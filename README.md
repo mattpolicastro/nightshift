@@ -29,8 +29,8 @@ repositories, review queued issue content and keep human review at merge time.
 
 Implementation and review are separate Claude Code sessions and can use
 separate models or endpoints. Anthropic is the production default. Ollama
-routing is implemented and live tool-loop probes have passed; a full local
-implementation → Opus review pilot is underway. OpenAI-compatible endpoints
+routing is implemented: a sandbox task completed GLM-4.7 Flash implementation,
+independent Opus review, PR creation and green GitHub CI on 2026-09-08. OpenAI-compatible endpoints
 require an operator-supplied translating proxy and remain unvalidated end to
 end. Native Codex workers and automatic model selection are not implemented.
 

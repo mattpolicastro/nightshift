@@ -39,11 +39,31 @@ a check outside that suite; it does not make verification infallible.
 
 ## Local-provider pilot — 2026-09-08
 
-A fresh GLM-4.7 Flash preflight completed a Read → Write loop in three turns and
-passed endpoint/model and credential-isolation checks. A supervised sandbox task
-is testing a small non-mutating numeric helper through local implementation,
-Opus review, the normal verify chain, PR creation and GitHub CI.
+**Result: passed on 2026-09-08.** A fresh GLM-4.7 Flash preflight completed a
+Read → Write loop in three turns and passed endpoint/model and credential-
+isolation checks. The normal one-task daemon pipeline then completed an
+additive, non-mutating numeric-helper task in a private sandbox:
 
-Full-task result: **pending**. Completion requires the ledger to confirm the
-configured local implementation route, reviewer PASS, an unmerged PR and green
-CI. An escalation will be recorded as an escalation, not relabeled as a pass.
+| Stage | Recorded result |
+| --- | --- |
+| Implementation | Ollama GLM-4.7 Flash, 16 turns, approximately 11m 55s |
+| Independent review | Anthropic Opus (`claude-opus-5` in telemetry), 11 turns, approximately 1m 35s; `VERDICT: PASS` |
+| Verification | Reviewer reran the complete typecheck, tests, build and formatting chain successfully |
+| Revision | None required; first attempt passed |
+| Delivery | Harness opened an unmerged PR; GitHub CI passed |
+| Attention state | Outcomes ledger recorded `awaiting_merge` with no refresh error |
+
+The review recorded two non-blocking consistency/documentation observations.
+Neither required changing the task's scope. Human merge review remains pending.
+Total pipeline time was approximately 13m 41s. Phase durations come from the
+worker result events, not a throughput estimate. A small auxiliary Haiku call
+also appears in review telemetry; Opus produced the review verdict.
+
+The pilot ran the published worker code with a private configuration and a
+dedicated admission label. No unrelated ready issues were consumed. Logs,
+transcripts, endpoint addresses and sandbox repository details remain private;
+this is a sanitized result summary, not a public reproduction archive.
+
+This establishes one successful local-implementation/cloud-review integration.
+It does not establish local reviewer quality, OpenAI proxy compatibility,
+automatic routing, native Codex support, or reliability across larger tasks.

@@ -10,7 +10,7 @@ routing, not automatic model selection or a native adapter for every coding CLI.
 | Route | Implemented | Evidence and limits |
 | --- | --- | --- |
 | Anthropic through Claude Code | Yes | Used for unattended tasks; the default configuration uses Sonnet implementation and Opus review. |
-| Ollama's Anthropic-compatible API | Yes | Live Read → Write probes passed for GLM-4.7 Flash and Qwen3 Coder Next during development. A fresh GLM probe passed in three turns on September 8. A full GLM implementation → Opus review sandbox pilot is underway; this is not yet a completed-task claim. |
+| Ollama's Anthropic-compatible API | Yes | Live Read → Write probes passed for GLM-4.7 Flash and Qwen3 Coder Next during development. A fresh GLM probe passed in three turns on September 8. A full GLM implementation → Opus review sandbox task completed on September 8: reviewer PASS, PR opened, GitHub CI green. One small task is integration evidence, not a reliability benchmark. |
 | OpenAI-compatible API via a translating proxy | Configuration and routing implemented | An operator-supplied proxy must accept Anthropic messages and translate them for the upstream provider. No proxy integration has been validated end to end here. |
 | Native Codex or another worker CLI | No | No native worker adapter exists. |
 | Automatic routing by task difficulty or cost | No | Explicit phase and per-repository assignments only. |
