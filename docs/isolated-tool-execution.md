@@ -151,7 +151,7 @@ export NIGHTSHIFT_TEST_DOCKER_HOST="$(docker context inspect --format '{{.Endpoi
 uv run pytest -q tests/test_remote_environment.py tests/test_container_snapshot.py
 ```
 
-These six integration checks passed locally with a fake provider and synthetic
+These seven integration checks passed locally with a fake provider and synthetic
 source only. Normal CI skips them unless explicitly opted in. They are separate
 from offline unit tests and do not establish live authentication or billing.
 
@@ -162,6 +162,21 @@ filters, hooks, signing, external diff helpers or porcelain commit refresh.
 An atomic expected-base ref update prevents overwriting a moved branch; failures
 preserve the staged candidate for investigation. There is no push or merge path
 in this helper, and it is not yet wired into daemon dispatch.
+
+## Joined candidate lifecycle control
+
+The synthetic transfer suite now joins the existing primitives in one test:
+export an exact Git baseline, edit its isolated source, pause and validate the
+returned archive, create a host-owned candidate commit, and materialize that
+exact commit for isolated verification and read-only review. The unchanged
+verification script fails on a deliberately bad baseline and passes on the
+candidate. The reviewer cannot overwrite the source and sees no Git control
+directory. Final committed bytes and the host worktree remain unchanged.
+
+This passes for the fixed synthetic fixture; it does not implement production
+lifecycle ownership, dependency preparation or daemon dispatch. In particular,
+the fixture's small `capture_output` transfers are not the bounded streaming
+transport required for production source export.
 
 ## Remaining production integration
 
@@ -181,3 +196,25 @@ in this helper, and it is not yet wired into daemon dispatch.
 The transport's `externalSandbox` declaration means that Docker owns containment;
 it does not grant a worker extra Docker privileges. Qualification must inspect
 and test the actual external policy before using that declaration.
+
+
+## Next implementation boundary
+
+Build one owned container-session manager before connecting model dispatch. It
+must inspect both the container policy and the owner-labeled tmpfs volume's
+driver/options, record ownership for recovery, and transfer validated source
+through bounded binary streams. One absolute deadline covers creation,
+inspection, import, execution, pause and export. Export requires confirmed
+paused state and the existing 20 MiB archive / 16 MiB content / 2,000 file limits.
+Cleanup gets a separate bounded allowance and must confirm removal of the owned
+container and volume before accepting a returned candidate. Cleanup failure
+retains the recovery record and disqualifies the result.
+
+After host commit creation, verification receives a fresh exact-SHA snapshot in
+a separate executor. Record each configured clause's result and the candidate
+SHA; never run the native candidate's scripts in the legacy host verifier.
+Required failure controls include partial/oversized archives, pause failure,
+wrong ownership, a disconnected engine after creation, exhausted resource and
+time limits, failed verification, and unsuccessful cleanup. The existing Git
+snapshot reader's per-subprocess timeout is not a whole-session deadline and
+must be included in this integration work.

@@ -245,3 +245,84 @@ def test_final_candidate_inspection_failure_preserves_unpushed_worktree(tmp_path
     assert report.step is Step.ESCALATE
     assert "unable to inspect candidate" in report.reason
     assert not removed and not pushed
+
+
+
+@pytest.mark.parametrize("failure", ["save", "phase", "push_runtime", "push_timeout", "push_io", "save_record", "push_record"])
+def test_evidence_and_shipping_failures_retain_unpushed_candidate(tmp_path, monkeypatch, caplog, failure):
+    import json
+    import subprocess
+    from nightshift import verification, vcs, worker
+    from nightshift.config import Config, Repo
+    from nightshift.queue import Claim, Issue, Phase
+
+    fail_record = failure.endswith("_record")
+    failure = {"save_record": "save", "push_record": "push_runtime"}.get(failure, failure)
+    recording_failed = [False]
+
+    def record(*args, **kwargs):
+        if recording_failed[0]:
+            raise OSError("synthetic failure-record persistence error")
+
+    monkeypatch.setattr(task.queue, "comments_of", lambda *a: [])
+    monkeypatch.setattr(task.outcomes, "record", record)
+    for name in ("fetch", "install", "add_worktree"):
+        monkeypatch.setattr(vcs, name, lambda *a, **k: None)
+    monkeypatch.setattr(vcs, "has_commits", lambda *a: True)
+    removed, pushed, reviewed, opened = [], [], [], []
+    monkeypatch.setattr(vcs, "remove_worktree", lambda *a, **k: removed.append(a))
+    monkeypatch.setattr(vcs, "open_pr", lambda *a, **k: opened.append(a))
+    event = json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                       "num_turns": 1, "result": "VERDICT: PASS"})
+    monkeypatch.setattr(worker, "implement", lambda *a, **k: worker.Run(0, event))
+
+    def review(*args, **kwargs):
+        reviewed.append(True)
+        return worker.Run(0, event)
+
+    monkeypatch.setattr(worker, "review", review)
+    checked = verification.VerificationResult("verified-sha", "true", clauses=[
+        verification.CommandResult(("true",), 0, 0)])
+    monkeypatch.setattr(verification, "run", lambda *a, **k: checked)
+    monkeypatch.setattr(verification, "unchanged", lambda *a, **k: True)
+
+    def advance(claim, phase):
+        if failure == "phase" and phase is Phase.SHIPPING:
+            raise OSError("synthetic claim write failure")
+
+    monkeypatch.setattr(Claim, "advance", advance)
+
+    def push(*args, **kwargs):
+        pushed.append(True)
+        recording_failed[0] = fail_record
+        if failure == "push_timeout":
+            raise subprocess.TimeoutExpired(["git", "push"], 30)
+        if failure == "push_io":
+            raise OSError("synthetic push IO failure")
+        raise RuntimeError("synthetic push refusal")
+
+    monkeypatch.setattr(vcs, "push", push)
+    if failure == "save":
+        def save(*args, **kwargs):
+            recording_failed[0] = fail_record
+            raise OSError("synthetic evidence write failure")
+        monkeypatch.setattr(verification, "save", save)
+
+    report = task.run(Config(repos=[], worktree_root=tmp_path), Repo("owner/repo", "true"),
+                      tmp_path, Issue("owner/repo", 1, "Task", "Task"),
+                      Claim("owner/repo", 1, "candidate", str(tmp_path), "now"),
+                      transcript_dir=tmp_path / "evidence")
+    assert report.step is Step.ESCALATE
+    assert "candidate retained" in report.reason
+    assert not removed and not opened
+    assert bool(pushed) == failure.startswith("push_")
+    assert bool(reviewed) == (failure != "save")
+    if failure == "save":
+        assert "verification evidence" in report.reason
+    elif failure == "phase":
+        assert "shipping phase" in report.reason
+    else:
+        assert "push candidate" in report.reason
+
+    if fail_record:
+        assert "could not record retained candidate escalation" in caplog.text

@@ -57,6 +57,19 @@ for line in sys.stdin:
         if scenario == "stderr":
             print(json.dumps(dict(method="turn/completed", params={})), file=sys.stderr, flush=True)
             sys.exit(0)
+        if scenario.startswith("structured_error:"):
+            error = json.loads(scenario.split(":", 1)[1])
+            send(dict(method="turn/completed", params=dict(threadId="thread1", turn=dict(id="turn1", status="failed", error=error))))
+            continue
+        if scenario.startswith("reroute"):
+            send(dict(method="model/rerouted", params=dict(
+                threadId="other" if scenario == "reroute_wrong_thread" else "thread1",
+                turnId="other" if scenario == "reroute_wrong_turn" else "turn1",
+                fromModel="explicit-model", toModel="different-model", reason="highRiskCyberActivity")))
+        if scenario.startswith("patch:"):
+            patch = dict(id="patch1", type="fileChange", status=scenario.split(":", 1)[1], changes=[])
+            event("item/started", item={**patch, "status":"inProgress"})
+            event("item/completed", item=patch)
         if scenario.startswith("failed:"):
             send(dict(method="turn/completed", params=dict(threadId="thread1", turn=dict(id="turn1", status="failed", error=dict(codexErrorInfo=scenario.split(":")[1])))))
             continue
@@ -303,3 +316,48 @@ def test_matching_terminal_snapshot_preserves_single_command_evidence(tmp_path):
     assert result.ok
     assert len(result.commands) == 1
     assert result.commands[0].exit_code == 0
+
+
+@pytest.mark.parametrize("role", ["implement", "review"])
+def test_model_reroute_fails_closed_and_preserves_actual_attribution(tmp_path, role):
+    req = replace(request(tmp_path), role=role)
+    result = invoke(tmp_path, "reroute", req=req)
+    assert result.status == "protocol_error"
+    assert result.requested_model == "explicit-model"
+    assert result.observed_model == "different-model"
+    assert not result.ok
+
+
+@pytest.mark.parametrize("scenario", ["reroute_wrong_thread", "reroute_wrong_turn"])
+def test_foreign_reroute_cannot_rewrite_model_attribution(tmp_path, scenario):
+    result = invoke(tmp_path, scenario)
+    assert result.status == "protocol_error"
+    assert result.observed_model == "explicit-model"
+
+
+@pytest.mark.parametrize("status", ["inProgress", "invented", ""])
+def test_completed_file_change_must_have_terminal_status(tmp_path, status):
+    result = invoke(tmp_path, "patch:" + status)
+    assert result.status == "protocol_error"
+    assert result.file_changes == []
+
+
+@pytest.mark.parametrize("kind", ["httpConnectionFailed", "responseStreamConnectionFailed",
+    "responseStreamDisconnected", "responseTooManyFailedAttempts"])
+@pytest.mark.parametrize("code,expected", [(401, "auth_failed"), (403, "auth_failed"),
+    (429, "rate_limited"), (503, "failed"), (None, "failed")])
+def test_structured_http_errors_keep_failure_classification(tmp_path, kind, code, expected):
+    scenario = "structured_error:" + json.dumps({"codexErrorInfo": {kind: {"httpStatusCode": code}}})
+    assert invoke(tmp_path, scenario).status == expected
+
+
+@pytest.mark.parametrize("error", [[], "bad", {"codexErrorInfo": []},
+    {"codexErrorInfo": {"httpConnectionFailed": "401"}},
+    {"codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": "401"}}},
+    {"codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": True}}},
+    {"codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": -1}}},
+    {"codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": 65536}}},
+    {"codexErrorInfo": {"unknownVariant": {}}},
+    {"codexErrorInfo": {"activeTurnNotSteerable": {"turnKind": "invented"}}}])
+def test_malformed_structured_errors_are_protocol_failures(tmp_path, error):
+    assert invoke(tmp_path, "structured_error:" + json.dumps(error)).status == "protocol_error"

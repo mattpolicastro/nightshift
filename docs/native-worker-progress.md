@@ -18,6 +18,8 @@ items, fall back to Claude, or be enabled with an operator bypass.
   followed by a check that the candidate and shipping branch still match.
   Worker claims of running tests are no longer sufficient shipping evidence.
 - Failed worker processes cannot succeed through a success-shaped final event.
+- Evidence-persistence and shipping failures escalate while retaining the
+  unpushed candidate; successful review alone cannot activate teardown.
 
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.
@@ -57,8 +59,11 @@ processes that escape their group. Native worker isolation is a separate gate.
 
 1. Qualify effective filesystem, Git, credential and network boundaries on each
    supported platform/runtime. See [security qualification](codex-security-qualification.md).
-2. Add the qualified runtime launcher, version checks, API-key authentication,
-   model capability validation and production permission assembly.
+2. Add the qualified runtime launcher, version checks, explicit authentication
+   modes, model capability validation and production permission assembly. The
+   next live qualification targets subscription-only use: require included-usage
+   evidence and fail closed without a proven billing control. Existing login
+   alone is insufficient; no API-key or purchased-credit fallback is allowed.
 3. Integrate driver dispatch, host-owned Git operations, normalized accounting
    and retry/error handling with the daemon's implementation/review phases.
 4. Run a credential-safe OpenAI canary, then an end-to-end sandbox task with

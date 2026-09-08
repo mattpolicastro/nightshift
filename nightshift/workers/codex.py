@@ -47,6 +47,47 @@ class _Stop(Exception):
         self.status, self.reason = status, reason
 
 
+
+def _failure_status(error):
+    if error is None:
+        return "failed"
+    if not isinstance(error, dict):
+        raise _Stop("protocol_error", "Malformed turn error")
+    info = error.get("codexErrorInfo")
+    if info is None:
+        return "failed"
+    mapped = {"unauthorized": "auth_failed", "rateLimitExceeded": "rate_limited",
+              "usageLimitExceeded": "rate_limited", "sessionBudgetExceeded": "budget_exhausted"}
+    known = {"contextWindowExceeded", "sessionBudgetExceeded", "usageLimitExceeded",
+             "rateLimitExceeded", "serverOverloaded", "cyberPolicy", "misalignmentPolicyViolation",
+             "internalServerError", "unauthorized", "badRequest", "threadRollbackFailed",
+             "sandboxError", "other"}
+    if isinstance(info, str):
+        if info not in known:
+            raise _Stop("protocol_error", "Unknown turn error classification")
+        return mapped.get(info, "failed")
+    if not isinstance(info, dict) or len(info) != 1:
+        raise _Stop("protocol_error", "Malformed turn error classification")
+    kind, details = next(iter(info.items()))
+    if not isinstance(details, dict):
+        raise _Stop("protocol_error", "Malformed turn error details")
+    if kind == "activeTurnNotSteerable":
+        if details.get("turnKind") not in {"review", "compact"}:
+            raise _Stop("protocol_error", "Malformed non-steerable turn error")
+        return "failed"
+    if kind not in {"httpConnectionFailed", "responseStreamConnectionFailed",
+                    "responseStreamDisconnected", "responseTooManyFailedAttempts"}:
+        raise _Stop("protocol_error", "Unknown turn error classification")
+    code = details.get("httpStatusCode")
+    if code is not None and (type(code) is not int or not 0 <= code <= 65535):
+        raise _Stop("protocol_error", "Malformed HTTP error status")
+    if code in (401, 403):
+        return "auth_failed"
+    if code == 429:
+        return "rate_limited"
+    return "failed"
+
+
 def _review(text):
     try:
         value = json.loads(text)
@@ -215,6 +256,8 @@ class _Session:
             if item.get("phase") != "commentary":
                 self.texts[item_id] = item["text"]
         elif kind == "fileChange":
+            if item.get("status") not in {"completed", "failed", "declined"}:
+                raise _Stop("protocol_error", "File change has no terminal status")
             self.result.file_changes.append(item)
 
     def notification(self, message):
@@ -223,7 +266,7 @@ class _Session:
         method, params = message.get("method"), message.get("params", {})
         if not isinstance(method, str) or not isinstance(params, dict):
             raise _Stop("protocol_error", "Malformed notification")
-        handled = {"item/started", "item/completed", "thread/tokenUsage/updated", "turn/completed"}
+        handled = {"item/started", "item/completed", "thread/tokenUsage/updated", "turn/completed", "model/rerouted"}
         if method not in handled:
             return False
         if params.get("threadId") != self.result.thread_id:
@@ -231,6 +274,15 @@ class _Session:
         turn_id = params.get("turn", {}).get("id") if method == "turn/completed" else params.get("turnId")
         if turn_id != self.result.turn_id:
             raise _Stop("protocol_error", "Notification for another turn")
+        if method == "model/rerouted":
+            source, target = params.get("fromModel"), params.get("toModel")
+            if (source != self.result.observed_model or not isinstance(target, str)
+                    or not target.strip() or params.get("reason") != "highRiskCyberActivity"):
+                raise _Stop("protocol_error", "Malformed model reroute")
+            self.result.observed_model = target
+            self.normalized.write("model_rerouted", {
+                "from_model": source, "to_model": target, "reason": params["reason"]})
+            raise _Stop("protocol_error", "Runtime rerouted the explicitly requested model")
         if method in {"item/started", "item/completed"}:
             self.item(params.get("item"), method == "item/completed",
                       params.get("completedAtMs" if method == "item/completed" else "startedAtMs"))
@@ -253,10 +305,7 @@ class _Session:
             turn = params["turn"]
             status = turn.get("status")
             if status == "failed":
-                info = (turn.get("error") or {}).get("codexErrorInfo")
-                mapped = {"unauthorized": "auth_failed", "rateLimitExceeded": "rate_limited",
-                          "usageLimitExceeded": "rate_limited", "sessionBudgetExceeded": "budget_exhausted"}
-                raise _Stop(mapped.get(info, "failed") if isinstance(info, str) else "failed", "Turn failed")
+                raise _Stop(_failure_status(turn.get("error")), "Turn failed")
             if status == "interrupted":
                 raise _Stop("interrupted", "Turn interrupted")
             if status != "completed":

@@ -216,6 +216,16 @@ class Report:
         return total
 
 
+def _record_retained_failure(repo: str, issue: int, report: Report) -> None:
+    """Failure telemetry must not send a retained candidate into crash cleanup."""
+    try:
+        outcomes.record(repo, issue, reason=report.reason,
+                        attempt_result=report.step.value)
+    except OSError as exc:
+        log.warning("could not record retained candidate escalation for %s#%s: %s",
+                    repo, issue, exc)
+
+
 def run(
     cfg: Config,
     repo: Repo,
@@ -409,8 +419,14 @@ def run(
 
             attempt.verification = verification.run(worktree, repo.verify)
             if impl_transcript:
-                verification.save(attempt.verification,
-                                  impl_transcript.with_suffix(".verification.json"))
+                try:
+                    verification.save(attempt.verification,
+                                      impl_transcript.with_suffix(".verification.json"))
+                except OSError:
+                    report.step = Step.ESCALATE
+                    report.reason = "unable to persist host verification evidence; candidate retained"
+                    _record_retained_failure(repo.name, issue.number, report)
+                    return report
             if not attempt.verification.ok:
                 report.step = Step.ESCALATE
                 report.reason = ("host verification failed: "
@@ -467,18 +483,17 @@ def run(
                     )
                 except (OSError, subprocess.SubprocessError):
                     report.reason = "unable to inspect candidate after verification or during review"
-                    outcomes.record(repo.name, issue.number, reason=report.reason,
-                                    attempt_result=report.step.value)
+                    _record_retained_failure(repo.name, issue.number, report)
                     return report
                 if not candidate_unchanged:
                     report.step = Step.ESCALATE
                     report.reason = "candidate changed after verification or during review"
-                    outcomes.record(repo.name, issue.number, reason=report.reason,
-                                    attempt_result=report.step.value)
+                    _record_retained_failure(repo.name, issue.number, report)
                     return report
-                report.step = Step.SHIP
-                claim.advance(Phase.SHIPPING)
+                shipping_failure = "unable to record shipping phase; candidate retained"
                 try:
+                    claim.advance(Phase.SHIPPING)
+                    shipping_failure = "unable to push candidate; candidate retained"
                     vcs.push(worktree, claim.branch, base)
                 except vcs.WorkflowScopeRefusal as refusal:
                     # Escalate rather than let this reach the daemon's crash
@@ -495,6 +510,11 @@ def run(
                         branch=claim.branch, detail=str(refusal)
                     )
                     return report
+                except Exception:  # A failed push/phase write must not activate teardown.
+                    report.reason = shipping_failure
+                    _record_retained_failure(repo.name, issue.number, report)
+                    return report
+                report.step = Step.SHIP
                 # A revise whose PR is still open needs no second one — the
                 # push already updated it. Asked with state=open on purpose: a
                 # CLOSED PR (the normal revise flow, where the human closes it

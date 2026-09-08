@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from nightshift.workers import candidate
 from nightshift.workers import snapshot as s
 
 IMAGE = os.environ.get('NIGHTSHIFT_TEST_CODEX_EXEC_IMAGE', '')
@@ -98,3 +99,53 @@ def test_materialized_reviewer_source_is_immutable(docker):
             assert docker('exec', name, '/bin/sh', '-c', command, check=False).returncode != 0
         assert (source/'nested/source').read_bytes() == b'candidate'
         assert sorted(str(p.relative_to(source)) for p in source.rglob('*') if p.is_file()) == ['README', 'nested/source']
+
+
+def test_candidate_roundtrip_commits_and_verifies_exact_snapshot(docker, tmp_path):
+    """Join the primitives without invoking a provider or dispatching a task."""
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    env = {"PATH": os.defpath, "HOME": str(tmp_path),
+           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+           "GIT_AUTHOR_NAME": "Synthetic fixture", "GIT_COMMITTER_NAME": "Synthetic fixture",
+           "GIT_AUTHOR_EMAIL": "fixture@localhost", "GIT_COMMITTER_EMAIL": "fixture@localhost"}
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "core.hooksPath=" + os.devnull,
+                               "-c", "commit.gpgSign=false", *args], cwd=repository,
+                              env=env, capture_output=True, text=True,
+                              check=True, timeout=10).stdout.strip()
+
+    git("init", "--quiet")
+    (repository / "answer").write_bytes(b"41\n")
+    (repository / "verify.sh").write_text(
+        '#!/bin/sh\nset -eu\ntest "$(cat /workspace/answer)" = 42\n')
+    git("add", "--", "answer", "verify.sh")
+    git("commit", "--quiet", "-m", "Synthetic baseline")
+    base = git("rev-parse", "HEAD")
+    initial = s.from_git(repository, base)
+    with container(docker, volume=True) as name:
+        docker("exec", "-i", name, "/bin/tar", "-xf", "-", "-C", "/workspace", data=s.encode(initial))
+        # The known-bad baseline must fail the same verification command.
+        assert docker("exec", name, "/bin/sh", "/workspace/verify.sh", check=False).returncode == 1
+        docker("exec", name, "/bin/sh", "-c", "printf '42\\n' > /workspace/answer")
+        docker("pause", name)
+        returned = s.decode_container_archive(docker("cp", name + ":/workspace", "-").stdout)
+    committed = candidate.create(repository, base, returned)
+    assert committed.base_sha == base
+    assert committed.changed_paths == ("answer",)
+    exact = s.from_git(repository, committed.candidate_sha)
+    assert exact == returned
+    assert git("rev-parse", "HEAD") == committed.candidate_sha
+    assert git("rev-parse", "HEAD^") == base
+
+    parent = Path(os.environ.get("NIGHTSHIFT_TEST_SNAPSHOT_PARENT", str(Path.cwd())))
+    with s.materialize(exact, parent=parent) as source, container(docker, source=source) as name:
+        # Verify only the host-committed source, using no host script execution.
+        docker("exec", name, "/bin/sh", "/workspace/verify.sh")
+        assert docker("exec", name, "/bin/sh", "-c",
+                      "printf tampered > /workspace/answer", check=False).returncode != 0
+        docker("exec", name, "/bin/sh", "-c", "test ! -e /workspace/.git")
+        assert (source / "answer").read_bytes() == b"42\n"
+    assert s.from_git(repository, committed.candidate_sha) == exact
+    assert git("status", "--porcelain") == ""
