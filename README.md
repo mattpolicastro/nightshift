@@ -27,12 +27,18 @@ repositories, review queued issue content and keep human review at merge time.
 
 ## Worker and model support
 
-Implementation and review are separate Claude Code sessions and can use
-separate models or endpoints. Anthropic is the production default. Ollama
-routing is implemented: a sandbox task completed GLM-4.7 Flash implementation,
-independent Opus review, PR creation and green GitHub CI on 2026-09-08. OpenAI-compatible endpoints
-require an operator-supplied translating proxy and remain unvalidated end to
-end. Native Codex workers and automatic model selection are not implemented.
+Nightshift supports multiple model providers, including Anthropic and Ollama,
+with independently configurable implementation and review models.
+
+All workers currently use Claude Code; implementation and review run in separate
+sessions. Anthropic is the production default. One sandbox task completed
+GLM-4.7 Flash implementation through Ollama, independent Opus review, PR creation
+and green GitHub CI on 2026-09-08. This validates that pipeline for one task;
+broader reliability across models is not yet established.
+
+OpenAI-compatible endpoints require an operator-supplied translating proxy and
+remain unvalidated end to end. Native Codex workers and automatic model selection
+are not implemented.
 
 See [provider setup and support status](docs/providers.md) and
 [validation evidence](docs/validation.md). Planning is task preparation, not a
