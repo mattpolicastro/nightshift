@@ -95,25 +95,37 @@ separate acceptance gates. The test's read-only bind mount is evidence for
 reviewer immutability, not authorization to mount host source or credentials in
 a production executor.
 
-## Remaining native skills-reader gate
+## Registered skills routing and provider-home policy
 
-The synthetic remote-executor fixture still advertises `skills.list` and
-`skills.read` after optional integrations, skill-search/discovery flags, and
-candidate per-tool disable settings are switched off. Configuration acceptance
-is not proof of removal; the captured provider inventory remains authoritative.
-Actual namespace calls returned empty registries and rejected forged absolute,
-file-URL, and traversal package identifiers targeting synthetic host data.
-Those negative results did not establish a successful registered-package read,
-so they do not qualify the complete reader boundary. A corrected remote-seeding probe wrote both workspace and executor-home skill
-fixtures through the container executor and verified their contents before
-thread creation. Both skill registries still returned empty results. Filesystem
-presence therefore did not establish namespace registration, and those empty
-results are not credited as a successful registered-package control. Before native execution is enabled, a reproducible test
-must register and read an executor-owned synthetic skill, reject resources
-outside that package and host-data access, and establish authority routing;
-alternatively, demonstrate that the reader tools are actually absent. The
-strict tool-inventory gate remains in force. No real account diagnostics,
-credentials, or provider calls were used for these tests.
+The synthetic fixture still advertises `skills.list` and `skills.read`. Explicit
+`thread/start.selectedCapabilityRoots` entries with an environment location
+register executor-owned packages; merely writing a SKILL.md does not establish
+namespace registration. Listing then returns an actual package identifier, and
+reading that identifier returns the executor's synthetic skill marker. A private
+synthetic wire trace observed the corresponding remote filesystem calls.
+
+Two reproducible fixture modes compare a fresh provider home with a deliberately
+seeded `CODEX_HOME/skills` directory. The seeded skill is advertised in the initial
+provider prompt even with `skip_host_skill_discovery=true`; the fresh home omits
+it. Production must construct an allowlisted provider home and explicit remote
+capability roots rather than rely on that flag or copy an interactive profile.
+The orchestrator namespace registry is empty in these fixtures.
+
+Direct host paths, file URLs, traversal, a package symlink to an unmounted host
+sentinel, and resource URIs outside the registered root are rejected. Extra
+authority/environment arguments on a valid package read are ignored by the
+pinned runtime: the read still returns the remote marker, rather than retargeting
+to local or orchestrator data. A package symlink can read a synthetic file in executor
+scratch. This does not establish confinement to the individual package, and the
+launcher must not use package membership as a narrower filesystem boundary.
+Executor scratch is already permitted by the container policy; this observation
+is not evidence of host credential access.
+
+These are behavior-characterization tests with a genuine registered-package
+positive control. They resolve the earlier registration mystery, but do not
+qualify a production launcher that has not yet been implemented. Native
+execution remains disabled. All fixtures use synthetic data and a fake provider;
+no account diagnostics or live credentials are published.
 
 
 ## Implemented transfer and lifecycle primitives
@@ -151,7 +163,7 @@ export NIGHTSHIFT_TEST_DOCKER_HOST="$(docker context inspect --format '{{.Endpoi
 uv run pytest -q tests/test_remote_environment.py tests/test_container_snapshot.py
 ```
 
-These seven integration checks passed locally with a fake provider and synthetic
+These nine integration checks passed locally with a fake provider and synthetic
 source only. Normal CI skips them unless explicitly opted in. They are separate
 from offline unit tests and do not establish live authentication or billing.
 
@@ -180,9 +192,10 @@ transport required for production source export.
 
 ## Remaining production integration
 
-- Resolve the skills reader's package registration and resource authority, or
-  prove that the capability is absent. An exact advertised inventory alone is
-  insufficient permission evidence.
+- Reproduce the characterized skills routing with an allowlisted fresh provider
+  home and explicit remote capability roots in the production launcher. Keep
+  filesystem authority at the executor boundary; do not assume package-local
+  symlink confinement or rely solely on discovery-disable flags.
 - Assemble the persistent executor, validated source transfer, host-owned
   candidate commit, and immutable reviewer snapshot into one owned lifecycle.
 - Run native candidates' verification scripts inside the qualified executor.

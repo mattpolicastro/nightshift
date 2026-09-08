@@ -83,4 +83,5 @@ offline tests are not evidence of a successful live provider call.
 Isolated-executor prototypes now have synthetic evidence for remote command,
 patch and interactive input routing, no host fallback, bounded container cleanup,
 validated source transfer and immutable reviewer source. See [isolation progress](isolated-tool-execution.md)
-for reproduction and the remaining skills-reader and production-integration gates.
+for reproduction, registered skills-routing characterization, and the remaining
+production-launcher and lifecycle gates.

@@ -9,8 +9,11 @@ reactivate destructive cleanup in the retained-candidate paths.
 
 A synthetic integration test now joins isolated edits, host-owned commits,
 exact-candidate verification and immutable reviewer source, with a failing
-baseline control. Production lifecycle ownership, skills authority qualification,
-authentication/accounting and daemon dispatch remain unfinished.
+baseline control. Registered skills now have a reproducible remote read control
+and host-path/symlink negatives. Characterization also records provider-home
+discovery and executor-scratch symlink behavior; it does not claim package-local
+confinement. Production launcher/lifecycle ownership, authentication/accounting
+and daemon dispatch remain unfinished.
 
 ## Initial public release — 2026-09-08
 

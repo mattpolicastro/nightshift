@@ -45,14 +45,20 @@ def _sse(item, sequence):
                    for name, data in events).encode()
 
 
-@pytest.mark.parametrize("mode", ["remote_exec", "no_host_fallback", "apply_patch", "write_stdin"])
+@pytest.mark.parametrize("mode", ["remote_exec", "no_host_fallback", "apply_patch", "write_stdin", "skills", "skills_clean"])
 def test_actual_model_tool_routing_is_remote_only(tmp_path, mode):
     remote_unavailable = mode == "no_host_fallback"
+    skills_mode = mode in {"skills", "skills_clean"}
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", _IMAGE), "Pin an immutable local image ID"
     codex, docker = shutil.which("codex"), shutil.which("docker")
     assert codex and docker
     provider_home = tmp_path / "provider"
     provider_home.mkdir()
+    if mode == "skills":
+        host_skill = provider_home / "skills" / "host-fixture"
+        host_skill.mkdir(parents=True)
+        (host_skill / "SKILL.md").write_text(
+            "---\nname: host-fixture\ndescription: Synthetic provider-owned fixture\n---\nHOST_SKILL_ONLY\n")
     host_sentinel = tmp_path / "host-only-sentinel"
     host_sentinel.write_text("UNCHANGED")
     name = "nightshift-remote-fixture-" + uuid.uuid4().hex[:12]
@@ -78,7 +84,7 @@ def test_actual_model_tool_routing_is_remote_only(tmp_path, mode):
                 assert length <= 4 * 1024 * 1024
                 body = json.loads(self.rfile.read(length))
                 state["requests"] += 1
-                assert state["requests"] <= 4, "Unexpected provider retry"
+                assert state["requests"] <= (11 if skills_mode else 4), "Unexpected provider retry"
                 state["outputs"].extend(i for i in body.get("input", [])
                                         if i.get("type") in {"function_call_output", "custom_tool_call_output"})
                 inventory = [(tool.get("type"), tool.get("name")) for tool in body.get("tools", [])]
@@ -87,6 +93,8 @@ def test_actual_model_tool_routing_is_remote_only(tmp_path, mode):
                 skills = body["tools"][-1]
                 assert [tool.get("name") for tool in skills["tools"]] == ["list", "read"]
                 state["inventory"] = inventory
+                if skills_mode and state["requests"] == 1:
+                    state["host_skill_advertised"] = "host-fixture" in json.dumps(body.get("input", []))
                 if state["requests"] == 1:
                     assert "exec_command" in [t.get("name") for t in body.get("tools", [])]
                     if remote_unavailable:
@@ -119,6 +127,32 @@ def test_actual_model_tool_routing_is_remote_only(tmp_path, mode):
                     item["arguments"] = json.dumps({"cmd": "pwd; printf 'WAITING\\n'; read probe; printf 'STDIN_ROUTED:%s\\n' \"$probe\"",
                                                      "workdir": "/work/source", "tty": True,
                                                      "yield_time_ms": 1000, "max_output_tokens": 1000})
+                if skills_mode:
+                    outputs = {entry["call_id"]: entry["output"] for entry in state["outputs"]}
+                    package = "unregistered"
+                    if state["requests"] > 2:
+                        listing = json.loads(outputs["call_skills_2"])
+                        package = listing["skills"][0]["package"]
+                    calls = [
+                        ("list", {"authority": {"kind": "orchestrator"}}),
+                        ("list", {"authority": {"kind": "executor"}}),
+                        ("read", {"package": package}),
+                        ("read", {"package": package, "resource": str(host_sentinel),
+                                  "environmentId": "local", "authority": {"kind": "orchestrator"}}),
+                        ("read", {"package": package, "resource": "file://" + str(host_sentinel)}),
+                        ("read", {"package": package, "resource": package + "/../../../../../tmp/outside-skill"}),
+                        ("read", {"package": package, "resource": package + "/escape"}),
+                        ("read", {"package": package, "resource": "skill://remote-fixture/tmp/outside-skill"}),
+                        ("read", {"package": package, "environmentId": "local",
+                                  "authority": {"kind": "orchestrator"}}),
+                        ("read", {"package": package, "resource": package + "/host-escape"}),
+                    ]
+                    if state["requests"] <= len(calls):
+                        tool, arguments = calls[state["requests"] - 1]
+                        call_id = "call_skills_" + str(state["requests"])
+                        item = {"type": "function_call", "id": "fc_" + call_id, "call_id": call_id,
+                                "name": tool, "namespace": "skills", "status": "completed",
+                                "arguments": json.dumps(arguments)}
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
@@ -137,7 +171,8 @@ def test_actual_model_tool_routing_is_remote_only(tmp_path, mode):
         'wire_api="responses"\nenv_key="NIGHTSHIFT_FAKE_KEY"\nrequires_openai_auth=false\n'
         'supports_websockets=false\nrequest_max_retries=0\nstream_max_retries=0\n'
         '[tools]\nexperimental_request_user_input={enabled=false}\n[features]\napps=false\nplugins=false\nhooks=false\nmulti_agent=false\n'
-        'browser_use=false\ncomputer_use=false\nshell_snapshot=false\nview_image=false\nimage_generation=false\n')
+        'browser_use=false\ncomputer_use=false\nshell_snapshot=false\nview_image=false\nimage_generation=false\n'
+        'skip_host_skill_discovery=true\nskill_search=true\n')
     docker_host = _docker("context", "inspect", "--format", "{{.Endpoints.docker.Host}}")
     container_args = [docker, "run", "--rm", "-i", "--name", name,
                       "--label", "nightshift.qualification=remote-fixture", "--pull", "never",
@@ -190,10 +225,26 @@ def test_actual_model_tool_routing_is_remote_only(tmp_path, mode):
             assert info["result"]["cwd"] == "file:///work/source"
             assert info["result"]["shell"]["name"] == "sh"
             assert "error" in await rpc(3, "environment/info", {"environmentId": "local"})
+            if skills_mode:
+                # Seed through the running executor, not Docker cp into tmpfs.
+                script = (
+                    "mkdir -p /work/source/.agents/skills/remote-fixture; "
+                    "printf '%s\\n' '---' 'name: remote-fixture' "
+                    "'description: Synthetic remote fixture' '---' 'REMOTE_SKILL_ONLY' "
+                    "> /work/source/.agents/skills/remote-fixture/SKILL.md; "
+                    "printf REMOTE_SCRATCH_ONLY > /tmp/outside-skill; "
+                    "ln -s /tmp/outside-skill /work/source/.agents/skills/remote-fixture/escape; "
+                    "ln -s " + shlex.quote(str(host_sentinel)) +
+                    " /work/source/.agents/skills/remote-fixture/host-escape; "
+                    "cat /work/source/.agents/skills/remote-fixture/SKILL.md")
+                assert "REMOTE_SKILL_ONLY" in _docker("exec", name, "/bin/sh", "-c", script)
+            capability_params = ({"selectedCapabilityRoots": [{"id": "remote-fixture", "location": {
+                "type": "environment", "environmentId": "remote",
+                "path": "/work/source/.agents/skills/remote-fixture"}}]} if skills_mode else {})
             # Omission intentionally exercises default='remote', include_local=false.
             response = await rpc(4, "thread/start", {
                 "model": "gpt-5.4", "modelProvider": "fake", "cwd": "/work/source",
-                "ephemeral": True, "approvalPolicy": "never", "sandbox": "read-only"})
+                "ephemeral": True, "approvalPolicy": "never", "sandbox": "read-only", **capability_params})
             thread_id = response["result"]["thread"]["id"]
             await rpc(5, "turn/start", {"threadId": thread_id,
                 "sandboxPolicy": {"type": "externalSandbox", "networkAccess": "restricted"},
@@ -219,10 +270,33 @@ def test_actual_model_tool_routing_is_remote_only(tmp_path, mode):
     try:
         asyncio.run(asyncio.wait_for(exercise(), 30))
         assert state["error"] is None, state["outputs"]
-        assert state["requests"] == (3 if mode in {"apply_patch", "write_stdin"} else 2)
+        assert state["requests"] == (11 if skills_mode else 3 if mode in {"apply_patch", "write_stdin"} else 2)
         assert host_sentinel.read_text() == "UNCHANGED"
         outputs = "\n".join(i["output"] for i in state["outputs"])
-        if remote_unavailable:
+        if skills_mode:
+            assert state["terminal_status"] == "completed"
+            # Characterization, not a package-confinement/security gate pass:
+            # this flag does not suppress skills explicitly present in CODEX_HOME.
+            assert state["host_skill_advertised"] is (mode == "skills")
+            by_call = {entry["call_id"]: entry["output"] for entry in state["outputs"]}
+            assert json.loads(by_call["call_skills_1"])["skills"] == []
+            listing = json.loads(by_call["call_skills_2"])["skills"]
+            assert len(listing) == 1
+            assert listing[0]["authority"] == {"kind": "executor", "id": "remote-fixture"}
+            positive = json.loads(by_call["call_skills_3"])
+            assert "REMOTE_SKILL_ONLY" in positive["contents"]
+            assert positive["skill_root"] == "/work/source/.agents/skills/remote-fixture"
+            for number in (4, 5, 6, 8, 10):
+                assert "failed to read skill resource" in by_call[f"call_skills_{number}"]
+                assert "UNCHANGED" not in by_call[f"call_skills_{number}"]
+            # A symlink can reach executor scratch. This is not host access and
+            # does not establish confinement to the individual skill package.
+            assert json.loads(by_call["call_skills_7"])["contents"] == "REMOTE_SCRATCH_ONLY"
+            # Extra authority/environment fields cannot retarget a valid package:
+            # on the pinned runtime they are ignored and its remote read succeeds.
+            assert "REMOTE_SKILL_ONLY" in json.loads(by_call["call_skills_9"])["contents"]
+            assert "UNCHANGED" not in outputs and "HOST_SKILL_ONLY" not in outputs
+        elif remote_unavailable:
             assert "CONTAINER_EXECUTOR_OK" not in outputs
             assert not any(c.get("exitCode") == 0 for c in state["commands"])
             assert "failed" in outputs.lower() or "unavailable" in outputs.lower() or "error" in outputs.lower()
