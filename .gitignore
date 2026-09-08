@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+# Never commit credentials — these live in ~/.config/nightshift/env (chmod 600)
+*.env
+config.toml
+dist/
+*.egg-info/
+node_modules/
+# Local secrets and runtime data
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+transcripts/
+.nightshift/

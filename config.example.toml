@@ -1,0 +1,27 @@
+# Copy to config.toml and replace example-owner repositories. Store secrets in ~/.config/nightshift/env.
+
+[daemon]
+poll_seconds = 120
+max_tasks_per_night = 8
+implement_max_turns = 140
+review_max_turns = 60
+concurrency = 1
+forbidden_probe = "example-owner/dotfiles"
+
+[[repos]]
+name = "example-owner/sample-nightshift-sandbox"
+verify = "pnpm -r typecheck && pnpm -r test && pnpm -r build && pnpm format:check"
+base = "main"
+
+[models]
+implement = "sonnet"
+review = "opus"          # ~1/3 the cost of an implement run; do not skip
+
+[notify]
+slack_webhook = ""
+
+[labels]
+ready = "agent:ready"
+working = "agent:working"
+done = "agent:done"
+needs_human = "needs-human"

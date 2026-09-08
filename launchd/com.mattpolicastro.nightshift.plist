@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  NOT auto-installed. See "Enabling the daemon" in README.md — there is a
+  checklist to work through first, and one item on it is a real credential
+  scoping problem, not a formality.
+
+  Install:
+    cp launchd/com.mattpolicastro.nightshift.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.mattpolicastro.nightshift.plist
+  Stop:
+    touch ~/.nightshift/pause          # graceful — finishes the current task
+    launchctl unload ~/Library/LaunchAgents/com.mattpolicastro.nightshift.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mattpolicastro.nightshift</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOUR_USERNAME/Projects/nightshift/bin/nightshift-daemon</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restart if the process dies, but not in a tight loop: a daemon that
+       cannot start (missing token, bad config) exits 78 immediately, and
+       ThrottleInterval keeps that from becoming a spin. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>300</integer>
+
+  <!-- BOTH streams to one file, deliberately. Python's logging writes to
+       stderr, so splitting them left nightshift.log at zero bytes forever
+       while every claim, ship and escalation went to nightshift.err.log — the
+       obvious file to tail was the empty one, and the interesting file was
+       named as though it only held failures. `tail -f nightshift.log` is the
+       live view of what the daemon is doing; keep it that way. -->
+  <key>StandardOutPath</key>
+  <string>/Users/YOUR_USERNAME/.logs/nightshift.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOUR_USERNAME/.logs/nightshift.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/YOUR_USERNAME/Projects/nightshift</string>
+
+  <!-- Low priority: this is background work and must never compete with
+       whatever Matt is doing interactively on the same machine. -->
+  <key>Nice</key>
+  <integer>5</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

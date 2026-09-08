@@ -1,0 +1,57 @@
+#!/bin/bash
+# launchd entry point.
+#
+# launchd reads NO shell config — not .zprofile, not .zshenv — so the worker's
+# credentials have to be sourced here explicitly. This wrapper exists for that
+# one reason; everything else is `uv run nightshift run`.
+
+set -euo pipefail
+
+ENV_FILE="$HOME/.config/nightshift/env"
+if [ ! -f "$ENV_FILE" ]; then
+  echo "nightshift: missing $ENV_FILE — refusing to start" >&2
+  exit 78  # EX_CONFIG
+fi
+
+set -a
+# shellcheck source=/dev/null
+. "$ENV_FILE"
+set +a
+
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  echo "nightshift: CLAUDE_CODE_OAUTH_TOKEN unset — refusing to start" >&2
+  exit 78
+fi
+
+if [ -z "${GH_TOKEN:-}" ]; then
+  echo "nightshift: GH_TOKEN unset — gh would fall back to the interactive login," >&2
+  echo "which reaches every repo this account owns. Refusing to start." >&2
+  exit 78
+fi
+
+# An API key silently outranks the OAuth token and moves workers onto metered
+# billing. Never inherit one from the launchd environment.
+unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
+
+# launchd hands us PATH=/usr/bin:/bin:/usr/sbin:/sbin and nothing else, which
+# is the same "reads no shell config" problem as the credentials above — it
+# just fails later and less legibly. `gh` is the queue, `claude` is the worker,
+# and `pnpm`/`node` are every enrolled repo's verify command. The absolute
+# `uv` path below was this solved one binary at a time; a bare `gh` crashed the
+# daemon on its first poll (2026-08-04), and node/pnpm would have failed every
+# verify AFTER a task had already spent its implement pass.
+export PATH="/opt/homebrew/bin:$HOME/n/bin:$PATH"
+
+# `swift` is swift-app's verify command and resolves at /usr/bin/swift, so
+# launchd's own PATH already reaches it — it is listed anyway because the whole
+# point of this loop is that a missing verify binary otherwise surfaces AFTER a
+# task has spent its implement pass.
+for bin in gh claude pnpm node git swift; do
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    echo "nightshift: $bin not on PATH — refusing to start" >&2
+    exit 78
+  fi
+done
+
+cd "$HOME/Projects/nightshift"
+exec /opt/homebrew/bin/uv run nightshift run

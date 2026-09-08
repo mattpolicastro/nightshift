@@ -1,0 +1,34 @@
+[project]
+name = "nightshift"
+version = "0.1.0"
+description = "Quota-aware autonomous development daemon driving headless Claude Code workers against a GitHub-Issues queue"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Matt Policastro", email = "matt@mattpolicastro.com" }]
+keywords = ["claude-code", "agents", "automation", "daemon", "llm"]
+requires-python = ">=3.12"
+dependencies = []
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: No Input/Output (Daemon)",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+]
+
+[project.urls]
+Homepage = "https://github.com/mattpolicastro/nightshift"
+Source = "https://github.com/mattpolicastro/nightshift"
+Changelog = "https://github.com/mattpolicastro/nightshift/blob/main/WORKLOG.md"
+
+[project.scripts]
+nightshift = "nightshift.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8"]
