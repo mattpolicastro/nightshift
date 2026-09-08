@@ -1,7 +1,9 @@
 # Native OpenAI workers
 
-**Status: proposed, not implemented.** Written 2026-09-08 against the published
-Nightshift architecture. This document is a delivery plan, not a support claim.
+**Status: partially implemented; native execution disabled.** Written 2026-09-08
+against the published Nightshift architecture. This document is the acceptance
+contract, not a support claim. See [implementation status](docs/native-worker-progress.md)
+for completed work and remaining gates.
 
 ## Decision
 
@@ -74,8 +76,9 @@ Do not reproduce those assumptions inside the Codex adapter to make it fit.
 
 ## Proposed configuration
 
-This is **future syntax**, not accepted by the current release. Add driver and
-authentication fields to Endpoint; omitted driver means `claude-code`, so
+This syntax is validated by the implementation branch, but native execution
+remains blocked. Driver and authentication fields extend Endpoint; omitted driver
+means `claude-code`, so
 existing configurations retain their meaning. Existing `protocol = "openai"`
 continues to mean the legacy Claude-to-proxy route; never reinterpret it silently.
 

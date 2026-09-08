@@ -21,8 +21,16 @@ items, fall back to Claude, or be enabled with an operator bypass.
 
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.
-Claude workers retain their existing execution and accounting interfaces;
-unifying those interfaces remains implementation work.
+A transitional Claude adapter now emits typed results while preserving legacy
+quota and verdict data separately. Missing telemetry stays unknown; requested
+commands do not become completed-command evidence. Its invocation accepts the
+legacy max-turn limit explicitly, not unenforced Codex budgets. Production
+dispatch still uses the existing interface; integrating the adapters remains
+implementation work.
+
+An offline schema inventory records input fingerprints and available permission
+fields separately from untested enforcement. It always returns a blocked
+qualification result; schema presence cannot enable execution.
 
 ## Verification configuration change
 
@@ -33,7 +41,9 @@ Move complex verification into a trusted repository script and invoke it
 explicitly. Preflight validates this syntax.
 
 The host runs every clause with a clean environment and scratch home, within a
-shared ten-minute deadline. A pnpm lockfile triggers a frozen-lockfile install;
+shared ten-minute deadline. Each command has a 16 MiB combined stdout/stderr
+limit; exceeding it fails verification and terminates its process group. Only
+the final 16 KiB is retained in memory. A pnpm lockfile triggers a frozen-lockfile install;
 other repositories must supply self-contained verification commands. Failed
 bootstrap, incomplete commands, background work, candidate edits or branch
 movement prevent shipping. A private `.verification.json` artifact records the
@@ -41,9 +51,7 @@ candidate SHA and command outcomes alongside worker transcripts.
 
 This executes trusted repository code on the host. Environment filtering and
 process-group cleanup are not filesystem/network isolation and cannot contain
-processes that escape their group. Retained command output is a bounded tail,
-but temporary output capture is not disk-bounded. Native worker isolation is a
-separate gate.
+processes that escape their group. Native worker isolation is a separate gate.
 
 ## Remaining before native support can be claimed
 
@@ -58,3 +66,6 @@ separate gate.
 
 The [specification](../SPEC-openai-workers.md) is the acceptance contract.
 No paid OpenAI calls or production daemon changes were part of this milestone.
+
+See the [fallback isolation experiment](isolated-tool-execution.md) for the
+provider/tool separation required if native permission qualification fails.

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import shlex
 import signal
 import subprocess
@@ -18,6 +19,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 DEFAULT_TIMEOUT_S = 600
+MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+OUTPUT_TAIL_BYTES = 16_384
 
 
 def parse_commands(command: str) -> list[list[str]]:
@@ -55,10 +58,12 @@ class CommandResult:
     timed_out: bool = False
     backgrounded: bool = False
     output: str = ""
+    output_exhausted: bool = False
 
     @property
     def ok(self) -> bool:
-        return self.exit_code == 0 and not self.timed_out and not self.backgrounded
+        return (self.exit_code == 0 and not self.timed_out
+                and not self.backgrounded and not self.output_exhausted)
 
 
 @dataclass
@@ -126,33 +131,65 @@ def _command(argv: list[str], cwd: Path, env: dict[str, str],
         return CommandResult(tuple(argv), None, 0, timed_out=True)
     timed_out = False
     backgrounded = False
-    with tempfile.TemporaryFile() as output:
-        try:
-            proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                    stdout=output, stderr=subprocess.STDOUT,
-                                    start_new_session=True)
-        except OSError as exc:
-            return CommandResult(tuple(argv), None, time.monotonic() - start,
-                                 output=str(exc))
-        try:
-            proc.wait(timeout=max(0.001, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            timed_out = True
-        finally:
-            # A command returning while its process group remains is not a
-            # completed verification. Kill owned descendants on every exit.
+    output_exhausted = False
+    tail = bytearray()
+    output_bytes = 0
+    try:
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                start_new_session=True)
+    except OSError as exc:
+        return CommandResult(tuple(argv), None, time.monotonic() - start,
+                             output=str(exc))
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                ready = selector.select(min(remaining, 0.05))
+                if not ready:
+                    if proc.poll() is None:
+                        continue
+                    # The child may have exited between select() and poll().
+                    # Consume newly available output/EOF before deciding that
+                    # a descendant still owns the pipe; otherwise a completed
+                    # foreground command can be mislabeled as background work.
+                    ready = selector.select(0)
+                    if not ready:
+                        backgrounded = True
+                        break
+                chunk = os.read(proc.stdout.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(proc.stdout)
+                    break
+                output_bytes += len(chunk)
+                tail.extend(chunk)
+                del tail[:-OUTPUT_TAIL_BYTES]
+                if output_bytes > MAX_OUTPUT_BYTES:
+                    output_exhausted = True
+                    break
+        if not (timed_out or backgrounded or output_exhausted):
             try:
-                os.killpg(proc.pid, 0)
-                backgrounded = not timed_out
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            proc.wait()
-        output.seek(0, os.SEEK_END)
-        output.seek(max(0, output.tell() - 16_384))
-        tail = output.read().decode("utf-8", errors="replace")
+                proc.wait(timeout=max(0.001, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+    finally:
+        # Process groups are cleanup, not containment of a detached session.
+        try:
+            os.killpg(proc.pid, 0)
+            if not (timed_out or output_exhausted):
+                backgrounded = True
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+        proc.stdout.close()
     return CommandResult(tuple(argv), proc.returncode, time.monotonic() - start,
-                         timed_out, backgrounded, tail)
+                         timed_out, backgrounded,
+                         tail.decode("utf-8", errors="replace"), output_exhausted)
 
 
 def run(worktree: Path, command: str, *, timeout_s: float = DEFAULT_TIMEOUT_S
@@ -190,7 +227,7 @@ def run(worktree: Path, command: str, *, timeout_s: float = DEFAULT_TIMEOUT_S
                 completion = _command(argv, checkout, env, deadline)
                 result.clauses.append(completion)
                 if not completion.ok:
-                    raise ValueError("verification clause failed, timed out, or left background work")
+                    raise ValueError("verification clause failed, exceeded a limit, or left background work")
                 if not unchanged(checkout, result.candidate_sha):
                     raise ValueError("verification modified the candidate checkout")
             if not unchanged(worktree, result.candidate_sha):

@@ -61,10 +61,25 @@ from credential files or other process-inspection surfaces.
 
 ## Next concrete test
 
-Inspect the experimental schema and resolved sandbox state for the actual
-model-tool path. If a legacy sandbox supports restricted minimal reads, exercise
-that exact state offline before a model turn. Do not substitute broad filesystem
-reads for an unavailable control.
+The pinned experimental legacy `SandboxPolicy` has no restricted-read field.
+`readOnly` exposes a network toggle; `workspaceWrite` adds writable roots and
+temporary-directory exclusions. Neither expresses a minimal readable-root set.
+The legacy read-only control therefore cannot qualify credential-file isolation.
+
+Inspect the actual model-tool path's complete resolved filesystem policy instead
+of its legacy projection. Exercise that exact state offline before a model turn.
+Do not substitute broad filesystem reads for an unavailable control.
+
+Produce a repeatable schema inventory with:
+
+```sh
+python -m nightshift.workers.qualification /path/to/generated-schemas --runtime-version 0.153.4
+```
+
+The tool reads only the supplied schemas and reports schema surfaces separately
+from untested enforcement controls. It always emits `qualified: false` and exits
+2; schema presence can never authorize execution. The supplied version label is
+recorded as unverified. Generate schemas with the experimental flag above.
 
 Include positive and negative controls:
 

@@ -167,3 +167,64 @@ def test_real_task_requires_host_success_and_unchanged_candidate(repo, tmp_path,
     if mode != "worker_failed":
         evidence = tmp_path / "evidence" / "owner__repo#1-impl-1.verification.json"
         assert json.loads(evidence.read_text())["candidate_sha"]
+
+
+def test_output_flood_is_bounded_and_cannot_pass(repo, monkeypatch):
+    monkeypatch.setattr(verification, "MAX_OUTPUT_BYTES", 100_000)
+    result = verification.run(repo, python(
+        "import os; [os.write(1, b'x' * 65536) for _ in range(100)]"))
+    assert not result.ok
+    assert result.clauses[0].output_exhausted
+    assert len(result.clauses[0].output) <= verification.OUTPUT_TAIL_BYTES
+
+
+def test_output_tail_preserves_final_diagnostic(repo):
+    result = verification.run(repo, python(
+        "import os; os.write(1, b'x' * 100000); os.write(2, b'FINAL_DIAGNOSTIC')"))
+    assert result.ok, result.error
+    assert result.clauses[0].output.endswith("FINAL_DIAGNOSTIC")
+    assert len(result.clauses[0].output) == verification.OUTPUT_TAIL_BYTES
+
+
+
+def test_foreground_exit_between_select_and_poll_is_not_background_work(tmp_path, monkeypatch):
+    """Model a scheduling race with real pipe EOF and an actually reaped child."""
+    original_popen = verification.subprocess.Popen
+    original_selector = verification.selectors.DefaultSelector
+    processes = []
+
+    def spawn(*args, **kwargs):
+        proc = original_popen(*args, **kwargs)
+        processes.append(proc)
+        return proc
+
+    class ExitBetweenSelectAndPoll:
+        def __init__(self):
+            self.selector = original_selector()
+            self.first = True
+
+        def __getattr__(self, name):
+            return getattr(self.selector, name)
+
+        def __enter__(self):
+            self.selector.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.selector.__exit__(*args)
+
+        def select(self, timeout=None):
+            if self.first:
+                self.first = False
+                processes[-1].wait(timeout=2)
+                return []
+            return self.selector.select(timeout)
+
+    monkeypatch.setattr(verification.subprocess, "Popen", spawn)
+    monkeypatch.setattr(verification.selectors, "DefaultSelector", ExitBetweenSelectAndPoll)
+    result = verification._command(
+        [sys.executable, "-c", "print('finished')"], tmp_path, {},
+        verification.time.monotonic() + 3)
+    assert result.ok
+    assert result.output == "finished\n"
+    assert not result.backgrounded
