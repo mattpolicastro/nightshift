@@ -106,7 +106,7 @@ def test_committing_without_verifying_escalates():
         result(), escalated=False, committed=True, verified=False
     )
     assert d.step is Step.ESCALATE
-    assert "no verify run" in d.reason
+    assert "no successful host verification" in d.reason
 
 
 # --- after_review --------------------------------------------------------
@@ -157,9 +157,27 @@ def test_single_attempt_config_never_retries():
 VERIFY = "pnpm -r typecheck && pnpm -r test && pnpm -r build && pnpm format:check"
 
 
-def test_verification_detected_from_executed_commands():
+def test_partial_or_piped_verification_is_not_the_complete_chain():
     r = result(commands=["git status", "pnpm -r test 2>&1 | tail -60"])
-    assert task.ran_verification(r, VERIFY)
+    assert not task.ran_verification(r, VERIFY)
+
+
+def test_exact_full_chain_is_only_diagnostic():
+    assert task.ran_verification(result(commands=[VERIFY]), VERIFY)
+
+
+def test_failed_implementation_with_commit_does_not_reach_review():
+    d = task.after_implement(result(ok=False), escalated=False,
+                             committed=True, verified=True)
+    assert d.step is Step.ESCALATE
+    assert "failed" in d.reason
+
+
+@pytest.mark.parametrize("changes", [{"ok": False}, {"turns_exhausted": True}])
+def test_failed_or_truncated_reviewer_cannot_ship_with_pass(changes):
+    d = task.after_review(result(**changes), True, attempt=1, max_attempts=2)
+    assert d.step is Step.ESCALATE
+
 
 
 def test_verification_not_inferred_from_prose():
@@ -175,10 +193,10 @@ def test_verification_ignores_a_near_miss_command():
 
 @pytest.mark.parametrize(
     "transcript,expected",
-    [("worker1.jsonl", True), ("worker3b.jsonl", False)],
+    [("worker1.jsonl", False), ("worker3b.jsonl", False)],
 )
 def test_verification_against_real_transcripts(transcript, expected, request):
-    """worker1 ran the verify chain; worker3b escalated without verifying."""
+    """Legacy partial/piped requests are not complete host verification."""
     path = (
         request.config.rootpath / "tests" / "fixtures" / transcript
     )
@@ -186,3 +204,44 @@ def test_verification_against_real_transcripts(transcript, expected, request):
         pytest.skip(f"fixture {transcript} not vendored")
     r = trace.parse(path.read_text())
     assert task.ran_verification(r, VERIFY) is expected
+
+
+@pytest.mark.parametrize("failure", ["missing_ref", "timeout", "io"])
+def test_final_candidate_inspection_failure_preserves_unpushed_worktree(tmp_path, monkeypatch, failure):
+    import json
+    import subprocess
+    from nightshift import verification, vcs, worker
+    from nightshift.config import Config, Repo
+    from nightshift.queue import Claim, Issue
+
+    monkeypatch.setattr(task.queue, "comments_of", lambda *a: [])
+    monkeypatch.setattr(Claim, "advance", lambda *a: None)
+    monkeypatch.setattr(task.outcomes, "record", lambda *a, **k: None)
+    for name in ("fetch", "install", "add_worktree"):
+        monkeypatch.setattr(vcs, name, lambda *a, **k: None)
+    monkeypatch.setattr(vcs, "has_commits", lambda *a: True)
+    removed, pushed = [], []
+    monkeypatch.setattr(vcs, "remove_worktree", lambda *a, **k: removed.append(a))
+    monkeypatch.setattr(vcs, "push", lambda *a, **k: pushed.append(a))
+    event = json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                        "num_turns": 1, "result": "VERDICT: PASS"})
+    for phase in ("implement", "review"):
+        monkeypatch.setattr(worker, phase, lambda *a, **k: worker.Run(0, event))
+    checked = verification.VerificationResult("verified-sha", "true", clauses=[
+        verification.CommandResult(("true",), 0, 0)])
+    monkeypatch.setattr(verification, "run", lambda *a, **k: checked)
+
+    def failed_inspection(*args, **kwargs):
+        if failure == "missing_ref":
+            raise subprocess.CalledProcessError(128, ["git", "rev-parse"])
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(["git", "status"], 30)
+        raise OSError("I/O error")
+
+    monkeypatch.setattr(verification, "unchanged", failed_inspection)
+    report = task.run(Config(repos=[], worktree_root=tmp_path), Repo("owner/repo", "true"),
+                      tmp_path, Issue("owner/repo", 1, "Task", "Task"),
+                      Claim("owner/repo", 1, "candidate", str(tmp_path), "now"))
+    assert report.step is Step.ESCALATE
+    assert "unable to inspect candidate" in report.reason
+    assert not removed and not pushed

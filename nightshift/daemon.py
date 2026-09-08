@@ -397,8 +397,16 @@ def endpoints_ready(cfg: Config, repo: Repo, *, prober=None) -> tuple[bool, str]
     Repos on the default endpoint never probe anything, so this costs today's
     configuration exactly nothing.
     """
+    if len({ep.name for ep in cfg.endpoints}) != len(cfg.endpoints):
+        return False, "endpoint names must be unique; no fallback will run"
+    unresolved = cfg.undeclared_endpoint_refs()
     for phase in ("implement", "review"):
+        if cfg.model_spec(phase, repo) in unresolved:
+            return False, f"{phase} assignment names an undeclared endpoint; no fallback will run"
         assignment = cfg.assign(phase, repo)
+        blocker = assignment.endpoint.execution_blocker()
+        if blocker:
+            return False, f"{phase} endpoint {assignment.endpoint.name}: {blocker}"
         if assignment.endpoint.is_default:
             continue
         endpoint = assignment.endpoint

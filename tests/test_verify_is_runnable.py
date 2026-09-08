@@ -86,17 +86,8 @@ def test_a_prefix_grant_does_not_leak_across_words():
     ) == ["swiftlint --strict"]
 
 
-def test_a_permitted_clause_also_counts_as_having_run():
-    """The permission check and `task.ran_verification` must not disagree.
-
-    `ran_verification` decides whether a worker RAN verify; this module decides
-    whether it was ALLOWED to. If the two split the command differently, a
-    worker can be permitted to run something that never counts as having run —
-    a task that does everything right and escalates anyway.
-
-    Asserted end-to-end through the real `ran_verification` rather than by
-    comparing two split expressions, which proves nothing.
-    """
+def test_permission_does_not_prove_complete_verification():
+    """Allowed partial command requests cannot satisfy the complete chain."""
     from nightshift import task, trace
 
     verify = "swift build && swift test && swift format lint --strict Sources"
@@ -107,7 +98,7 @@ def test_a_permitted_clause_also_counts_as_having_run():
         output_tokens=0, cache_read_tokens=0, text="",
         commands=["swift build", "swift test 2>&1 | tail -20"],
     )
-    assert task.ran_verification(ran, verify)
+    assert not task.ran_verification(ran, verify)
 
 
 def test_preflight_reports_an_unrunnable_verify_command():

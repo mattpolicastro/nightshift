@@ -10,12 +10,13 @@ judgement to them.
 from __future__ import annotations
 
 import logging
+import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
 from . import mirror as mirror_mod
-from . import outcomes, prompts, queue, trace, vcs, worker
+from . import outcomes, prompts, queue, trace, vcs, verification, worker
 from .config import Config, Repo
 from .queue import Issue, Phase
 
@@ -44,6 +45,7 @@ class Attempt:
     review: trace.Result | None = None
     verdict: bool | None = None
     feedback: str = ""
+    verification: verification.VerificationResult | None = None
 
 
 def after_implement(
@@ -61,6 +63,9 @@ def after_implement(
     # is an artefact of where it was cut off, not a finished piece of work.
     if run.truncated:
         return Decision(Step.ESCALATE, f"worker truncated at {run.turns} turns")
+
+    if not run.ok:
+        return Decision(Step.ESCALATE, "implementation worker failed")
 
     # Escalation is a correct outcome, not a failure — check it before anything
     # that looks like a shortfall, or a deliberate stop reads as a broken run.
@@ -85,7 +90,7 @@ def after_implement(
     # AGENTS.md makes this an explicit failure so the incentive is never to
     # commit and hope. "I could not verify" is a valid outcome; silence is not.
     if not verified:
-        return Decision(Step.ESCALATE, "no verify run found in the transcript")
+        return Decision(Step.ESCALATE, "no successful host verification for the candidate")
 
     return None
 
@@ -109,6 +114,9 @@ def after_review(
             + (" (truncated)" if run.truncated else ""),
         )
 
+    if not run.ok or run.truncated:
+        return Decision(Step.ESCALATE, "reviewer did not complete successfully")
+
     if verdict:
         return Decision(Step.SHIP, "reviewer passed")
 
@@ -121,19 +129,23 @@ def after_review(
 
 
 def ran_verification(run: trace.Result, verify: str) -> bool:
-    """Did the worker actually execute the verify command?
+    """Diagnostic only: did command requests contain the complete exact chain?
 
-    Checked against the Bash commands in the transcript, not the closing
-    message — a worker that claims it ran the tests and one that ran them read
-    identically in prose. Matches on each `&&`-joined clause's leading tokens,
-    so `pnpm -r test 2>&1 | tail -60` still counts. Coarse on purpose: this
-    catches a worker that never tried, not one that misread the output.
+    Requested text cannot prove completion, exit status, or candidate identity.
+    Shipping exclusively uses the host-owned VerificationResult below.
     """
-    clauses = [c.strip() for c in verify.split("&&") if c.strip()]
-    if not clauses:
-        return True
-    stems = {" ".join(c.split()[:2]) for c in clauses}
-    return any(stem in cmd for stem in stems for cmd in run.commands)
+    try:
+        expected = verification.parse_commands(verify)
+        requested = []
+        for command in run.commands:
+            try:
+                requested.extend(verification.parse_commands(command))
+            except ValueError:
+                continue
+        return all(clause in requested for clause in expected)
+    except ValueError:
+        return False
+
 
 
 #: Written by the harness, not by an agent: the worker never sees this failure
@@ -376,24 +388,35 @@ def run(
                 foreign_auth_envs=cfg.foreign_auth_envs(implementing.endpoint),
                 transcript=impl_transcript,
             )
-            impl_result = trace.parse(impl.events)
+            impl_result = worker.parse_result(impl)
             attempt = Attempt(implement=impl_result)
             report.attempts.append(attempt)
 
             escalated = (worktree / ESCALATION_FILE).exists()
             committed = vcs.has_commits(worktree, base_ref)
-            verified = bool(impl_result) and ran_verification(impl_result, repo.verify)
 
             early = after_implement(
                 impl_result,
                 escalated=escalated,
                 committed=committed,
-                verified=verified,
+                verified=True,
             )
             if early:
                 outcomes.record(repo.name, issue.number, reason=early.reason,
                                 attempt_result=early.step.value)
                 report.step, report.reason = early.step, early.reason
+                return report
+
+            attempt.verification = verification.run(worktree, repo.verify)
+            if impl_transcript:
+                verification.save(attempt.verification,
+                                  impl_transcript.with_suffix(".verification.json"))
+            if not attempt.verification.ok:
+                report.step = Step.ESCALATE
+                report.reason = ("host verification failed: "
+                                 + attempt.verification.error)
+                outcomes.record(repo.name, issue.number, reason=report.reason,
+                                attempt_result=report.step.value)
                 return report
 
             claim.advance(Phase.REVIEWING)
@@ -404,7 +427,9 @@ def run(
                             review_transcript=str(rev_transcript) if rev_transcript else None)
             rev = worker.review(
                 worktree,
-                prompts.review(issue_text, claim.branch, base_ref, repo.verify),
+                prompts.review(issue_text, claim.branch, base_ref, repo.verify)
+                + "\n\nHost verification passed all configured clauses at candidate "
+                + attempt.verification.candidate_sha + ".",
                 model=reviewing.model,
                 max_turns=reviewing.max_turns(cfg.review_max_turns),
                 endpoint=reviewing.endpoint,
@@ -412,7 +437,7 @@ def run(
                 foreign_auth_envs=cfg.foreign_auth_envs(reviewing.endpoint),
                 transcript=rev_transcript,
             )
-            rev_result = trace.parse(rev.events)
+            rev_result = worker.parse_result(rev)
             attempt.review = rev_result
             attempt.verdict = trace.verdict(rev_result.text) if rev_result else None
 
@@ -432,6 +457,26 @@ def run(
                 continue
 
             if decision.step is Step.SHIP:
+                # Inspection failures must preserve the unpushed worktree. SHIP
+                # activates teardown in finally, so don't set it until the gate
+                # has actually completed successfully.
+                report.step = Step.ESCALATE
+                try:
+                    candidate_unchanged = verification.unchanged(
+                        worktree, attempt.verification.candidate_sha, branch=claim.branch
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    report.reason = "unable to inspect candidate after verification or during review"
+                    outcomes.record(repo.name, issue.number, reason=report.reason,
+                                    attempt_result=report.step.value)
+                    return report
+                if not candidate_unchanged:
+                    report.step = Step.ESCALATE
+                    report.reason = "candidate changed after verification or during review"
+                    outcomes.record(repo.name, issue.number, reason=report.reason,
+                                    attempt_result=report.step.value)
+                    return report
+                report.step = Step.SHIP
                 claim.advance(Phase.SHIPPING)
                 try:
                     vcs.push(worktree, claim.branch, base)
