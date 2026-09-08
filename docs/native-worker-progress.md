@@ -74,3 +74,8 @@ A standalone [OpenAI smoke test](openai-smoke-test.md) can check API-key/model
 access before executor qualification. It sends a fixed prompt with no tools or
 repository content. This command does not enable native worker dispatch, and
 offline tests are not evidence of a successful live provider call.
+
+Isolated-executor prototypes now have synthetic evidence for remote command,
+patch and interactive input routing, no host fallback, bounded container cleanup,
+validated source transfer and immutable reviewer source. See [isolation progress](isolated-tool-execution.md)
+for reproduction and the remaining skills-reader and production-integration gates.
