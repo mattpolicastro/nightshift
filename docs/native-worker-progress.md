@@ -69,3 +69,8 @@ No paid OpenAI calls or production daemon changes were part of this milestone.
 
 See the [fallback isolation experiment](isolated-tool-execution.md) for the
 provider/tool separation required if native permission qualification fails.
+
+A standalone [OpenAI smoke test](openai-smoke-test.md) can check API-key/model
+access before executor qualification. It sends a fixed prompt with no tools or
+repository content. This command does not enable native worker dispatch, and
+offline tests are not evidence of a successful live provider call.
