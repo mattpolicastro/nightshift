@@ -25,3 +25,5 @@ ready = "agent:ready"
 working = "agent:working"
 done = "agent:done"
 needs_human = "needs-human"
+
+# Optional Ollama and other endpoint routing: see docs/providers.md.

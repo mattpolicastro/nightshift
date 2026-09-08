@@ -25,6 +25,19 @@ others. Read [known limitations](BACKLOG.md) before running unattended.
 These controls reduce risk; they are not a security sandbox. Enroll trusted
 repositories, review queued issue content and keep human review at merge time.
 
+## Worker and model support
+
+Implementation and review are separate Claude Code sessions and can use
+separate models or endpoints. Anthropic is the production default. Ollama
+routing is implemented and live tool-loop probes have passed; a full local
+implementation → Opus review pilot is underway. OpenAI-compatible endpoints
+require an operator-supplied translating proxy and remain unvalidated end to
+end. Native Codex workers and automatic model selection are not implemented.
+
+See [provider setup and support status](docs/providers.md) and
+[validation evidence](docs/validation.md). Planning is task preparation, not a
+separate model-backed execution phase in the current daemon.
+
 ## Setup
 
 Requires Python 3.12+, uv, Git, GitHub CLI, Claude Code, and the tools used by
