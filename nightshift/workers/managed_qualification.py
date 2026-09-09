@@ -18,6 +18,7 @@ class _QualificationResult:
     status: str
     requested_model: str
     duration_s: float = 0
+    provider_stopped: bool = False
 
     @property
     def passed(self):
@@ -62,5 +63,6 @@ async def _qualify_managed_account(model: str, argv: list[str], *, env: dict[str
     # Internal success has no model output or task meaning. Never expose raw
     # diagnostics, stderr, text, identity, or token/credit data from this seam.
     if result.ok and result.thread_id is None and result.turn_id is None and not result.commands:
-        return _QualificationResult('passed', model, result.duration_s)
-    return _QualificationResult(result.status if not result.ok else 'protocol_error', model, result.duration_s)
+        return _QualificationResult('passed', model, result.duration_s, provider_stopped=True)
+    return _QualificationResult(result.status if not result.ok else 'protocol_error', model, result.duration_s,
+                                provider_stopped=True)

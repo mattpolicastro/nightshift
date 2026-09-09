@@ -1,5 +1,23 @@
 # Changelog
 
+## Stable credential lease and native recovery marker — 2026-09-09
+
+Added a private stable `CODEX_HOME` lease for macOS keyring-backed metadata
+qualification. It validates a pre-existing private root without following
+symlinks, acquires a cross-process lock before inspection, writes a durable
+attempt marker before namespace mutation, creates exact bounded startup assets
+through held directory descriptors, and requires confirmed provider shutdown
+before bounded cleanup. Clean attempts preserve the stable namespace inode;
+stale assets, concurrent use, control-state changes, and uncertain cleanup retain
+recovery evidence and fail closed.
+
+A metadata-only adapter holds that lease across version and managed-account
+admission and uses an inert remote-only executor descriptor. It cannot inherit
+the model runner or create a thread. A separate dormant native claim marker now
+persists before any future provider launch and makes queue/startup recovery retain
+the claim, worktree, branch, and cleanup evidence before Git or PR probes. No
+production caller can prepare the marker, and native dispatch remains disabled.
+
 ## Bound ChatGPT metadata qualification — 2026-09-09
 
 Added private principal/workspace binding and a metadata-only qualification path

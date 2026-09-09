@@ -70,7 +70,10 @@ details. A local qualification passed without creating a thread or turn. That
 experiment also showed that the keyring login is scoped to the enrolled
 `CODEX_HOME`: a new per-attempt home has no account. Production therefore needs
 a stable, private and exclusively locked credential home whose generated policy
-and startup assets are checked on every use. That lifecycle is not implemented.
+and startup assets are checked on every use. The private lease and metadata-only
+adapter now implement and synthetically test that lifecycle, but the final stable
+namespace has not been enrolled or used for a live qualification. The adapter
+cannot create a model thread.
 
 ## Accounting and failure handling
 

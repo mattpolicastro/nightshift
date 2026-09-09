@@ -192,14 +192,15 @@ transport required for production source export.
 
 ## Remaining production integration
 
-- Privately bind the generated ChatGPT/keyring policy to the intended account.
-  Synthetic admission now rejects API/custom-provider fallback and validates
-  managed usage, model and reasoning capability, but the production constructor
-  remains blocked because a fresh provider home does not isolate the macOS keyring.
-- Implement the stable credential-home lifecycle required by macOS keyring
-  scoping. A local metadata-only qualification passed when the enrolled home was
-  used with regenerated validated policy; the production code does not yet own,
-  lock, clean or recover that stable home.
+- Enroll the final stable credential namespace, then join its lease to the
+  model-capable provider/executor composition. Principal/workspace admission and
+  a local metadata-only qualification pass; the private stable-home adapter now
+  owns, locks, cleans and retains recovery evidence without creating a model
+  thread. Production model execution remains blocked.
+- Persist a native recovery marker before provider launch and recognize it ahead
+  of ordinary queue/Git/PR recovery. The dormant marker and retention behavior
+  now exist behind current dispatch gates; production coordination still must
+  join it atomically to the credential lease and container lifecycle.
 - Reproduce the characterized skills routing with an allowlisted fresh provider
   home and explicit remote capability roots in the production launcher. Keep
   filesystem authority at the executor boundary; do not assume package-local

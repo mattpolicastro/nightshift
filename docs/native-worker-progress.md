@@ -31,6 +31,14 @@ items, fall back to Claude, or be enabled with an operator bypass.
   no-turn qualification passed with the authorized managed account and an
   advertised model. It also confirmed that keyring enrollment is scoped to a
   stable `CODEX_HOME`; the current one-attempt provider home cannot reuse it.
+- A stable credential-home lease now supplies exclusive cross-process locking,
+  durable attempt evidence, descriptor-based exact startup writes, shutdown-bound
+  cleanup, and retained recovery state. Its metadata adapter cannot start a model
+  thread and uses an inert remote-only executor descriptor.
+- A dormant native claim marker can be made durable before a future provider
+  launch. Queue reconciliation and startup recovery retain any marked claim and
+  skip destructive Git/PR recovery. No production caller prepares it, so this
+  does not activate native dispatch.
 
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.
@@ -73,13 +81,13 @@ processes that escape their group. Native worker isolation is a separate gate.
    configured and effective read-only mounts, denied source mutation, scratch,
    network and host isolation, exact source preservation and owned cleanup. See
    [security qualification](codex-security-qualification.md).
-2. Implement an owned, locked lifecycle for the privately enrolled stable
-   `CODEX_HOME`, regenerating and validating policy without allowing concurrent
-   attempts or stale assets, then add the production launcher. The
+2. Enroll the stable credential namespace and qualify it locally, then join the
+   lease to the native provider/executor launcher. The
    approved route allows a ChatGPT plan's included allowance and existing
    ChatGPT credits. Platform API-key and custom-provider fallback remain forbidden.
-3. Integrate driver dispatch, host-owned Git operations, normalized accounting
-   and retry/error handling with the daemon's implementation/review phases. The
+3. Integrate driver dispatch, host-owned Git operations, normalized accounting,
+   the durable native marker and retained recovery disposition with the daemon's
+   implementation/review phases. The
    bound reviewer prompt now carries validated approved-task and policy data.
 4. Run a credential-safe OpenAI canary, then an end-to-end sandbox task with
    independent review, host verification, PR creation and GitHub CI.

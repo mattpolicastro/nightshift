@@ -54,9 +54,10 @@ def test_pass_is_metadata_only_without_threads_output_or_journals(tmp_path, caps
     result = invoke(tmp_path)
     assert result.passed
     assert result.execution_enabled is False
+    assert result.provider_stopped is True
     assert methods(tmp_path) == ['initialize', 'initialized', 'config/read', 'configRequirements/read',
                                 'account/read', 'account/rateLimits/read', 'model/list']
-    assert set(asdict(result)) == {'status', 'requested_model', 'duration_s'}
+    assert set(asdict(result)) == {'status', 'requested_model', 'duration_s', 'provider_stopped'}
     assert 'PRIVATE' not in repr(result)
     assert capsys.readouterr() == ('', '')
     assert not (tmp_path / 'native.jsonl').exists()
