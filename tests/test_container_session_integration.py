@@ -237,3 +237,76 @@ def test_real_isolated_verification_chain(engine, tmp_path, monkeypatch, scenari
         assert len(result.clauses) == 1 and result.clauses[0].ok
         assert result.source_fingerprint != result.final_fingerprint
         assert "LATER_RESTORE" not in result.clauses[0].output
+
+
+def test_readonly_session_enforces_source_mount_and_preserves_snapshot(engine, tmp_path, monkeypatch):
+    import copy
+    from nightshift.workers.container_session import Session
+
+    host, docker = engine
+    recovery = tmp_path / "readonly-recovery"
+    sentinel = tmp_path / "host-private"
+    sentinel.write_text("SYNTHETIC_HOST_ONLY")
+    monkeypatch.setenv("NIGHTSHIFT_PROVIDER_SENTINEL", "SYNTHETIC_PROVIDER_ONLY")
+    initial = [snapshot.SourceFile("source.txt", b"READONLY_SOURCE\n")]
+    fingerprint = snapshot.fingerprint(initial)
+    with Session(IMAGE, initial, docker_host=host, recovery_dir=recovery,
+                 readonly_source=True, timeout_s=30, max_output_bytes=8192) as session:
+        names = _names(session)
+        assert session.readonly_source_confirmed
+        _journal(recovery)
+        _live_owned(docker, session)
+        assert docker("inspect", "--type", "container", session.loader_name, check=False).returncode != 0
+        effective = json.loads(docker("inspect", session.name).stdout)[0]
+        configured = effective["HostConfig"]["Mounts"]
+        volumes = [mount for mount in effective["Mounts"] if mount["Type"] == "volume"]
+        assert len(configured) == len(volumes) == 1
+        assert configured[0]["ReadOnly"] is True
+        assert volumes[0]["RW"] is False and volumes[0]["Destination"] == "/workspace"
+        # Validate reject paths against real inspect data without creating any
+        # extra daemon mount: a writable flag or alias must not pass the policy.
+        for kind in ("configured_writable", "effective_writable", "alias"):
+            wrong = copy.deepcopy(effective)
+            if kind == "configured_writable":
+                wrong["HostConfig"]["Mounts"][0]["ReadOnly"] = False
+            elif kind == "effective_writable":
+                next(m for m in wrong["Mounts"] if m["Type"] == "volume")["RW"] = True
+            else:
+                wrong["Mounts"].append({**volumes[0], "Destination": "/alias", "RW": True})
+            assert not session._container_policy(wrong, running=True)
+
+        read = session.run(["/bin/cat", "/workspace/source.txt"])
+        assert read.ok and read.output == "READONLY_SOURCE\n"
+        scratch = session.run(["/bin/sh", "-c",
+            "set -eu; printf SCRATCH_OK > /tmp/scratch; "
+            "ln -s /workspace/source.txt /tmp/source-link; cat /tmp/scratch"])
+        assert scratch.ok and scratch.output == "SCRATCH_OK"
+        attempts = {
+            "overwrite": ["/bin/sh", "-c", "printf CHANGED > /workspace/source.txt"],
+            "unlink": ["/bin/rm", "/workspace/source.txt"],
+            "rename": ["/bin/mv", "/workspace/source.txt", "/workspace/renamed"],
+            "chmod": ["/bin/chmod", "777", "/workspace/source.txt"],
+            "create": ["/bin/touch", "/workspace/created"],
+            "hardlink_source": ["/bin/ln", "/workspace/source.txt", "/workspace/hardlink"],
+            "hardlink_scratch": ["/bin/ln", "/workspace/source.txt", "/tmp/hardlink"],
+            "scratch_symlink_write": ["/bin/sh", "-c", "printf CHANGED > /tmp/source-link"],
+        }
+        for label, argv in attempts.items():
+            denied = session.run(argv)
+            assert denied.status == "failed" and denied.exit_code != 0, (label, denied)
+            expected = "Cross-device link" if label == "hardlink_scratch" else "Read-only file system"
+            assert expected.lower() in denied.output.lower(), (label, denied)
+        boundary = session.run(["/bin/sh", "-c",
+            "set -eu; test ! -e " + shlex.quote(str(sentinel)) + "; "
+            'test -z "${NIGHTSHIFT_PROVIDER_SENTINEL:-}"; '
+            'test ! -e /workspace/.git; test ! -e /var/run/docker.sock; '
+            'test -z "$(ip route show)"; '
+            'if nc -v -w 1 198.18.0.1 9; then exit 1; fi'])
+        assert boundary.ok and "Network unreachable" in boundary.output
+        assert snapshot.fingerprint(session.checkpoint()) == fingerprint
+        returned = session.finish()
+    assert returned == initial and snapshot.fingerprint(returned) == fingerprint
+    assert sentinel.read_text() == "SYNTHETIC_HOST_ONLY"
+    assert session.cleanup_succeeded
+    _gone(docker, names, recovery)
+    assert docker("inspect", "--type", "container", session.loader_name, check=False).returncode != 0

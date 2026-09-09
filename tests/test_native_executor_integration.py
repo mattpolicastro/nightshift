@@ -37,8 +37,8 @@ def _sse(item, sequence):
                    for name, data in events).encode()
 
 
-@pytest.mark.parametrize("mode", ["edits", "missing_executor", "cancelled", "coordinator"])
-def test_native_tools_use_owned_session_and_cleanup(tmp_path, mode):
+@pytest.mark.parametrize("mode", ["edits", "missing_executor", "cancelled", "coordinator", "reviewer"])
+def test_native_tools_use_owned_session_and_cleanup(tmp_path, monkeypatch, mode):
     from nightshift.workers.container_session import Session, SessionError
     from nightshift.workers.native_executor import NativeExecutor
 
@@ -77,6 +77,20 @@ def test_native_tools_use_owned_session_and_cleanup(tmp_path, mode):
                "printf '42\\n' > /workspace/answer; printf HOST_ENV_NETWORK_BOUNDARY_OK")
     if mode == "cancelled":
         command = "printf STARTED > /tmp/native-command-started; sleep 30"
+    if mode == "reviewer":
+        command = (
+            "set -eu; test \"$(cat /workspace/answer)\" = 42; "
+            "if (printf CHANGED > /workspace/answer) 2>/tmp/denied; then exit 42; fi; "
+            "grep -q 'Read-only file system' /tmp/denied; "
+            "printf SCRATCH_OK > /tmp/review-scratch; "
+            "test \"$(cat /tmp/review-scratch)\" = SCRATCH_OK; "
+            "ln -s /workspace/answer /tmp/review-link; "
+            "if (printf CHANGED > /tmp/review-link) 2>/tmp/denied; then exit 43; fi; "
+            "grep -q 'Read-only file system' /tmp/denied; "
+            "test ! -e " + shlex.quote(str(sentinel)) + "; "
+            'test -z "${NIGHTSHIFT_FAKE_KEY:-}${NIGHTSHIFT_PROVIDER_SENTINEL:-}"; '
+            "test ! -e /var/run/docker.sock; test ! -e /workspace/.git; "
+            'test -z "$(ip route show)"; printf IMMUTABLE_REVIEW_BOUNDARY_OK')
 
     class Provider(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -109,7 +123,8 @@ def test_native_tools_use_owned_session_and_cleanup(tmp_path, mode):
                             "*** Begin Patch\n*** Add File: /workspace/native-patch.txt\n+OWNED_NATIVE_PATCH\n*** End Patch\n"}
                 else:
                     item = {"type": "message", "id": "msg_done", "role": "assistant", "status": "completed",
-                            "content": [{"type": "output_text", "text": "SYNTHETIC_DONE", "annotations": []}]}
+                            "content": [{"type": "output_text", "text": (json.dumps({"verdict": "PASS", "blocking": [], "non_blocking": []})
+                                                     if mode == "reviewer" else "SYNTHETIC_DONE"), "annotations": []}]}
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
@@ -211,10 +226,81 @@ def test_native_tools_use_owned_session_and_cleanup(tmp_path, mode):
         return result, returned
 
     try:
-        if mode != "coordinator":
+        if mode == "reviewer":
+            from nightshift.workers import candidate_pipeline, isolated_verification, reviewer
+
+            files = [snapshot.SourceFile("answer", b"42\n")]
+            fingerprint = snapshot.fingerprint(files)
+            candidate_sha = "b" * 40
+            # Synthetic host-owned verification metadata is explicitly bound to
+            # these bytes. Real verification is exercised by coordinator mode.
+            evidence = isolated_verification.IsolatedVerificationResult(
+                candidate_sha, "true", IMAGE, status="succeeded",
+                source_fingerprint=fingerprint, final_fingerprint=fingerprint,
+                cleanup_succeeded=True,
+                clauses=[isolated_verification.ClauseResult(("true",), "succeeded", 0, "", 0)])
+            sessions, homes, thread_ids = [], [], []
+            original_session, original_stdio = reviewer.Session, codex._run_stdio
+
+            def observe_session(*args, **kwargs):
+                session = original_session(*args, **kwargs)
+                sessions.append(session)
+                return session
+
+            async def observe_stdio(request, argv, **kwargs):
+                home = kwargs["provider_cwd"]
+                homes.append(home)
+                assert home != provider_home and home.stat().st_mode & 0o777 == 0o700
+                assert kwargs["env"]["CODEX_HOME"] == kwargs["env"]["HOME"] == str(home)
+                assert request.role == "review" and request.cwd == Path("/workspace")
+                assert sessions[-1].readonly_source_confirmed
+                effective = json.loads(docker("inspect", sessions[-1].name).stdout)[0]
+                mounts = [m for m in effective["Mounts"] if m["Type"] == "volume"]
+                assert len(mounts) == 1 and mounts[0]["RW"] is False
+                assert docker("inspect", sessions[-1].loader_name, check=False).returncode != 0
+                return await original_stdio(request, argv, **kwargs)
+
+            # Observe identities while using the actual adapter, engine and transport.
+            monkeypatch.setattr(reviewer, "Session", observe_session)
+            monkeypatch.setattr(codex, "_run_stdio", observe_stdio)
+            with snapshot.materialize(files) as source:
+                for attempt in range(2):
+                    state.update(requests=0, outputs=[], error=None)
+                    review_input = candidate_pipeline.ReviewInput(
+                        f"synthetic-review-{attempt}", "a" * 40, candidate_sha, source,
+                        (candidate_pipeline.FileChange("answer", snapshot.SourceFile("answer", b"41\n"), files[0]),),
+                        evidence)
+                    recovery = tmp_path / f"review-recovery-{attempt}"
+                    outcome = asyncio.run(reviewer._run_isolated(review_input, files,
+                        image_id=IMAGE, docker_host=host, recovery_dir=recovery,
+                        provider_argv=[binary, "app-server", "--stdio"],
+                        provider_config=(provider_home / "config.toml").read_text(),
+                        provider_env={"NIGHTSHIFT_FAKE_KEY": "synthetic-fixture-key",
+                                      "NIGHTSHIFT_PROVIDER_SENTINEL": "provider-only"},
+                        model="gpt-5.4", budgets=WorkerBudgets(max_runtime_s=30)))
+                    assert outcome.ok, (outcome.detail, outcome.result.diagnostics)
+                    assert outcome.review_id == review_input.review_id
+                    assert outcome.candidate_sha == candidate_sha
+                    assert outcome.source_fingerprint == fingerprint
+                    assert outcome.cleanup_succeeded and outcome.readonly_source_confirmed
+                    assert outcome.fresh_context_confirmed
+                    assert outcome.result.reviewer_verdict == ReviewerVerdict("PASS", (), ())
+                    assert state["error"] is None and state["requests"] == 2
+                    assert len(outcome.result.commands) == 1 and outcome.result.commands[0].exit_code == 0
+                    assert "IMMUTABLE_REVIEW_BOUNDARY_OK" in "\n".join(item["output"] for item in state["outputs"])
+                    thread_ids.append(outcome.result.thread_id)
+                    assert (source / "answer").read_bytes() == b"42\n"
+                    assert not homes[-1].exists()
+                    for name in (sessions[-1].name, sessions[-1].loader_name):
+                        assert docker("inspect", name, check=False).returncode != 0
+                    assert docker("volume", "inspect", sessions[-1].volume_name, check=False).returncode != 0
+                    assert not list(recovery.glob("*.json"))
+            assert len(set(thread_ids)) == len(set(homes)) == len({s.owner for s in sessions}) == 2
+            assert sentinel.read_text() == "SYNTHETIC_HOST_UNCHANGED"
+        elif mode != "coordinator":
             run_owned([snapshot.SourceFile("answer", b"41\n")])
         else:
-            from nightshift.workers import candidate_pipeline, isolated_verification
+            from nightshift.workers import candidate_pipeline, isolated_verification, reviewer
 
             repository = tmp_path / "candidate"
             repository.mkdir()
@@ -272,8 +358,13 @@ def test_native_tools_use_owned_session_and_cleanup(tmp_path, mode):
                 assert changes["answer"].after.content == b"42\n"
                 assert changes["native-patch.txt"].before is None
                 assert changes["native-patch.txt"].after.content == b"OWNED_NATIVE_PATCH\n"
-                return WorkerResult(status="succeeded", runtime="synthetic-trusted-reviewer",
+                worker = WorkerResult(status="succeeded", runtime="synthetic-trusted-reviewer",
                     thread_id=value.review_id, reviewer_verdict=ReviewerVerdict("PASS", (), ()))
+                # Deliberately synthetic adapter evidence for coordinator wiring.
+                # The separate reviewer mode exercises the actual isolation adapter.
+                return reviewer.ReviewOutcome(worker, value.review_id, value.candidate_sha,
+                    snapshot.fingerprint(expected), readonly_source_confirmed=True,
+                    cleanup_succeeded=True, fresh_context_confirmed=True)
 
             result = candidate_pipeline._run_offline(repository, baseline_sha,
                 "sh verify.sh && /bin/sh verify.sh", implement=implement, verify=verify, review=review)

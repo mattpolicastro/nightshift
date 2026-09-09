@@ -282,11 +282,21 @@ and disables provider model fallback. Public worker execution stays unsupported.
 
 `workers/candidate_pipeline.py` supplies a private fixture coordinator for
 implementation export, a host-owned commit, exact-commit isolated verification,
-and fresh review evidence. It checks candidate identity and content throughout,
+and bound review evidence. It checks candidate identity and content throughout,
 copies evidence defensively, and preserves committed candidates on later failure.
-Its public entry point is disabled. Review callbacks are trusted host fixtures;
-read-only file modes detect accidental changes but are not a hostile-code
-boundary. A successful fixture result is not production shipping authorization.
+Its public entry point is disabled. Raw reviewer results do not satisfy the gate:
+evidence must carry the exact review ID, candidate SHA and source fingerprint,
+plus immutable-source, fresh-context and cleanup confirmations.
+
+`workers/reviewer.py` provides the qualification-only native adapter behind that
+binding. It creates a new provider home and owned Session for each review. A
+trusted loader seeds a fresh owned volume; while it remains mounted, a separate
+review container starts with that volume read-only. Both configured `ReadOnly`
+and effective `RW=false` state are inspected. The loader is ownership-checked,
+removed and confirmed absent before the provider attaches. The adapter supplies
+no implementation transcript, preserves one deadline across setup and provider
+execution, and requires native executor quiescence, an unchanged final source
+fingerprint and confirmed resource cleanup before returning eligible evidence.
 
 Build the Session-compatible image using the
 [image instructions](../tools/qualification/codex-executor/README.md#owned-session-variant)
@@ -295,11 +305,15 @@ and run `tests/test_native_executor_integration.py` with
 real-engine cases exercise native edits, missing-executor rejection with a host
 fallback sentinel, cancellation of a running command, and the joined coordinator.
 The last uses actual native implementation and isolated verification, followed by
-an explicitly synthetic reviewer that checks the exact snapshot and diff. These
-fixtures use a deterministic local provider and synthetic credentials.
+an explicitly synthetic reviewer that checks the exact snapshot and diff. A
+separate real-engine reviewer probe verifies source reads, denied overwrite,
+unlink, rename, chmod, create and hardlink attempts, writable scratch, absent host
+paths/credentials/Docker socket/network, exact source preservation and cleanup.
+These fixtures use deterministic local data and synthetic credentials.
 
-Next, integrate and qualify the live immutable reviewer boundary, production
-launcher/authentication/accounting, daemon dispatch and recovery. The
+Next, add task issue/policy context and qualify the real model-backed reviewer,
+then integrate the production launcher/authentication/accounting, daemon dispatch
+and recovery. The
 [subscription-only policy](subscription-worker-policy.md) separates login and
 quota telemetry from the still-unresolved billing enforcement requirement.
 Native task execution remains disabled.

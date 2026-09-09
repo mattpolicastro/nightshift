@@ -6,6 +6,7 @@ import pytest
 from nightshift.workers import candidate, candidate_pipeline as pipeline, snapshot
 from nightshift.workers.base import ReviewerVerdict, WorkerResult
 from nightshift.workers.isolated_verification import ClauseResult, IsolatedVerificationResult
+from nightshift.workers.reviewer import ReviewOutcome
 from nightshift.workers.snapshot import SourceFile
 
 
@@ -66,7 +67,10 @@ class Callbacks:
         assert request.verification.candidate_sha == request.candidate_sha
         if self.review_change:
             self.review_change(request)
-        return self.review
+        return ReviewOutcome(self.review, request.review_id, request.candidate_sha,
+                             request.verification.final_fingerprint,
+                             readonly_source_confirmed=True, cleanup_succeeded=True,
+                             fresh_context_confirmed=True)
 
 
 def run(repository, callbacks):
@@ -150,6 +154,39 @@ def test_reviewer_must_complete_with_independent_structured_pass(repository, kin
     result = run(repository, callbacks)
     assert not result.ready_for_shipping and result.stage == "review"
     assert git(repository[0], "rev-parse", "HEAD") == result.candidate_sha
+
+
+@pytest.mark.parametrize("field,value", [
+    ("review_id", "wrong"),
+    ("candidate_sha", "b" * 40),
+    ("source_fingerprint", "wrong"),
+    ("readonly_source_confirmed", False),
+    ("cleanup_succeeded", False),
+    ("fresh_context_confirmed", False),
+])
+def test_reviewer_evidence_must_bind_isolation_and_exact_candidate(repository, field, value):
+    callbacks = Callbacks()
+    original = callbacks.reviewer
+
+    def invalid(request):
+        outcome = original(request)
+        values = {name: getattr(outcome, name) for name in outcome.__dataclass_fields__}
+        values[field] = value
+        return ReviewOutcome(**values)
+
+    result = pipeline._run_offline(*repository, "true && true",
+        implement=callbacks.implement, verify=callbacks.verify, review=invalid)
+    assert not result.ready_for_shipping and result.stage == "review"
+    assert git(repository[0], "rev-parse", "HEAD") == result.candidate_sha
+
+
+def test_raw_worker_result_cannot_claim_isolated_review(repository):
+    callbacks = Callbacks()
+    result = pipeline._run_offline(*repository, "true && true",
+        implement=callbacks.implement, verify=callbacks.verify,
+        review=lambda request: callbacks.review)
+    assert not result.ready_for_shipping and result.stage == "review"
+    assert "bound isolated evidence" in result.detail
 
 
 def test_snapshot_mode_bypass_is_detected_without_touching_original(repository):

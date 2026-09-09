@@ -1,5 +1,19 @@
 # Changelog
 
+## Immutable native reviewer boundary — 2026-09-08
+
+Added a qualification-only native reviewer adapter backed by a fresh owned
+container whose exact candidate source volume is inspected as read-only before
+the provider starts. A separately journaled writable loader is removed and its
+absence confirmed first. Review acceptance is bound to the review ID, candidate
+SHA and verification fingerprint, and requires a fresh provider home/thread,
+structured PASS, unchanged source, clean tool-server quiescence and confirmed
+container cleanup.
+
+Native dispatch remains disabled. Production provider authentication and billing
+policy, issue/policy prompt assembly, daemon coordination and recovery wiring are
+still incomplete. No live model calls or production daemon changes were made.
+
 ## Native executor attachment and coordinator fixture — 2026-09-08
 
 Added a bounded, host-owned bridge to the pinned native tool server inside an

@@ -257,3 +257,84 @@ def test_initial_checkpoint_mismatch_rejects_and_cleans(tmp_path, monkeypatch):
         obj.__enter__()
     assert obj.cleanup_succeeded
     assert not obj.record_path.exists()
+
+
+@pytest.mark.parametrize('requested,effective', [(False, False), (True, True), (None, False)])
+def test_readonly_requires_requested_and_effective_mount(tmp_path, requested, effective):
+    obj = session(tmp_path, readonly_source=True)
+    obj._source_readonly = True
+    data = policy_data(obj)
+    data['HostConfig']['Mounts'][0]['ReadOnly'] = requested
+    data['Mounts'][0]['RW'] = effective
+    assert not obj._container_policy(data, running=False)
+    data['HostConfig']['Mounts'][0]['ReadOnly'] = True
+    data['Mounts'][0]['RW'] = False
+    assert obj._container_policy(data, running=False)
+    data['Mounts'].append({'Type': 'volume', 'Name': obj.volume_name,
+                           'Destination': '/alias', 'RW': True})
+    assert not obj._container_policy(data, running=False)
+
+
+@pytest.mark.parametrize('loader_remains', [False, True])
+def test_readonly_transition_removes_loader_before_provider_attachment(tmp_path, monkeypatch, loader_remains):
+    obj = session(tmp_path, readonly_source=True)
+    events = []
+    monkeypatch.setattr(obj, '_checked', lambda args, **k: events.append(args) or module.BinaryResult('completed', 0))
+    monkeypatch.setattr(obj, '_inspect', lambda *a, **k: {'Config': {'Labels': {module.OWNER_LABEL: obj.owner}}})
+    monkeypatch.setattr(obj, '_volume_policy', lambda *a: True)
+    monkeypatch.setattr(obj, '_container_policy', lambda *a, **k: True)
+    monkeypatch.setattr(obj, '_healthy', lambda: None)
+    monkeypatch.setattr(obj, '_processes', lambda: {1, 2})
+    monkeypatch.setattr(obj, 'checkpoint', lambda: obj.files)
+    def exists(*a):
+        events.append(['exists'])
+        return loader_remains
+    monkeypatch.setattr(obj, '_exists', exists)
+    monkeypatch.setattr(obj, 'close', lambda: None)
+    if loader_remains:
+        with pytest.raises(module.SessionError, match='loader remains'):
+            obj.__enter__()
+        assert not obj.readonly_source_confirmed
+        assert len([e for e in events if e[0] == 'create']) == 2
+    else:
+        assert obj.__enter__() is obj
+        assert obj.readonly_source_confirmed
+        creates = [e for e in events if e[0] == 'create']
+        assert len(creates) == 2
+        assert not any(',readonly' in a for a in creates[0])
+        assert any(',readonly' in a for a in creates[1])
+        assert events.index(creates[1]) < events.index(['rm', '--force', obj.loader_name]) < events.index(['exists'])
+
+
+def test_readonly_journal_tracks_both_containers_before_mutation(tmp_path, monkeypatch):
+    obj = session(tmp_path, readonly_source=True)
+    def call(*args, **kwargs):
+        record = json.loads(obj.record_path.read_text())
+        assert record['container'] == obj._review_name
+        assert record['loader_container'] == obj.loader_name
+        assert record['volume'] == obj.volume_name
+        return module.BinaryResult('timed_out', None)
+    monkeypatch.setattr(module, '_binary', call)
+    with pytest.raises(module.SessionError):
+        obj.__enter__()
+    assert obj.record_path.exists()
+    assert not obj.cleanup_succeeded
+
+
+def test_readonly_cleanup_removes_both_owned_containers_before_volume(tmp_path, monkeypatch):
+    obj = session(tmp_path, readonly_source=True)
+    obj._record()
+    pending = {obj._review_name, obj.loader_name, obj.volume_name}
+    removed = []
+    monkeypatch.setattr(obj, '_exists', lambda kind, name, deadline: name in pending)
+    monkeypatch.setattr(obj, '_inspect', lambda kind, name, **k:
+                        {'Config': {'Labels': {module.OWNER_LABEL: obj.owner}},
+                         'Labels': {module.OWNER_LABEL: obj.owner}})
+    def remove(args, **kwargs):
+        removed.append(args[-1])
+        pending.remove(args[-1])
+    monkeypatch.setattr(obj, '_checked', remove)
+    obj.close()
+    assert removed == [obj._review_name, obj.loader_name, obj.volume_name]
+    assert obj.cleanup_succeeded
+    assert not obj.record_path.exists()

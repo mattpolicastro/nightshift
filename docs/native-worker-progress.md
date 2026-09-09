@@ -57,15 +57,19 @@ processes that escape their group. Native worker isolation is a separate gate.
 
 ## Remaining before native support can be claimed
 
-1. Qualify effective filesystem, Git, credential and network boundaries on each
-   supported platform/runtime. See [security qualification](codex-security-qualification.md).
+1. Extend the immutable reviewer and executor qualification across every
+   supported platform/runtime. The local pinned-image reviewer probe now checks
+   configured and effective read-only mounts, denied source mutation, scratch,
+   network and host isolation, exact source preservation and owned cleanup. See
+   [security qualification](codex-security-qualification.md).
 2. Add the qualified runtime launcher, version checks, explicit authentication
    modes, model capability validation and production permission assembly. The
    next live qualification targets subscription-only use: require included-usage
    evidence and fail closed without a proven billing control. Existing login
    alone is insufficient; no API-key or purchased-credit fallback is allowed.
-3. Integrate driver dispatch, host-owned Git operations, normalized accounting
-   and retry/error handling with the daemon's implementation/review phases.
+3. Add issue and policy inputs to the bound reviewer prompt, then integrate
+   driver dispatch, host-owned Git operations, normalized accounting and
+   retry/error handling with the daemon's implementation/review phases.
 4. Run a credential-safe OpenAI canary, then an end-to-end sandbox task with
    independent review, host verification, PR creation and GitHub CI.
 
@@ -94,7 +98,9 @@ isolated verifier runs complete command chains against exact committed snapshots
 and checks source after each clause. A native tool-server attachment and private fixture coordinator now join source
 export, host-owned commits and exact-commit verification. Four real-engine tests
 exercise native edits, missing-executor rejection, cancellation, and the joined
-coordinator with an explicitly synthetic reviewer. Live immutable review,
-production authentication/accounting and daemon wiring remain incomplete.
+coordinator with an explicitly synthetic reviewer. A separate bound reviewer
+adapter now requires an inspected immutable source mount, fresh execution context,
+exact evidence identities and cleanup before PASS can qualify. Production
+authentication/accounting, issue/policy assembly and daemon wiring remain incomplete.
 See the [subscription-only integration policy](subscription-worker-policy.md)
 for the separate authentication and billing requirements.

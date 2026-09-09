@@ -3,7 +3,7 @@
 Requires a trusted local Docker engine and a compatible immutable image with
 /bin/sleep and /bin/tar. Image-inherited environment beyond the fixed allowlist
 is rejected. No provider auth, image pull, automatic recovery, or host execution
-of candidate code occurs here. Source is mutable; this is not a reviewer mount.
+of candidate code occurs here. Source is mutable by default; readonly_source builds a separate immutable reviewer mount.
 """
 from __future__ import annotations
 
@@ -142,7 +142,7 @@ def _directory_sync(path):
 class Session:
     def __init__(self, image_id: str, files: list[snapshot.SourceFile], *, docker_host: str,
                  recovery_dir: Path, timeout_s: float = 30, deadline: float | None = None,
-                 max_output_bytes: int = 1024 * 1024):
+                 max_output_bytes: int = 1024 * 1024, readonly_source: bool = False):
         if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
             raise ValueError("An immutable local image ID is required")
         if not isinstance(docker_host, str) or not re.fullmatch(r"unix:///[^\0\r\n]+", docker_host):
@@ -153,6 +153,11 @@ class Session:
             raise ValueError("A finite absolute deadline is required")
         if type(max_output_bytes) is not int or max_output_bytes <= 0:
             raise ValueError("A positive session output budget is required")
+        if type(readonly_source) is not bool:
+            raise ValueError("readonly_source must be a boolean")
+        self.readonly_source = readonly_source
+        self.readonly_source_confirmed = False
+        self._source_readonly = False
         self.files = snapshot.validate(files)
         self.image_id, self.docker_host = image_id, docker_host
         self.recovery_dir = Path(recovery_dir)
@@ -161,6 +166,10 @@ class Session:
         self.owner = uuid.uuid4().hex
         self.name = "nightshift-session-" + self.owner
         self.volume_name = self.name + "-source"
+        self._review_name = self.name
+        self.loader_name = self.name + "-loader" if readonly_source else None
+        if self.loader_name:
+            self.name = self.loader_name
         self.record_path = self.recovery_dir / (self.owner + ".json")
         self.closed = False
         self.cleanup_succeeded = False
@@ -228,9 +237,10 @@ class Session:
             and configured_mounts[0].get("Source") == self.volume_name
             and configured_mounts[0].get("Target") == "/workspace"
             and configured_mounts[0].get("VolumeOptions") == {"NoCopy": True}
-            and not configured_mounts[0].get("ReadOnly")
+            and configured_mounts[0].get("ReadOnly", False) is self._source_readonly
             and len(volume_mounts) == 1 and volume_mounts[0].get("Name") == self.volume_name
-            and volume_mounts[0].get("Destination") == "/workspace" and volume_mounts[0].get("RW") is True
+            and volume_mounts[0].get("Destination") == "/workspace"
+            and volume_mounts[0].get("RW") is (not self._source_readonly)
             and all(m.get("Type") == "volume" or (m.get("Type") == "tmpfs" and m.get("Destination") == "/tmp")
                     for m in data.get("Mounts", [])))
 
@@ -256,7 +266,8 @@ class Session:
         info = self.recovery_dir.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise SessionError("Recovery directory must be private and owned")
-        value = {"version": 1, "owner": self.owner, "container": self.name, "volume": self.volume_name,
+        value = {"version": 1, "owner": self.owner, "container": self._review_name, "volume": self.volume_name,
+                 "loader_container": self.loader_name,
                  "image_id": self.image_id, "docker_host": self.docker_host}
         descriptor = os.open(self.record_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         self._recorded = True
@@ -267,6 +278,24 @@ class Session:
             os.fsync(stream.fileno())
         _directory_sync(self.recovery_dir)
         self._recorded = True
+
+    def _start_owned_container(self):
+        args = ["create", "--pull", "never", "--name", self.name, "--label", OWNER_LABEL + "=" + self.owner,
+                "--network", "none", "--user", "1000:1000", "--read-only", "--cap-drop", "ALL",
+                "--security-opt", "no-new-privileges", "--pids-limit", "64", "--memory", "128m",
+                "--cpus", "1", "--log-driver", "none", "--init", "--ipc", "private", "--no-healthcheck",
+                "--workdir", "/workspace", "--entrypoint", "/bin/sleep",
+                "--mount", "type=volume,src=" + self.volume_name + ",dst=/workspace,volume-nocopy"
+                        + (",readonly" if self._source_readonly else "")]
+        for key, value in ENVIRONMENT.items():
+            args.extend(["--env", key + "=" + value])
+        for target, value in SCRATCH.items():
+            args.extend(["--tmpfs", target + ":" + value])
+        self._create([*args, self.image_id, "2147483647"])
+        if not self._container_policy(self._inspect("container", self.name), running=False):
+            raise SessionError("Effective container policy differs before start")
+        self._checked(["start", self.name])
+        self._healthy()
 
     def __enter__(self):
         if self._entered or self.closed:
@@ -286,21 +315,7 @@ class Session:
             self._create([*args, self.volume_name])
             if not self._volume_policy(self._inspect("volume", self.volume_name)):
                 raise SessionError("Effective source volume policy differs")
-            args = ["create", "--pull", "never", "--name", self.name, "--label", OWNER_LABEL + "=" + self.owner,
-                    "--network", "none", "--user", "1000:1000", "--read-only", "--cap-drop", "ALL",
-                    "--security-opt", "no-new-privileges", "--pids-limit", "64", "--memory", "128m",
-                    "--cpus", "1", "--log-driver", "none", "--init", "--ipc", "private", "--no-healthcheck",
-                    "--workdir", "/workspace", "--entrypoint", "/bin/sleep",
-                    "--mount", "type=volume,src=" + self.volume_name + ",dst=/workspace,volume-nocopy"]
-            for key, value in ENVIRONMENT.items():
-                args.extend(["--env", key + "=" + value])
-            for target, value in SCRATCH.items():
-                args.extend(["--tmpfs", target + ":" + value])
-            self._create([*args, self.image_id, "2147483647"])
-            if not self._container_policy(self._inspect("container", self.name), running=False):
-                raise SessionError("Effective container policy differs before start")
-            self._checked(["start", self.name])
-            self._healthy()
+            self._start_owned_container()
             self._checked(["exec", "-i", "--", self.name, "/bin/tar", "-xf", "-", "-C", "/workspace"],
                           input_bytes=archive)
             self._baseline_processes = self._processes()
@@ -308,6 +323,24 @@ class Session:
                 raise SessionError("Unexpected initial container processes")
             if self.checkpoint() != self.files:
                 raise SessionError("Imported source differs from the requested snapshot")
+            if self.readonly_source:
+                # Keep tmpfs mounted while a separate reader acquires it. Only
+                # the fixed trusted importer exists until its removal confirms.
+                self._healthy()
+                self.name = self._review_name
+                self._source_readonly = True
+                self._start_owned_container()
+                self._baseline_processes = self._processes()
+                if len(self._baseline_processes) != 2 or self.checkpoint() != self.files:
+                    raise SessionError("Immutable reviewer source could not be confirmed")
+                loader = self._inspect("container", self.loader_name)
+                if loader.get("Config", {}).get("Labels", {}).get(OWNER_LABEL) != self.owner:
+                    raise SessionError("Writable source loader ownership differs")
+                self._checked(["rm", "--force", self.loader_name])
+                if self._exists("container", self.loader_name, self.deadline):
+                    raise SessionError("Writable source loader remains")
+                self._healthy()
+                self.readonly_source_confirmed = True
             return self
         except BaseException as exc:
             try:
@@ -418,7 +451,11 @@ class Session:
         deadline = self._cleanup_deadline
         try:
             if self._recorded:
-                for kind, name in (("container", self.name), ("volume", self.volume_name)):
+                resources = [("container", self._review_name)]
+                if self.loader_name:
+                    resources.append(("container", self.loader_name))
+                resources.append(("volume", self.volume_name))
+                for kind, name in resources:
                     if self._exists(kind, name, deadline):
                         data = self._inspect(kind, name, deadline=deadline)
                         labels = data.get("Config", {}).get("Labels", {}) if kind == "container" else data.get("Labels", {})

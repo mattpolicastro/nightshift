@@ -17,6 +17,7 @@ from typing import Callable
 from . import candidate, snapshot
 from .base import ReviewerVerdict, WorkerResult
 from .isolated_verification import IsolatedVerificationResult
+from .reviewer import ReviewOutcome
 from ..verification import parse_commands
 
 
@@ -132,7 +133,7 @@ def _review_snapshot_unchanged(root: Path, files: list[snapshot.SourceFile]) -> 
 def _run_offline(worktree: Path, expected_base_sha: str, verify_command: str, *,
                  implement: Callable[[ImplementationInput], ImplementationOutcome],
                  verify: Callable[[VerificationInput], IsolatedVerificationResult],
-                 review: Callable[[ReviewInput], WorkerResult]) -> PipelineResult:
+                 review: Callable[[ReviewInput], ReviewOutcome]) -> PipelineResult:
     """One implement/commit/verify/fresh-review attempt using trusted callbacks.
 
     Failures preserve candidate work and evidence. No callback receives the
@@ -185,11 +186,18 @@ def _run_offline(worktree: Path, expected_base_sha: str, verify_command: str, *,
                                        source, changes, copy.deepcopy(evidence))
             reviewed = review(review_input)
             _review_snapshot_unchanged(source, files)
-        if not isinstance(reviewed, WorkerResult):
-            raise ValueError("Reviewer did not return a typed result")
-        result.review = copy.deepcopy(reviewed)
+        if not isinstance(reviewed, ReviewOutcome):
+            raise ValueError("Reviewer did not return bound isolated evidence")
+        if (reviewed.review_id != review_input.review_id
+                or reviewed.candidate_sha != result.candidate_sha
+                or reviewed.source_fingerprint != expected_fingerprint
+                or not reviewed.readonly_source_confirmed
+                or not reviewed.cleanup_succeeded
+                or not reviewed.fresh_context_confirmed):
+            raise ValueError("Reviewer evidence is not bound to the isolated candidate")
+        result.review = copy.deepcopy(reviewed.result)
         verdict = result.review.reviewer_verdict
-        if (not result.review.ok or not isinstance(verdict, ReviewerVerdict)
+        if (not reviewed.ok or not result.review.ok or not isinstance(verdict, ReviewerVerdict)
                 or verdict.verdict != "PASS" or verdict.blocking
                 or not isinstance(verdict.blocking, tuple) or not isinstance(verdict.non_blocking, tuple)
                 or not all(isinstance(note, str) for note in verdict.non_blocking)):
