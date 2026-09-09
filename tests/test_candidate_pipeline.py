@@ -7,6 +7,10 @@ from nightshift.workers import candidate, candidate_pipeline as pipeline, snapsh
 from nightshift.workers.base import ReviewerVerdict, WorkerResult
 from nightshift.workers.isolated_verification import ClauseResult, IsolatedVerificationResult
 from nightshift.workers.reviewer import ReviewOutcome
+from nightshift.workers.review_context import ApprovedTask, ReviewPolicy
+
+TASK = ApprovedTask("fixture-1", "Update source", "Update the source and add the requested file.")
+POLICY = ReviewPolicy("Check correctness and scope.", ("No unrelated modifications",))
 from nightshift.workers.snapshot import SourceFile
 
 
@@ -74,7 +78,7 @@ class Callbacks:
 
 
 def run(repository, callbacks):
-    return pipeline._run_offline(*repository, "true && true", implement=callbacks.implement,
+    return pipeline._run_offline(*repository, "true && true", approved_task=TASK, review_policy=POLICY, implement=callbacks.implement,
                                  verify=callbacks.verify, review=callbacks.reviewer)
 
 
@@ -174,7 +178,7 @@ def test_reviewer_evidence_must_bind_isolation_and_exact_candidate(repository, f
         values[field] = value
         return ReviewOutcome(**values)
 
-    result = pipeline._run_offline(*repository, "true && true",
+    result = pipeline._run_offline(*repository, "true && true", approved_task=TASK, review_policy=POLICY,
         implement=callbacks.implement, verify=callbacks.verify, review=invalid)
     assert not result.ready_for_shipping and result.stage == "review"
     assert git(repository[0], "rev-parse", "HEAD") == result.candidate_sha
@@ -182,7 +186,7 @@ def test_reviewer_evidence_must_bind_isolation_and_exact_candidate(repository, f
 
 def test_raw_worker_result_cannot_claim_isolated_review(repository):
     callbacks = Callbacks()
-    result = pipeline._run_offline(*repository, "true && true",
+    result = pipeline._run_offline(*repository, "true && true", approved_task=TASK, review_policy=POLICY,
         implement=callbacks.implement, verify=callbacks.verify,
         review=lambda request: callbacks.review)
     assert not result.ready_for_shipping and result.stage == "review"
@@ -247,3 +251,24 @@ def test_callback_failure_retains_candidate_without_retry(repository):
     assert not result.ready_for_shipping
     assert callbacks.calls == ["implement", "verify", "review"]
     assert git(repository[0], "rev-parse", "HEAD") == result.candidate_sha
+
+
+def test_invalid_approved_context_rejected_before_implementation(repository):
+    callbacks = Callbacks()
+    result = pipeline._run_offline(*repository, 'true', approved_task={'body': 'untyped'},
+        review_policy=POLICY, implement=callbacks.implement, verify=callbacks.verify,
+        review=callbacks.reviewer)
+    assert result.stage == 'validate' and not result.ready_for_shipping
+    assert not callbacks.calls
+    assert git(repository[0], 'rev-parse', 'HEAD') == repository[1]
+
+
+def test_approved_task_and_policy_reach_independent_review_without_history(repository):
+    callbacks = Callbacks()
+    callbacks.implementation.text = 'PRIVATE_IMPLEMENTATION_TRANSCRIPT'
+    result = run(repository, callbacks)
+    assert result.ready_for_shipping, result.detail
+    assert callbacks.review_input.approved_task == TASK
+    assert callbacks.review_input.review_policy == POLICY
+    assert not hasattr(callbacks.review_input, 'implementation')
+    assert 'PRIVATE_IMPLEMENTATION_TRANSCRIPT' not in repr(callbacks.review_input)

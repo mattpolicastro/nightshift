@@ -1,5 +1,6 @@
 """Reviewer setup consumes the same deadline as provider execution."""
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,8 +18,7 @@ def test_provider_only_receives_remaining_review_time(tmp_path, monkeypatch, set
     monkeypatch.setattr(reviewer, 'time', SimpleNamespace(monotonic=lambda: next(instants)))
     result = asyncio.run(reviewer._run_isolated(request, files, image_id='sha256:' + 'b' * 64,
         docker_host='unix:///tmp/fixture.sock', recovery_dir=tmp_path / 'recovery',
-        provider_argv=['/fixture/codex', 'app-server', '--stdio'], provider_config='fixture=true',
-        provider_env={}, model='fixture', budgets=WorkerBudgets(max_runtime_s=10)))
+        provider_binary=Path('/fixture/codex'), fixture_base_url='http://127.0.0.1:12345/v1', model='fixture', budgets=WorkerBudgets(max_runtime_s=10)))
     if setup_elapsed < 10:
         assert result.ok
         assert state['request'].budgets.max_runtime_s == 4

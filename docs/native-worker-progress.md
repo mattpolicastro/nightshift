@@ -67,9 +67,9 @@ processes that escape their group. Native worker isolation is a separate gate.
    next live qualification targets subscription-only use: require included-usage
    evidence and fail closed without a proven billing control. Existing login
    alone is insufficient; no API-key or purchased-credit fallback is allowed.
-3. Add issue and policy inputs to the bound reviewer prompt, then integrate
-   driver dispatch, host-owned Git operations, normalized accounting and
-   retry/error handling with the daemon's implementation/review phases.
+3. Integrate driver dispatch, host-owned Git operations, normalized accounting
+   and retry/error handling with the daemon's implementation/review phases. The
+   bound reviewer prompt now carries validated approved-task and policy data.
 4. Run a credential-safe OpenAI canary, then an end-to-end sandbox task with
    independent review, host verification, PR creation and GitHub CI.
 
@@ -101,6 +101,9 @@ exercise native edits, missing-executor rejection, cancellation, and the joined
 coordinator with an explicitly synthetic reviewer. A separate bound reviewer
 adapter now requires an inspected immutable source mount, fresh execution context,
 exact evidence identities and cleanup before PASS can qualify. Production
-authentication/accounting, issue/policy assembly and daemon wiring remain incomplete.
+authentication/accounting and daemon wiring remain incomplete. Synthetic native
+runs now use a generated one-attempt provider home and validate the pinned host
+runtime plus effective configuration layers, origins and requirements before
+thread creation; its subscription constructor deliberately remains blocked.
 See the [subscription-only integration policy](subscription-worker-policy.md)
 for the separate authentication and billing requirements.

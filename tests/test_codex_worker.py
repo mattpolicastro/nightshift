@@ -391,3 +391,37 @@ def test_invalid_external_fixture_never_launches(tmp_path, monkeypatch, external
     result = asyncio.run(_run_stdio(request(tmp_path), ["ignored"], env={},
                                    external_executor=external, provider_cwd=cwd))
     assert result.status == "protocol_error"
+
+
+@pytest.mark.parametrize('mode', ['accepted', 'rejected', 'rpc_error'])
+def test_owned_config_validation_precedes_thread_start(tmp_path, mode):
+    protocol = FAKE.replace('    method = msg.get("method")',
+        '    method = msg.get("method")\n    with open("methods.jsonl", "a") as f: f.write(json.dumps(method)+"\\n")')
+    protocol = protocol.replace('    elif method == "thread/start":', '''    elif method == "config/read":
+        assert msg["params"] == {"includeLayers": True, "cwd": os.getcwd()}
+        if os.environ.get("CONFIG_FIXTURE") == "rpc_error":
+            send(dict(id=msg["id"], error={"code": -1, "message": "synthetic config failure"}))
+        else:
+            send(dict(id=msg["id"], result={"config": {}, "layers": [], "origins": {}}))
+    elif method == "configRequirements/read":
+        assert msg["params"] == {}
+        send(dict(id=msg["id"], result={"requirements": None}))
+    elif method == "thread/start":''')
+    fake = tmp_path / 'config-fake.py'
+    fake.write_text(protocol)
+    observed = []
+    def validate(configuration, requirements):
+        observed.append((configuration, requirements))
+        if mode == 'rejected':
+            raise ValueError('Synthetic unowned configuration')
+    result = asyncio.run(_run_stdio(replace(request(tmp_path), cwd=Path('/workspace')),
+        [sys.executable, str(fake), 'external'], env={'CONFIG_FIXTURE': mode},
+        external_executor=True, provider_cwd=tmp_path, config_validator=validate))
+    methods = [json.loads(line) for line in (tmp_path / 'methods.jsonl').read_text().splitlines()]
+    assert methods.index('initialize') < methods.index('config/read')
+    if mode == 'accepted':
+        assert result.ok and len(observed) == 1
+        assert methods.index('config/read') < methods.index('configRequirements/read') < methods.index('thread/start')
+    else:
+        assert result.status == 'protocol_error'
+        assert 'thread/start' not in methods

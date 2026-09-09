@@ -311,9 +311,24 @@ unlink, rename, chmod, create and hardlink attempts, writable scratch, absent ho
 paths/credentials/Docker socket/network, exact source preservation and cleanup.
 These fixtures use deterministic local data and synthetic credentials.
 
-Next, add task issue/policy context and qualify the real model-backed reviewer,
-then integrate the production launcher/authentication/accounting, daemon dispatch
-and recovery. The
+The synthetic provider path now generates the complete one-attempt provider home
+instead of accepting arbitrary configuration, environment or command flags. It
+pins both host and container Codex 0.153.4, accepts only a literal loopback fixture
+endpoint, and validates effective configuration values, layers, origins and
+requirements before `thread/start`. The only external-layer exception is the
+recognized empty `/etc/codex/config.toml` layer emitted by the pinned runtime;
+nonempty system settings and managed, project or unknown layers are rejected.
+Startup assets, local-executor fallback, profile reuse and policy type confusion
+also fail closed. This factory contains a fixed synthetic key and refuses a
+subscription constructor.
+
+Review prompts now include bounded, exact `ApprovedTask` and `ReviewPolicy` data
+as explicitly untrusted JSON. Validation occurs before implementation and again
+before reviewer container creation. Only declared task/policy fields are copied;
+implementation messages, results and raw verification output remain private.
+
+Next, qualify the real model-backed reviewer and production subscription
+authentication/accounting, then integrate daemon dispatch and recovery. The
 [subscription-only policy](subscription-worker-policy.md) separates login and
 quota telemetry from the still-unresolved billing enforcement requirement.
 Native task execution remains disabled.

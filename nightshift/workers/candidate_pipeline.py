@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
-from . import candidate, snapshot
+from . import candidate, snapshot, review_context
+from .review_context import ApprovedTask, ReviewPolicy
 from .base import ReviewerVerdict, WorkerResult
 from .isolated_verification import IsolatedVerificationResult
 from .reviewer import ReviewOutcome
@@ -55,6 +56,8 @@ class ReviewInput:
     source_path: Path
     diff: tuple[FileChange, ...]
     verification: IsolatedVerificationResult
+    approved_task: ApprovedTask
+    review_policy: ReviewPolicy
     readonly_mount_required: bool = True
 
 
@@ -131,6 +134,7 @@ def _review_snapshot_unchanged(root: Path, files: list[snapshot.SourceFile]) -> 
 
 
 def _run_offline(worktree: Path, expected_base_sha: str, verify_command: str, *,
+                 approved_task: ApprovedTask, review_policy: ReviewPolicy,
                  implement: Callable[[ImplementationInput], ImplementationOutcome],
                  verify: Callable[[VerificationInput], IsolatedVerificationResult],
                  review: Callable[[ReviewInput], ReviewOutcome]) -> PipelineResult:
@@ -142,6 +146,7 @@ def _run_offline(worktree: Path, expected_base_sha: str, verify_command: str, *,
     """
     result = PipelineResult(status="failed", stage="validate", base_sha=expected_base_sha)
     try:
+        review_context.validate(approved_task, review_policy)
         parse_commands(verify_command)
         if worktree.is_symlink():
             raise ValueError("Worktree root cannot be a symlink")
@@ -183,7 +188,7 @@ def _run_offline(worktree: Path, expected_base_sha: str, verify_command: str, *,
         with snapshot.materialize(files) as source:
             _readonly_files(source, files)
             review_input = ReviewInput(uuid.uuid4().hex, expected_base_sha, result.candidate_sha,
-                                       source, changes, copy.deepcopy(evidence))
+                                       source, changes, copy.deepcopy(evidence), approved_task, review_policy)
             reviewed = review(review_input)
             _review_snapshot_unchanged(source, files)
         if not isinstance(reviewed, ReviewOutcome):

@@ -1,5 +1,19 @@
 # Changelog
 
+## Generated provider policy and bounded review context — 2026-09-08
+
+Native qualification now uses a one-attempt generated provider home instead of
+caller-supplied TOML, environment or flags. Before thread creation it confirms
+the pinned host runtime and validates effective configuration layers, origins and
+requirements. Nonempty system policy, managed/project layers, provider or feature
+expansion, startup-file tampering and reuse fail closed. Subscription construction
+is explicitly unsupported while included-usage-only billing remains unenforceable.
+
+The isolated reviewer now receives bounded operator-approved task and review
+policy data as untrusted JSON. Only declared fields enter its prompt; implementation
+history and raw verifier output remain excluded. Public native dispatch remains
+disabled, and no live model calls or production daemon changes were made.
+
 ## Immutable native reviewer boundary — 2026-09-08
 
 Added a qualification-only native reviewer adapter backed by a fresh owned

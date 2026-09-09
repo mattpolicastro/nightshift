@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from nightshift.workers.review_context import ApprovedTask, ReviewPolicy
 from nightshift.workers import codex, snapshot
 from nightshift.workers.base import ReviewerVerdict, WorkerBudgets, WorkerRequest, WorkerResult
 
@@ -40,7 +41,7 @@ def _sse(item, sequence):
 @pytest.mark.parametrize("mode", ["edits", "missing_executor", "cancelled", "coordinator", "reviewer"])
 def test_native_tools_use_owned_session_and_cleanup(tmp_path, monkeypatch, mode):
     from nightshift.workers.container_session import Session, SessionError
-    from nightshift.workers.native_executor import NativeExecutor
+    from nightshift.workers.provider_home import FixtureProvider
 
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", IMAGE)
     binary, docker_binary = shutil.which("codex"), shutil.which("docker")
@@ -137,16 +138,7 @@ def test_native_tools_use_owned_session_and_cleanup(tmp_path, monkeypatch, mode)
     server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
     serving = threading.Thread(target=server.serve_forever, daemon=True)
     serving.start()
-    (provider_home / "config.toml").write_text(
-        'model_provider="fake"\nmodel="gpt-5.4"\nweb_search="disabled"\n'
-        '[model_providers.fake]\nname="Synthetic fixture"\nbase_url=' +
-        json.dumps(f"http://127.0.0.1:{server.server_port}/v1") + '\n'
-        'wire_api="responses"\nenv_key="NIGHTSHIFT_FAKE_KEY"\nrequires_openai_auth=false\n'
-        'supports_websockets=false\nrequest_max_retries=0\nstream_max_retries=0\n'
-        '[tools]\nexperimental_request_user_input={enabled=false}\n'
-        '[features]\napps=false\nplugins=false\nhooks=false\nmulti_agent=false\n'
-        'browser_use=false\ncomputer_use=false\nshell_snapshot=false\nview_image=false\n'
-        'image_generation=false\nskip_host_skill_discovery=true\nskill_search=true\n')
+    url = f"http://127.0.0.1:{server.server_port}/v1"
     env = {"PATH": os.defpath, "HOME": str(provider_home), "CODEX_HOME": str(provider_home),
            "NIGHTSHIFT_FAKE_KEY": "synthetic-fixture-key", "NIGHTSHIFT_PROVIDER_SENTINEL": "provider-only"}
     version = subprocess.run([binary, "--version"], env=env, capture_output=True,
@@ -156,9 +148,8 @@ def test_native_tools_use_owned_session_and_cleanup(tmp_path, monkeypatch, mode)
                             budgets=WorkerBudgets(max_runtime_s=20, max_tool_calls=6,
                                                   max_output_tokens_total=4000))
 
-    async def invoke():
-        task = asyncio.create_task(codex._run_stdio(request, [binary, "app-server", "--stdio"],
-                                                   env=env, external_executor=True, provider_cwd=provider_home))
+    async def invoke(provider):
+        task = asyncio.create_task(provider.run(request))
         if mode == "cancelled":
             try:
                 async with asyncio.timeout(12):
@@ -190,20 +181,21 @@ def test_native_tools_use_owned_session_and_cleanup(tmp_path, monkeypatch, mode)
             container_name, volume_name = session.name, session.volume_name
             expected = pytest.raises(SessionError) if mode == "missing_executor" else nullcontext()
             with expected:
-                with NativeExecutor(session, provider_home) as executor:
-                    result = asyncio.run(invoke())
-                    assert state["error"] is None, state["error"]
-                    if edits:
-                        assert result.ok, result.diagnostics
-                        executor.quiesce()
-                        returned = session.finish()
-                    elif mode == "missing_executor":
-                        assert not any(command.exit_code == 0 for command in result.commands)
-                        executor.quiesce()
-                    else:
-                        assert result.status == "interrupted", result.diagnostics
-                        # No candidate is accepted after cancellation; the contexts
-                        # must stop the owned server and destroy its process namespace.
+                with FixtureProvider(Path(binary), "gpt-5.4", url) as provider:
+                    with provider.attach(session) as executor:
+                        result = asyncio.run(invoke(provider))
+                        assert state["error"] is None, state["error"]
+                        if edits:
+                            assert result.ok, result.diagnostics
+                            executor.quiesce()
+                            returned = session.finish()
+                        elif mode == "missing_executor":
+                            assert not any(command.exit_code == 0 for command in result.commands)
+                            executor.quiesce()
+                        else:
+                            assert result.status == "interrupted", result.diagnostics
+                            # No candidate is accepted after cancellation; the contexts
+                            # must stop the owned server and destroy its process namespace.
         assert result is not None, "The native worker must actually run"
         assert state["requests"] >= 1, "The synthetic provider must actually request a tool"
         assert session.cleanup_succeeded
@@ -269,14 +261,12 @@ def test_native_tools_use_owned_session_and_cleanup(tmp_path, monkeypatch, mode)
                     review_input = candidate_pipeline.ReviewInput(
                         f"synthetic-review-{attempt}", "a" * 40, candidate_sha, source,
                         (candidate_pipeline.FileChange("answer", snapshot.SourceFile("answer", b"41\n"), files[0]),),
-                        evidence)
+                        evidence, ApprovedTask("fixture-1", "Correct answer", "Set the answer to 42."),
+                        ReviewPolicy("Check answer correctness and scope."))
                     recovery = tmp_path / f"review-recovery-{attempt}"
                     outcome = asyncio.run(reviewer._run_isolated(review_input, files,
                         image_id=IMAGE, docker_host=host, recovery_dir=recovery,
-                        provider_argv=[binary, "app-server", "--stdio"],
-                        provider_config=(provider_home / "config.toml").read_text(),
-                        provider_env={"NIGHTSHIFT_FAKE_KEY": "synthetic-fixture-key",
-                                      "NIGHTSHIFT_PROVIDER_SENTINEL": "provider-only"},
+                        provider_binary=Path(binary), fixture_base_url=url,
                         model="gpt-5.4", budgets=WorkerBudgets(max_runtime_s=30)))
                     assert outcome.ok, (outcome.detail, outcome.result.diagnostics)
                     assert outcome.review_id == review_input.review_id
@@ -367,7 +357,9 @@ def test_native_tools_use_owned_session_and_cleanup(tmp_path, monkeypatch, mode)
                     cleanup_succeeded=True, fresh_context_confirmed=True)
 
             result = candidate_pipeline._run_offline(repository, baseline_sha,
-                "sh verify.sh && /bin/sh verify.sh", implement=implement, verify=verify, review=review)
+                "sh verify.sh && /bin/sh verify.sh",
+                approved_task=ApprovedTask("fixture-1", "Correct answer", "Set the answer to 42."),
+                review_policy=ReviewPolicy("Check answer correctness and scope."), implement=implement, verify=verify, review=review)
             assert result.fixture_passed and result.qualification_only, result.detail
             assert result.ready_for_shipping, result.detail
             assert result.candidate_sha == git("rev-parse", "HEAD")

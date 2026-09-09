@@ -148,8 +148,10 @@ class _Journal:
 
 
 class _Session:
-    def __init__(self, request, process, native, normalized, *, external_executor=False):
+    def __init__(self, request, process, native, normalized, *, external_executor=False,
+                 config_validator=None, config_cwd=None):
         self.external_executor = external_executor
+        self.config_validator, self.config_cwd = config_validator, config_cwd
         self.request, self.process = request, process
         self.native, self.normalized = native, normalized
         self.result = WorkerResult(requested_model=request.model)
@@ -351,6 +353,10 @@ class _Session:
         await self.rpc("initialize", {"clientInfo": {"name": "nightshift", "version": "0.1.0"},
                                       "capabilities": {"experimentalApi": self.external_executor}})
         await self.send({"method": "initialized"})
+        if self.config_validator is not None:
+            configuration = await self.rpc("config/read", {"includeLayers": True, "cwd": str(self.config_cwd)})
+            requirements = await self.rpc("configRequirements/read", {})
+            self.config_validator(configuration, requirements)
         thread = await self.rpc("thread/start", {
             "model": self.request.model, "cwd": str(self.request.cwd), "ephemeral": True,
             "allowProviderModelFallback": False,
@@ -384,7 +390,8 @@ class _Session:
 
 
 async def _run_stdio(request: WorkerRequest, argv: list[str], *, env: dict[str, str],
-                     external_executor: bool = False, provider_cwd: Path | None = None) -> WorkerResult:
+                     external_executor: bool = False, provider_cwd: Path | None = None,
+                     config_validator=None) -> WorkerResult:
     """PRIVATE offline fixture seam. No qualification claim or public activation flag.
 
     Caller supplies an explicit credential-free environment. This function does
@@ -394,7 +401,8 @@ async def _run_stdio(request: WorkerRequest, argv: list[str], *, env: dict[str, 
     fixture owner's responsibility. This does not enable the public worker.
     """
     started = time.monotonic()
-    if (type(external_executor) is not bool
+    if (config_validator is not None and (not callable(config_validator) or not external_executor)
+            or type(external_executor) is not bool
             or (external_executor and (not isinstance(provider_cwd, Path) or not provider_cwd.is_absolute()))
             or (not external_executor and provider_cwd is not None)):
         return WorkerResult(status="protocol_error", requested_model=request.model,
@@ -422,7 +430,8 @@ async def _run_stdio(request: WorkerRequest, argv: list[str], *, env: dict[str, 
         return WorkerResult(status="protocol_error", requested_model=request.model,
                             duration_s=time.monotonic() - started,
                             diagnostics=["Unable to start fixture app-server process"])
-    session = _Session(request, process, *journals, external_executor=external_executor)
+    session = _Session(request, process, *journals, external_executor=external_executor,
+                       config_validator=config_validator, config_cwd=provider_cwd)
     stderr = bytearray()
 
     async def drain_stderr():

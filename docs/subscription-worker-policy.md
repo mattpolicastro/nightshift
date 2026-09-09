@@ -13,6 +13,14 @@ ChatGPT authentication forced and the official built-in OpenAI provider. Supply
 no API-key environment variables or custom provider/base-URL overrides. The
 executor receives none of the provider home, credentials or host environment.
 
+A fresh home alone does not exclude system or managed configuration. Before
+thread creation, read effective configuration with all layers and origins, plus
+configuration requirements. Reject nonempty system settings, managed/project or
+unknown layers, inherited instructions/capabilities, provider overrides, and
+unexpected credential-store or ChatGPT base-URL requirements. Official Codex
+configuration supports forcing `chatgpt` login; it does not turn authentication
+into a billing guarantee. [Codex authentication](https://learn.chatgpt.com/docs/auth).
+
 Before a turn, check the effective account mode, explicitly requested model and
 its capabilities. Disable provider model fallback. A mode change, model reroute,
 missing authentication or authorization error fails the attempt; never switch
@@ -46,6 +54,9 @@ verified non-chargeable deployment policy may supply it; do not invent a boolean
 configuration override that merely asserts it. The current schema inventory
 leaves this control unresolved. Do not change account billing settings, purchase
 credits, redeem resets or send credit-request notifications as part of preflight.
+Do not use the protocol's unstable internal ChatGPT-token injection variant as a
+credential-transfer mechanism; qualify a documented managed login or access-token
+flow separately.
 
 ## Accounting and failure handling
 
