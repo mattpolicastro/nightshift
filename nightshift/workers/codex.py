@@ -149,10 +149,11 @@ class _Journal:
 
 class _Session:
     def __init__(self, request, process, native, normalized, *, external_executor=False,
-                 config_validator=None, config_cwd=None, admission=None):
+                 config_validator=None, config_cwd=None, admission=None, preflight_only=False):
         self.external_executor = external_executor
         self.config_validator, self.config_cwd = config_validator, config_cwd
         self.admission = admission
+        self.preflight_only = preflight_only
         self.outstanding = {}
         self.request, self.process = request, process
         self.native, self.normalized = native, normalized
@@ -370,6 +371,9 @@ class _Session:
             await self.admission.preflight(
                 self.rpc, self.request.model, self.request.reasoning_effort)
             self.admission.check_ready()
+        if self.preflight_only:
+            self.result.status = "succeeded"
+            return
         thread = await self.rpc("thread/start", {
             "model": self.request.model, "cwd": str(self.request.cwd), "ephemeral": True,
             "allowProviderModelFallback": False,
@@ -406,7 +410,7 @@ class _Session:
 
 async def _run_stdio(request: WorkerRequest, argv: list[str], *, env: dict[str, str],
                      external_executor: bool = False, provider_cwd: Path | None = None,
-                     config_validator=None, admission=None) -> WorkerResult:
+                     config_validator=None, admission=None, preflight_only: bool = False) -> WorkerResult:
     """PRIVATE offline fixture seam. No qualification claim or public activation flag.
 
     Caller supplies an explicit credential-free environment. This function does
@@ -414,9 +418,16 @@ async def _run_stdio(request: WorkerRequest, argv: list[str], *, env: dict[str, 
     External fixtures must supply a distinct host provider cwd; request.cwd is
     then the container path. Containment and read-only review remain the external
     fixture owner's responsibility. This does not enable the public worker.
+    preflight_only is a private metadata seam: admission/config guards are required,
+    transcripts forbidden, and no thread or turn is created.
     """
     started = time.monotonic()
-    if (admission is not None and (not external_executor or config_validator is None)
+    if (type(preflight_only) is not bool
+            or preflight_only and (admission is None or config_validator is None
+                                   or not external_executor
+                                   or request.transcript_path is not None
+                                   or request.normalized_transcript_path is not None)
+            or admission is not None and (not external_executor or config_validator is None)
             or config_validator is not None and (not callable(config_validator) or not external_executor)
             or type(external_executor) is not bool
             or (external_executor and (not isinstance(provider_cwd, Path) or not provider_cwd.is_absolute()))
@@ -447,7 +458,8 @@ async def _run_stdio(request: WorkerRequest, argv: list[str], *, env: dict[str, 
                             duration_s=time.monotonic() - started,
                             diagnostics=["Unable to start fixture app-server process"])
     session = _Session(request, process, *journals, external_executor=external_executor,
-                       config_validator=config_validator, config_cwd=provider_cwd, admission=admission)
+                       config_validator=config_validator, config_cwd=provider_cwd, admission=admission,
+                       preflight_only=preflight_only)
     stderr = bytearray()
 
     async def drain_stderr():

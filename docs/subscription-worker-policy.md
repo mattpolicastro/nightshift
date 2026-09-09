@@ -59,11 +59,18 @@ billing settings, purchase credits, redeem resets or send credit-request
 notifications as part of preflight. Do not use the protocol's unstable internal
 ChatGPT-token injection variant as a credential-transfer mechanism.
 
-Production activation remains blocked until the macOS keyring login can be bound
-to the intended operator account without exposing credentials to the executor.
-A fresh `HOME` and `CODEX_HOME` do not isolate an OS keyring identity. The public
-constructor therefore remains unavailable even though the policy and protocol
-admission paths have synthetic coverage.
+Production activation remains blocked until the bound macOS keyring login can be
+used through an owned stable-home lifecycle without exposing credentials to the
+executor. A fresh `HOME` and `CODEX_HOME` do not isolate or inherit an enrolled
+OS keyring identity. The public constructor therefore remains unavailable.
+
+The metadata-only path now requires a private expected email and workspace ID,
+compares both to live managed-account evidence, and returns no account or quota
+details. A local qualification passed without creating a thread or turn. That
+experiment also showed that the keyring login is scoped to the enrolled
+`CODEX_HOME`: a new per-attempt home has no account. Production therefore needs
+a stable, private and exclusively locked credential home whose generated policy
+and startup assets are checked on every use. That lifecycle is not implemented.
 
 ## Accounting and failure handling
 

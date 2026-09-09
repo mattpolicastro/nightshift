@@ -1,5 +1,21 @@
 # Changelog
 
+## Bound ChatGPT metadata qualification — 2026-09-09
+
+Added private principal/workspace binding and a metadata-only qualification path
+that validates generated configuration, managed account mode, quota buckets,
+the explicit model and reasoning capability without creating a thread or turn.
+The public result contains no account, quota, stderr or transcript data. Opaque
+quota bucket identifiers are bounded and identity-preserving; every returned
+bucket must pass admission.
+
+A local private qualification confirmed the authorized ChatGPT account, managed
+usage and an advertised model through this no-turn sequence. It also established
+that macOS keyring credentials are scoped to the enrolled `CODEX_HOME`: a fresh
+per-attempt home does not inherit the login. Production remains blocked until a
+stable private credential-home lifecycle is implemented and joined to daemon
+recovery. No prompt or model turn was sent.
+
 ## ChatGPT-managed admission policy — 2026-09-08
 
 Added a generated provider policy for the standard ChatGPT subscription route:

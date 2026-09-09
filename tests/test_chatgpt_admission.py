@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift.workers.chatgpt_admission import ChatGPTAdmission
+from nightshift.workers.chatgpt_admission import ChatGPTAdmission, ChatGPTIdentity
 from nightshift.workers.codex import _run_stdio
 from test_codex_worker import FAKE, request
 
@@ -63,7 +63,7 @@ def test_nonmanaged_or_unknown_account_rejected(change):
     lambda data: data.update(rateLimitReachedType='workspace_member_usage_limit_reached'),
     lambda data: data.update(rateLimitReachedType='unknown'),
     lambda data: data.update(planType='plus'),
-    lambda data: data.update(limitId='unattributed'),
+    lambda data: data.update(limitId=True),
     lambda data: data.update(credits={'hasCredits': 1, 'unlimited': False}),
     lambda data: data.update(credits={'hasCredits': True, 'unlimited': False, 'balance': 'NaN'}),
     lambda data: data.update(credits={'hasCredits': True, 'unlimited': False, 'balance': '0'}),
@@ -83,6 +83,38 @@ def test_reset_credits_are_not_spendable_allowance():
     data = limits()
     data['rateLimits']['primary']['usedPercent'] = 100
     data['rateLimitResetCredits'] = {'availableCount': 99}
+    with pytest.raises(ValueError):
+        gate.rate_limits(data)
+
+
+def test_opaque_managed_bucket_names_are_bound_and_all_validated():
+    gate = ChatGPTAdmission()
+    gate.account(account())
+    data = limits()
+    data['rateLimits']['limitId'] = 'opaque-primary'
+    secondary = copy.deepcopy(data['rateLimits'])
+    secondary['limitId'] = 'opaque-secondary'
+    data['rateLimitsByLimitId'] = {
+        'opaque-primary': copy.deepcopy(data['rateLimits']),
+        'opaque-secondary': secondary,
+    }
+    gate.rate_limits(data)
+    assert gate.usage_available
+    data['rateLimitsByLimitId']['opaque-secondary']['primary']['usedPercent'] = 100
+    with pytest.raises(ValueError):
+        gate.rate_limits(data)
+
+
+@pytest.mark.parametrize('buckets', [
+    {},
+    {'opaque': {'limitId': 'different', 'primary': {'usedPercent': 1}}},
+    {True: {'limitId': True, 'primary': {'usedPercent': 1}}},
+])
+def test_malformed_managed_bucket_attribution_is_rejected(buckets):
+    gate = ChatGPTAdmission()
+    gate.account(account())
+    data = limits()
+    data['rateLimitsByLimitId'] = buckets
     with pytest.raises(ValueError):
         gate.rate_limits(data)
 
@@ -111,14 +143,15 @@ def protocol():
     elif method == "thread/start":''')
 
 
-def invoke(tmp_path, inject_at='', inject_kind='account'):
+def invoke(tmp_path, inject_at='', inject_kind='account', expected_identity=None):
     fake = tmp_path / 'admission-fake.py'
     fake.write_text(protocol())
     journal = tmp_path / 'native.jsonl'
     req = replace(request(tmp_path), cwd=Path('/workspace'), transcript_path=journal)
     result = asyncio.run(_run_stdio(req, [sys.executable, str(fake), 'external'],
         env={'INJECT_AT': inject_at, 'INJECT_KIND': inject_kind}, external_executor=True,
-        provider_cwd=tmp_path, config_validator=lambda *args: None, admission=ChatGPTAdmission()))
+        provider_cwd=tmp_path, config_validator=lambda *args: None,
+        admission=ChatGPTAdmission(expected_identity)))
     methods = [json.loads(line) for line in (tmp_path / 'admission-methods.jsonl').read_text().splitlines()]
     return result, methods, journal.read_text()
 
@@ -211,6 +244,15 @@ def test_requested_reasoning_effort_must_be_advertised():
         asyncio.run(rejected.preflight(rpc, 'requested-model', 'high'))
 
 
+def test_missing_model_precedes_reasoning_effort_error():
+    async def rpc(method, params):
+        if method == 'account/read': return account()
+        if method == 'account/rateLimits/read': return limits()
+        return {'data': [catalog_model()], 'nextCursor': None}
+    with pytest.raises(ValueError, match='Requested model is unavailable'):
+        asyncio.run(ChatGPTAdmission().preflight(rpc, 'missing-model', 'unadvertised-effort'))
+
+
 def test_catalog_accepts_bounded_future_reasoning_effort_names():
     entry = catalog_model()
     entry['defaultReasoningEffort'] = 'future-effort'
@@ -236,3 +278,80 @@ def test_duplicate_reasoning_efforts_are_rejected():
 
     with pytest.raises(ValueError, match='Duplicate model reasoning effort'):
         asyncio.run(ChatGPTAdmission().preflight(rpc, 'requested-model', 'medium'))
+
+
+PRIVATE_EMAIL = 'synthetic-private-identity@example.invalid'
+PRIVATE_ACCOUNT = 'synthetic-private-workspace'
+
+
+def private_identity():
+    return ChatGPTIdentity(PRIVATE_EMAIL, PRIVATE_ACCOUNT)
+
+
+def bound_account():
+    value = account()
+    value['account']['email'] = PRIVATE_EMAIL
+    return value
+
+
+def bound_limits():
+    return {**limits(), 'accountId': PRIVATE_ACCOUNT}
+
+
+def test_private_identity_binds_principal_and_usage_workspace():
+    identity = private_identity()
+    assert PRIVATE_EMAIL not in repr(identity) and PRIVATE_ACCOUNT not in repr(identity)
+    gate = ChatGPTAdmission(identity)
+    gate.account(bound_account())
+    gate.rate_limits(bound_limits())
+    gate.model_confirmed = True
+    gate.check_ready()
+    assert gate.usage_identity_confirmed
+
+
+@pytest.mark.parametrize('field,value', [('email', None), ('email', 'other@example.invalid'),
+    ('email', True), ('accountId', None), ('accountId', 'different-workspace'), ('accountId', True)])
+def test_identity_mismatch_missing_or_wrong_type_fails_without_disclosure(field, value):
+    gate = ChatGPTAdmission(private_identity())
+    response = bound_account()
+    usage = bound_limits()
+    if field == 'email': response['account']['email'] = value
+    else: usage['accountId'] = value
+    with pytest.raises(ValueError) as error:
+        gate.account(response)
+        gate.rate_limits(usage)
+    assert PRIVATE_EMAIL not in str(error.value) and PRIVATE_ACCOUNT not in str(error.value)
+    gate.model_confirmed = True
+    with pytest.raises(ValueError):
+        gate.check_ready()
+
+
+def test_unattributed_usage_notification_invalidates_bound_identity():
+    gate = ChatGPTAdmission(private_identity())
+    gate.account(bound_account())
+    gate.rate_limits(bound_limits())
+    gate.model_confirmed = True
+    gate.check_ready()
+    # The pinned notification has no accountId: never silently assign it to
+    # the admitted workspace after an account switch or keychain change.
+    with pytest.raises(ValueError):
+        gate.notification('account/rateLimits/updated', limits())
+    with pytest.raises(ValueError):
+        gate.check_ready()
+
+
+@pytest.mark.parametrize('value', ['', ' padded ', '\nidentity', '\ud800', True, None, 'x' * 513])
+def test_private_identity_values_are_bounded_and_errors_are_generic(value):
+    with pytest.raises(ValueError, match='bounded private ChatGPT identity'):
+        ChatGPTIdentity(value, PRIVATE_ACCOUNT)
+    with pytest.raises(ValueError, match='bounded private ChatGPT identity'):
+        ChatGPTIdentity(PRIVATE_EMAIL, value)
+
+
+def test_bound_preflight_journals_do_not_expose_private_identity(tmp_path):
+    identity = ChatGPTIdentity('SYNTHETIC_EMAIL_PRIVATE@example.invalid', 'SYNTHETIC_ACCOUNT_PRIVATE')
+    result, methods, raw = invoke(tmp_path, expected_identity=identity)
+    assert result.ok and 'turn/start' in methods
+    for value in (identity.email, identity.account_id):
+        assert value not in raw
+        assert value not in repr(result)

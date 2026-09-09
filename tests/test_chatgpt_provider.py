@@ -1,6 +1,8 @@
 """Generated ChatGPT policy only: synthetic config and no credential operations."""
+import asyncio
 import copy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,7 +12,9 @@ from nightshift.workers.container_session import SessionError
 
 def create(monkeypatch):
     monkeypatch.setattr(module.sys, 'platform', 'darwin')
-    return module.ChatGPTProvider._for_synthetic_test(Path('/synthetic/codex'), 'explicit-model')
+    identity = module.ChatGPTIdentity('synthetic-expected@example.invalid', 'synthetic-workspace')
+    return module.ChatGPTProvider._for_synthetic_test(Path('/synthetic/codex'), 'explicit-model',
+                                                     expected_identity=identity)
 
 
 def evidence(obj):
@@ -30,8 +34,8 @@ def evidence(obj):
                         for key in leaves(raw) | {'features.network_proxy.enabled'}}}
 
 
-def test_production_constructor_remains_blocked_without_keyring_binding():
-    with pytest.raises(SessionError, match='keyring account binding is unqualified'):
+def test_production_constructor_remains_blocked_without_stable_keyring_home():
+    with pytest.raises(SessionError, match='stable keyring-home lifecycle is unqualified'):
         module.ChatGPTProvider(Path('/synthetic/codex'), 'model')
 
 
@@ -66,4 +70,68 @@ def test_api_or_custom_provider_fallback_is_rejected(monkeypatch, key, value):
 def test_unsupported_platform_blocks_keyring_policy(monkeypatch):
     monkeypatch.setattr(module.sys, 'platform', 'linux')
     with pytest.raises(SessionError, match='macOS'):
-        module.ChatGPTProvider._for_synthetic_test(Path('/synthetic/codex'), 'model')
+        module.ChatGPTProvider._for_synthetic_test(Path('/synthetic/codex'), 'model',
+            expected_identity=module.ChatGPTIdentity('fixture@example.invalid', 'fixture-workspace'))
+
+
+def test_bound_provider_uses_os_home_and_owned_codex_home(monkeypatch):
+    monkeypatch.setenv('HOME', '/synthetic/untrusted-ambient-home')
+    monkeypatch.setattr(module.pwd, 'getpwuid', lambda uid: SimpleNamespace(pw_dir='/synthetic/os-home'))
+    with create(monkeypatch) as obj:
+        env = obj._environment()
+        assert env == {'PATH': module.os.defpath, 'HOME': '/synthetic/os-home', 'CODEX_HOME': str(obj.home)}
+        assert obj._expected['forced_chatgpt_workspace_id'] == 'synthetic-workspace'
+        assert 'synthetic-expected@example.invalid' not in obj._config
+        assert 'synthetic-workspace' not in repr(obj)
+        admission = obj._admission()
+        admission.account({'requiresOpenaiAuth': True, 'account': {'type': 'chatgpt',
+            'email': 'synthetic-expected@example.invalid', 'planType': 'pro'}})
+        with pytest.raises(ValueError, match='private expected identity'):
+            admission.rate_limits({'accountId': 'different-workspace',
+                'rateLimits': {'primary': {'usedPercent': 1}}})
+
+
+@pytest.mark.parametrize('value', [None, 'different-workspace', ['synthetic-workspace']])
+def test_effective_workspace_binding_must_match_private_expectation(monkeypatch, value):
+    with create(monkeypatch) as obj:
+        response = evidence(obj)
+        response['config']['forced_chatgpt_workspace_id'] = value
+        with pytest.raises(ValueError) as error:
+            obj._validate_configuration(response, {'requirements': None})
+        assert 'synthetic-workspace' not in str(error.value)
+
+
+def test_missing_private_identity_cannot_construct_provider(monkeypatch):
+    monkeypatch.setattr(module.sys, 'platform', 'darwin')
+    with pytest.raises(ValueError, match='private ChatGPT identity'):
+        module.ChatGPTProvider._for_synthetic_test(Path('/synthetic/codex'), 'model', expected_identity=None)
+
+
+def test_fresh_home_metadata_constructor_uses_same_private_policy(monkeypatch):
+    monkeypatch.setattr(module.sys, 'platform', 'darwin')
+    identity = module.ChatGPTIdentity('fixture@example.invalid', 'fixture-workspace')
+    obj = module.ChatGPTProvider._for_fresh_home_metadata_probe(
+        Path('/synthetic/codex'), 'model', expected_identity=identity)
+    assert obj._expected_identity is identity
+    assert obj._used is False and obj._temporary is None
+
+
+def test_fresh_home_metadata_policy_cannot_start_model_turn(monkeypatch):
+    async def forbidden(*args, **kwargs):
+        pytest.fail('metadata policy reached model execution')
+    monkeypatch.setattr(module.FixtureProvider, 'run', forbidden)
+    monkeypatch.setattr(module.sys, 'platform', 'darwin')
+    policy = module.ChatGPTProvider._for_fresh_home_metadata_probe(
+        Path('/synthetic/codex'), 'model', expected_identity=(
+            module.ChatGPTIdentity('fixture@example.invalid', 'workspace')))
+    with pytest.raises(SessionError, match='cannot start a model thread or turn'):
+        asyncio.run(policy.run(None))
+
+
+def test_fresh_home_metadata_policy_does_not_accept_stable_home(monkeypatch):
+    monkeypatch.setattr(module.sys, 'platform', 'darwin')
+    with pytest.raises(TypeError):
+        module.ChatGPTProvider._for_fresh_home_metadata_probe(
+            Path('/synthetic/codex'), 'model', expected_identity=(
+                module.ChatGPTIdentity('fixture@example.invalid', 'workspace')),
+            stable_home=Path('/enrolled/profile'))

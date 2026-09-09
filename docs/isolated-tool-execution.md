@@ -196,6 +196,10 @@ transport required for production source export.
   Synthetic admission now rejects API/custom-provider fallback and validates
   managed usage, model and reasoning capability, but the production constructor
   remains blocked because a fresh provider home does not isolate the macOS keyring.
+- Implement the stable credential-home lifecycle required by macOS keyring
+  scoping. A local metadata-only qualification passed when the enrolled home was
+  used with regenerated validated policy; the production code does not yet own,
+  lock, clean or recover that stable home.
 - Reproduce the characterized skills routing with an allowlisted fresh provider
   home and explicit remote capability roots in the production launcher. Keep
   filesystem authority at the executor boundary; do not assume package-local

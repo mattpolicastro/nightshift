@@ -4,7 +4,10 @@ Allows included usage or already-available ChatGPT credits. Never buys credits,
 redeems reset credits, changes spend limits, or admits API-key/custom-provider auth.
 Telemetry is a point-in-time eligibility signal, not a reservation or cost quote.
 """
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+import hmac
+import unicodedata
 
 PLANS = {'free', 'go', 'plus', 'pro', 'prolite', 'team', 'self_serve_business_prolite',
     'self_serve_business_usage_based', 'business', 'ent26', 'enterprise_cbp_automation',
@@ -34,8 +37,38 @@ def _label(value, limit=200):
             and all(ord(character) >= 32 for character in value))
 
 
+@dataclass(frozen=True)
+class ChatGPTIdentity:
+    """Operator-supplied private principal/workspace expectation; never journal it."""
+    email: str = field(repr=False)
+    account_id: str = field(repr=False)
+
+    def __post_init__(self):
+        for value in (self.email, self.account_id):
+            if (not isinstance(value, str) or not value or len(value) > 512 or value != value.strip()
+                    or any(unicodedata.category(c).startswith('C') for c in value)
+                    or len(value.encode('utf-8')) > 512):
+                raise ValueError('A bounded private ChatGPT identity is required')
+
+    def _matches(self, value, expected):
+        if (not isinstance(value, str) or len(value) > 512 or any(unicodedata.category(c).startswith('C') for c in value)
+                or len(value.encode('utf-8')) > 512):
+            return False
+        return hmac.compare_digest(value.encode('utf-8'), expected.encode('utf-8'))
+
+    def matches_email(self, value):
+        return self._matches(value, self.email)
+
+    def matches_account(self, value):
+        return self._matches(value, self.account_id)
+
+
 class ChatGPTAdmission:
-    def __init__(self):
+    def __init__(self, expected_identity: ChatGPTIdentity | None = None):
+        if expected_identity is not None and not isinstance(expected_identity, ChatGPTIdentity):
+            raise ValueError('A private ChatGPT identity value is required')
+        self._expected_identity = expected_identity
+        self.usage_identity_confirmed = False
         self.plan = None
         self.account_confirmed = False
         self.usage_available = False
@@ -54,6 +87,8 @@ class ChatGPTAdmission:
                 or account.get('planType') not in PLANS or 'email' not in account
                 or account['email'] is not None and not isinstance(account['email'], str)):
             self._fail('A recognized ChatGPT-managed account is required')
+        if self._expected_identity is not None and not self._expected_identity.matches_email(account['email']):
+            self._fail('ChatGPT principal does not match the private expected identity')
         if self.plan is not None and self.plan != account['planType']:
             self._fail('ChatGPT account plan changed during admission')
         self.plan = account['planType']
@@ -62,8 +97,8 @@ class ChatGPTAdmission:
     def _snapshot(self, value):
         if not isinstance(value, dict):
             self._fail('Managed usage snapshot is unavailable')
-        if value.get('limitId') not in (None, 'codex'):
-            self._fail('An unsupported usage bucket was reported')
+        if value.get('limitId') is not None and not _label(value['limitId'], 512):
+            self._fail('A malformed usage bucket was reported')
         plan = value.get('planType')
         if plan is not None and (plan not in PLANS or self.plan is not None and plan != self.plan):
             self._fail('Managed usage plan does not match admission')
@@ -111,16 +146,25 @@ class ChatGPTAdmission:
             self._fail('No confirmed included usage or existing ChatGPT credits')
 
     def rate_limits(self, response):
+        self.usage_available = False
+        self.usage_identity_confirmed = False
         if not isinstance(response, dict) or 'rateLimits' not in response:
             self._fail('Managed usage telemetry is missing')
+        if self._expected_identity is not None:
+            if not self._expected_identity.matches_account(response.get('accountId')):
+                self._fail('ChatGPT usage account does not match the private expected identity')
         self._snapshot(response['rateLimits'])
         buckets = response.get('rateLimitsByLimitId')
         if buckets is not None:
-            if not isinstance(buckets, dict) or set(buckets) != {'codex'}:
+            if (not isinstance(buckets, dict) or not 1 <= len(buckets) <= 16
+                    or any(not _label(key, 512) or not isinstance(value, dict)
+                           or value.get('limitId') != key for key, value in buckets.items())):
                 self._fail('Usage bucket attribution is unsupported')
-            self._snapshot(buckets['codex'])
+            for value in buckets.values():
+                self._snapshot(value)
         # Reset-credit details and upsell banners are not spendable credit evidence.
         self.usage_available = True
+        self.usage_identity_confirmed = self._expected_identity is not None
 
     async def preflight(self, rpc, model, reasoning_effort=None):
         self.account(await rpc('account/read', {'refreshToken': False}))
@@ -165,6 +209,8 @@ class ChatGPTAdmission:
             seen.add(cursor)
         else:
             self._fail('Model catalog exceeded its page budget')
+        if not self.model_confirmed:
+            self._fail('Requested model is unavailable')
         if reasoning_effort is not None and (not _label(reasoning_effort)
                                                or reasoning_effort not in (requested_efforts or set())):
             self._fail('Requested reasoning effort is unavailable for the model')
@@ -187,5 +233,6 @@ class ChatGPTAdmission:
             self._fail('Requested model was rerouted')
 
     def check_ready(self):
-        if self.invalid or not (self.account_confirmed and self.usage_available and self.model_confirmed):
+        if (self.invalid or not (self.account_confirmed and self.usage_available and self.model_confirmed)
+                or self._expected_identity is not None and not self.usage_identity_confirmed):
             self._fail('ChatGPT admission is incomplete or invalidated')

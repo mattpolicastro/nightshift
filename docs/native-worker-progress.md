@@ -25,7 +25,12 @@ items, fall back to Claude, or be enabled with an operator bypass.
   custom providers and inherited configuration. Synthetic admission validates
   account mode, managed usage or existing credits, the model catalog and the
   requested reasoning effort before thread creation. Its production constructor
-  remains blocked pending private keyring account binding.
+  remains blocked pending an owned stable keyring-home lifecycle.
+- A private metadata-only seam now binds an expected principal and workspace,
+  validates all of that evidence, and exits before thread creation. A local
+  no-turn qualification passed with the authorized managed account and an
+  advertised model. It also confirmed that keyring enrollment is scoped to a
+  stable `CODEX_HOME`; the current one-attempt provider home cannot reuse it.
 
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.
@@ -68,8 +73,9 @@ processes that escape their group. Native worker isolation is a separate gate.
    configured and effective read-only mounts, denied source mutation, scratch,
    network and host isolation, exact source preservation and owned cleanup. See
    [security qualification](codex-security-qualification.md).
-2. Qualify the generated ChatGPT policy against a privately bound macOS keyring
-   identity, then add the production launcher and permission assembly. The
+2. Implement an owned, locked lifecycle for the privately enrolled stable
+   `CODEX_HOME`, regenerating and validating policy without allowing concurrent
+   attempts or stale assets, then add the production launcher. The
    approved route allows a ChatGPT plan's included allowance and existing
    ChatGPT credits. Platform API-key and custom-provider fallback remain forbidden.
 3. Integrate driver dispatch, host-owned Git operations, normalized accounting
@@ -110,6 +116,7 @@ authentication/accounting and daemon wiring remain incomplete. Synthetic native
 runs now use a generated one-attempt provider home and validate the pinned host
 runtime plus effective configuration layers, origins and requirements before
 thread creation. The ChatGPT-managed variant also validates account, usage,
-model and reasoning capability evidence; its production constructor deliberately
-remains blocked until keyring identity binding is qualified. See the
+model and reasoning capability evidence. Principal/workspace binding and a local
+metadata-only qualification now pass, but its production constructor deliberately
+remains blocked until the stable credential-home lifecycle is implemented. See the
 [ChatGPT-managed integration policy](subscription-worker-policy.md).
