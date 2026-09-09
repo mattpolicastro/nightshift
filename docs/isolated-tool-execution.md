@@ -211,23 +211,64 @@ it does not grant a worker extra Docker privileges. Qualification must inspect
 and test the actual external policy before using that declaration.
 
 
-## Next implementation boundary
+## Owned session manager and isolated verification
 
-Build one owned container-session manager before connecting model dispatch. It
-must inspect both the container policy and the owner-labeled tmpfs volume's
-driver/options, record ownership for recovery, and transfer validated source
-through bounded binary streams. One absolute deadline covers creation,
-inspection, import, execution, pause and export. Export requires confirmed
-paused state and the existing 20 MiB archive / 16 MiB content / 2,000 file limits.
-Cleanup gets a separate bounded allowance and must confirm removal of the owned
-container and volume before accepting a returned candidate. Cleanup failure
-retains the recovery record and disqualifies the result.
+`workers/container_session.py` now joins source transfer and repeated foreground
+commands in one owned session. It creates a labeled, size-limited tmpfs-backed
+volume and a fixed non-root, network-disabled container, checks their effective
+policy before startup, and confirms the imported snapshot before returning the
+session. Unexpected image environment or mounts are rejected. Use a compatible
+immutable local image containing `/bin/sleep` and `/bin/tar`; the current Codex
+exec-server image has additional environment entries and is not yet a qualified
+image for this manager.
 
-After host commit creation, verification receives a fresh exact-SHA snapshot in
-a separate executor. Record each configured clause's result and the candidate
-SHA; never run the native candidate's scripts in the legacy host verifier.
-Required failure controls include partial/oversized archives, pause failure,
-wrong ownership, a disconnected engine after creation, exhausted resource and
-time limits, failed verification, and unsuccessful cleanup. The existing Git
-snapshot reader's per-subprocess timeout is not a whole-session deadline and
-must be included in this integration work.
+Binary stdin, stdout and stderr are streamed with byte and time limits. Command
+output consumes a cumulative session budget; ordinary completed nonzero exits
+allow repair, while timeouts, excess output and unconfirmed completion invalidate
+the session. Daemon-owned process inventories reject surviving background work.
+Snapshot checkpoints pause the container and inspect the frozen process set
+before reading a bounded archive, then resume it. A checkpoint is provisional;
+`finish()` accepts source only after owned resources are removed successfully.
+
+A private, fsynced ownership record precedes Docker creation. The recovery
+directory must be owned and private under a trusted host-controlled parent.
+Cleanup has one separate 15-second deadline and verifies container and volume
+absence before removing the record. An ambiguous creation result keeps the
+record even if a current listing shows nothing: the daemon request may still
+be in flight. Cleanup or record-persistence failure cannot produce an accepted
+candidate. There is no automatic recovery deletion based on a supplied JSON file.
+
+`workers/isolated_verification.py` reads an exact Git commit and runs every
+configured argv clause through the session. It checks source fingerprints after
+each successful clause and again at finish, so a later clause cannot hide an
+earlier mutation. Failed/backgrounded commands, missing completion, changed
+source and unconfirmed cleanup prevent success. Source export and execution
+share one deadline, including the Git snapshot reader. Repository scripts never
+execute in the host verification process.
+
+Dependencies must already be available in the compatible immutable image.
+There is no package installation or network bootstrap. The verification copy is
+mutable and checked after each clause; immutable reviewer mounting is still a
+separate integration step. This command-session manager is not yet a native
+Codex exec-server launcher or a daemon dispatch path.
+
+Run the additional real-engine qualification with the local Alpine fixture:
+
+```sh
+export NIGHTSHIFT_TEST_CONTAINER_SESSION_IMAGE="sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
+export NIGHTSHIFT_TEST_DOCKER_HOST="$(docker context inspect --format '{{.Endpoints.docker.Host}}')"
+uv run pytest -q tests/test_container_session_integration.py
+```
+
+The eight synthetic integration cases cover persistent edits, failed-test repair,
+host/environment/network denial, detached work, output and time budgets,
+malformed exports and cleanup, and exact-commit verification with per-clause
+mutation detection. Offline tests additionally exercise ambiguous creation,
+wrong ownership, checkpoint failure and recovery-record persistence errors.
+
+Next, adapt the owned lifecycle to the pinned native tool server, assemble
+host-owned commits and immutable review in the task coordinator, and integrate
+explicit authentication/accounting and recovery. The
+[subscription-only policy](subscription-worker-policy.md) separates login and
+quota telemetry from the still-unresolved billing enforcement requirement.
+Native task execution remains disabled.

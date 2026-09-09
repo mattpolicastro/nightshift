@@ -85,3 +85,13 @@ patch and interactive input routing, no host fallback, bounded container cleanup
 validated source transfer and immutable reviewer source. See [isolation progress](isolated-tool-execution.md)
 for reproduction, registered skills-routing characterization, and the remaining
 production-launcher and lifecycle gates.
+
+
+An owned foreground-command session manager now handles bounded binary source
+transfer, exact import checks, paused export, cumulative output limits, process
+quiescence and ownership-checked cleanup with durable recovery records. An
+isolated verifier runs complete command chains against exact committed snapshots
+and checks source after each clause. These components pass synthetic tests but
+still need native tool-server, host-commit, immutable-review and daemon wiring.
+See the [subscription-only integration policy](subscription-worker-policy.md)
+for the separate authentication and billing requirements.

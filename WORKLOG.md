@@ -1,5 +1,17 @@
 # Changelog
 
+## Owned executor sessions — 2026-09-08
+
+Added bounded persistent command sessions with validated source import/export,
+paused checkpoints, background-process rejection and durable ownership records.
+Ambiguous Docker creation and cleanup failures retain recovery evidence rather
+than accepting a candidate. Exact-commit verification now has an isolated runner
+with per-clause source checks and a shared source/execution deadline.
+
+Synthetic real-engine tests cover the joined lifecycle and its failure paths.
+Native tool-server launch, immutable review, authentication/accounting and daemon
+integration remain incomplete. No production daemon changes or live model calls.
+
 ## Native-worker draft review — 2026-09-08
 
 Native execution remains disabled. Independent review found and fixed candidate

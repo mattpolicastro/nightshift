@@ -222,3 +222,44 @@ def test_implicit_directory_spelling_aliases_rejected(paths):
     with pytest.raises(ValueError):
         s.decode_container_archive(docker_archive([('workspace/', tarfile.DIRTYPE, b''),
             *[('workspace/' + path, tarfile.REGTYPE, b'') for path in paths]]))
+
+
+@pytest.mark.parametrize("deadline", [True, float("inf"), float("nan"), "30"])
+def test_git_snapshot_rejects_invalid_deadline_before_launch(tmp_path, monkeypatch, deadline):
+    monkeypatch.setattr(s.subprocess, "Popen", lambda *a, **k: pytest.fail("must not launch"))
+    with pytest.raises(ValueError, match="finite absolute"):
+        s.from_git(tmp_path, "a" * 40, deadline=deadline)
+
+
+def test_git_snapshot_expired_deadline_never_launches(tmp_path, monkeypatch):
+    monkeypatch.setattr(s.subprocess, "Popen", lambda *a, **k: pytest.fail("must not launch"))
+    with pytest.raises(ValueError, match="timed out"):
+        s.from_git(tmp_path, "a" * 40, deadline=0)
+
+
+def test_git_snapshot_deadline_is_shared_across_blob_reads(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(tmp_path), *args]).decode().strip()
+    git("init", "-q")
+    git("config", "user.name", "Fixture")
+    git("config", "user.email", "fixture@example.invalid")
+    for name in ("one", "two"):
+        (tmp_path / name).write_text(name)
+    git("add", ".")
+    git("commit", "-qm", "fixture")
+    sha = git("rev-parse", "HEAD")
+    clock = [0.0]
+    processes = []
+    launch = s.subprocess.Popen
+    def popen(*args, **kwargs):
+        process = launch(*args, **kwargs)
+        processes.append(process)
+        clock[0] += 20
+        return process
+    monkeypatch.setattr(s, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(s.subprocess, "Popen", popen)
+    with pytest.raises(ValueError, match="timed out"):
+        s.from_git(tmp_path, sha, deadline=50)
+    assert len(processes) == 3
+    assert all(process.poll() is not None for process in processes)

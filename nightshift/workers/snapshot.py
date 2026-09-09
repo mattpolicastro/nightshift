@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 import os
 import re
 import selectors
@@ -133,14 +134,25 @@ def fingerprint(files: list[SourceFile]) -> str:
     return hashlib.sha256(encode(files)).hexdigest()
 
 
-def from_git(repository: Path, sha: str) -> list[SourceFile]:
+def from_git(repository: Path, sha: str, *, deadline: float | None = None) -> list[SourceFile]:
     """Read exact committed blobs; exclude untracked files and Git control data.
 
     This reads an operator-selected trusted local repository. It does not stage,
     commit, checkout, interpret repository scripts, or copy working-tree files.
+    One absolute monotonic deadline covers the entire transfer (30 seconds by
+    default), with an additional 30-second cap per Git subprocess.
     """
     if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', sha):
         raise ValueError('an exact commit object ID is required')
+    transfer_deadline = time.monotonic() + 30 if deadline is None else deadline
+    if (type(transfer_deadline) not in (int, float)
+            or not math.isfinite(transfer_deadline)):
+        raise ValueError('a finite absolute transfer deadline is required')
+
+    def check_deadline():
+        if time.monotonic() >= transfer_deadline:
+            raise ValueError('Git source read timed out')
+
     env = {'PATH': '/usr/bin:/bin:/opt/homebrew/bin',
            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
            'GIT_TERMINAL_PROMPT': '0', 'GIT_NO_REPLACE_OBJECTS': '1',
@@ -148,16 +160,17 @@ def from_git(repository: Path, sha: str) -> list[SourceFile]:
     def git(*args, output_limit=MAX_FILES * 640):
         # Bound bytes while reading, not after subprocess.run has buffered a
         # potentially enormous tree listing. Suppress repository diagnostics.
+        check_deadline()
+        command_deadline = min(transfer_deadline, time.monotonic() + 30)
         with subprocess.Popen(['git', *args], cwd=repository, env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               start_new_session=True) as process:
             output = bytearray()
-            deadline = time.monotonic() + 30
             try:
                 with selectors.DefaultSelector() as selector:
                     selector.register(process.stdout, selectors.EVENT_READ)
                     while True:
-                        remaining = deadline - time.monotonic()
+                        remaining = command_deadline - time.monotonic()
                         if remaining <= 0:
                             raise ValueError('Git source read timed out')
                         if not selector.select(remaining):
@@ -168,7 +181,7 @@ def from_git(repository: Path, sha: str) -> list[SourceFile]:
                         output.extend(chunk)
                         if len(output) > output_limit:
                             raise ValueError('Git output exceeds transfer limit')
-                code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+                code = process.wait(timeout=max(0.001, command_deadline - time.monotonic()))
                 if code:
                     raise ValueError('Git source read failed')
                 return bytes(output)
@@ -209,7 +222,9 @@ def from_git(repository: Path, sha: str) -> list[SourceFile]:
         if len(content) != size:
             raise ValueError('Git blob size changed')
         files.append(SourceFile(path, content, executable))
-    return validate(files)
+    result = validate(files)
+    check_deadline()
+    return result
 
 
 @contextmanager
