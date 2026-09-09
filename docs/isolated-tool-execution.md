@@ -249,8 +249,8 @@ execute in the host verification process.
 Dependencies must already be available in the compatible immutable image.
 There is no package installation or network bootstrap. The verification copy is
 mutable and checked after each clause; immutable reviewer mounting is still a
-separate integration step. This command-session manager is not yet a native
-Codex exec-server launcher or a daemon dispatch path.
+separate integration step. Native tool-server attachment is described below;
+these components are not a daemon dispatch path.
 
 Run the additional real-engine qualification with the local Alpine fixture:
 
@@ -266,9 +266,40 @@ malformed exports and cleanup, and exact-commit verification with per-clause
 mutation detection. Offline tests additionally exercise ambiguous creation,
 wrong ownership, checkpoint failure and recovery-record persistence errors.
 
-Next, adapt the owned lifecycle to the pinned native tool server, assemble
-host-owned commits and immutable review in the task coordinator, and integrate
-explicit authentication/accounting and recovery. The
+## Native attachment and candidate coordinator
+
+`workers/native_executor.py` attaches the pinned Codex tool server to an owned
+Session through a private, single-use Unix socket bridge. The harness owns the
+Docker client process, enforces byte/time limits, and requires provider shutdown,
+a clean server exit and no surviving jobs before export. Transport failure or
+uncertain cleanup invalidates the candidate. The caller must create a fresh,
+allowlisted provider home; the helper's ownership/mode checks do not prove
+freshness and do not authorize reuse of an interactive profile.
+
+The private Codex transport seam uses the container workspace separately from
+the provider process directory, explicitly selects external sandbox routing,
+and disables provider model fallback. Public worker execution stays unsupported.
+
+`workers/candidate_pipeline.py` supplies a private fixture coordinator for
+implementation export, a host-owned commit, exact-commit isolated verification,
+and fresh review evidence. It checks candidate identity and content throughout,
+copies evidence defensively, and preserves committed candidates on later failure.
+Its public entry point is disabled. Review callbacks are trusted host fixtures;
+read-only file modes detect accidental changes but are not a hostile-code
+boundary. A successful fixture result is not production shipping authorization.
+
+Build the Session-compatible image using the
+[image instructions](../tools/qualification/codex-executor/README.md#owned-session-variant)
+and run `tests/test_native_executor_integration.py` with
+`NIGHTSHIFT_TEST_NATIVE_EXECUTOR_IMAGE` set to its immutable image ID. Four
+real-engine cases exercise native edits, missing-executor rejection with a host
+fallback sentinel, cancellation of a running command, and the joined coordinator.
+The last uses actual native implementation and isolated verification, followed by
+an explicitly synthetic reviewer that checks the exact snapshot and diff. These
+fixtures use a deterministic local provider and synthetic credentials.
+
+Next, integrate and qualify the live immutable reviewer boundary, production
+launcher/authentication/accounting, daemon dispatch and recovery. The
 [subscription-only policy](subscription-worker-policy.md) separates login and
 quota telemetry from the still-unresolved billing enforcement requirement.
 Native task execution remains disabled.

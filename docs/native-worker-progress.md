@@ -91,7 +91,10 @@ An owned foreground-command session manager now handles bounded binary source
 transfer, exact import checks, paused export, cumulative output limits, process
 quiescence and ownership-checked cleanup with durable recovery records. An
 isolated verifier runs complete command chains against exact committed snapshots
-and checks source after each clause. These components pass synthetic tests but
-still need native tool-server, host-commit, immutable-review and daemon wiring.
+and checks source after each clause. A native tool-server attachment and private fixture coordinator now join source
+export, host-owned commits and exact-commit verification. Four real-engine tests
+exercise native edits, missing-executor rejection, cancellation, and the joined
+coordinator with an explicitly synthetic reviewer. Live immutable review,
+production authentication/accounting and daemon wiring remain incomplete.
 See the [subscription-only integration policy](subscription-worker-policy.md)
 for the separate authentication and billing requirements.

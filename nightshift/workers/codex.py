@@ -12,6 +12,7 @@ import signal
 import time
 from collections import deque
 from dataclasses import asdict
+from pathlib import Path
 
 from .base import CompletedCommand, ReviewerVerdict, WorkerRequest, WorkerResult
 
@@ -147,7 +148,8 @@ class _Journal:
 
 
 class _Session:
-    def __init__(self, request, process, native, normalized):
+    def __init__(self, request, process, native, normalized, *, external_executor=False):
+        self.external_executor = external_executor
         self.request, self.process = request, process
         self.native, self.normalized = native, normalized
         self.result = WorkerResult(requested_model=request.model)
@@ -346,10 +348,12 @@ class _Session:
         return False
 
     async def execute(self):
-        await self.rpc("initialize", {"clientInfo": {"name": "nightshift", "version": "0.1.0"}})
+        await self.rpc("initialize", {"clientInfo": {"name": "nightshift", "version": "0.1.0"},
+                                      "capabilities": {"experimentalApi": self.external_executor}})
         await self.send({"method": "initialized"})
         thread = await self.rpc("thread/start", {
             "model": self.request.model, "cwd": str(self.request.cwd), "ephemeral": True,
+            "allowProviderModelFallback": False,
             "approvalPolicy": "never", "approvalsReviewer": "user",
             "sandbox": "read-only" if self.request.role == "review" else "workspace-write",
         })
@@ -362,6 +366,8 @@ class _Session:
         self.normalized.write("thread_started", {"thread_id": self.result.thread_id, "observed_model": self.result.observed_model})
         params = {"threadId": self.result.thread_id,
                   "input": [{"type": "text", "text": self.request.prompt}]}
+        if self.external_executor:
+            params["sandboxPolicy"] = {"type": "externalSandbox", "networkAccess": "restricted"}
         if self.request.reasoning_effort is not None:
             params["effort"] = self.request.reasoning_effort
         if self.request.role == "review":
@@ -377,13 +383,22 @@ class _Session:
                 return
 
 
-async def _run_stdio(request: WorkerRequest, argv: list[str], *, env: dict[str, str]) -> WorkerResult:
+async def _run_stdio(request: WorkerRequest, argv: list[str], *, env: dict[str, str],
+                     external_executor: bool = False, provider_cwd: Path | None = None) -> WorkerResult:
     """PRIVATE offline fixture seam. No qualification claim or public activation flag.
 
     Caller supplies an explicit credential-free environment. This function does
     not authenticate or invoke a shell. A process group is owned for this run.
+    External fixtures must supply a distinct host provider cwd; request.cwd is
+    then the container path. Containment and read-only review remain the external
+    fixture owner's responsibility. This does not enable the public worker.
     """
     started = time.monotonic()
+    if (type(external_executor) is not bool
+            or (external_executor and (not isinstance(provider_cwd, Path) or not provider_cwd.is_absolute()))
+            or (not external_executor and provider_cwd is not None)):
+        return WorkerResult(status="protocol_error", requested_model=request.model,
+                            diagnostics=["External fixture requires an explicit absolute provider cwd"])
     if os.name != "posix":
         return WorkerResult(status="unsupported", diagnostics=["Fixture transport requires POSIX process groups"])
     journals = []
@@ -397,7 +412,7 @@ async def _run_stdio(request: WorkerRequest, argv: list[str], *, env: dict[str, 
                             diagnostics=["Unable to create exclusive private transcript"])
     try:
         process = await asyncio.create_subprocess_exec(
-            *argv, cwd=request.cwd, env=env, stdin=asyncio.subprocess.PIPE,
+            *argv, cwd=provider_cwd if external_executor else request.cwd, env=env, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             start_new_session=True, limit=request.budgets.max_line_bytes,
         )
@@ -407,7 +422,7 @@ async def _run_stdio(request: WorkerRequest, argv: list[str], *, env: dict[str, 
         return WorkerResult(status="protocol_error", requested_model=request.model,
                             duration_s=time.monotonic() - started,
                             diagnostics=["Unable to start fixture app-server process"])
-    session = _Session(request, process, *journals)
+    session = _Session(request, process, *journals, external_executor=external_executor)
     stderr = bytearray()
 
     async def drain_stderr():

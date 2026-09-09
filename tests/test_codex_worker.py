@@ -23,12 +23,19 @@ for line in sys.stdin:
     msg = json.loads(line)
     method = msg.get("method")
     if method == "initialize":
+        if scenario == "external": assert msg["params"]["capabilities"]["experimentalApi"] is True
         send(dict(id=msg["id"] + (1 if scenario == "wrong_id" else 0), result={}))
     elif method == "thread/start":
         assert msg["params"]["approvalPolicy"] == "never"
         assert msg["params"]["ephemeral"] is True
+        assert msg["params"]["allowProviderModelFallback"] is False
+        if scenario == "external": assert msg["params"]["cwd"] == "/workspace"
         send(dict(id=msg["id"], result=dict(thread=dict(id="thread1"), model=msg["params"]["model"])))
     elif method == "turn/start":
+        if scenario == "external":
+            assert msg["params"]["sandboxPolicy"] == {"type":"externalSandbox", "networkAccess":"restricted"}
+        else:
+            assert "sandboxPolicy" not in msg["params"]
         send(dict(id=msg["id"], result=dict(turn=dict(id="turn1"))))
         if scenario in ("silent", "cancel"):
             time.sleep(30)
@@ -361,3 +368,26 @@ def test_structured_http_errors_keep_failure_classification(tmp_path, kind, code
     {"codexErrorInfo": {"activeTurnNotSteerable": {"turnKind": "invented"}}}])
 def test_malformed_structured_errors_are_protocol_failures(tmp_path, error):
     assert invoke(tmp_path, "structured_error:" + json.dumps(error)).status == "protocol_error"
+
+
+
+def test_external_fixture_separates_host_and_executor_cwd(tmp_path):
+    fake = tmp_path / "fake.py"
+    fake.write_text(FAKE)
+    req = replace(request(tmp_path), cwd=Path("/workspace"))
+    result = asyncio.run(_run_stdio(req, [sys.executable, str(fake), "external"],
+                                   env={}, external_executor=True, provider_cwd=tmp_path))
+    assert result.ok
+    assert result.commands[0].cwd == str(tmp_path)  # The fixture process runs on host.
+    assert CodexWorker().run(req).status == "unsupported"
+
+
+@pytest.mark.parametrize("external,cwd", [(True, None), (True, Path("relative")),
+                                         (False, Path("/tmp")), ("true", Path("/tmp"))])
+def test_invalid_external_fixture_never_launches(tmp_path, monkeypatch, external, cwd):
+    async def forbidden(*args, **kwargs):
+        pytest.fail("Invalid fixture cannot start a process")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    result = asyncio.run(_run_stdio(request(tmp_path), ["ignored"], env={},
+                                   external_executor=external, provider_cwd=cwd))
+    assert result.status == "protocol_error"

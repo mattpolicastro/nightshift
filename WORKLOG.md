@@ -1,5 +1,19 @@
 # Changelog
 
+## Native executor attachment and coordinator fixture — 2026-09-08
+
+Added a bounded, host-owned bridge to the pinned native tool server inside an
+owned container Session. Export requires clean tool-server shutdown and confirmed
+session cleanup. The private transport distinguishes provider cwd from container
+workspace and disables provider model fallback.
+
+A fixture coordinator now joins native implementation, host-owned candidate
+commit, exact-commit container verification and explicitly synthetic review.
+Real-engine tests also cover missing-executor rejection and cancellation. Public
+execution remains disabled; live immutable review, production authentication,
+billing enforcement, accounting and daemon integration are still incomplete.
+No live model calls or production daemon changes were made for this milestone.
+
 ## Owned executor sessions — 2026-09-08
 
 Added bounded persistent command sessions with validated source import/export,

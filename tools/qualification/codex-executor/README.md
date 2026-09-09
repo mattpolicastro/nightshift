@@ -59,3 +59,29 @@ entry is not permission to use it. These tests do not establish live provider
 accounting, subscription authentication, complete tool coverage, source transfer,
 or task/reviewer integration. Native repository workers remain disabled until
 those gates are qualified and enforced in the production adapter.
+
+## Owned Session variant
+
+`Dockerfile.session` uses the same base and integrity-checked package above but
+retains only the fixed Session image environment and starts a non-root idle
+process. It does not replace the original remote-environment fixture image.
+After preparing and verifying `build_root` as above:
+
+```sh
+cp tools/qualification/codex-executor/Dockerfile.session "$build_root/Dockerfile.session"
+docker build --network none --pull=false -f "$build_root/Dockerfile.session" \
+  -t nightshift-codex-session:0.153.4 "$build_root"
+session_image="$(docker image inspect nightshift-codex-session:0.153.4 --format '{{.Id}}')"
+NIGHTSHIFT_TEST_NATIVE_EXECUTOR_IMAGE="$session_image" \
+  uv run pytest -q tests/test_native_executor_integration.py
+```
+
+The private `NativeExecutor` attachment launches the exact packaged executable
+through `docker exec -i` in an existing owned Session. A private, one-use Unix
+socket launcher carries stdio; the host coordinator owns and reaps the Docker
+client. Executor environment values are fixed with `env -i`; provider keys and
+configuration are not forwarded. The provider process must stop before
+`quiesce()`, and source export requires a clean server exit with no leftover
+container jobs followed by Session cleanup. Bounded transport failures make the
+candidate ineligible. This remains an internal building block exercised with a
+synthetic provider, not enabled native worker dispatch or live authentication.
