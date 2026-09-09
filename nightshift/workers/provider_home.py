@@ -115,14 +115,7 @@ class FixtureProvider:
         self._temporary = tempfile.TemporaryDirectory(prefix='nightshift-fixture-provider-')
         self.home = Path(self._temporary.name).resolve()
         self.home.chmod(0o700)
-        config = ('model_provider="nightshift_fixture"\nmodel=' + json.dumps(self.model) + '\n'
-            'web_search="disabled"\n[model_providers.nightshift_fixture]\nname="Synthetic fixture"\n'
-            'base_url=' + json.dumps(self.base_url) + '\nwire_api="responses"\n'
-            'env_key="NIGHTSHIFT_FAKE_KEY"\nrequires_openai_auth=false\nsupports_websockets=false\n'
-            'request_max_retries=0\nstream_max_retries=0\n'
-            '[tools]\nexperimental_request_user_input={enabled=false}\n[features]\n' +
-            ''.join(key + '=' + str(value).lower() + '\n' for key, value in FEATURES.items()) +
-            '[mcp_servers]\n[plugins]\n')
+        config = self._configuration()
         self._config = config
         self._expected = tomllib.loads(config)
         try:
@@ -131,6 +124,16 @@ class FixtureProvider:
             self.__exit__(None, None, None)
             raise
         return self
+
+    def _configuration(self):
+        return ('model_provider="nightshift_fixture"\nmodel=' + json.dumps(self.model) + '\n'
+            'web_search="disabled"\n[model_providers.nightshift_fixture]\nname="Synthetic fixture"\n'
+            'base_url=' + json.dumps(self.base_url) + '\nwire_api="responses"\n'
+            'env_key="NIGHTSHIFT_FAKE_KEY"\nrequires_openai_auth=false\nsupports_websockets=false\n'
+            'request_max_retries=0\nstream_max_retries=0\n'
+            '[tools]\nexperimental_request_user_input={enabled=false}\n[features]\n' +
+            ''.join(key + '=' + str(value).lower() + '\n' for key, value in FEATURES.items()) +
+            '[mcp_servers]\n[plugins]\n')
 
     def attach(self, session):
         if self._temporary is None or self._closed or self._attached:
@@ -180,13 +183,7 @@ class FixtureProvider:
         for key in ('model', 'model_provider', 'web_search', 'features', 'mcp_servers', 'plugins'):
             if not _same(effective.get(key), self._expected[key]):
                 raise ValueError('Effective provider configuration differs from generated policy')
-        provider = dict(self._expected['model_providers']['nightshift_fixture'])
-        provider.update({key: None for key in ('env_key_instructions', 'experimental_bearer_token',
-            'auth', 'aws', 'query_params', 'http_headers', 'env_http_headers',
-            'stream_idle_timeout_ms', 'websocket_connect_timeout_ms')})
-        provider['supports_standalone_web_search'] = False
-        if not _same(effective.get('model_providers'), {'nightshift_fixture': provider}):
-            raise ValueError('Effective model provider differs from generated fixture policy')
+        self._validate_model_provider(effective)
         # The pinned config/read view omits experimental_request_user_input;
         # its exact false value and origin are therefore checked in the raw layer.
         if not _same(effective.get('tools'), {'web_search': None}):
@@ -198,6 +195,22 @@ class FixtureProvider:
             if effective.get(key) not in (None, {}, []):
                 raise ValueError('Provider inherited instructions or capability configuration')
         self._configuration_confirmed = True
+
+    def _validate_model_provider(self, effective):
+        provider = dict(self._expected['model_providers']['nightshift_fixture'])
+        provider.update({key: None for key in ('env_key_instructions', 'experimental_bearer_token',
+            'auth', 'aws', 'query_params', 'http_headers', 'env_http_headers',
+            'stream_idle_timeout_ms', 'websocket_connect_timeout_ms')})
+        provider['supports_standalone_web_search'] = False
+        if not _same(effective.get('model_providers'), {'nightshift_fixture': provider}):
+            raise ValueError('Effective model provider differs from generated fixture policy')
+
+    def _environment(self):
+        return {"PATH": os.defpath, "HOME": str(self.home), "CODEX_HOME": str(self.home),
+                "NIGHTSHIFT_FAKE_KEY": FIXTURE_KEY}
+
+    def _admission(self):
+        return None
 
     def _ready(self):
         if self._temporary is None or self._closed or self._used or self._executor is None:
@@ -231,8 +244,7 @@ class FixtureProvider:
         if request.model != self.model or request.cwd != Path('/workspace'):
             raise SessionError('Provider request differs from its bound model or source')
         self._used = True
-        env = {'PATH': os.defpath, 'HOME': str(self.home), 'CODEX_HOME': str(self.home),
-               'NIGHTSHIFT_FAKE_KEY': FIXTURE_KEY}
+        env = self._environment()
         deadline = time.monotonic() + request.budgets.max_runtime_s
         await _check_version(self.binary, self.home, env, deadline)
         remaining = deadline - time.monotonic()
@@ -240,7 +252,7 @@ class FixtureProvider:
             raise SessionError('Provider version check exhausted the request deadline')
         request = replace(request, budgets=replace(request.budgets, max_runtime_s=remaining))
         result = await codex._run_stdio(request, [str(self.binary), 'app-server', '--stdio', '--strict-config'],
-            env=env, external_executor=True, provider_cwd=self.home, config_validator=self._validate_configuration)
+            env=env, external_executor=True, provider_cwd=self.home, config_validator=self._validate_configuration, admission=self._admission())
         if not self._configuration_confirmed and result.ok:
             result.status = 'protocol_error'
             result.diagnostics.append('Effective configuration was not confirmed')

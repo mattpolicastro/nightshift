@@ -149,9 +149,11 @@ class _Journal:
 
 class _Session:
     def __init__(self, request, process, native, normalized, *, external_executor=False,
-                 config_validator=None, config_cwd=None):
+                 config_validator=None, config_cwd=None, admission=None):
         self.external_executor = external_executor
         self.config_validator, self.config_cwd = config_validator, config_cwd
+        self.admission = admission
+        self.outstanding = {}
         self.request, self.process = request, process
         self.native, self.normalized = native, normalized
         self.result = WorkerResult(requested_model=request.model)
@@ -187,8 +189,11 @@ class _Session:
         method = message.get("method", "")
         sensitive = ("id" in message and "method" in message) or (
             isinstance(method, str) and any(word in method.lower() for word in ("auth", "account", "login")))
-        native_record = ({"id": message.get("id"), "method": method, "params": "[redacted]"}
-                         if sensitive else message)
+        response_method = self.outstanding.get(message.get("id")) if type(message.get("id")) is int else None
+        private_response = "id" in message and "method" not in message and (
+            response_method is None or response_method.startswith(("account/", "model/", "config/", "configRequirements/")))
+        native_record = ({"id": message.get("id"), "method": method or response_method, "params": "[redacted]"}
+                         if sensitive or private_response else message)
         self.native.write("received", native_record)
         if "id" in message and "method" in message:
             # Never grant an authorization, invoke a dynamic tool, or solicit input.
@@ -197,11 +202,14 @@ class _Session:
             await self.send({"id": message["id"], "error": {
                 "code": -32601, "message": "Nightshift denies server-initiated requests"}})
             raise _Stop("needs_input", "Server requested an unauthorized action or user input")
+        if self.admission is not None and "id" not in message:
+            self.admission.notification(method, message.get("params"))
         return message
 
     async def rpc(self, method, params):
         self.sequence += 1
         request_id = self.sequence
+        self.outstanding[request_id] = method
         await self.send({"id": request_id, "method": method, "params": params})
         while True:
             message = await self.receive()
@@ -214,6 +222,7 @@ class _Session:
                 raise _Stop("protocol_error", "App-server RPC failed")
             if not isinstance(message.get("result"), dict):
                 raise _Stop("protocol_error", "Missing RPC result")
+            self.outstanding.pop(request_id, None)
             return message["result"]
 
     def item(self, item, completed, timestamp=None):
@@ -357,6 +366,10 @@ class _Session:
             configuration = await self.rpc("config/read", {"includeLayers": True, "cwd": str(self.config_cwd)})
             requirements = await self.rpc("configRequirements/read", {})
             self.config_validator(configuration, requirements)
+        if self.admission is not None:
+            await self.admission.preflight(
+                self.rpc, self.request.model, self.request.reasoning_effort)
+            self.admission.check_ready()
         thread = await self.rpc("thread/start", {
             "model": self.request.model, "cwd": str(self.request.cwd), "ephemeral": True,
             "allowProviderModelFallback": False,
@@ -378,6 +391,8 @@ class _Session:
             params["effort"] = self.request.reasoning_effort
         if self.request.role == "review":
             params["outputSchema"] = REVIEW_SCHEMA
+        if self.admission is not None:
+            self.admission.check_ready()
         turn = await self.rpc("turn/start", params)
         self.result.turn_id = turn.get("turn", {}).get("id")
         if not isinstance(self.result.turn_id, str) or not self.result.turn_id:
@@ -391,7 +406,7 @@ class _Session:
 
 async def _run_stdio(request: WorkerRequest, argv: list[str], *, env: dict[str, str],
                      external_executor: bool = False, provider_cwd: Path | None = None,
-                     config_validator=None) -> WorkerResult:
+                     config_validator=None, admission=None) -> WorkerResult:
     """PRIVATE offline fixture seam. No qualification claim or public activation flag.
 
     Caller supplies an explicit credential-free environment. This function does
@@ -401,7 +416,8 @@ async def _run_stdio(request: WorkerRequest, argv: list[str], *, env: dict[str, 
     fixture owner's responsibility. This does not enable the public worker.
     """
     started = time.monotonic()
-    if (config_validator is not None and (not callable(config_validator) or not external_executor)
+    if (admission is not None and (not external_executor or config_validator is None)
+            or config_validator is not None and (not callable(config_validator) or not external_executor)
             or type(external_executor) is not bool
             or (external_executor and (not isinstance(provider_cwd, Path) or not provider_cwd.is_absolute()))
             or (not external_executor and provider_cwd is not None)):
@@ -431,7 +447,7 @@ async def _run_stdio(request: WorkerRequest, argv: list[str], *, env: dict[str, 
                             duration_s=time.monotonic() - started,
                             diagnostics=["Unable to start fixture app-server process"])
     session = _Session(request, process, *journals, external_executor=external_executor,
-                       config_validator=config_validator, config_cwd=provider_cwd)
+                       config_validator=config_validator, config_cwd=provider_cwd, admission=admission)
     stderr = bytearray()
 
     async def drain_stderr():

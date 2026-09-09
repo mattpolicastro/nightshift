@@ -1,5 +1,19 @@
 # Changelog
 
+## ChatGPT-managed admission policy — 2026-09-08
+
+Added a generated provider policy for the standard ChatGPT subscription route:
+included allowance and already-available ChatGPT credits are permitted, while
+Platform API keys, custom providers and endpoint overrides are rejected. Before
+thread creation, synthetic admission checks account mode, managed usage, a
+bounded unambiguous model catalog and the requested reasoning effort. Observed
+account, quota and model changes fail the attempt, and private account/config
+responses are redacted from native journals.
+
+Production construction remains blocked until the intended macOS keyring account
+can be bound without exposing credentials to the isolated executor. No live model
+call, daemon dispatch change or public activation was made.
+
 ## Generated provider policy and bounded review context — 2026-09-08
 
 Native qualification now uses a one-attempt generated provider home instead of

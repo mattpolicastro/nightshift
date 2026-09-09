@@ -20,6 +20,12 @@ items, fall back to Claude, or be enabled with an operator bypass.
 - Failed worker processes cannot succeed through a success-shaped final event.
 - Evidence-persistence and shipping failures escalate while retaining the
   unpushed candidate; successful review alone cannot activate teardown.
+- A generated ChatGPT-managed provider policy forces the built-in OpenAI route,
+  keyring credentials and ChatGPT login while excluding API-key environment,
+  custom providers and inherited configuration. Synthetic admission validates
+  account mode, managed usage or existing credits, the model catalog and the
+  requested reasoning effort before thread creation. Its production constructor
+  remains blocked pending private keyring account binding.
 
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.
@@ -62,11 +68,10 @@ processes that escape their group. Native worker isolation is a separate gate.
    configured and effective read-only mounts, denied source mutation, scratch,
    network and host isolation, exact source preservation and owned cleanup. See
    [security qualification](codex-security-qualification.md).
-2. Add the qualified runtime launcher, version checks, explicit authentication
-   modes, model capability validation and production permission assembly. The
-   next live qualification targets subscription-only use: require included-usage
-   evidence and fail closed without a proven billing control. Existing login
-   alone is insufficient; no API-key or purchased-credit fallback is allowed.
+2. Qualify the generated ChatGPT policy against a privately bound macOS keyring
+   identity, then add the production launcher and permission assembly. The
+   approved route allows a ChatGPT plan's included allowance and existing
+   ChatGPT credits. Platform API-key and custom-provider fallback remain forbidden.
 3. Integrate driver dispatch, host-owned Git operations, normalized accounting
    and retry/error handling with the daemon's implementation/review phases. The
    bound reviewer prompt now carries validated approved-task and policy data.
@@ -104,6 +109,7 @@ exact evidence identities and cleanup before PASS can qualify. Production
 authentication/accounting and daemon wiring remain incomplete. Synthetic native
 runs now use a generated one-attempt provider home and validate the pinned host
 runtime plus effective configuration layers, origins and requirements before
-thread creation; its subscription constructor deliberately remains blocked.
-See the [subscription-only integration policy](subscription-worker-policy.md)
-for the separate authentication and billing requirements.
+thread creation. The ChatGPT-managed variant also validates account, usage,
+model and reasoning capability evidence; its production constructor deliberately
+remains blocked until keyring identity binding is qualified. See the
+[ChatGPT-managed integration policy](subscription-worker-policy.md).

@@ -192,6 +192,10 @@ transport required for production source export.
 
 ## Remaining production integration
 
+- Privately bind the generated ChatGPT/keyring policy to the intended account.
+  Synthetic admission now rejects API/custom-provider fallback and validates
+  managed usage, model and reasoning capability, but the production constructor
+  remains blocked because a fresh provider home does not isolate the macOS keyring.
 - Reproduce the characterized skills routing with an allowlisted fresh provider
   home and explicit remote capability roots in the production launcher. Keep
   filesystem authority at the executor boundary; do not assume package-local

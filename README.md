@@ -38,7 +38,9 @@ broader reliability across models is not yet established.
 
 OpenAI-compatible endpoints require an operator-supplied translating proxy and
 remain unvalidated end to end. A native Codex transport is under development,
-with execution disabled pending isolation qualification and daemon integration.
+targeting ChatGPT-managed subscription usage with Platform API-key fallback
+disabled. Execution remains disabled pending private account binding and daemon
+integration.
 See [implementation status](docs/native-worker-progress.md). Automatic model
 selection is not implemented.
 

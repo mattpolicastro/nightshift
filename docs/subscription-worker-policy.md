@@ -1,8 +1,10 @@
-# Subscription-only native worker policy
+# ChatGPT-managed native worker policy
 
-Status: integration contract, not an enabled authentication route. Native
-execution remains disabled. The standalone API-key smoke command is a separate,
-explicitly metered operation and must never be a fallback for this route.
+Status: approved integration contract, not an enabled authentication route.
+Native execution remains disabled. This route may use a ChatGPT plan's included
+allowance and already-available ChatGPT credits. It must never use Platform API
+key billing or a custom provider fallback. The standalone API-key smoke command
+is a separate, explicitly metered operation.
 
 ## Provider process
 
@@ -21,17 +23,19 @@ unexpected credential-store or ChatGPT base-URL requirements. Official Codex
 configuration supports forcing `chatgpt` login; it does not turn authentication
 into a billing guarantee. [Codex authentication](https://learn.chatgpt.com/docs/auth).
 
-Before a turn, check the effective account mode, explicitly requested model and
-its capabilities. Disable provider model fallback. A mode change, model reroute,
-missing authentication or authorization error fails the attempt; never switch
-accounts, providers or paid routes automatically. Authentication refresh and
-account identifiers remain private controller concerns, not model tools.
+Before a turn, check the effective account mode, current managed usage, the
+explicitly requested model and its requested reasoning effort. Disable provider
+model fallback. A mode change, model reroute, missing authentication or
+authorization error fails the attempt; never switch accounts or providers
+automatically. Authentication refresh and account identifiers remain private
+controller concerns, not model tools.
 
-## Included usage is a separate decision
+## Managed usage admission
 
-A ChatGPT login is not sufficient evidence of subscription-only execution.
-Official pricing documentation says available credits can continue usage after
-included limits are reached. [Codex pricing](https://learn.chatgpt.com/docs/pricing).
+A ChatGPT login is not sufficient evidence of managed usage availability.
+Official pricing documentation says available ChatGPT credits can continue usage
+after included limits are reached. This policy permits that standard ChatGPT
+route. [Codex pricing](https://learn.chatgpt.com/docs/pricing).
 
 The pinned 0.153.4 generated protocol supplies account mode, quota windows,
 optional credit/spend snapshots and rate-limit notifications. Its inspected
@@ -39,24 +43,27 @@ thread/turn start schemas do not provide an included-usage-only spending switch.
 The documented rate-limit read is telemetry; it does not reserve quota for a
 turn. [App-server account and rate-limit API](https://learn.chatgpt.com/docs/app-server).
 
-Admission must therefore distinguish three things:
+Admission distinguishes three things:
 
 - **Authentication:** effective ChatGPT mode, with no API-key fallback.
 - **Headroom:** fresh, applicable quota buckets and windows, including secondary
   limits when supplied. Missing or ambiguous telemetry cannot mean unlimited.
-- **Billing enforcement:** evidence that this deployment cannot fall through to
-  purchased credits or another chargeable route during the task. A point-in-time
-  `hasCredits=false` value or remaining percentage alone does not establish this.
+- **Billing route:** generated configuration forces ChatGPT authentication and
+  the built-in provider, uses no API-key environment variable, and rejects
+  custom providers or base URLs. Existing ChatGPT credits are allowed.
 
-Do not enable unattended subscription dispatch until the third condition has a
-qualified enforcement mechanism. A runtime/provider spending control or a
-verified non-chargeable deployment policy may supply it; do not invent a boolean
-configuration override that merely asserts it. The current schema inventory
-leaves this control unresolved. Do not change account billing settings, purchase
-credits, redeem resets or send credit-request notifications as part of preflight.
-Do not use the protocol's unstable internal ChatGPT-token injection variant as a
-credential-transfer mechanism; qualify a documented managed login or access-token
-flow separately.
+Synthetic tests now enforce those conditions before thread creation and process
+account, quota and reroute notifications synchronously when observed. Telemetry
+is still a point-in-time signal rather than a reservation. Do not change account
+billing settings, purchase credits, redeem resets or send credit-request
+notifications as part of preflight. Do not use the protocol's unstable internal
+ChatGPT-token injection variant as a credential-transfer mechanism.
+
+Production activation remains blocked until the macOS keyring login can be bound
+to the intended operator account without exposing credentials to the executor.
+A fresh `HOME` and `CODEX_HOME` do not isolate an OS keyring identity. The public
+constructor therefore remains unavailable even though the policy and protocol
+admission paths have synthetic coverage.
 
 ## Accounting and failure handling
 
@@ -67,7 +74,5 @@ account diagnostics and raw responses private; public qualification uses
 synthetic data or separately approved sanitized evidence.
 
 Monitor account and quota changes throughout a native run. Interrupt on a lost
-admission condition, preserve the candidate and report the reason. Interruption
-cannot retroactively guarantee zero in-flight credit use, so it supplements the
-billing enforcement condition rather than replacing it. Never replay a mutating
-turn automatically after a transport, quota or authentication failure.
+admission condition, preserve the candidate and report the reason. Never replay
+a mutating turn automatically after a transport, quota or authentication failure.
