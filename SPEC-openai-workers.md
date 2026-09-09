@@ -1,7 +1,9 @@
 # Native OpenAI workers
 
-**Status: proposed, not implemented.** Written 2026-09-08 against the published
-Nightshift architecture. This document is a delivery plan, not a support claim.
+**Status: partially implemented; native execution disabled.** Written 2026-09-08
+against the published Nightshift architecture. This document is the acceptance
+contract, not a support claim. See [implementation status](docs/native-worker-progress.md)
+for completed work and remaining gates.
 
 ## Decision
 
@@ -10,8 +12,11 @@ Code as the existing driver for Anthropic and the validated Ollama route.
 Select the driver through an endpoint assignment so implementation and review
 can independently use either runtime.
 
-The first supported OpenAI route uses an explicitly configured Platform API
-credential and the official OpenAI endpoint. It does not translate OpenAI
+The next live qualification route uses explicitly selected ChatGPT subscription
+authentication. It must fail closed when included quota or billing policy cannot
+be established; it must never fall back to an API key or purchased credits. The
+separately configured Platform API route remains available as a future metered
+option using a dedicated credential and the official OpenAI endpoint. It does not translate OpenAI
 responses into fabricated Claude stream-json events. It also does not make
 arbitrary “OpenAI-compatible” servers supported merely because they expose a
 similarly named URL.
@@ -54,8 +59,8 @@ Release scope:
 Not included: automatic model selection, a separate planning-model phase,
 Chat Completions adapters, managed translating proxies, arbitrary third-party
 OpenAI-compatible servers, remote public worker services, or a new UI.
-ChatGPT-managed authentication is a separate opt-in follow-up, not an automatic
-fallback for an absent API key. Model choice is explicit; do not hardcode a
+ChatGPT-managed authentication and Platform API authentication are separate
+explicit modes; neither is an automatic fallback for the other. Model choice is explicit; do not hardcode a
 “latest” model or silently substitute another model when access fails.
 
 ## Current coupling that must be removed
@@ -74,8 +79,10 @@ Do not reproduce those assumptions inside the Codex adapter to make it fit.
 
 ## Proposed configuration
 
-This is **future syntax**, not accepted by the current release. Add driver and
-authentication fields to Endpoint; omitted driver means `claude-code`, so
+The API-key syntax below is validated by the implementation branch, but native
+execution remains blocked. Subscription configuration and its preflight policy
+are not implemented yet; an existing Codex login does not enable queued tasks. Driver and authentication fields extend Endpoint; omitted driver
+means `claude-code`, so
 existing configurations retain their meaning. Existing `protocol = "openai"`
 continues to mean the legacy Claude-to-proxy route; never reinterpret it silently.
 
@@ -156,10 +163,13 @@ work and diagnostics for recovery; do not automatically replay a mutating turn.
 
 ## Permissions and credential boundary
 
-Authentication is an explicit setup step, not an agent capability. The first
-release supports a dedicated API credential; preflight checks the effective
-account/auth class. Codex also documents ChatGPT login, but that mode has
-different billing and operational rules. [Official authentication documentation](https://learn.chatgpt.com/docs/auth).
+Authentication is an explicit setup step, not an agent capability. Preflight
+must check the effective account/auth class against the selected mode. An API
+key route requires a dedicated credential. Subscription qualification requires
+ChatGPT login plus evidence that the run stays within included usage; login
+alone is not a billing guarantee. If the runtime cannot enforce the requested
+subscription-only policy, leave that route disabled and report the missing
+control. Do not substitute the API-key route. [Official authentication documentation](https://learn.chatgpt.com/docs/auth).
 
 Build the child environment from an allowlist. Do not source the complete
 Nightshift credential file into tool subprocesses. Keep GH_TOKEN, Slack tokens,

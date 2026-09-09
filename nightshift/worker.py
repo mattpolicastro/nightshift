@@ -166,6 +166,16 @@ class Run:
     events: str
 
 
+def parse_result(run: Run) -> trace.Result | None:
+    """A successful event cannot override an unsuccessful worker process."""
+    parsed = trace.parse(run.events)
+    if parsed is not None and run.returncode != 0:
+        parsed.ok = False
+        if parsed.subtype == "success":
+            parsed.subtype = "error_process_exit"
+    return parsed
+
+
 def _env(
     endpoint: config.Endpoint | None = None,
     *,
@@ -187,6 +197,9 @@ def _env(
     means metered billing; it is not a way to configure an endpoint.
     """
     ep = endpoint or config.DEFAULT_ENDPOINT
+    blocker = ep.execution_blocker()
+    if blocker:
+        raise ValueError(blocker)
     env = dict(os.environ)
 
     # Shared with the CLI so the two cannot drift: `preflight` checking a
@@ -389,7 +402,7 @@ def probe(endpoint: config.Endpoint, model: str, *, context_tokens: int = 0,
             return False, str(exc)
         wrote = (work / "out.txt").exists()
         text = (work / "out.txt").read_text().strip() if wrote else ""
-    result = trace.parse(run.events)
+    result = parse_result(run)
     turns = result.turns if result else 0
     if not wrote:
         return False, "the model never wrote the file — no usable tool loop"
@@ -521,7 +534,7 @@ def probe_readonly(endpoint: config.Endpoint, model: str, *, context_tokens: int
     if edited:
         return False, f"CONTRACT BREACHED — the reviewer {edited}"
 
-    result = trace.parse(run.events)
+    result = parse_result(run)
     if result is None:
         return False, "no result event — nothing was demonstrated"
     writes = [d for d in result.denials if _is_a_write_attempt(d, target)]

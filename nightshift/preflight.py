@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from . import worker
+from . import verification, worker
 from .config import Config, Endpoint
 
 
@@ -90,6 +90,8 @@ def _endpoint_checks(cfg: Config, env: dict[str, str], *, prober=None,
     wasting a 262k model or overrunning a smaller one.
     """
     checks: list[Check] = []
+    if len({ep.name for ep in cfg.endpoints}) != len(cfg.endpoints):
+        return [Check("endpoint names", False, "endpoint names must be unique")]
 
     stray = cfg.undeclared_endpoint_refs()
     if stray:
@@ -145,6 +147,9 @@ def _one_endpoint(cfg: Config, ep: Endpoint, env: dict[str, str], *,
                   prober=None, deep: bool = False) -> list[Check]:
     checks: list[Check] = []
     name = f"endpoint {ep.name}"
+    blocker = ep.execution_blocker()
+    if blocker:
+        return [Check(f"{name} driver", False, blocker)]
 
     if ep.protocol == "openai" and not ep.proxy_url:
         # `claude -p` speaks Anthropic and nothing else, so this endpoint
@@ -300,6 +305,10 @@ def run(cfg: Config, env: dict[str, str], *, runner=None, prober=None,
         # enrolled, and the gap surfaces only as a worker escalation that reads
         # like task ambiguity rather than config. swift-app burned a full
         # run on this before anyone noticed the allow-list was all JS verbs.
+        try:
+            verification.parse_commands(repo.verify)
+        except ValueError as exc:
+            checks.append(Check(f"verify syntax {repo.name}", False, str(exc)))
         blocked = worker.unrunnable_verify_clauses(repo.verify)
         checks.append(
             Check(

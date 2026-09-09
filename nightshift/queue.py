@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import re
 import subprocess
 import time
@@ -102,6 +104,43 @@ class Claim:
     #: Written so a crash mid-revise recovers as a revise. Defaulted, so claim
     #: files from before this existed still load.
     revise: bool = False
+    # Presence, including an unknown/malformed value, blocks automatic recovery.
+    # No production dispatch currently prepares a native claim.
+    native_recovery: dict | None = None
+
+    def _prepare_native(self, run_id: str, recovery_dir: Path) -> None:
+        """Private future-launch seam: return only after the marker is durable.
+
+        This does not authorize or invoke a provider. Any persistence exception
+        must prevent launch; after an ambiguous write the marker stays retained.
+        Existing claim directory must already exist from ordinary admission.
+        """
+        if self.native_recovery is not None:
+            raise ValueError("Native claim was already prepared")
+        if type(run_id) is not str or re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
+            raise ValueError("A fresh native run identity is required")
+        if not isinstance(recovery_dir, Path) or not recovery_dir.is_absolute():
+            raise ValueError("An absolute owned recovery directory is required")
+        if len(str(recovery_dir).encode()) > 4096 or any(ord(c) < 32 for c in str(recovery_dir)):
+            raise ValueError("Invalid recovery directory reference")
+        if not self.path.is_file() or self.path.is_symlink():
+            raise ValueError("An existing regular claim is required before native preparation")
+        self.native_recovery = {"version": 1, "run_id": run_id, "recovery_dir": str(recovery_dir)}
+        descriptor, name = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=self.path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "w") as stream:
+                json.dump(asdict(self), stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+            directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @property
     def path(self) -> Path:
@@ -127,6 +166,7 @@ class Claim:
 class Repair(Enum):
     """What reconcile() did to a disagreeing pair."""
 
+    RETAINED = "retained"  # native state requires explicit inspection, never automatic release
     RESUMABLE = "resumable"  # label + claim + worktree present — watchdog picks up
     RELEASED = "released"  # label with no usable local work — back to ready
     LITTER = "litter"  # claim file with no matching label — deleted
@@ -879,7 +919,7 @@ def reconcile(
 ) -> list[Reconciliation]:
     """Make labels and claim files agree. Call at startup, before claiming.
 
-    Four states, three needing repair:
+    Five states, four needing repair:
 
     | label     | claim file | worktree | action                              |
     |-----------|------------|----------|-------------------------------------|
@@ -887,13 +927,18 @@ def reconcile(
     | working   | yes        | no       | RELEASED — crashed before create    |
     | working   | no         | –        | RELEASED — orphaned                 |
     | absent    | yes        | –        | LITTER — delete the file            |
+    | any       | native     | any      | RETAINED — explicit inspection      |
 
     Releasing rather than resuming a half-created task is deliberate: a
     worktree that does not exist has produced nothing, so re-running from
     `agent:ready` costs one cycle and cannot double-commit.
     """
     claims, repairs = _load_claims(repo)
-    working = {i.number for i in _list(repo, labels.working, runner=runner)}
+    retained = {number for number, record in claims.items() if record.native_recovery is not None}
+    for number in sorted(retained):
+        repairs.append(Reconciliation(Repair.RETAINED, number, "native execution requires inspection"))
+    claims = {number: record for number, record in claims.items() if number not in retained}
+    working = {i.number for i in _list(repo, labels.working, runner=runner)} - retained
 
     # `issue list --label` reads a search index that lags label writes by a few
     # seconds. A daemon restarting straight after a crash therefore sees its own

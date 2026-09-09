@@ -288,7 +288,7 @@ def startup(cfg: Config, repo_dirs: dict[str, Path],
 
         repo_dir = repo_dirs.get(repo.name)
         for r in found:
-            if r.repair is Repair.RESUMABLE and repo_dir is not None:
+            if r.repair in (Repair.RESUMABLE, Repair.RETAINED) and repo_dir is not None:
                 _recover(cfg, repo, repo_dir, r.number)
     return repairs
 
@@ -298,6 +298,19 @@ def _recover(cfg: Config, repo: Repo, repo_dir: Path, number: int) -> None:
     claims, _ = queue._load_claims(repo.name)  # noqa: SLF001 — same package
     claim = claims.get(number)
     if claim is None:
+        return
+
+    if claim.native_recovery is not None:
+        # Marker precedes every future native provider launch. Even an existing
+        # PR or missing worktree cannot establish source/container cleanup.
+        plan = recovery.decide(claim.phase, has_commits=False, branch_pushed=False,
+                               pr_url=None, native_pending=True)
+        log.warning("retain native #%s for inspection: %s", number, plan.reason)
+        try:
+            outcomes.record(repo.name, number, state="needs_decision", reason=plan.reason,
+                            escalated=False, native_retained=True)
+        except Exception as exc:  # Attention reporting cannot authorize cleanup.
+            log.warning("could not record retained native #%s: %s", number, exc)
         return
 
     worktree = Path(claim.worktree)
@@ -397,8 +410,16 @@ def endpoints_ready(cfg: Config, repo: Repo, *, prober=None) -> tuple[bool, str]
     Repos on the default endpoint never probe anything, so this costs today's
     configuration exactly nothing.
     """
+    if len({ep.name for ep in cfg.endpoints}) != len(cfg.endpoints):
+        return False, "endpoint names must be unique; no fallback will run"
+    unresolved = cfg.undeclared_endpoint_refs()
     for phase in ("implement", "review"):
+        if cfg.model_spec(phase, repo) in unresolved:
+            return False, f"{phase} assignment names an undeclared endpoint; no fallback will run"
         assignment = cfg.assign(phase, repo)
+        blocker = assignment.endpoint.execution_blocker()
+        if blocker:
+            return False, f"{phase} endpoint {assignment.endpoint.name}: {blocker}"
         if assignment.endpoint.is_default:
             continue
         endpoint = assignment.endpoint

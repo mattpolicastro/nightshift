@@ -37,8 +37,13 @@ and green GitHub CI on 2026-09-08. This validates that pipeline for one task;
 broader reliability across models is not yet established.
 
 OpenAI-compatible endpoints require an operator-supplied translating proxy and
-remain unvalidated end to end. Native Codex workers and automatic model selection
-are not implemented.
+remain unvalidated end to end. A native Codex transport is under development,
+targeting ChatGPT-managed subscription usage with Platform API-key fallback
+disabled. Execution remains disabled pending stable credential enrollment and
+daemon integration; a keyring-home lease and restart-retention marker are now
+implemented behind the hard dispatch gate.
+See [implementation status](docs/native-worker-progress.md). Automatic model
+selection is not implemented.
 
 See [provider setup and support status](docs/providers.md) and
 [validation evidence](docs/validation.md). Planning is task preparation, not a
