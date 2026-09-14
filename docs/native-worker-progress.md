@@ -67,7 +67,9 @@ items, fall back to Claude, or be enabled with an operator bypass.
   typed isolated-verification clauses, and starts a fresh managed ChatGPT turn
   only after an immutable source mount is confirmed. PASS requires a distinct
   thread, structured verdict, unchanged source/Claim/Git state and complete
-  provider, executor, session and credential cleanup.
+  provider, executor, session and credential cleanup. A live review canary over
+  a real verified synthetic commit returned a bound structured PASS with every
+  isolation, identity, accounting and cleanup check satisfied.
 
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.

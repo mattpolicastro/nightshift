@@ -195,7 +195,8 @@ transport required for production source export.
 - Join the private verified implementation and stable reviewer adapters under one
   durable controller. The reviewer now binds exact Git-derived source and diff to
   typed verification, confirms an immutable mount before a fresh authenticated
-  turn, and requires unchanged state plus full cleanup before PASS.
+  turn, and requires unchanged state plus full cleanup before PASS. A live
+  synthetic-candidate review canary has passed this boundary.
 - Persist a native recovery marker before provider launch and recognize it ahead
   of ordinary queue/Git/PR recovery. The dormant marker and retention behavior
   now exist behind current dispatch gates; production coordination still must

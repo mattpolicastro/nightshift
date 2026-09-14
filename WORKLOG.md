@@ -46,6 +46,12 @@ credential lease clean up, the Claim remains unchanged and the final host Git
 state still matches. Forged verification objects and Boolean lookalike exit codes
 are rejected before launch. The reviewer is still private and unwired.
 
+A live reviewer canary started from a synthetic two-commit Git repository and a
+real successful pinned-container verification. A fresh managed review thread
+returned structured PASS with the immutable mount, distinct context, exact
+candidate and Claim, review-phase accounting, and every cleanup gate confirmed.
+No branch was pushed and no shipping or daemon path was invoked.
+
 ## Stable credential lease and native recovery marker — 2026-09-09
 
 Added a private stable `CODEX_HOME` lease for macOS keyring-backed metadata

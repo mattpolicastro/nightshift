@@ -86,6 +86,11 @@ quota update without workspace identity during a turn. That notification revokes
 admission until fresh account and quota reads rebind the private identity and
 confirm available managed usage. Exhausted telemetry fails without refresh.
 
+The same managed route has passed a live independent-review canary over an
+immutable synthetic candidate mount after real isolated verification. It used a
+fresh thread and returned structured PASS with review accounting and all cleanup
+gates confirmed. Production dispatch remains disabled.
+
 ## Accounting and failure handling
 
 Keep OpenAI account/auth/bucket state separate from Anthropic subscription
