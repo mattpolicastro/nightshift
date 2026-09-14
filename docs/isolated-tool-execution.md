@@ -192,10 +192,10 @@ transport required for production source export.
 
 ## Remaining production integration
 
-- Add a stable authenticated reviewer over the immutable exact-candidate mount.
-  The canary-qualified implementation runner now joins the enrolled credential
-  lease, bound admission, isolated executor, host-owned candidate commit and
-  isolated verification, then stops at `verified_pending_review`.
+- Join the private verified implementation and stable reviewer adapters under one
+  durable controller. The reviewer now binds exact Git-derived source and diff to
+  typed verification, confirms an immutable mount before a fresh authenticated
+  turn, and requires unchanged state plus full cleanup before PASS.
 - Persist a native recovery marker before provider launch and recognize it ahead
   of ordinary queue/Git/PR recovery. The dormant marker and retention behavior
   now exist behind current dispatch gates; production coordination still must

@@ -62,6 +62,12 @@ items, fall back to Claude, or be enabled with an operator bypass.
   worktree, symbolic branch and base commit across every handoff; preserves
   implementation files and accounting on failure; and stops at
   `verified_pending_review`, which cannot authorize shipping.
+- A private stable reviewer independently reloads the exact baseline and
+  candidate from the Claim's Git worktree, derives and validates the diff, checks
+  typed isolated-verification clauses, and starts a fresh managed ChatGPT turn
+  only after an immutable source mount is confirmed. PASS requires a distinct
+  thread, structured verdict, unchanged source/Claim/Git state and complete
+  provider, executor, session and credential cleanup.
 
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.
@@ -104,10 +110,10 @@ processes that escape their group. Native worker isolation is a separate gate.
    configured and effective read-only mounts, denied source mutation, scratch,
    network and host isolation, exact source preservation and owned cleanup. See
    [security qualification](codex-security-qualification.md).
-2. Add a stable authenticated reviewer over the existing immutable exact-candidate
-   mount and join it after `verified_pending_review`. The bound reviewer prompt
-   already carries validated approved-task and policy data.
-3. Integrate the private coordinator, durable accounting persistence, exclusive
+2. Join the verified implementation coordinator and stable reviewer into one
+   controller that advances the durable Claim, persists both phases' accounting,
+   and still stops before shipping.
+3. Integrate that controller, durable accounting persistence, exclusive
    claim/worktree ownership and retained recovery outcomes with daemon dispatch.
 4. Run an end-to-end sandbox task with independent review, isolated verification,
    host-owned PR creation and GitHub CI before enabling production dispatch.

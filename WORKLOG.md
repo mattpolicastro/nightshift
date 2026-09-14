@@ -36,6 +36,16 @@ keeps candidate files, accounting and recovery state on failure. Success stops a
 claim ownership and durable accounting persistence remain controller duties, and
 authenticated immutable review remains a separate required phase.
 
+A separate private stable reviewer now derives baseline, candidate bytes and the
+complete diff from exact Git SHAs before credential use. It requires a durable
+reviewing-phase Claim, the Claim's current branch and candidate, typed successful
+isolated-verification clauses, a fresh read-only container mount and a review
+thread distinct from implementation. Structured PASS qualifies only after the
+provider and executor stop, immutable source export matches, the container and
+credential lease clean up, the Claim remains unchanged and the final host Git
+state still matches. Forged verification objects and Boolean lookalike exit codes
+are rejected before launch. The reviewer is still private and unwired.
+
 ## Stable credential lease and native recovery marker — 2026-09-09
 
 Added a private stable `CODEX_HOME` lease for macOS keyring-backed metadata
