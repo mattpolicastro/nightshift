@@ -80,6 +80,15 @@ items, fall back to Claude, or be enabled with an operator bypass.
   block replay and require operator inspection. Even a complete PASS stops at
   `reviewed_pending_human` and cannot authorize shipping.
 
+The complete private controller has also passed a live two-turn canary over a
+synthetic local Git repository. A managed implementation turn produced the exact
+single-file candidate, the pinned verifier accepted its committed SHA, and a fresh
+managed review thread returned structured PASS over the immutable candidate.
+Both phase receipts were durable, the Claim remained in `reviewing`, implementation
+and review threads differed, every cleanup gate succeeded, and the final result
+still denied shipping. The canary had no Git remote and did not use the daemon or
+GitHub queue.
+
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.
 A transitional Claude adapter now emits typed results while preserving legacy

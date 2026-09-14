@@ -65,6 +65,16 @@ identity in a rejected result; receipts now preserve both expected and observed
 values. The controller stops at `reviewed_pending_human`, with daemon dispatch and
 shipping still disabled.
 
+The joined controller then passed a live private canary over a synthetic local Git
+repository with no remote. One managed implementation turn created the exact
+requested single-file candidate, the pinned verifier accepted the committed SHA,
+and a fresh managed review thread returned structured PASS over the immutable
+source. The durable journal finished both accounting phases, the Claim remained
+retained in `reviewing`, the implementation and review threads were distinct, and
+all provider, executor, container and credential cleanup gates succeeded. The
+result remained `reviewed_pending_human` with shipping disabled; no daemon, GitHub
+queue, push or PR path was invoked.
+
 ## Stable credential lease and native recovery marker — 2026-09-09
 
 Added a private stable `CODEX_HOME` lease for macOS keyring-backed metadata
