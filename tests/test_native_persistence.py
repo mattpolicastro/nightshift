@@ -368,3 +368,130 @@ def test_reasoning_effort_remains_bound_before_any_provider_turn(setup):
         journal.start('implement')
         assert journal.state['binding']['implementation_reasoning_effort'] == 'medium'
         assert journal.state['binding']['review_reasoning_effort'] == 'high'
+
+
+@pytest.fixture
+def pre_worktree(fresh_claim):
+    fixture = fresh_claim
+    fixture.repository = fixture.worktree.with_name('source-repository')
+    fixture.worktree.rename(fixture.repository)
+    fixture.worktree_root = fixture.worktree.parent
+    fixture.claim = replace(fixture.claim, branch='native/fixture-7')
+    fixture.claim.write()
+    fixture.prepare = lambda: module.NativePreparationLock(
+        fixture.claim, fixture.worktree, fixture.worktree_root, fixture.recovery)
+    return fixture
+
+
+def test_ownership_exists_before_git_and_survives_full_handoff(pre_worktree):
+    from test_candidate_pipeline import git
+    fixture = pre_worktree
+    lock = fixture.claim.path.with_name(fixture.claim.path.name + '.native.lock')
+    with fixture.prepare() as owner:
+        assert not fixture.worktree.exists()
+        assert _probe_lock(lock) == 'blocked'
+        assert json.loads(fixture.claim.path.read_text())['native_recovery'] is None
+        git(fixture.repository, 'worktree', 'add', '-b', fixture.claim.branch,
+            str(fixture.worktree), fixture.binding['base_sha'])
+        with module.NativeClaimLease(fixture.claim, fixture.worktree, fixture.recovery,
+                                     fixture.binding, ownership=owner) as lease:
+            with lease.open_journal() as journal:
+                journal.start('implement')
+                assert _probe_lock(lock) == 'blocked'
+            assert _probe_lock(lock) == 'blocked'
+        assert _probe_lock(lock) == 'blocked'
+    assert _probe_lock(lock) == 'acquired'
+    assert fixture.worktree.exists() and fixture.claim.path.exists()
+    with pytest.raises(SessionError):
+        with fixture.prepare(): pytest.fail('preparation replayed')
+
+
+def test_preparation_performs_no_git_or_provider_operations(pre_worktree, monkeypatch):
+    def forbidden(*args, **kwargs): pytest.fail('Git invoked by ownership primitive')
+    monkeypatch.setattr(module.candidate, '_git', forbidden)
+    monkeypatch.setattr(module.snapshot, 'from_git', forbidden)
+    with pre_worktree.prepare(): pass
+    assert not pre_worktree.worktree.exists()
+
+
+@pytest.mark.parametrize('fault', ['existing', 'dangling', 'root-mode', 'recovery-mode',
+                                   'changed-claim', 'old-lock', 'revision'])
+def test_pre_worktree_ambiguity_never_admits_creation(pre_worktree, fault):
+    fixture = pre_worktree
+    if fault == 'existing': fixture.worktree.mkdir()
+    if fault == 'dangling': fixture.worktree.symlink_to('/synthetic/missing')
+    if fault == 'root-mode': fixture.worktree_root.chmod(0o777)
+    if fault == 'recovery-mode': fixture.recovery.chmod(0o755)
+    if fault == 'changed-claim': replace(fixture.claim, started_at='other-owner').write()
+    if fault == 'old-lock':
+        fixture.claim.path.with_name(fixture.claim.path.name + '.native.lock').write_text('')
+    if fault == 'revision': fixture.claim = replace(fixture.claim, revise=True)
+    with pytest.raises(SessionError):
+        with fixture.prepare(): pytest.fail('ambiguous preparation admitted')
+
+
+@pytest.mark.parametrize('failure_at', [1, 2])
+def test_pre_worktree_fsync_failure_leaves_tombstone_and_no_git(pre_worktree, monkeypatch, failure_at):
+    original = module.os.fsync
+    calls = [0]
+    def failed(fd):
+        calls[0] += 1
+        if calls[0] == failure_at: raise OSError('synthetic fault')
+        original(fd)
+    monkeypatch.setattr(module.os, 'fsync', failed)
+    with pytest.raises(SessionError):
+        with pre_worktree.prepare(): pytest.fail('uncertain ownership returned')
+    assert not pre_worktree.worktree.exists()
+    assert pre_worktree.claim.path.with_name(pre_worktree.claim.path.name + '.native.lock').exists()
+    with pytest.raises(SessionError):
+        with pre_worktree.prepare(): pytest.fail('uncertain preparation replayed')
+
+
+def test_claim_changed_after_git_cannot_transfer_ownership(pre_worktree):
+    from test_candidate_pipeline import git
+    fixture = pre_worktree
+    with fixture.prepare() as owner:
+        git(fixture.repository, 'worktree', 'add', '-b', fixture.claim.branch,
+            str(fixture.worktree), fixture.binding['base_sha'])
+        replace(fixture.claim, started_at='concurrent-owner').write()
+        with pytest.raises(SessionError):
+            with module.NativeClaimLease(fixture.claim, fixture.worktree, fixture.recovery,
+                                         fixture.binding, ownership=owner):
+                pytest.fail('changed claim received native marker')
+        assert json.loads(fixture.claim.path.read_text())['native_recovery'] is None
+    assert fixture.worktree.exists()
+
+
+def test_exception_before_marker_keeps_recovery_tombstone(pre_worktree):
+    with pytest.raises(KeyboardInterrupt):
+        with pre_worktree.prepare(): raise KeyboardInterrupt()
+    assert pre_worktree.claim.path.with_name(pre_worktree.claim.path.name + '.native.lock').exists()
+    assert json.loads(pre_worktree.claim.path.read_text())['native_recovery'] is None
+
+
+@pytest.mark.parametrize('direction', ['worktree-inside-recovery', 'recovery-inside-worktree', 'equal'])
+def test_preparation_namespaces_cannot_overlap(pre_worktree, direction):
+    fixture = pre_worktree
+    worktree, recovery = fixture.worktree, fixture.recovery
+    if direction == 'worktree-inside-recovery': worktree = recovery / 'candidate'
+    elif direction == 'recovery-inside-worktree': recovery = worktree / 'recovery'
+    else: recovery = worktree
+    claim = replace(fixture.claim, worktree=str(worktree))
+    with pytest.raises(SessionError):
+        module.NativePreparationLock(claim, worktree, fixture.worktree_root, recovery)
+    assert not fixture.claim.path.with_name(fixture.claim.path.name + '.native.lock').exists()
+
+
+def test_ownership_started_survives_initial_sync_failure(pre_worktree, monkeypatch):
+    owner = pre_worktree.prepare()
+    assert owner.ownership_started is False
+    def fail(fd): raise OSError('synthetic sync failure')
+    monkeypatch.setattr(module.os, 'fsync', fail)
+    with pytest.raises(SessionError):
+        with owner: pytest.fail('uncertain ownership returned')
+    assert owner.ownership_started is True
+    with pytest.raises(AttributeError): owner.ownership_started = False
+    another = pre_worktree.prepare()
+    with pytest.raises(SessionError):
+        with another: pytest.fail('tombstone replayed')
+    assert another.ownership_started is False

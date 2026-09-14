@@ -49,9 +49,11 @@ review turn over an immutable candidate mount are implemented behind the private
 gate. A private controller now holds exclusive claim ownership, durably records
 both model-call intents and returned token evidence, advances the exact Claim for
 review, and stops after an independently reviewed candidate. Daemon coordination
-and shipping through this route remain disabled. A dormant managed-task profile
-and continuous prelaunch lease now validate the subscription-only inputs and keep
-native ownership intact from Claim preparation through controller cleanup.
+and shipping through this route remain disabled. A dormant private task lane now
+validates the subscription-only inputs, creates durable ownership before any Git
+operation, fetches an explicit public GitHub base without credentials, builds a
+fresh hook-free worktree, and keeps the same lock through controller cleanup.
+Its public entry point is blocked and it cannot dispatch, clean up, push or ship.
 See [implementation status](docs/native-worker-progress.md). Automatic model
 selection is not implemented.
 

@@ -288,6 +288,31 @@ class NativeAttemptJournal:
         return False
 
 
+def _read_initial_claim(directory, claim_path, expected_claim, initial_bytes=None, initial_stamp=None):
+    descriptor = os.open(claim_path.name,
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    with os.fdopen(descriptor, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        # Ordinary claims may be 0644. The native CAS replacement is 0600.
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o022
+                or not 0 < info.st_size <= 65536):
+            raise SessionError('Initial claim is not an owned regular file')
+        data = stream.read(65537)
+        after = os.fstat(stream.fileno())
+    stamp = lambda i: (i.st_dev, i.st_ino, i.st_size, i.st_mtime_ns, i.st_ctime_ns)
+    current = os.stat(claim_path.name, dir_fd=directory, follow_symlinks=False)
+    if len(data) > 65536 or stamp(info) != stamp(after) or stamp(info) != stamp(current):
+        raise SessionError('Initial claim changed while read')
+    parsed = json.loads(data, object_pairs_hook=_unique,
+        parse_constant=lambda value: (_ for _ in ()).throw(ValueError('Invalid JSON constant')))
+    if _encode(parsed) != _encode(asdict(expected_claim)):
+        raise SessionError('Initial claim differs from expected ownership')
+    if initial_bytes is not None and (data != initial_bytes or stamp(info) != initial_stamp):
+        raise SessionError('Initial claim changed before native replacement')
+    return data, stamp(info)
+
+
 class NativeClaimLease:
     """Fresh claimed-to-native preparation under one persistent ownership lock.
 
@@ -297,7 +322,7 @@ class NativeClaimLease:
     its close cannot unlock this lease and there is no unlocked handoff window.
     """
     def __init__(self, expected_claim: queue.Claim, worktree: Path,
-                 recovery_parent: Path, binding: dict):
+                 recovery_parent: Path, binding: dict, *, ownership=None):
         if (type(expected_claim) is not queue.Claim or expected_claim.phase != 'claimed'
                 or expected_claim.revise is not False or expected_claim.native_recovery is not None
                 or type(expected_claim.repo) is not str or not expected_claim.repo
@@ -318,6 +343,7 @@ class NativeClaimLease:
         self._entered = self._ready = self._opened = False
         self._initial_bytes = self._initial_stamp = None
         self._journal = None
+        self._ownership = ownership
 
     def _owned_directory(self, path, *, private=False):
         descriptor = _open_directory(path)
@@ -329,28 +355,9 @@ class NativeClaimLease:
         return descriptor
 
     def _initial(self):
-        descriptor = os.open(self.marker.claim_path.name,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self._control._parent)
-        with os.fdopen(descriptor, 'rb') as stream:
-            info = os.fstat(stream.fileno())
-            # Ordinary claims may be 0644. The native CAS replacement is 0600.
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                    or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o022
-                    or not 0 < info.st_size <= 65536):
-                raise SessionError('Initial claim is not an owned regular file')
-            data = stream.read(65537)
-            after = os.fstat(stream.fileno())
-        stamp = lambda i: (i.st_dev, i.st_ino, i.st_size, i.st_mtime_ns, i.st_ctime_ns)
-        current = os.stat(self.marker.claim_path.name, dir_fd=self._control._parent, follow_symlinks=False)
-        if len(data) > 65536 or stamp(info) != stamp(after) or stamp(info) != stamp(current):
-            raise SessionError('Initial claim changed while read')
-        parsed = json.loads(data, object_pairs_hook=_unique,
-            parse_constant=lambda value: (_ for _ in ()).throw(ValueError('Invalid JSON constant')))
-        if _encode(parsed) != _encode(asdict(self.expected_claim)):
-            raise SessionError('Initial claim differs from expected ownership')
-        if self._initial_bytes is not None and (data != self._initial_bytes or stamp(info) != self._initial_stamp):
-            raise SessionError('Initial claim changed before native replacement')
-        self._initial_bytes, self._initial_stamp = data, stamp(info)
+        self._initial_bytes, self._initial_stamp = _read_initial_claim(
+            self._control._parent, self.marker.claim_path, self.expected_claim,
+            self._initial_bytes, self._initial_stamp)
 
     def _paths(self):
         for path, held, private in ((self.marker.claim_path.parent, self._control._parent, False),
@@ -374,13 +381,25 @@ class NativeClaimLease:
         self._entered = True
         try:
             control = self._control
-            control._parent = self._owned_directory(self.marker.claim_path.parent)
-            # Even an unlocked old file is retained history, never a fresh run.
-            control._lock = os.open(control._lock_name,
-                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=control._parent)
-            fcntl.flock(control._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            os.fsync(control._lock)
-            os.fsync(control._parent)
+            if self._ownership is None:
+                control._parent = self._owned_directory(self.marker.claim_path.parent)
+                # Even an unlocked old file is retained history, never a fresh run.
+                control._lock = os.open(control._lock_name,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=control._parent)
+                fcntl.flock(control._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                os.fsync(control._lock)
+                os.fsync(control._parent)
+            else:
+                owner = self._ownership
+                if (type(owner) is not NativePreparationLock or owner._handed_off
+                        or owner.expected_claim != self.expected_claim or owner.worktree != self.worktree
+                        or owner.recovery_parent != self.recovery_parent):
+                    raise SessionError('Native preparation ownership differs')
+                owner._same()
+                owner._handed_off = True
+                control._parent = os.dup(owner._parent)
+                control._lock = os.dup(owner._lock)
+                self._initial_bytes, self._initial_stamp = owner._initial_bytes, owner._initial_stamp
             self._initial()
             self._recovery_parent_fd = self._owned_directory(self.recovery_parent, private=True)
             self._worktree_fd = self._owned_directory(self.worktree)
@@ -437,4 +456,122 @@ class NativeClaimLease:
             if descriptor is not None:
                 os.close(descriptor)
                 setattr(self, field, None)
+        return False
+
+
+class NativePreparationLock:
+    """Durable ownership before any Git creation, fetch, or base resolution.
+
+    Performs no Git, credential or provider calls. The caller may only create
+    the absent target while holding this lease. Existing history is never
+    reused, even if the claim still says claimed and no source was created.
+    """
+    def __init__(self, expected_claim: queue.Claim, worktree: Path,
+                 worktree_root: Path, recovery_parent: Path):
+        if (type(expected_claim) is not queue.Claim or expected_claim.phase != 'claimed'
+                or expected_claim.revise is not False or expected_claim.native_recovery is not None
+                or type(expected_claim.repo) is not str or not expected_claim.repo
+                or type(expected_claim.number) is not int or expected_claim.number <= 0
+                or type(expected_claim.branch) is not str or not expected_claim.branch
+                or type(expected_claim.started_at) is not str or not expected_claim.started_at
+                or any(not isinstance(path, Path) or not path.is_absolute() or '..' in path.parts
+                       for path in (worktree, worktree_root, recovery_parent))
+                or expected_claim.worktree != str(worktree) or worktree_root not in worktree.parents
+                or recovery_parent == worktree or worktree in recovery_parent.parents
+                or recovery_parent in worktree.parents):
+            raise SessionError('Fresh bounded native preparation ownership is required')
+        self.expected_claim = queue.Claim(**json.loads(_encode(asdict(expected_claim))))
+        self.worktree, self.worktree_root, self.recovery_parent = worktree, worktree_root, recovery_parent
+        self._parent = self._lock = None
+        self._directories = []
+        self._initial_bytes = self._initial_stamp = None
+        self._entered = self._ready = self._handed_off = False
+        self._ownership_started = False
+        self._ownership_started = False
+        self._lock_name = expected_claim.path.name + '.native.lock'
+
+    @property
+    def ownership_started(self):
+        """Whether this attempt created persistent native ownership evidence."""
+        return self._ownership_started
+
+    @property
+    def ownership_started(self):
+        return self._ownership_started
+
+    def _directory(self, path, private=False):
+        descriptor = _open_directory(path)
+        try:
+            for ancestor in (path, *path.parents):
+                info = ancestor.lstat()
+                sticky = (ancestor in {Path('/tmp'), Path('/private/tmp')} and info.st_uid == 0
+                          and bool(info.st_mode & stat.S_ISVTX))
+                if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in {0, os.getuid()}
+                        or (info.st_mode & 0o022 and not sticky)):
+                    raise SessionError('Native preparation ancestors are not protected')
+            info = os.fstat(descriptor)
+            if info.st_uid != os.getuid() or (private and not _private(info, directory=True)):
+                raise SessionError('Native preparation root ownership differs')
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def _same(self):
+        if not self._ready or self._lock is None:
+            raise SessionError('Native preparation ownership is unavailable')
+        for path, held, private in self._directories:
+            descriptor = self._directory(path, private)
+            try:
+                a, b = os.fstat(descriptor), os.fstat(held)
+                if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+                    raise SessionError('Native preparation root changed')
+            finally:
+                os.close(descriptor)
+        current = os.stat(self._lock_name, dir_fd=self._parent, follow_symlinks=False)
+        held = os.fstat(self._lock)
+        if not _private(current) or (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+            raise SessionError('Native preparation lock changed')
+        _read_initial_claim(self._parent, self.expected_claim.path, self.expected_claim,
+                            self._initial_bytes, self._initial_stamp)
+
+    def __enter__(self):
+        if self._entered:
+            raise SessionError('Native preparation ownership cannot be reused')
+        self._entered = True
+        try:
+            self._parent = self._directory(self.expected_claim.path.parent)
+            self._directories.append((self.expected_claim.path.parent, self._parent, False))
+            self._lock = os.open(self._lock_name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=self._parent)
+            self._ownership_started = True
+            self._ownership_started = True
+            fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.fsync(self._lock)
+            os.fsync(self._parent)
+            self._initial_bytes, self._initial_stamp = _read_initial_claim(
+                self._parent, self.expected_claim.path, self.expected_claim)
+            for path, private in ((self.worktree_root, False), (self.worktree.parent, False),
+                                  (self.recovery_parent, True)):
+                self._directories.append((path, self._directory(path, private), private))
+            if os.path.lexists(self.worktree):
+                raise SessionError('Native preparation target already exists')
+            self._ready = True
+            self._same()
+            return self
+        except BaseException as exc:
+            self.__exit__(None, None, None)
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise SessionError('Native preparation stopped; retain ownership evidence') from None
+
+    def __exit__(self, exc_type, exc, traceback):
+        self._ready = False
+        for _, descriptor, _ in self._directories:
+            os.close(descriptor)
+        self._directories = []
+        self._parent = None
+        if self._lock is not None:
+            os.close(self._lock)
+            self._lock = None
         return False

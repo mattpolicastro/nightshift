@@ -96,12 +96,17 @@ review and verification images; the pinned host runtime; an owned local Docker
 socket; private credential/recovery roots; and an opaque identity reference.
 Mixed drivers, API-key/custom providers and fallback fields are rejected.
 
-Native Claim ownership can now begin before marker creation and remain continuous
-through controller cleanup. The preparation lease checks the exact clean Git base,
-branch, worktree and persisted fresh Claim, creates a private recovery directory,
-and durably installs the `implementing` marker before opening the attempt journal
-under the same cross-process lock. Unreadable claims, unsafe claim directories and
-orphan native lock tombstones block destructive reconciliation and re-admission.
+Native Claim ownership can now begin before any Git operation and remain continuous
+through controller cleanup. A dormant private task lane validates the approved task,
+verification command, private identity reference and fresh persisted Claim before
+creating an exclusive tombstone. While holding that lock it resolves an explicit
+public GitHub branch through an anonymous isolated fetch, imports the exact commit,
+and creates a new branch and worktree without checkout hooks or content filters.
+It then durably installs the `implementing` marker and opens the attempt journal
+under the same cross-process lock. Existing targets, partial preparation, ambiguous
+fsync and cancellation retain their evidence and require operator inspection.
+Unreadable claims, unsafe claim directories and orphan native lock tombstones block
+destructive reconciliation and re-admission.
 Native recovery remains attention-visible regardless of remote issue/PR state
 until an explicit local recovery action clears it. These paths remain unwired from
 normal daemon dispatch.

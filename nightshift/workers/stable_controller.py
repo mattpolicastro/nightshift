@@ -63,6 +63,21 @@ def _review_input(root, base_sha, implemented, verify_command, verification_imag
                        changes, evidence, approved_task, review_policy)
 
 
+def _controller_binding(base_sha, request, verify_command, approved_task, review_policy,
+                        review_model, image_id, verification_image_id, review_image_id,
+                        review_reasoning_effort):
+    """One exact durable binding shared by preparation and execution."""
+    context = review_context.payload(approved_task, review_policy)
+    return {'base_sha': base_sha, 'verify_command': verify_command,
+            'implementation_image_id': image_id, 'verification_image_id': verification_image_id,
+            'implementation_model': request.model, 'review_model': review_model,
+            'implementation_reasoning_effort': request.reasoning_effort,
+            'review_reasoning_effort': review_reasoning_effort,
+            'review_image_id': review_image_id,
+            'approved_context_fingerprint': hashlib.sha256(json.dumps(context,
+                sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
+
+
 async def _run_attempt(worktree: Path, base_sha: str, request: WorkerRequest,
         verify_command: str, *, approved_task: ApprovedTask, review_policy: ReviewPolicy,
         review_model: str, credential_root: Path, binary: Path, image_id: str,
@@ -85,15 +100,9 @@ async def _run_attempt(worktree: Path, base_sha: str, request: WorkerRequest,
         initial = validate_marker(native_marker, recovery_dir)
         if initial.phase != 'implementing' or native_marker.worktree != worktree:
             raise ValueError('Prepared implementation claim required')
-        context = review_context.payload(approved_task, review_policy)
-        binding = {'base_sha': base_sha, 'verify_command': verify_command,
-            'implementation_image_id': image_id, 'verification_image_id': verification_image_id,
-            'implementation_model': request.model, 'review_model': review_model,
-            'implementation_reasoning_effort': request.reasoning_effort,
-            'review_reasoning_effort': review_reasoning_effort,
-            'review_image_id': review_image_id,
-            'approved_context_fingerprint': hashlib.sha256(json.dumps(context,
-                sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
+        binding = _controller_binding(base_sha, request, verify_command, approved_task,
+            review_policy, review_model, image_id, verification_image_id,
+            review_image_id, review_reasoning_effort)
         if prepared_journal is not None:
             if (type(prepared_journal) is not NativeAttemptJournal
                     or prepared_journal.marker != native_marker

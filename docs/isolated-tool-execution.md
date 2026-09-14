@@ -192,26 +192,17 @@ transport required for production source export.
 
 ## Remaining production integration
 
-- Join the private verified implementation and stable reviewer adapters under one
-  durable controller. The reviewer now binds exact Git-derived source and diff to
-  typed verification, confirms an immutable mount before a fresh authenticated
-  turn, and requires unchanged state plus full cleanup before PASS. A live
-  synthetic-candidate review canary has passed this boundary.
-- Persist a native recovery marker before provider launch and recognize it ahead
-  of ordinary queue/Git/PR recovery. The dormant marker and retention behavior
-  now exist behind current dispatch gates; production coordination still must
-  join it atomically to the credential lease and container lifecycle.
 - Reproduce the characterized skills routing with an allowlisted fresh provider
   home and explicit remote capability roots in the production launcher. Keep
   filesystem authority at the executor boundary; do not assume package-local
   symlink confinement or rely solely on discovery-disable flags.
-- Join the verified implementation coordinator and immutable reviewer into one
-  owned lifecycle with durable accounting persistence.
-- Run native candidates' verification scripts inside the qualified executor.
-  The legacy host verifier is not filesystem/network isolation; a modified test
-  or install script must not regain host access through that path.
 - Wire typed driver results, explicit authentication/quota policy and native
-  accounting into daemon implementation/review dispatch.
+  accounting into a fail-closed daemon dispatch route. Keep the existing public
+  activation surface blocked until startup recovery and operator controls use the
+  same native ownership state.
+- Define a separately qualified authenticated fetch policy before native tasks can
+  work with private repositories; the dormant lane intentionally supports anonymous
+  public GitHub bases only.
 - Run an isolated sandbox task through verification, independent review and PR
   creation. Keep human merge review and exact-candidate checks.
 

@@ -75,14 +75,24 @@ all provider, executor, container and credential cleanup gates succeeded. The
 result remained `reviewed_pending_human` with shipping disabled; no daemon, GitHub
 queue, push or PR path was invoked.
 
-The next dormant integration layer adds a managed task profile and continuous
-prelaunch Claim lease without enabling dispatch. The profile requires the standard
+A dormant integration layer adds a managed task profile and continuous prelaunch
+Claim lease without enabling dispatch. The profile requires the standard
 ChatGPT route for both phases, exact models/reasoning/budgets, pinned runtime and
 image identities, protected local paths and an opaque private identity reference;
 API-key, custom-provider, mixed-driver and fallback fields fail closed. The lease
 holds one cross-process lock while it verifies the clean Git base/branch/worktree,
 durably advances a fresh Claim to `implementing`, creates private recovery state,
 and hands the same lock description into the controller journal.
+
+A private task lane now composes that profile, lease and controller without adding
+a daemon route. It validates task context and identity before ownership, creates a
+durable tombstone before every Git operation, fetches only an explicit public GitHub
+base through an anonymous isolated configuration, imports its exact commit, and
+materializes a fresh worktree without checkout hooks or content filters. The same
+lock remains held across marker installation, both model phases and cleanup. Partial
+fetch/worktree preparation, claim races, persistence faults and cancellation retain
+local evidence and generic operator attention. Its public entry point always returns
+blocked; it cannot call legacy cleanup, retry, push, PR or shipping paths.
 
 Recovery now treats unreadable claims, unsafe claim roots and orphan native lock
 tombstones as retained evidence. They cannot be deleted, released or reclaimed by
