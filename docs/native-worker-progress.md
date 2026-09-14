@@ -70,6 +70,15 @@ items, fall back to Claude, or be enabled with an operator bypass.
   provider, executor, session and credential cleanup. A live review canary over
   a real verified synthetic commit returned a bound structured PASS with every
   isolation, identity, accounting and cleanup check satisfied.
+- A private controller now holds a cross-process Claim lock across implementation,
+  commit, isolated verification and independent review. It writes a durable
+  `implement` intent before the first model call and persists exact returned usage
+  before any host Git mutation. It then durably records the verified candidate,
+  advances the unchanged Claim to `reviewing`, and writes a separate review intent
+  before starting the fresh reviewer. Returned review provenance and accounting
+  are persisted before qualification. Existing, incomplete or ambiguous journals
+  block replay and require operator inspection. Even a complete PASS stops at
+  `reviewed_pending_human` and cannot authorize shipping.
 
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.
@@ -112,12 +121,9 @@ processes that escape their group. Native worker isolation is a separate gate.
    configured and effective read-only mounts, denied source mutation, scratch,
    network and host isolation, exact source preservation and owned cleanup. See
    [security qualification](codex-security-qualification.md).
-2. Join the verified implementation coordinator and stable reviewer into one
-   controller that advances the durable Claim, persists both phases' accounting,
-   and still stops before shipping.
-3. Integrate that controller, durable accounting persistence, exclusive
+2. Integrate the private controller, durable accounting persistence, exclusive
    claim/worktree ownership and retained recovery outcomes with daemon dispatch.
-4. Run an end-to-end sandbox task with independent review, isolated verification,
+3. Run an end-to-end sandbox task with independent review, isolated verification,
    host-owned PR creation and GitHub CI before enabling production dispatch.
 
 The approved route allows a ChatGPT plan's included allowance and existing

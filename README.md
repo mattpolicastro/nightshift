@@ -46,7 +46,10 @@ subscription canaries have qualified both implementation and review paths.
 Daemon dispatch remains disabled.
 Host-owned candidate commit, isolated verification, and a fresh authenticated
 review turn over an immutable candidate mount are implemented behind the private
-gate. Their final controller and daemon coordination remain disabled.
+gate. A private controller now holds exclusive claim ownership, durably records
+both model-call intents and returned token evidence, advances the exact Claim for
+review, and stops after an independently reviewed candidate. Daemon coordination
+and shipping through this route remain disabled.
 See [implementation status](docs/native-worker-progress.md). Automatic model
 selection is not implemented.
 

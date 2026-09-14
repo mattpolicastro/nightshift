@@ -48,7 +48,7 @@ async def _implement_and_verify(worktree: Path, expected_base_sha: str,
         request: WorkerRequest, verify_command: str, *, credential_root: Path,
         binary: Path, image_id: str, verification_image_id: str, docker_host: str,
         recovery_dir: Path, expected_identity,
-        native_marker: NativeMarkerEvidence) -> _VerifiedImplementation:
+        native_marker: NativeMarkerEvidence, persist_accounting=None) -> _VerifiedImplementation:
     """One private attempt; no retries, review verdict, push, or activation.
 
     The shared remaining budget reaches source loading, implementation and
@@ -95,6 +95,8 @@ async def _implement_and_verify(worktree: Path, expected_base_sha: str,
         result.accounting = native_accounting.from_worker(
             claim.native_recovery,
             'implement', result.implementation)
+        if persist_accounting is not None:
+            persist_accounting(result.accounting, implemented)
         if not implemented.ok or result.implementation.requested_model != request.model:
             raise ValueError('Implementation cleanup or completion was not confirmed')
         files = snapshot.validate(list(implemented.files))

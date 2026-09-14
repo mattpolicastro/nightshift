@@ -52,6 +52,19 @@ returned structured PASS with the immutable mount, distinct context, exact
 candidate and Claim, review-phase accounting, and every cleanup gate confirmed.
 No branch was pushed and no shipping or daemon path was invoked.
 
+A final private controller now holds a persistent cross-process Claim lock across
+the implementation and review phases. Before either model call it durably records
+the exact run, Claim, models, images, verification command and approved-context
+fingerprint. Implementation accounting is fsynced before candidate commit; review
+preparation, the exact Claim transition to `reviewing`, and review intent are each
+separate durable boundaries. Returned review identity, candidate fingerprint,
+verdict and accounting are recorded before qualification. Interrupted or ambiguous
+records block replay and retain the Claim for inspection. Independent fault review
+also caught and fixed a provenance error that had recorded the expected review
+identity in a rejected result; receipts now preserve both expected and observed
+values. The controller stops at `reviewed_pending_human`, with daemon dispatch and
+shipping still disabled.
+
 ## Stable credential lease and native recovery marker — 2026-09-09
 
 Added a private stable `CODEX_HOME` lease for macOS keyring-backed metadata
