@@ -1,5 +1,23 @@
 # Changelog
 
+## Private stable ChatGPT runner and accounting evidence — 2026-09-14
+
+Added an unwired implementation adapter that validates a real durable queue
+claim before mutation, exclusively leases the enrolled credential namespace,
+regenerates and checks the ChatGPT-managed policy, starts the isolated native
+executor, performs account/quota/model admission before one implementation turn,
+and releases candidate bytes only after provider, executor, container and lease
+cleanup are all confirmed. Unowned transcript destinations are rejected before
+startup. A real synthetic JSON-RPC subprocess verifies the admission/turn order
+and lease lifetime without contacting a provider.
+
+The marker guard now requires the exact complete queue claim at its canonical
+path. A restart-loader regression proves that a marker accepted for launch is
+still parseable and retained after restart. Separate dormant native accounting
+records exact reported token fields by run and phase; missing values stay unknown
+and never become Anthropic cost, quota, turn counts or unbilled scheduling credit.
+No production caller, daemon dispatch route or live model call was enabled.
+
 ## Stable credential lease and native recovery marker — 2026-09-09
 
 Added a private stable `CODEX_HOME` lease for macOS keyring-backed metadata

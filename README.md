@@ -39,9 +39,10 @@ broader reliability across models is not yet established.
 OpenAI-compatible endpoints require an operator-supplied translating proxy and
 remain unvalidated end to end. A native Codex transport is under development,
 targeting ChatGPT-managed subscription usage with Platform API-key fallback
-disabled. Execution remains disabled pending model-capable provider composition
-and daemon integration; an enrolled metadata-qualified keyring-home lease and
-restart-retention marker are implemented behind the hard dispatch gate.
+disabled. A private model-capable composition now joins the enrolled credential
+lease, managed-account admission, isolated executor, durable claim marker and
+cleanup-gated candidate export. Its full path is covered by synthetic protocol
+tests, but no live model turn has qualified it. Daemon dispatch remains disabled.
 See [implementation status](docs/native-worker-progress.md). Automatic model
 selection is not implemented.
 

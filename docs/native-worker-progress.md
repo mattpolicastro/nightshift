@@ -40,8 +40,18 @@ items, fall back to Claude, or be enabled with an operator bypass.
   runtime files cannot alter the authenticated namespace.
 - A dormant native claim marker can be made durable before a future provider
   launch. Queue reconciliation and startup recovery retain any marked claim and
-  skip destructive Git/PR recovery. No production caller prepares it, so this
-  does not activate native dispatch.
+  skip destructive Git/PR recovery. The launch guard requires a complete claim
+  at its canonical queue path and tests that restart loading preserves it. No
+  production caller prepares it, so this does not activate native dispatch.
+- A private implementation runner now composes that marker, the enrolled stable
+  credential lease, generated ChatGPT policy, managed-account admission, owned
+  container session and isolated executor. Candidate bytes remain provisional
+  until provider, executor, session and lease cleanup all succeed. Synthetic
+  JSON-RPC coverage proves admission precedes the single turn and that the lease
+  remains held until transport shutdown. No live model turn has run through it.
+- Dormant native accounting snapshots exact reported token fields by prepared
+  run and phase. Missing usage remains unknown; native evidence does not alter
+  legacy Anthropic cost, quota, turns or unbilled scheduling capacity.
 
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.
@@ -84,16 +94,15 @@ processes that escape their group. Native worker isolation is a separate gate.
    configured and effective read-only mounts, denied source mutation, scratch,
    network and host isolation, exact source preservation and owned cleanup. See
    [security qualification](codex-security-qualification.md).
-2. Join the qualified stable credential lease to the native provider/executor
-   launcher. The
-   approved route allows a ChatGPT plan's included allowance and existing
+2. Run a minimal credential-safe live canary through the private stable runner.
+   The approved route allows a ChatGPT plan's included allowance and existing
    ChatGPT credits. Platform API-key and custom-provider fallback remain forbidden.
-3. Integrate driver dispatch, host-owned Git operations, normalized accounting,
+3. Integrate driver dispatch, host-owned Git operations, native accounting,
    the durable native marker and retained recovery disposition with the daemon's
    implementation/review phases. The
    bound reviewer prompt now carries validated approved-task and policy data.
-4. Run a credential-safe OpenAI canary, then an end-to-end sandbox task with
-   independent review, host verification, PR creation and GitHub CI.
+4. Run an end-to-end sandbox task with independent review, isolated verification,
+   host-owned PR creation and GitHub CI before enabling production dispatch.
 
 The [specification](../SPEC-openai-workers.md) is the acceptance contract.
 No paid OpenAI calls or production daemon changes were part of this milestone.
@@ -117,17 +126,19 @@ An owned foreground-command session manager now handles bounded binary source
 transfer, exact import checks, paused export, cumulative output limits, process
 quiescence and ownership-checked cleanup with durable recovery records. An
 isolated verifier runs complete command chains against exact committed snapshots
-and checks source after each clause. A native tool-server attachment and private fixture coordinator now join source
-export, host-owned commits and exact-commit verification. Four real-engine tests
+and checks source after each clause. A native tool-server attachment and private
+fixture coordinator now join source export, host-owned commits and exact-commit
+verification. Four real-engine tests
 exercise native edits, missing-executor rejection, cancellation, and the joined
 coordinator with an explicitly synthetic reviewer. A separate bound reviewer
 adapter now requires an inspected immutable source mount, fresh execution context,
-exact evidence identities and cleanup before PASS can qualify. Production
-authentication/accounting and daemon wiring remain incomplete. Synthetic native
+exact evidence identities and cleanup before PASS can qualify. Production daemon
+wiring remains incomplete. Synthetic native
 runs now use a generated one-attempt provider home and validate the pinned host
 runtime plus effective configuration layers, origins and requirements before
 thread creation. The ChatGPT-managed variant also validates account, usage,
 model and reasoning capability evidence. Principal/workspace binding and a local
-metadata-only qualification now pass, but its production constructor deliberately
-remains blocked until the stable credential-home lifecycle is implemented. See the
+metadata-only qualification now pass. The private stable runner composes this
+policy with the enrolled lease and isolated executor, while its production
+constructor and daemon route remain blocked. See the
 [ChatGPT-managed integration policy](subscription-worker-policy.md).

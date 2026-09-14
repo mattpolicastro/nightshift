@@ -192,10 +192,9 @@ transport required for production source export.
 
 ## Remaining production integration
 
-- Join the enrolled, metadata-qualified stable credential lease to the
-  model-capable provider/executor composition. Principal/workspace admission and
-  a live metadata-only qualification pass; the private stable-home adapter owns,
-  locks, cleans and retains recovery evidence without creating a model thread.
+- Qualify the private model-capable composition with a minimal live canary. It
+  now joins the enrolled credential lease, principal/workspace admission,
+  isolated executor and cleanup-gated candidate export in synthetic tests.
   Production model execution remains blocked.
 - Persist a native recovery marker before provider launch and recognize it ahead
   of ordinary queue/Git/PR recovery. The dormant marker and retention behavior
@@ -210,8 +209,8 @@ transport required for production source export.
 - Run native candidates' verification scripts inside the qualified executor.
   The legacy host verifier is not filesystem/network isolation; a modified test
   or install script must not regain host access through that path.
-- Wire typed driver results, explicit authentication/quota policy and accounting
-  into daemon implementation/review dispatch.
+- Wire typed driver results, explicit authentication/quota policy and native
+  accounting into daemon implementation/review dispatch.
 - Run an isolated sandbox task through verification, independent review and PR
   creation. Keep human merge review and exact-candidate checks.
 

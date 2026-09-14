@@ -59,10 +59,10 @@ billing settings, purchase credits, redeem resets or send credit-request
 notifications as part of preflight. Do not use the protocol's unstable internal
 ChatGPT-token injection variant as a credential-transfer mechanism.
 
-Production activation remains blocked until the bound macOS keyring login can be
-used through an owned stable-home lifecycle without exposing credentials to the
-executor. A fresh `HOME` and `CODEX_HOME` do not isolate or inherit an enrolled
-OS keyring identity. The public constructor therefore remains unavailable.
+Production activation remains blocked while the private stable composition is
+qualified and joined to daemon recovery and review. A fresh `HOME` and
+`CODEX_HOME` do not isolate or inherit an enrolled OS keyring identity. The
+public constructor therefore remains unavailable.
 
 The metadata-only path now requires a private expected email and workspace ID,
 compares both to live managed-account evidence, and returns no account or quota
@@ -75,7 +75,10 @@ adapter implement and synthetically test that lifecycle. The final stable
 namespace is enrolled and has passed a live metadata-only qualification with
 confirmed provider shutdown. The credential-free version check uses a separate
 disposable home so its runtime files cannot enter this namespace. The adapter
-cannot create a model thread.
+cannot create a model thread. A separate private, unwired implementation runner
+now holds the same lease across policy validation, managed admission, one model
+turn, isolated executor shutdown and container cleanup. Its full ordering and
+failure behavior are synthetically tested; it has not yet made a live model call.
 
 ## Accounting and failure handling
 

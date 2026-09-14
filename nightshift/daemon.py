@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from . import outcomes, notify, preflight, queue, recovery, task, trace, vcs
+from . import native_accounting, notify, outcomes, preflight, queue, recovery, task, trace, vcs
 from .config import Config, Repo
 from .queue import Repair
 from .task import Step
@@ -193,6 +193,9 @@ class Tally:
     # because `max_tasks_per_night` is a cap per SUBSCRIPTION WINDOW: work that
     # touched no window must not eat a slot in one.
     unbilled: int = 0
+    # Native evidence is never interpreted as Claude cost/quota or free capacity.
+    native_usage: dict[tuple[str, str], native_accounting.NativeAccounting] = field(
+        default_factory=dict)
 
     @property
     def handled(self) -> int:
@@ -610,14 +613,22 @@ def _run_claimed(cfg: Config, claimed: Claimed, tally: Tally) -> None:
     _record_quota(report, tally)
 
 
+def _record_native_accounting(tally: Tally, claim: queue.Claim, phase: str, result) -> None:
+    """Dormant final-result seam; no production dispatch invokes this helper."""
+    evidence = native_accounting.from_worker(claim.native_recovery, phase, result)
+    tally.native_usage = native_accounting.merge(tally.native_usage, {evidence.key: evidence})
+
+
 def _merge(dst: Tally, src: Tally) -> None:
     """Fold a finished task's tally into the loop's. Loop thread only."""
+    combined_native = native_accounting.merge(dst.native_usage, src.native_usage)
     dst.shipped += src.shipped
     dst.escalated += src.escalated
     dst.cost += src.cost
     dst.turns += src.turns
     dst.unbilled += src.unbilled
     dst.lines += src.lines
+    dst.native_usage = combined_native
     # Latest wins, same rule as `_record_quota` — a task that reported nothing
     # about the window must not erase what another task just learned about it.
     if src.quota is not None:
