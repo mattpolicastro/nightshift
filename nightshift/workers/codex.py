@@ -304,7 +304,12 @@ class _Session:
             usage = params.get("tokenUsage", {}).get("total")
             if not isinstance(usage, dict):
                 raise _Stop("protocol_error", "Malformed token usage")
-            for key in ("inputTokens", "outputTokens", "cachedInputTokens", "reasoningOutputTokens", "totalTokens"):
+            required = {"inputTokens", "outputTokens", "cachedInputTokens",
+                        "reasoningOutputTokens", "totalTokens"}
+            allowed = required | {"cacheWriteInputTokens"}
+            if not required <= usage.keys() or usage.keys() - allowed:
+                raise _Stop("protocol_error", "Unknown token usage shape")
+            for key in allowed:
                 if key in usage and (type(usage[key]) is not int or usage[key] < 0):
                     raise _Stop("protocol_error", "Invalid token usage")
             # Cumulative thread totals, never sum repeated snapshots. Fresh thread per run.
@@ -387,6 +392,8 @@ class _Session:
         if self.result.observed_model != self.request.model:
             raise _Stop("protocol_error", "Thread did not confirm the requested model")
         self.normalized.write("thread_started", {"thread_id": self.result.thread_id, "observed_model": self.result.observed_model})
+        if self.admission is not None:
+            await self.admission.refresh_if_required(self.rpc)
         params = {"threadId": self.result.thread_id,
                   "input": [{"type": "text", "text": self.request.prompt}]}
         if self.external_executor:
@@ -402,9 +409,15 @@ class _Session:
         if not isinstance(self.result.turn_id, str) or not self.result.turn_id:
             raise _Stop("protocol_error", "Missing turn ID")
         self.normalized.write("turn_started", {"thread_id": self.result.thread_id, "turn_id": self.result.turn_id})
+        if self.admission is not None:
+            await self.admission.refresh_if_required(self.rpc)
         while True:
             message = self.pending.popleft() if self.pending else await self.receive()
+            if self.admission is not None:
+                await self.admission.refresh_if_required(self.rpc)
             if self.notification(message):
+                if self.admission is not None:
+                    self.admission.check_ready()
                 return
 
 

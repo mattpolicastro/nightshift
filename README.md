@@ -41,8 +41,8 @@ remain unvalidated end to end. A native Codex transport is under development,
 targeting ChatGPT-managed subscription usage with Platform API-key fallback
 disabled. A private model-capable composition now joins the enrolled credential
 lease, managed-account admission, isolated executor, durable claim marker and
-cleanup-gated candidate export. Its full path is covered by synthetic protocol
-tests, but no live model turn has qualified it. Daemon dispatch remains disabled.
+cleanup-gated candidate export. Synthetic protocol tests and a minimal live
+subscription canary have qualified that private path. Daemon dispatch remains disabled.
 See [implementation status](docs/native-worker-progress.md). Automatic model
 selection is not implemented.
 

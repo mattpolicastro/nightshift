@@ -192,10 +192,10 @@ transport required for production source export.
 
 ## Remaining production integration
 
-- Qualify the private model-capable composition with a minimal live canary. It
-  now joins the enrolled credential lease, principal/workspace admission,
-  isolated executor and cleanup-gated candidate export in synthetic tests.
-  Production model execution remains blocked.
+- Join the canary-qualified private model composition to the persistent candidate
+  coordinator and daemon recovery lifecycle. The private runner now joins the
+  enrolled credential lease, bound admission, isolated executor and cleanup-gated
+  candidate export; production dispatch remains blocked.
 - Persist a native recovery marker before provider launch and recognize it ahead
   of ordinary queue/Git/PR recovery. The dormant marker and retention behavior
   now exist behind current dispatch gates; production coordination still must

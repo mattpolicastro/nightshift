@@ -74,6 +74,7 @@ class ChatGPTAdmission:
         self.usage_available = False
         self.model_confirmed = False
         self.invalid = False
+        self.refresh_required = False
 
     def _fail(self, reason):
         self.invalid = True
@@ -145,14 +146,9 @@ class ChatGPTAdmission:
         if not ((windows and all(percent < 100 for percent in windows) and reached is None) or credit_available):
             self._fail('No confirmed included usage or existing ChatGPT credits')
 
-    def rate_limits(self, response):
-        self.usage_available = False
-        self.usage_identity_confirmed = False
+    def _validate_rate_limits(self, response):
         if not isinstance(response, dict) or 'rateLimits' not in response:
             self._fail('Managed usage telemetry is missing')
-        if self._expected_identity is not None:
-            if not self._expected_identity.matches_account(response.get('accountId')):
-                self._fail('ChatGPT usage account does not match the private expected identity')
         self._snapshot(response['rateLimits'])
         buckets = response.get('rateLimitsByLimitId')
         if buckets is not None:
@@ -162,9 +158,27 @@ class ChatGPTAdmission:
                 self._fail('Usage bucket attribution is unsupported')
             for value in buckets.values():
                 self._snapshot(value)
+
+    def rate_limits(self, response):
+        self.usage_available = False
+        self.usage_identity_confirmed = False
+        if (self._expected_identity is not None
+                and (not isinstance(response, dict)
+                     or not self._expected_identity.matches_account(response.get('accountId')))):
+            self._fail('ChatGPT usage account does not match the private expected identity')
+        self._validate_rate_limits(response)
         # Reset-credit details and upsell banners are not spendable credit evidence.
         self.usage_available = True
         self.usage_identity_confirmed = self._expected_identity is not None
+        self.refresh_required = False
+
+    async def refresh_if_required(self, rpc):
+        """Rebind an unattributed live quota notification through exact RPCs."""
+        if not self.refresh_required:
+            return
+        self.account(await rpc('account/read', {'refreshToken': False}))
+        self.rate_limits(await rpc('account/rateLimits/read', {}))
+        self.check_ready()
 
     async def preflight(self, rpc, model, reasoning_effort=None):
         self.account(await rpc('account/read', {'refreshToken': False}))
@@ -228,7 +242,16 @@ class ChatGPTAdmission:
                 self._fail('ChatGPT authentication changed or became unavailable')
             self.plan = params['planType']
         elif method == 'account/rateLimits/updated':
-            self.rate_limits(params)
+            if self._expected_identity is None:
+                self.rate_limits(params)
+            else:
+                # The notification has no workspace identity. Validate that it
+                # does not already report exhaustion, then require a fresh bound
+                # read before any later event can qualify the turn.
+                self.usage_available = False
+                self.usage_identity_confirmed = False
+                self._validate_rate_limits(params)
+                self.refresh_required = True
         elif method == 'model/rerouted':
             self._fail('Requested model was rerouted')
 

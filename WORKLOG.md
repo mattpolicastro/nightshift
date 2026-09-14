@@ -16,7 +16,16 @@ path. A restart-loader regression proves that a marker accepted for launch is
 still parseable and retained after restart. Separate dormant native accounting
 records exact reported token fields by run and phase; missing values stay unknown
 and never become Anthropic cost, quota, turn counts or unbilled scheduling credit.
-No production caller, daemon dispatch route or live model call was enabled.
+
+The first live subscription canary exposed two pinned-protocol details missing
+from fixtures: an optional cache-write token count and an unattributed quota
+notification during the turn. Accounting now records the extra token field. A
+quota notification immediately invalidates eligibility; the transport resumes
+only after fresh bound account and quota RPCs reconfirm the same private identity
+and available managed usage. Exhausted notifications still fail immediately.
+After those fixes, a real isolated turn changed one synthetic text file to the
+exact requested bytes and returned complete thread, turn, model, usage and cleanup
+evidence. No production caller or daemon dispatch route was enabled.
 
 ## Stable credential lease and native recovery marker — 2026-09-09
 

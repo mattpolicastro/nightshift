@@ -29,10 +29,11 @@ def test_missing_and_explicit_zero_remain_distinct():
 
 def test_reported_counts_are_copied_without_derived_totals_or_prices():
     result = WorkerResult(status='failed', usage={'inputTokens': 5, 'outputTokens': 7,
-        'cachedInputTokens': 2, 'reasoningOutputTokens': 3})
+        'cachedInputTokens': 2, 'cacheWriteInputTokens': 4, 'reasoningOutputTokens': 3})
     evidence = accounting.from_worker(MARKER, 'implement', result)
     result.usage['inputTokens'] = 99
     assert evidence.tokens.input_tokens == 5
+    assert evidence.tokens.cache_write_input_tokens == 4
     assert evidence.tokens.total_tokens is None
     assert not hasattr(evidence, 'cost_usd')
     assert not hasattr(evidence, 'subscription_billed')

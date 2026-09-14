@@ -125,6 +125,8 @@ def protocol():
     if method == os.environ.get("INJECT_AT"):
         if os.environ.get("INJECT_KIND") == "rate":
             send({"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":100}}}})
+        elif os.environ.get("INJECT_KIND") == "rate_refresh":
+            send({"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","planType":"pro","primary":{"usedPercent":25}}}})
         else:
             send({"method":"account/updated","params":{"authMode":"apikey","planType":"pro","secret":"SYNTHETIC_AUTH_PRIVATE"}})
 ''')
@@ -326,7 +328,7 @@ def test_identity_mismatch_missing_or_wrong_type_fails_without_disclosure(field,
         gate.check_ready()
 
 
-def test_unattributed_usage_notification_invalidates_bound_identity():
+def test_unattributed_usage_notification_requires_bound_refresh():
     gate = ChatGPTAdmission(private_identity())
     gate.account(bound_account())
     gate.rate_limits(bound_limits())
@@ -334,10 +336,38 @@ def test_unattributed_usage_notification_invalidates_bound_identity():
     gate.check_ready()
     # The pinned notification has no accountId: never silently assign it to
     # the admitted workspace after an account switch or keychain change.
+    gate.notification('account/rateLimits/updated', limits())
+    assert gate.refresh_required
+    assert not gate.usage_available and not gate.usage_identity_confirmed
+    calls = []
+    async def rpc(method, params):
+        calls.append(method)
+        return bound_account() if method == 'account/read' else bound_limits()
+    asyncio.run(gate.refresh_if_required(rpc))
+    gate.check_ready()
+    assert calls == ['account/read', 'account/rateLimits/read']
+
+
+def test_exhausted_unattributed_usage_notification_fails_without_refresh():
+    gate = ChatGPTAdmission(private_identity())
+    gate.account(bound_account())
+    gate.rate_limits(bound_limits())
+    gate.model_confirmed = True
+    exhausted = limits()
+    exhausted['rateLimits']['primary']['usedPercent'] = 100
     with pytest.raises(ValueError):
-        gate.notification('account/rateLimits/updated', limits())
-    with pytest.raises(ValueError):
-        gate.check_ready()
+        gate.notification('account/rateLimits/updated', exhausted)
+    assert not gate.refresh_required
+
+
+def test_bound_quota_notification_during_turn_refreshes_before_completion(tmp_path):
+    identity = ChatGPTIdentity('SYNTHETIC_EMAIL_PRIVATE@example.invalid',
+                               'SYNTHETIC_ACCOUNT_PRIVATE')
+    result, methods, _ = invoke(tmp_path, 'turn/start', 'rate_refresh', identity)
+    assert result.ok
+    turn = methods.index('turn/start')
+    assert methods.index('account/read', turn) > turn
+    assert methods.index('account/rateLimits/read', turn) > turn
 
 
 @pytest.mark.parametrize('value', ['', ' padded ', '\nidentity', '\ud800', True, None, 'x' * 513])

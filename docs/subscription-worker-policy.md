@@ -78,7 +78,13 @@ disposable home so its runtime files cannot enter this namespace. The adapter
 cannot create a model thread. A separate private, unwired implementation runner
 now holds the same lease across policy validation, managed admission, one model
 turn, isolated executor shutdown and container cleanup. Its full ordering and
-failure behavior are synthetically tested; it has not yet made a live model call.
+failure behavior are synthetically tested. A minimal live subscription canary
+returned the exact requested synthetic file with all cleanup gates confirmed.
+
+The live protocol reports an optional cache-write token count and can emit a
+quota update without workspace identity during a turn. That notification revokes
+admission until fresh account and quota reads rebind the private identity and
+confirm available managed usage. Exhausted telemetry fails without refresh.
 
 ## Accounting and failure handling
 

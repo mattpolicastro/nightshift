@@ -48,10 +48,15 @@ items, fall back to Claude, or be enabled with an operator bypass.
   container session and isolated executor. Candidate bytes remain provisional
   until provider, executor, session and lease cleanup all succeed. Synthetic
   JSON-RPC coverage proves admission precedes the single turn and that the lease
-  remains held until transport shutdown. No live model turn has run through it.
+  remains held until transport shutdown. A minimal live subscription canary
+  produced the exact requested synthetic file and confirmed all cleanup gates.
 - Dormant native accounting snapshots exact reported token fields by prepared
   run and phase. Missing usage remains unknown; native evidence does not alter
-  legacy Anthropic cost, quota, turns or unbilled scheduling capacity.
+  legacy Anthropic cost, quota, turns or unbilled scheduling capacity. The live
+  protocol's optional cache-write token count is preserved explicitly.
+- Unattributed live quota notifications revoke eligibility until fresh account
+  and quota reads rebind the private identity and confirm available managed
+  usage. Exhaustion or failed rebinding stops the attempt.
 
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.
@@ -94,18 +99,19 @@ processes that escape their group. Native worker isolation is a separate gate.
    configured and effective read-only mounts, denied source mutation, scratch,
    network and host isolation, exact source preservation and owned cleanup. See
    [security qualification](codex-security-qualification.md).
-2. Run a minimal credential-safe live canary through the private stable runner.
-   The approved route allows a ChatGPT plan's included allowance and existing
-   ChatGPT credits. Platform API-key and custom-provider fallback remain forbidden.
-3. Integrate driver dispatch, host-owned Git operations, native accounting,
+2. Integrate driver dispatch, host-owned Git operations, native accounting,
    the durable native marker and retained recovery disposition with the daemon's
    implementation/review phases. The
    bound reviewer prompt now carries validated approved-task and policy data.
-4. Run an end-to-end sandbox task with independent review, isolated verification,
+3. Run an end-to-end sandbox task with independent review, isolated verification,
    host-owned PR creation and GitHub CI before enabling production dispatch.
 
+The approved route allows a ChatGPT plan's included allowance and existing
+ChatGPT credits. Platform API-key and custom-provider fallback remain forbidden.
+
 The [specification](../SPEC-openai-workers.md) is the acceptance contract.
-No paid OpenAI calls or production daemon changes were part of this milestone.
+The private canary used the approved managed subscription route. No production
+daemon dispatch or repository task was activated.
 
 See the [fallback isolation experiment](isolated-tool-execution.md) for the
 provider/tool separation required if native permission qualification fails.

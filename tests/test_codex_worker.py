@@ -91,7 +91,10 @@ for line in sys.stdin:
             event("item/completed", item=cmd, completedAtMs=15)
         if scenario == "tools":
             event("item/started", item=dict(id="cmd2", type="commandExecution"))
-        usage = dict(inputTokens=10, outputTokens=7, cachedInputTokens=0, reasoningOutputTokens=0, totalTokens=17)
+        usage = dict(inputTokens=10, outputTokens=7, cachedInputTokens=0,
+            cacheWriteInputTokens=0, reasoningOutputTokens=0, totalTokens=17)
+        if scenario == "usage_unknown": usage["futureTokens"] = 1
+        if scenario == "usage_missing": del usage["totalTokens"]
         event("thread/tokenUsage/updated", tokenUsage=dict(total=usage))
         event("thread/tokenUsage/updated", tokenUsage=dict(total=usage))
         if scenario == "review":
@@ -149,6 +152,7 @@ def test_success_requires_terminal_and_preserves_native_evidence(tmp_path):
     assert result.observed_model == "explicit-model"
     assert result.runtime_version is None  # A fixture isn't proof of a runtime version.
     assert result.output_tokens == 7
+    assert result.usage["cacheWriteInputTokens"] == 0
     assert len(result.commands) == 1
     assert result.commands[0].exit_code == 0
     assert result.commands[0].started_at_ms == 10
@@ -163,6 +167,13 @@ def test_fail_closed_protocol(tmp_path, scenario):
     assert not result.ok
     if scenario == "stderr":
         assert "turn/completed" in result.stderr
+
+
+@pytest.mark.parametrize("scenario", ["usage_unknown", "usage_missing"])
+def test_token_usage_shape_matches_pinned_protocol(tmp_path, scenario):
+    result = invoke(tmp_path, scenario)
+    assert result.status == "protocol_error"
+    assert "token usage shape" in result.diagnostics[-1].lower()
 
 
 @pytest.mark.parametrize("scenario", ["approval", "unknown_request"])
