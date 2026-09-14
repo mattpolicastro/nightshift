@@ -89,6 +89,23 @@ and review threads differed, every cleanup gate succeeded, and the final result
 still denied shipping. The canary had no Git remote and did not use the daemon or
 GitHub queue.
 
+A dormant daemon-integration foundation now validates an exact ChatGPT-managed
+profile without reading credentials or offering an activation switch. It binds
+both phase models, reasoning effort and budgets; distinct immutable implementation,
+review and verification images; the pinned host runtime; an owned local Docker
+socket; private credential/recovery roots; and an opaque identity reference.
+Mixed drivers, API-key/custom providers and fallback fields are rejected.
+
+Native Claim ownership can now begin before marker creation and remain continuous
+through controller cleanup. The preparation lease checks the exact clean Git base,
+branch, worktree and persisted fresh Claim, creates a private recovery directory,
+and durably installs the `implementing` marker before opening the attempt journal
+under the same cross-process lock. Unreadable claims, unsafe claim directories and
+orphan native lock tombstones block destructive reconciliation and re-admission.
+Native recovery remains attention-visible regardless of remote issue/PR state
+until an explicit local recovery action clears it. These paths remain unwired from
+normal daemon dispatch.
+
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.
 A transitional Claude adapter now emits typed results while preserving legacy

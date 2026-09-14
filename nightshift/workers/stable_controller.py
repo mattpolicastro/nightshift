@@ -4,6 +4,7 @@ Journal intent precedes each possible model call. A crash leaves an unfinished
 phase, not zero usage or permission to retry. Caller must also hold exclusive
 worktree/queue ownership; the journal lock coordinates this private controller.
 """
+from contextlib import nullcontext
 import asyncio
 import hashlib
 import json
@@ -67,7 +68,9 @@ async def _run_attempt(worktree: Path, base_sha: str, request: WorkerRequest,
         review_model: str, credential_root: Path, binary: Path, image_id: str,
         verification_image_id: str, docker_host: str, recovery_dir: Path,
         expected_identity, native_marker: NativeMarkerEvidence,
-        review_budgets: WorkerBudgets | None = None) -> _AttemptResult:
+        review_budgets: WorkerBudgets | None = None, review_reasoning_effort: str | None = None,
+        review_image_id: str | None = None,
+        prepared_journal: NativeAttemptJournal | None = None) -> _AttemptResult:
     result = _AttemptResult()
     try:
         if type(request) is not WorkerRequest or type(request.budgets) is not WorkerBudgets:
@@ -75,6 +78,7 @@ async def _run_attempt(worktree: Path, base_sha: str, request: WorkerRequest,
         if review_budgets is not None and type(review_budgets) is not WorkerBudgets:
             raise ValueError('Typed review budgets required')
         review_budgets = WorkerBudgets() if review_budgets is None else review_budgets
+        review_image_id = image_id if review_image_id is None else review_image_id
         review_context.validate(approved_task, review_policy)
         if type(review_model) is not str or not review_model.strip():
             raise ValueError('Explicit review model required')
@@ -85,10 +89,23 @@ async def _run_attempt(worktree: Path, base_sha: str, request: WorkerRequest,
         binding = {'base_sha': base_sha, 'verify_command': verify_command,
             'implementation_image_id': image_id, 'verification_image_id': verification_image_id,
             'implementation_model': request.model, 'review_model': review_model,
-            'review_image_id': image_id,
+            'implementation_reasoning_effort': request.reasoning_effort,
+            'review_reasoning_effort': review_reasoning_effort,
+            'review_image_id': review_image_id,
             'approved_context_fingerprint': hashlib.sha256(json.dumps(context,
                 sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
-        with NativeAttemptJournal(native_marker, recovery_dir, binding) as journal:
+        if prepared_journal is not None:
+            if (type(prepared_journal) is not NativeAttemptJournal
+                    or prepared_journal.marker != native_marker
+                    or prepared_journal.recovery_dir != recovery_dir
+                    or prepared_journal.binding != binding
+                    or prepared_journal.initial_claim != initial):
+                raise ValueError('Prepared journal differs from the exact native attempt')
+            prepared_journal._same()
+            manager = nullcontext(prepared_journal)
+        else:
+            manager = NativeAttemptJournal(native_marker, recovery_dir, binding)
+        with manager as journal:
             if validate_marker(native_marker, recovery_dir) != initial:
                 raise ValueError('Claim changed before implementation intent')
             journal.start('implement', binding)
@@ -137,10 +154,11 @@ async def _run_attempt(worktree: Path, base_sha: str, request: WorkerRequest,
                 reviewed = await _review_stable_chatgpt(review_request, list(implemented.files),
                     implementation_thread_id=implemented.implementation.thread_id, model=review_model,
                     verify_command=verify_command, verification_image_id=verification_image_id,
-                    credential_root=credential_root, binary=binary, image_id=image_id,
+                    credential_root=credential_root, binary=binary, image_id=review_image_id,
                     docker_host=docker_host, recovery_dir=recovery_dir, expected_identity=expected_identity,
                     native_marker=native_marker,
-                    budgets=replace(review_budgets, max_runtime_s=_remaining(deadline)))
+                    budgets=replace(review_budgets, max_runtime_s=_remaining(deadline)),
+                    reasoning_effort=review_reasoning_effort)
                 if type(reviewed) is not ReviewOutcome or type(reviewed.result) is not WorkerResult:
                     raise ValueError('Typed isolated review result required')
                 result.review = reviewed

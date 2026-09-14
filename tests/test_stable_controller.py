@@ -163,3 +163,41 @@ def test_rejected_review_provenance_is_persisted_as_observed(harness, monkeypatc
     assert receipt[field] != receipt['expected_' + field]
     assert receipt['status'] == 'succeeded'  # Worker success is not binding approval.
     assert harness.claim.path.exists()
+
+
+def test_preentered_lease_handoff_keeps_one_lock_through_controller_cleanup(harness, monkeypatch):
+    import hashlib
+    from nightshift.workers.native_persistence import NativeClaimLease
+    from nightshift.workers import stable_pipeline, review_context
+    from nightshift.workers.stable_worker import _StableRun
+    from test_native_persistence import _probe_lock
+    harness.claim.phase = 'claimed'
+    harness.claim.native_recovery = None
+    harness.claim.write()
+    context = review_context.payload(ApprovedTask('task', 'Repair', 'Change source'), ReviewPolicy('Check scope'))
+    binding = {'base_sha': harness.base, 'verify_command': 'true',
+        'implementation_model': 'model', 'review_model': 'review-model',
+        'implementation_reasoning_effort': None, 'review_reasoning_effort': None,
+        'implementation_image_id': 'sha256:' + 'a' * 64,
+        'verification_image_id': 'sha256:' + 'b' * 64, 'review_image_id': 'sha256:' + 'a' * 64,
+        'approved_context_fingerprint': hashlib.sha256(json.dumps(context,
+            sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
+    lock = harness.claim.path.with_name(harness.claim.path.name + '.native.lock')
+    async def worker(*args, **kwargs):
+        assert _probe_lock(lock) == 'blocked'
+        return _StableRun(harness.worker, harness.files, True, True, True, True)
+    monkeypatch.setattr(stable_pipeline, '_run_stable_chatgpt', worker)
+    original = module._run_attempt
+    with NativeClaimLease(harness.claim, harness.root, harness.recovery, binding) as lease:
+        harness.marker, harness.recovery = lease.marker, lease.recovery_dir
+        harness.journal = harness.recovery / ('native-run-' + lease.run_id + '.json')
+        with lease.open_journal() as journal:
+            async def attached(*args, **kwargs):
+                return await original(*args, **kwargs, prepared_journal=journal)
+            monkeypatch.setattr(module, '_run_attempt', attached)
+            result = asyncio.run(harness.call_controller())
+            assert result.status == 'reviewed_pending_human', (result.stage, result.detail)
+            assert journal.state['review']['state'] == 'finished'
+            assert _probe_lock(lock) == 'blocked'
+        assert _probe_lock(lock) == 'blocked'
+    assert _probe_lock(lock) == 'acquired'

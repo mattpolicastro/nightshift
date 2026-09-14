@@ -298,22 +298,25 @@ def startup(cfg: Config, repo_dirs: dict[str, Path],
 
 def _recover(cfg: Config, repo: Repo, repo_dir: Path, number: int) -> None:
     """Act on one interrupted task."""
-    claims, _ = queue._load_claims(repo.name)  # noqa: SLF001 — same package
+    claims, repairs = queue._load_claims(repo.name)  # noqa: SLF001 — same package
     claim = claims.get(number)
-    if claim is None:
-        return
-
-    if claim.native_recovery is not None:
-        # Marker precedes every future native provider launch. Even an existing
-        # PR or missing worktree cannot establish source/container cleanup.
-        plan = recovery.decide(claim.phase, has_commits=False, branch_pushed=False,
-                               pr_url=None, native_pending=True)
-        log.warning("retain native #%s for inspection: %s", number, plan.reason)
+    retained = any(repair.repair is Repair.RETAINED and repair.number in (0, number)
+                   for repair in repairs)
+    if retained or (claim is not None and claim.native_recovery is not None):
+        # An orphan lock or unsafe claim is evidence even without a readable
+        # native marker. Honor it before every Git/GitHub recovery probe.
+        reason = "local native or ambiguous recovery evidence requires inspection"
+        if number <= 0:
+            log.warning("retain recovery state for %s: %s", repo.name, reason)
+            return
+        log.warning("retain #%s for inspection: %s", number, reason)
         try:
-            outcomes.record(repo.name, number, state="needs_decision", reason=plan.reason,
+            outcomes.record(repo.name, number, state="needs_decision", reason=reason,
                             escalated=False, native_retained=True)
         except Exception as exc:  # Attention reporting cannot authorize cleanup.
-            log.warning("could not record retained native #%s: %s", number, exc)
+            log.warning("could not record retained #%s: %s", number, exc)
+        return
+    if claim is None:
         return
 
     worktree = Path(claim.worktree)

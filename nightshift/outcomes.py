@@ -89,12 +89,17 @@ def tasks() -> list[dict]:
         item = json.loads(row["data"])
         item.update({k: row[k] for k in ("id", "repo", "issue", "at", "checked_at", "resolution", "error")})
         item["state"] = row["observed_state"] or item.get("state", "running")
+        if item.get("native_retained"):
+            item["state"] = "needs_decision"
+            item["resolution"] = "native recovery requires explicit local inspection"
         item["issue_url"] = f"https://github.com/{row['repo']}/issues/{row['issue']}"
         result.append(item)
     return result
 
 
 def _observe(item, labels, runner):
+    if item.get("native_retained"):
+        return "needs_decision", "native recovery requires explicit local inspection"
     state, resolution = item["state"], item.get("resolution") or ""
     issue = json.loads(runner([
         "issue", "view", str(item["issue"]), "--repo", item["repo"],

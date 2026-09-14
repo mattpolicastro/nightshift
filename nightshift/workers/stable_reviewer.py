@@ -25,7 +25,7 @@ async def _review_stable_chatgpt(request: ReviewInput, files, *, implementation_
         model: str, verify_command: str, verification_image_id: str, credential_root: Path,
         binary: Path, image_id: str, docker_host: str, recovery_dir: Path,
         expected_identity, native_marker: NativeMarkerEvidence,
-        budgets: WorkerBudgets | None = None) -> ReviewOutcome:
+        budgets: WorkerBudgets | None = None, reasoning_effort: str | None = None) -> ReviewOutcome:
     """Private stable review; no interactive history, shipping or claim removal.
 
     Caller supplies host-owned exact ReviewInput and holds exclusive claim/worktree
@@ -131,7 +131,7 @@ async def _review_stable_chatgpt(request: ReviewInput, files, *, implementation_
                                 provider_stopped = False
                                 worker = await codex._run_stdio(
                                     WorkerRequest("review", Path("/workspace"), prompt, model,
-                                        budgets=replace(budgets, max_runtime_s=remaining)),
+                                        budgets=replace(budgets, max_runtime_s=remaining), reasoning_effort=reasoning_effort),
                                     [str(binary), 'app-server', '--stdio', '--strict-config'],
                                     env=policy._environment(), external_executor=True,
                                     provider_cwd=lease.home, config_validator=policy._validate_configuration,

@@ -277,3 +277,18 @@ def test_falsey_nonbudget_rejected_before_any_operation(harness, monkeypatch, va
     monkeypatch.setattr(module, '_review_stable_chatgpt', injected)
     assert not asyncio.run(harness.call()).ok
     assert harness.events == [] and not list(harness.root.iterdir())
+
+
+def test_explicit_review_effort_reaches_native_request(harness, monkeypatch):
+    original = module._review_stable_chatgpt
+    original_transport = module.codex._run_stdio
+    observed = []
+    async def launch(request, *args, **kwargs):
+        observed.append(request.reasoning_effort)
+        return await original_transport(request, *args, **kwargs)
+    async def configured(*args, **kwargs):
+        return await original(*args, **kwargs, reasoning_effort='high')
+    monkeypatch.setattr(module, '_review_stable_chatgpt', configured)
+    monkeypatch.setattr(module.codex, '_run_stdio', launch)
+    assert asyncio.run(harness.call()).ok
+    assert observed == ['high']

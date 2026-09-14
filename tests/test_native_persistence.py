@@ -28,7 +28,8 @@ def setup(tmp_path, monkeypatch):
                'verification_image_id': 'sha256:' + 'd' * 64,
                'review_image_id': 'sha256:' + 'c' * 64,
                'approved_context_fingerprint': 'e' * 64,
-               'implementation_model': 'fixture-implementation', 'review_model': 'fixture-review'}
+               'implementation_model': 'fixture-implementation', 'review_model': 'fixture-review',
+               'implementation_reasoning_effort': 'medium', 'review_reasoning_effort': 'high'}
     review = {'candidate_sha': 'f' * 40, 'source_fingerprint': '1' * 64}
     verification = IsolatedVerificationResult(review['candidate_sha'], 'true', binding['verification_image_id'],
         status='succeeded', cleanup_succeeded=True, source_fingerprint=review['source_fingerprint'],
@@ -222,3 +223,148 @@ def test_lock_replacement_detected_before_state_mutation(setup):
         lock.chmod(0o600)
         with pytest.raises(SessionError): journal.start('implement')
         assert journal.state['implement'] is None
+
+
+@pytest.fixture
+def fresh_claim(tmp_path, monkeypatch):
+    from test_candidate_pipeline import git
+    monkeypatch.setattr(queue, 'CLAIM_DIR', tmp_path / 'claims')
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir(mode=0o700)
+    git(worktree, 'init', '-q')
+    git(worktree, 'config', 'user.name', 'Fixture')
+    git(worktree, 'config', 'user.email', 'fixture@example.invalid')
+    (worktree / 'source.txt').write_text('before')
+    git(worktree, 'add', 'source.txt')
+    git(worktree, 'commit', '-qm', 'base')
+    base = git(worktree, 'rev-parse', 'HEAD')
+    claim = queue.Claim('fixture/repo', 7, git(worktree, 'branch', '--show-current'), str(worktree), 'fixture')
+    claim.write()
+    claim.path.chmod(0o644)
+    recovery = tmp_path / 'recovery'
+    recovery.mkdir(mode=0o700)
+    binding = {'base_sha': base, 'verify_command': 'true',
+        'implementation_image_id': 'sha256:' + '1' * 64,
+        'verification_image_id': 'sha256:' + '2' * 64, 'review_image_id': 'sha256:' + '1' * 64,
+        'approved_context_fingerprint': '3' * 64,
+        'implementation_model': 'fixture', 'review_model': 'fixture',
+        'implementation_reasoning_effort': 'medium', 'review_reasoning_effort': 'high'}
+    result = SimpleNamespace(claim=claim, worktree=worktree, recovery=recovery, binding=binding)
+    result.lease = lambda: module.NativeClaimLease(result.claim, worktree, recovery, binding)
+    return result
+
+
+def _probe_lock(path):
+    context = multiprocessing.get_context('spawn')
+    reader, writer = context.Pipe(duplex=False)
+    process = context.Process(target=_lock_child, args=(str(path), writer))
+    process.start()
+    writer.close()
+    try:
+        assert reader.poll(5)
+        value = reader.recv()
+        process.join(5)
+        assert process.exitcode == 0
+        return value
+    finally:
+        if process.is_alive(): process.kill(); process.join(5)
+        reader.close()
+
+
+def test_prelaunch_lease_durable_marker_and_same_lock_handoff(fresh_claim):
+    fixture = fresh_claim
+    lock = fixture.claim.path.with_name(fixture.claim.path.name + '.native.lock')
+    with fixture.lease() as lease:
+        prepared = validate_marker(lease.marker, lease.recovery_dir)
+        assert prepared.phase == 'implementing' and prepared.native_recovery['run_id'] == lease.run_id
+        assert fixture.claim.path.stat().st_mode & 0o777 == 0o600
+        assert lease.recovery_dir.stat().st_mode & 0o777 == 0o700
+        assert _probe_lock(lock) == 'blocked'
+        with lease.open_journal() as journal:
+            assert journal.initial_claim == prepared
+            journal.start('implement')
+            assert _probe_lock(lock) == 'blocked'
+        assert _probe_lock(lock) == 'blocked', 'journal exit must not unlock outer ownership'
+        with pytest.raises(SessionError): lease.open_journal()
+    assert _probe_lock(lock) == 'acquired'
+    assert fixture.claim.path.exists() and lock.exists()
+    with pytest.raises(SessionError):
+        with fixture.lease(): pytest.fail('old claim replayed')
+
+
+@pytest.mark.parametrize('kind', ['revise', 'existing-marker', 'phase', 'branch', 'base', 'dirty',
+                                  'claim-mode', 'claim-link', 'recovery-mode', 'old-lock'])
+def test_prelaunch_rejects_ambiguous_or_unowned_input(fresh_claim, tmp_path, kind):
+    fixture = fresh_claim
+    before = fixture.claim.path.read_bytes()
+    if kind == 'revise': fixture.claim = replace(fixture.claim, revise=True)
+    if kind == 'existing-marker': fixture.claim = replace(fixture.claim, native_recovery={})
+    if kind == 'phase': fixture.claim = replace(fixture.claim, phase='implementing')
+    if kind == 'branch':
+        fixture.claim = replace(fixture.claim, branch='other')
+        fixture.claim.write()
+        before = fixture.claim.path.read_bytes()
+    if kind == 'base': fixture.binding['base_sha'] = 'a' * 40
+    if kind == 'dirty': (fixture.worktree / 'source.txt').write_text('changed')
+    if kind == 'claim-mode': fixture.claim.path.chmod(0o666)
+    if kind == 'claim-link':
+        original = tmp_path / 'original-claim'
+        fixture.claim.path.rename(original)
+        fixture.claim.path.symlink_to(original)
+    if kind == 'recovery-mode': fixture.recovery.chmod(0o755)
+    if kind == 'old-lock':
+        fixture.claim.path.with_name(fixture.claim.path.name + '.native.lock').write_text('')
+    with pytest.raises(SessionError):
+        with fixture.lease(): pytest.fail('unsafe preparation admitted')
+    assert fixture.claim.path.read_bytes() == before
+    assert not list(fixture.recovery.iterdir())
+
+
+@pytest.mark.parametrize('failed_sync', [1, 2, 3, 4, 5])
+def test_prelaunch_sync_uncertainty_never_returns_handoff(fresh_claim, monkeypatch, failed_sync):
+    fixture = fresh_claim
+    calls = [0]
+    original = module.os.fsync
+    def fail(fd):
+        calls[0] += 1
+        if calls[0] == failed_sync: raise OSError('synthetic sync uncertainty')
+        original(fd)
+    monkeypatch.setattr(module.os, 'fsync', fail)
+    lease = fixture.lease()
+    with pytest.raises(SessionError):
+        with lease: pytest.fail('uncertain preparation returned')
+    with pytest.raises(SessionError): lease.open_journal()
+    assert fixture.claim.path.exists()
+    assert fixture.claim.path.with_name(fixture.claim.path.name + '.native.lock').exists()
+    if failed_sync == 5:
+        assert json.loads(fixture.claim.path.read_text())['native_recovery'] is not None
+    with pytest.raises(SessionError):
+        with fixture.lease(): pytest.fail('uncertain ownership replayed')
+
+
+def test_initial_claim_replacement_during_validation_blocks_cas(fresh_claim, monkeypatch):
+    fixture = fresh_claim
+    original = module.snapshot.from_git
+    def changed(*args, **kwargs):
+        value = original(*args, **kwargs)
+        replacement = replace(fixture.claim, started_at='other-owner')
+        replacement.write()
+        return value
+    monkeypatch.setattr(module.snapshot, 'from_git', changed)
+    with pytest.raises(SessionError):
+        with fixture.lease(): pytest.fail('changed claim was overwritten')
+    assert json.loads(fixture.claim.path.read_text())['started_at'] == 'other-owner'
+    assert not list(fixture.recovery.iterdir())
+
+
+@pytest.mark.parametrize('effort', ['', ' ', 1, False, 'x' * 65, 'high\n'])
+def test_invalid_reasoning_effort_cannot_enter_durable_intent(setup, effort):
+    setup.binding['review_reasoning_effort'] = effort
+    with pytest.raises(SessionError): setup.open()
+
+
+def test_reasoning_effort_remains_bound_before_any_provider_turn(setup):
+    with setup.open() as journal:
+        journal.start('implement')
+        assert journal.state['binding']['implementation_reasoning_effort'] == 'medium'
+        assert journal.state['binding']['review_reasoning_effort'] == 'high'

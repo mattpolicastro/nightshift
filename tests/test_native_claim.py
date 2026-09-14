@@ -113,3 +113,51 @@ def test_failed_attention_write_does_not_escape_retention(claim, tmp_path, monke
     repo = config.Repo(name=claim.repo, verify='true')
     daemon._recover(config.Config(repos=[repo]), repo, tmp_path, 7)
     assert claim.path.exists()
+
+
+@pytest.mark.parametrize('kind', ['orphan-lock', 'unmarked-lock', 'unreadable', 'repo-wide'])
+def test_startup_honors_retained_loader_repairs_before_legacy_recovery(claim, monkeypatch, kind):
+    if kind in ('orphan-lock', 'unmarked-lock'):
+        claim.path.with_name(claim.path.name + '.native.lock').write_text('')
+        if kind == 'orphan-lock': claim.path.unlink()
+    elif kind == 'unreadable': claim.path.write_text('{')
+    else: claim.path.parent.chmod(0o777)
+    def forbidden(*args, **kwargs): pytest.fail('retained recovery reached probe or mutation')
+    for name in ('has_commits', 'pr_for_branch', 'branch_on_remote', 'remove_worktree', 'open_pr'):
+        monkeypatch.setattr(daemon.vcs, name, forbidden)
+    for name in ('release', 'complete', 'escalate'):
+        monkeypatch.setattr(queue, name, forbidden)
+    monkeypatch.setattr(daemon.notify, 'send', forbidden)
+    recorded = []
+    monkeypatch.setattr(daemon.outcomes, 'record', lambda *a, **k: recorded.append((a, k)))
+    repo = config.Repo(name=claim.repo, verify='true')
+    daemon._recover(config.Config(repos=[repo]), repo, Path(claim.worktree).parent, 7)
+    assert recorded == [((claim.repo, 7), dict(state='needs_decision',
+        reason='local native or ambiguous recovery evidence requires inspection',
+        escalated=False, native_retained=True))]
+    assert (Path(claim.worktree)/'candidate').read_text() == 'retained'
+
+
+def test_repo_wide_retention_does_not_fabricate_issue_zero(claim, monkeypatch, caplog):
+    claim.path.parent.chmod(0o777)
+    def forbidden(*args, **kwargs): pytest.fail('issue-zero retention probed or wrote state')
+    monkeypatch.setattr(daemon.outcomes, 'record', forbidden)
+    monkeypatch.setattr(daemon.vcs, 'has_commits', forbidden)
+    repo = config.Repo(name=claim.repo, verify='true')
+    daemon._recover(config.Config(repos=[repo]), repo, Path(claim.worktree).parent, 0)
+    assert 'retain recovery state' in caplog.text
+
+
+def test_other_issue_retention_does_not_change_normal_legacy_recovery(claim, monkeypatch):
+    other = queue.claim_path(claim.repo, 8)
+    other.with_name(other.name + '.native.lock').write_text('')
+    calls = []
+    monkeypatch.setattr(daemon.vcs, 'has_commits', lambda *a: False)
+    monkeypatch.setattr(daemon.vcs, 'pr_for_branch', lambda *a: None)
+    monkeypatch.setattr(daemon.vcs, 'branch_on_remote', lambda *a: False)
+    monkeypatch.setattr(queue, 'release', lambda *a: calls.append('release'))
+    monkeypatch.setattr(daemon.vcs, 'remove_worktree', lambda *a, **k: calls.append('remove'))
+    monkeypatch.setattr(daemon.outcomes, 'record', lambda *a, **k: None)
+    repo = config.Repo(name=claim.repo, verify='true')
+    daemon._recover(config.Config(repos=[repo]), repo, Path(claim.worktree).parent, 7)
+    assert calls == ['release', 'remove']

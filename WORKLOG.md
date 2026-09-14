@@ -75,6 +75,23 @@ all provider, executor, container and credential cleanup gates succeeded. The
 result remained `reviewed_pending_human` with shipping disabled; no daemon, GitHub
 queue, push or PR path was invoked.
 
+The next dormant integration layer adds a managed task profile and continuous
+prelaunch Claim lease without enabling dispatch. The profile requires the standard
+ChatGPT route for both phases, exact models/reasoning/budgets, pinned runtime and
+image identities, protected local paths and an opaque private identity reference;
+API-key, custom-provider, mixed-driver and fallback fields fail closed. The lease
+holds one cross-process lock while it verifies the clean Git base/branch/worktree,
+durably advances a fresh Claim to `implementing`, creates private recovery state,
+and hands the same lock description into the controller journal.
+
+Recovery now treats unreadable claims, unsafe claim roots and orphan native lock
+tombstones as retained evidence. They cannot be deleted, released or reclaimed by
+legacy startup behavior, and unresolved native state stays visible even if GitHub
+reports the issue or PR closed. Cross-review found and fixed the pre-marker crash
+window where a tombstone paired with a legacy-looking Claim could otherwise enter
+ordinary release and worktree cleanup. Native daemon dispatch and shipping remain
+disabled.
+
 ## Stable credential lease and native recovery marker — 2026-09-09
 
 Added a private stable `CODEX_HOME` lease for macOS keyring-backed metadata
