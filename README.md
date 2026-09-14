@@ -43,6 +43,8 @@ disabled. A private model-capable composition now joins the enrolled credential
 lease, managed-account admission, isolated executor, durable claim marker and
 cleanup-gated candidate export. Synthetic protocol tests and a minimal live
 subscription canary have qualified that private path. Daemon dispatch remains disabled.
+Host-owned candidate commit and isolated verification are also joined behind the
+private gate; authenticated immutable review and daemon coordination remain.
 See [implementation status](docs/native-worker-progress.md). Automatic model
 selection is not implemented.
 

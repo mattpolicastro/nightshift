@@ -57,6 +57,11 @@ items, fall back to Claude, or be enabled with an operator bypass.
 - Unattributed live quota notifications revoke eligibility until fresh account
   and quota reads rebind the private identity and confirm available managed
   usage. Exhaustion or failed rebinding stops the attempt.
+- A private coordinator now joins stable implementation to a host-owned exact
+  candidate commit and pinned isolated verification. It binds the complete Claim,
+  worktree, symbolic branch and base commit across every handoff; preserves
+  implementation files and accounting on failure; and stops at
+  `verified_pending_review`, which cannot authorize shipping.
 
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.
@@ -99,11 +104,12 @@ processes that escape their group. Native worker isolation is a separate gate.
    configured and effective read-only mounts, denied source mutation, scratch,
    network and host isolation, exact source preservation and owned cleanup. See
    [security qualification](codex-security-qualification.md).
-2. Integrate driver dispatch, host-owned Git operations, native accounting,
-   the durable native marker and retained recovery disposition with the daemon's
-   implementation/review phases. The
-   bound reviewer prompt now carries validated approved-task and policy data.
-3. Run an end-to-end sandbox task with independent review, isolated verification,
+2. Add a stable authenticated reviewer over the existing immutable exact-candidate
+   mount and join it after `verified_pending_review`. The bound reviewer prompt
+   already carries validated approved-task and policy data.
+3. Integrate the private coordinator, durable accounting persistence, exclusive
+   claim/worktree ownership and retained recovery outcomes with daemon dispatch.
+4. Run an end-to-end sandbox task with independent review, isolated verification,
    host-owned PR creation and GitHub CI before enabling production dispatch.
 
 The approved route allows a ChatGPT plan's included allowance and existing

@@ -192,10 +192,10 @@ transport required for production source export.
 
 ## Remaining production integration
 
-- Join the canary-qualified private model composition to the persistent candidate
-  coordinator and daemon recovery lifecycle. The private runner now joins the
-  enrolled credential lease, bound admission, isolated executor and cleanup-gated
-  candidate export; production dispatch remains blocked.
+- Add a stable authenticated reviewer over the immutable exact-candidate mount.
+  The canary-qualified implementation runner now joins the enrolled credential
+  lease, bound admission, isolated executor, host-owned candidate commit and
+  isolated verification, then stops at `verified_pending_review`.
 - Persist a native recovery marker before provider launch and recognize it ahead
   of ordinary queue/Git/PR recovery. The dormant marker and retention behavior
   now exist behind current dispatch gates; production coordination still must
@@ -204,8 +204,8 @@ transport required for production source export.
   home and explicit remote capability roots in the production launcher. Keep
   filesystem authority at the executor boundary; do not assume package-local
   symlink confinement or rely solely on discovery-disable flags.
-- Assemble the persistent executor, validated source transfer, host-owned
-  candidate commit, and immutable reviewer snapshot into one owned lifecycle.
+- Join the verified implementation coordinator and immutable reviewer into one
+  owned lifecycle with durable accounting persistence.
 - Run native candidates' verification scripts inside the qualified executor.
   The legacy host verifier is not filesystem/network isolation; a modified test
   or install script must not regain host access through that path.

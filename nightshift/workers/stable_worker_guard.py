@@ -39,7 +39,7 @@ def _stamp(info):
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def validate_marker(marker: NativeMarkerEvidence, recovery_dir: Path) -> None:
+def validate_marker(marker: NativeMarkerEvidence, recovery_dir: Path) -> queue.Claim:
     """Require matching owned claim bytes and sync file+directory before launch.
 
     The caller prepared the claim through the durable queue operation. Re-sync
@@ -97,6 +97,7 @@ def validate_marker(marker: NativeMarkerEvidence, recovery_dir: Path) -> None:
         current = os.stat(marker.claim_path.name, dir_fd=parent, follow_symlinks=False)
         if _stamp(current) != _stamp(before) or _stamp(os.fstat(descriptor)) != _stamp(before):
             raise ValueError('Claim changed while synced')
+        return record
     except (OSError, ValueError, TypeError, UnicodeError):
         raise SessionError('Durable native marker could not be confirmed') from None
     finally:

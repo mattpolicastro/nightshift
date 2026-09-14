@@ -27,6 +27,15 @@ After those fixes, a real isolated turn changed one synthetic text file to the
 exact requested bytes and returned complete thread, turn, model, usage and cleanup
 evidence. No production caller or daemon dispatch route was enabled.
 
+A subsequent private coordinator now carries an exact durable Claim and clean
+Git base through stable implementation, native accounting, a host-owned candidate
+commit and pinned isolated verification. It binds the Claim's worktree and branch
+to the same repository state, rechecks the complete Claim between handoffs, and
+keeps candidate files, accounting and recovery state on failure. Success stops at
+`verified_pending_review`; the result can never authorize shipping. Exclusive
+claim ownership and durable accounting persistence remain controller duties, and
+authenticated immutable review remains a separate required phase.
+
 ## Stable credential lease and native recovery marker — 2026-09-09
 
 Added a private stable `CODEX_HOME` lease for macOS keyring-backed metadata
