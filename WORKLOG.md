@@ -18,6 +18,14 @@ persists before any future provider launch and makes queue/startup recovery reta
 the claim, worktree, branch, and cleanup evidence before Git or PR probes. No
 production caller can prepare the marker, and native dispatch remains disabled.
 
+The final private stable namespace was subsequently enrolled and passed a live
+metadata-only qualification for the bound account, managed quota, advertised
+model and requested reasoning capability. The credential-free version probe now
+uses a separate disposable home because Codex creates runtime log/tmp entries
+even for `--version`; those files never enter the exact authenticated namespace.
+Provider shutdown and lease cleanup were confirmed. No prompt, thread or turn
+was created.
+
 ## Bound ChatGPT metadata qualification — 2026-09-09
 
 Added private principal/workspace binding and a metadata-only qualification path

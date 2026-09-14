@@ -34,7 +34,10 @@ items, fall back to Claude, or be enabled with an operator bypass.
 - A stable credential-home lease now supplies exclusive cross-process locking,
   durable attempt evidence, descriptor-based exact startup writes, shutdown-bound
   cleanup, and retained recovery state. Its metadata adapter cannot start a model
-  thread and uses an inert remote-only executor descriptor.
+  thread and uses an inert remote-only executor descriptor. The final namespace
+  is enrolled and has passed a live metadata-only qualification with confirmed
+  provider shutdown. The version probe runs in a separate disposable home so its
+  runtime files cannot alter the authenticated namespace.
 - A dormant native claim marker can be made durable before a future provider
   launch. Queue reconciliation and startup recovery retain any marked claim and
   skip destructive Git/PR recovery. No production caller prepares it, so this
@@ -81,8 +84,8 @@ processes that escape their group. Native worker isolation is a separate gate.
    configured and effective read-only mounts, denied source mutation, scratch,
    network and host isolation, exact source preservation and owned cleanup. See
    [security qualification](codex-security-qualification.md).
-2. Enroll the stable credential namespace and qualify it locally, then join the
-   lease to the native provider/executor launcher. The
+2. Join the qualified stable credential lease to the native provider/executor
+   launcher. The
    approved route allows a ChatGPT plan's included allowance and existing
    ChatGPT credits. Platform API-key and custom-provider fallback remain forbidden.
 3. Integrate driver dispatch, host-owned Git operations, normalized accounting,

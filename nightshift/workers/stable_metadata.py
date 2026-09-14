@@ -5,6 +5,8 @@ thread/turn, or enables dispatch. An inert remote-only descriptor prevents local
 fallback. The lease remains held until provider shutdown is confirmed; uncertain
 shutdown retains its recovery state. Authentication is managed externally.
 """
+import os
+import tempfile
 import time
 import tomllib
 from dataclasses import replace
@@ -45,7 +47,15 @@ async def _qualify_stable_home(root: Path, binary: Path, model: str, *, expected
                 env = policy._environment()
                 process_may_exist = True
                 try:
-                    await _check_version(binary, lease.home, env, deadline)
+                    # `codex --version` may create log/tmp runtime state. It
+                    # needs no credential, so keep those writes outside the
+                    # exact stable namespace used by the authenticated process.
+                    with tempfile.TemporaryDirectory(prefix='nightshift-version-') as temporary:
+                        version_home = Path(temporary)
+                        version_home.chmod(0o700)
+                        version_env = {'PATH': os.defpath, 'HOME': str(version_home),
+                                       'CODEX_HOME': str(version_home)}
+                        await _check_version(binary, version_home, version_env, deadline)
                 finally:
                     # _check_version owns and always reaps its process group.
                     process_may_exist = False

@@ -71,8 +71,10 @@ experiment also showed that the keyring login is scoped to the enrolled
 `CODEX_HOME`: a new per-attempt home has no account. Production therefore needs
 a stable, private and exclusively locked credential home whose generated policy
 and startup assets are checked on every use. The private lease and metadata-only
-adapter now implement and synthetically test that lifecycle, but the final stable
-namespace has not been enrolled or used for a live qualification. The adapter
+adapter implement and synthetically test that lifecycle. The final stable
+namespace is enrolled and has passed a live metadata-only qualification with
+confirmed provider shutdown. The credential-free version check uses a separate
+disposable home so its runtime files cannot enter this namespace. The adapter
 cannot create a model thread.
 
 ## Accounting and failure handling

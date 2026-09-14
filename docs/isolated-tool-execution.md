@@ -192,11 +192,11 @@ transport required for production source export.
 
 ## Remaining production integration
 
-- Enroll the final stable credential namespace, then join its lease to the
+- Join the enrolled, metadata-qualified stable credential lease to the
   model-capable provider/executor composition. Principal/workspace admission and
-  a local metadata-only qualification pass; the private stable-home adapter now
-  owns, locks, cleans and retains recovery evidence without creating a model
-  thread. Production model execution remains blocked.
+  a live metadata-only qualification pass; the private stable-home adapter owns,
+  locks, cleans and retains recovery evidence without creating a model thread.
+  Production model execution remains blocked.
 - Persist a native recovery marker before provider launch and recognize it ahead
   of ordinary queue/Git/PR recovery. The dormant marker and retention behavior
   now exist behind current dispatch gates; production coordination still must

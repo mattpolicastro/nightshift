@@ -92,6 +92,26 @@ def test_stable_namespace_inode_survives_clean_attempts(tmp_path, monkeypatch):
     assert_empty(root)
 
 
+def test_version_probe_runtime_files_never_enter_stable_namespace(tmp_path, monkeypatch):
+    root = setup(tmp_path, monkeypatch)
+    version_homes = []
+    async def version(binary, home, env, deadline):
+        version_homes.append(home)
+        assert env['HOME'] == env['CODEX_HOME'] == str(home)
+        assert home != root / 'codex-home'
+        (home / 'log').mkdir()
+        (home / 'tmp').mkdir()
+    async def qualify(*args, **kwargs):
+        assert set(path.name for path in kwargs['provider_cwd'].iterdir()) == {
+            'config.toml', 'environments.toml'}
+        return _QualificationResult('passed', 'explicit-model', provider_stopped=True)
+    monkeypatch.setattr(module, '_check_version', version)
+    monkeypatch.setattr(module, '_qualify_managed_account', qualify)
+    assert asyncio.run(call(root)).passed
+    assert len(version_homes) == 1 and not version_homes[0].exists()
+    assert_empty(root)
+
+
 def test_uncertain_provider_shutdown_retains_recovery_state(tmp_path, monkeypatch):
     root = setup(tmp_path, monkeypatch)
     async def qualify(*args, **kwargs):
