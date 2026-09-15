@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!package/
+!package/vendor/
+!package/vendor/aarch64-unknown-linux-musl/
+!package/vendor/aarch64-unknown-linux-musl/**

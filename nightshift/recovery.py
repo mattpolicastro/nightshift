@@ -19,6 +19,7 @@ from .queue import Phase
 
 
 class Action(Enum):
+    RETAIN = "retain"  # native execution evidence requires explicit inspection
     RELEASE = "release"  # nothing was produced — back to agent:ready
     ESCALATE = "escalate"  # work exists but its state is unknowable
     RE_REVIEW = "re_review"  # diff is committed; review is safe to redo
@@ -38,8 +39,12 @@ def decide(
     has_commits: bool,
     branch_pushed: bool,
     pr_url: str | None,
+    native_pending: bool = False,
 ) -> Recovery:
     """Pure. `pr_url` is None when no PR exists for the branch."""
+
+    if native_pending:
+        return Recovery(Action.RETAIN, "native execution or cleanup evidence requires inspection")
 
     # Order matters: an existing PR is the strongest evidence available, and it
     # can be true at any phase if the crash landed between `gh pr create` and

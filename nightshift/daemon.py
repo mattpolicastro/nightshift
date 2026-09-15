@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from . import outcomes, notify, preflight, queue, recovery, task, trace, vcs
+from . import native_accounting, notify, outcomes, preflight, queue, recovery, task, trace, vcs
 from .config import Config, Repo
 from .queue import Repair
 from .task import Step
@@ -193,6 +193,9 @@ class Tally:
     # because `max_tasks_per_night` is a cap per SUBSCRIPTION WINDOW: work that
     # touched no window must not eat a slot in one.
     unbilled: int = 0
+    # Native evidence is never interpreted as Claude cost/quota or free capacity.
+    native_usage: dict[tuple[str, str], native_accounting.NativeAccounting] = field(
+        default_factory=dict)
 
     @property
     def handled(self) -> int:
@@ -288,15 +291,31 @@ def startup(cfg: Config, repo_dirs: dict[str, Path],
 
         repo_dir = repo_dirs.get(repo.name)
         for r in found:
-            if r.repair is Repair.RESUMABLE and repo_dir is not None:
+            if r.repair in (Repair.RESUMABLE, Repair.RETAINED) and repo_dir is not None:
                 _recover(cfg, repo, repo_dir, r.number)
     return repairs
 
 
 def _recover(cfg: Config, repo: Repo, repo_dir: Path, number: int) -> None:
     """Act on one interrupted task."""
-    claims, _ = queue._load_claims(repo.name)  # noqa: SLF001 — same package
+    claims, repairs = queue._load_claims(repo.name)  # noqa: SLF001 — same package
     claim = claims.get(number)
+    retained = any(repair.repair is Repair.RETAINED and repair.number in (0, number)
+                   for repair in repairs)
+    if retained or (claim is not None and claim.native_recovery is not None):
+        # An orphan lock or unsafe claim is evidence even without a readable
+        # native marker. Honor it before every Git/GitHub recovery probe.
+        reason = "local native or ambiguous recovery evidence requires inspection"
+        if number <= 0:
+            log.warning("retain recovery state for %s: %s", repo.name, reason)
+            return
+        log.warning("retain #%s for inspection: %s", number, reason)
+        try:
+            outcomes.record(repo.name, number, state="needs_decision", reason=reason,
+                            escalated=False, native_retained=True)
+        except Exception as exc:  # Attention reporting cannot authorize cleanup.
+            log.warning("could not record retained #%s: %s", number, exc)
+        return
     if claim is None:
         return
 
@@ -397,8 +416,16 @@ def endpoints_ready(cfg: Config, repo: Repo, *, prober=None) -> tuple[bool, str]
     Repos on the default endpoint never probe anything, so this costs today's
     configuration exactly nothing.
     """
+    if len({ep.name for ep in cfg.endpoints}) != len(cfg.endpoints):
+        return False, "endpoint names must be unique; no fallback will run"
+    unresolved = cfg.undeclared_endpoint_refs()
     for phase in ("implement", "review"):
+        if cfg.model_spec(phase, repo) in unresolved:
+            return False, f"{phase} assignment names an undeclared endpoint; no fallback will run"
         assignment = cfg.assign(phase, repo)
+        blocker = assignment.endpoint.execution_blocker()
+        if blocker:
+            return False, f"{phase} endpoint {assignment.endpoint.name}: {blocker}"
         if assignment.endpoint.is_default:
             continue
         endpoint = assignment.endpoint
@@ -589,14 +616,22 @@ def _run_claimed(cfg: Config, claimed: Claimed, tally: Tally) -> None:
     _record_quota(report, tally)
 
 
+def _record_native_accounting(tally: Tally, claim: queue.Claim, phase: str, result) -> None:
+    """Dormant final-result seam; no production dispatch invokes this helper."""
+    evidence = native_accounting.from_worker(claim.native_recovery, phase, result)
+    tally.native_usage = native_accounting.merge(tally.native_usage, {evidence.key: evidence})
+
+
 def _merge(dst: Tally, src: Tally) -> None:
     """Fold a finished task's tally into the loop's. Loop thread only."""
+    combined_native = native_accounting.merge(dst.native_usage, src.native_usage)
     dst.shipped += src.shipped
     dst.escalated += src.escalated
     dst.cost += src.cost
     dst.turns += src.turns
     dst.unbilled += src.unbilled
     dst.lines += src.lines
+    dst.native_usage = combined_native
     # Latest wins, same rule as `_record_quota` — a task that reported nothing
     # about the window must not erase what another task just learned about it.
     if src.quota is not None:

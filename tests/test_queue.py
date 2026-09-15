@@ -236,15 +236,16 @@ def test_claim_file_with_no_working_label_is_litter():
     assert gh.edits() == [], "litter must not touch GitHub"
 
 
-def test_unparseable_claim_file_is_deleted_not_guessed_at(claim_dir):
+def test_unparseable_claim_file_is_retained_not_guessed_at(claim_dir):
     claim_dir.mkdir(parents=True, exist_ok=True)
     bad = claim_dir / f"{REPO.replace('/', '__')}#5.json"
     bad.write_text('{"repo": "matt/sandbox", "number":')  # truncated mid-write
 
     repairs = queue.reconcile(REPO, runner=FakeGh({LABELS.working: []}))
 
-    assert [r.repair for r in repairs] == [Repair.LITTER]
-    assert not bad.exists()
+    assert [r.repair for r in repairs] == [Repair.RETAINED]
+    assert bad.exists()
+    assert repairs[0].number == 5
 
 
 def test_reconcile_ignores_other_repos_claim_files(claim_dir):
@@ -560,3 +561,148 @@ def test_base_branch_does_not_swallow_a_following_word():
     """`base: x y` is a typo, not a branch called "x y" — take the first token
     so a stray trailing word can't silently become part of the name."""
     assert queue.base_branch("base: narrow-tier and then merge") == "narrow-tier"
+
+
+@pytest.mark.parametrize('kind', ['truncated', 'duplicate', 'wrong-identity', 'symlink', 'dangling', 'fifo', 'directory', 'hardlink', 'writable'])
+def test_unsafe_canonical_claim_is_retained_and_blocks_admission(claim_dir, tmp_path, kind):
+    import os
+    claim_dir.mkdir()
+    path = queue.claim_path(REPO, 5)
+    raw = json.dumps(dict(repo=REPO, number=5, branch='candidate', worktree=str(tmp_path/'worktree'), started_at='fixture'))
+    target = tmp_path/'untouched'
+    target.write_text(raw)
+    if kind == 'symlink': path.symlink_to(target)
+    elif kind == 'dangling': path.symlink_to(tmp_path/'absent')
+    elif kind == 'fifo': os.mkfifo(path)
+    elif kind == 'directory': path.mkdir()
+    elif kind == 'hardlink': os.link(target, path)
+    else:
+        path.write_text(raw)
+        if kind == 'truncated': path.write_text('{')
+        elif kind == 'duplicate': path.write_text(raw[:-1] + ',"number":5}')
+        elif kind == 'wrong-identity': path.write_text(raw.replace('"number": 5', '"number": 9'))
+        elif kind == 'writable': path.chmod(0o666)
+    gh = FakeGh({LABELS.working: [5], LABELS.ready: [5]})
+    repairs = queue.reconcile(REPO, runner=gh, worktree_exists=lambda p: pytest.fail('unsafe claim worktree probe'))
+    assert [(r.repair, r.number) for r in repairs] == [(Repair.RETAINED, 5)]
+    assert gh.edits() == [] and os.path.lexists(path)
+    assert queue.claim(REPO, tmp_path, runner=gh) is None
+    assert target.read_text() == raw
+
+
+def test_unreadable_claim_open_is_retained(claim_dir, monkeypatch):
+    claim_dir.mkdir()
+    path = queue.claim_path(REPO, 5)
+    path.write_text('{}')
+    original = queue.os.open
+    def fail(name, *args, **kwargs):
+        if name == path.name: raise PermissionError('unreadable')
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(queue.os, 'open', fail)
+    gh = FakeGh({LABELS.working: [5]})
+    repairs = queue.reconcile(REPO, runner=gh)
+    assert [(r.repair, r.number) for r in repairs] == [(Repair.RETAINED, 5)]
+    assert path.exists() and not gh.edits()
+
+
+@pytest.mark.parametrize('kind', ['symlink', 'writable', 'foreign-owner'])
+def test_unsafe_claim_directory_is_never_traversed_or_released(claim_dir, tmp_path, monkeypatch, kind):
+    import os
+    from types import SimpleNamespace
+    claim_dir.mkdir()
+    path = queue.claim_path(REPO, 5)
+    path.write_text('{}')
+    if kind == 'symlink':
+        target = tmp_path/'other-claims'
+        claim_dir.rename(target)
+        claim_dir.symlink_to(target, target_is_directory=True)
+    elif kind == 'writable': claim_dir.chmod(0o777)
+    else:
+        original = queue.os.fstat
+        def foreign(fd):
+            info = original(fd)
+            return SimpleNamespace(st_mode=info.st_mode, st_uid=os.getuid()+1)
+        monkeypatch.setattr(queue.os, 'fstat', foreign)
+    monkeypatch.setattr(queue.os, 'listdir', lambda *a: pytest.fail('unsafe directory traversed'))
+    gh = FakeGh({LABELS.working: [5]})
+    repairs = queue.reconcile(REPO, runner=gh)
+    assert all(r.repair is Repair.RETAINED for r in repairs)
+    assert any(r.number == 5 for r in repairs)
+    assert not gh.edits()
+    assert queue.in_flight(REPO)[1]
+
+
+def test_status_does_not_follow_claim_symlink(claim_dir, tmp_path):
+    claim_dir.mkdir()
+    path = queue.claim_path(REPO, 5)
+    path.symlink_to(tmp_path/'absent')
+    claims, unreadable = queue.in_flight(REPO)
+    assert claims == [] and unreadable == [path.name]
+    assert path.is_symlink()
+
+
+@pytest.mark.parametrize('kind', ['empty', 'malformed', 'symlink', 'dangling', 'fifo'])
+@pytest.mark.parametrize('working', [False, True])
+def test_orphan_native_lock_retains_identity_and_blocks_reclaim(claim_dir, tmp_path, monkeypatch, kind, working):
+    import os
+    claim_dir.mkdir()
+    path = queue.claim_path(REPO, 5)
+    lock = path.with_name(path.name + '.native.lock')
+    target = tmp_path/'sentinel'
+    target.write_text('untouched')
+    if kind == 'symlink': lock.symlink_to(target)
+    elif kind == 'dangling': lock.symlink_to(tmp_path/'absent')
+    elif kind == 'fifo': os.mkfifo(lock)
+    else: lock.write_text('' if kind == 'empty' else '{broken content')
+    original = queue.os.open
+    def no_lock_read(name, *args, **kwargs):
+        assert name != lock.name, 'lock must be recognized without opening or following it'
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(queue.os, 'open', no_lock_read)
+    gh = FakeGh({LABELS.ready: [5], LABELS.working: [5] if working else []})
+    repairs = queue.reconcile(REPO, runner=gh)
+    assert [(r.repair, r.number) for r in repairs] == [(Repair.RETAINED, 5)]
+    claims, unreadable = queue.in_flight(REPO)
+    assert claims == [] and unreadable == [lock.name]
+    assert queue.claim(REPO, tmp_path, runner=gh) is None
+    assert os.path.lexists(lock) and not path.exists() and not gh.edits()
+    assert target.read_text() == 'untouched'
+
+
+def test_native_lock_also_protects_unmarked_legacy_claim_from_litter(claim_dir, tmp_path):
+    value = queue.Claim(REPO, 5, 'candidate', str(tmp_path/'worktree'), 'fixture')
+    value.write()
+    lock = value.path.with_name(value.path.name + '.native.lock')
+    lock.write_text('')
+    gh = FakeGh({LABELS.working: []})
+    repairs = queue.reconcile(REPO, runner=gh)
+    assert [(r.repair, r.number) for r in repairs] == [(Repair.RETAINED, 5)]
+    assert value.path.exists() and lock.exists() and not gh.edits()
+
+
+@pytest.mark.parametrize('kind', ['writable-root', 'symlink-root', 'malformed-name', 'malformed-lock-name'])
+def test_ambiguous_root_or_unidentified_evidence_blocks_all_repo_admission(claim_dir, tmp_path, kind):
+    claim_dir.mkdir()
+    if kind == 'writable-root':
+        claim_dir.chmod(0o777)
+    elif kind == 'symlink-root':
+        target = tmp_path / 'other-claims'
+        claim_dir.rename(target)
+        claim_dir.symlink_to(target, target_is_directory=True)
+    else:
+        suffix = '.json.native.lock' if kind == 'malformed-lock-name' else '.json'
+        (claim_dir / (REPO.replace('/', '__') + '#0005' + suffix)).write_text('{}')
+    gh = FakeGh({LABELS.ready: [5, 6]})
+    assert queue.claim(REPO, tmp_path, runner=gh) is None
+    assert not gh.calls, 'ambiguous local ownership should fail before remote admission'
+    assert not queue.claim_path(REPO, 6).exists()
+
+
+def test_canonical_retained_identity_does_not_block_unrelated_ready_issue(claim_dir, tmp_path):
+    claim_dir.mkdir()
+    lock = queue.claim_path(REPO, 5).with_suffix('.json.native.lock')
+    lock.write_text('')
+    gh = FakeGh({LABELS.ready: [5, 6]})
+    issue, record = queue.claim(REPO, tmp_path, runner=gh)
+    assert issue.number == record.number == 6
+    assert lock.exists() and not queue.claim_path(REPO, 5).exists()

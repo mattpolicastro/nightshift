@@ -25,6 +25,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import stat
+import tempfile
 import re
 import subprocess
 import time
@@ -102,6 +105,43 @@ class Claim:
     #: Written so a crash mid-revise recovers as a revise. Defaulted, so claim
     #: files from before this existed still load.
     revise: bool = False
+    # Presence, including an unknown/malformed value, blocks automatic recovery.
+    # No production dispatch currently prepares a native claim.
+    native_recovery: dict | None = None
+
+    def _prepare_native(self, run_id: str, recovery_dir: Path) -> None:
+        """Private future-launch seam: return only after the marker is durable.
+
+        This does not authorize or invoke a provider. Any persistence exception
+        must prevent launch; after an ambiguous write the marker stays retained.
+        Existing claim directory must already exist from ordinary admission.
+        """
+        if self.native_recovery is not None:
+            raise ValueError("Native claim was already prepared")
+        if type(run_id) is not str or re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
+            raise ValueError("A fresh native run identity is required")
+        if not isinstance(recovery_dir, Path) or not recovery_dir.is_absolute():
+            raise ValueError("An absolute owned recovery directory is required")
+        if len(str(recovery_dir).encode()) > 4096 or any(ord(c) < 32 for c in str(recovery_dir)):
+            raise ValueError("Invalid recovery directory reference")
+        if not self.path.is_file() or self.path.is_symlink():
+            raise ValueError("An existing regular claim is required before native preparation")
+        self.native_recovery = {"version": 1, "run_id": run_id, "recovery_dir": str(recovery_dir)}
+        descriptor, name = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=self.path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "w") as stream:
+                json.dump(asdict(self), stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+            directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @property
     def path(self) -> Path:
@@ -127,6 +167,7 @@ class Claim:
 class Repair(Enum):
     """What reconcile() did to a disagreeing pair."""
 
+    RETAINED = "retained"  # native state requires explicit inspection, never automatic release
     RESUMABLE = "resumable"  # label + claim + worktree present — watchdog picks up
     RELEASED = "released"  # label with no usable local work — back to ready
     LITTER = "litter"  # claim file with no matching label — deleted
@@ -676,10 +717,18 @@ def claim(
     # few seconds (measured ~5s on 2026-08-02), so a just-claimed issue can
     # still appear ready. An existing claim file is the authoritative local
     # answer and does not depend on the index.
+    _, evidence = _load_claims(repo)
+    retained = {item.number for item in evidence if item.repair is Repair.RETAINED}
+    if 0 in retained:
+        # An unsafe root or noncanonical evidence cannot be scoped to one
+        # issue. Do not create new ownership until it is inspected locally.
+        return None
     candidates = [
         i
         for i in ready(repo, labels, runner=runner)
-        if not claim_path(repo, i.number).exists()
+        if i.number not in retained
+        if not os.path.lexists(claim_path(repo, i.number))
+        and not os.path.lexists(str(claim_path(repo, i.number)) + ".native.lock")
     ]
 
     # The index says these are ready; `issue view` says what they actually
@@ -821,52 +870,76 @@ def complete(
 
 
 def in_flight(repo: str) -> tuple[list[Claim], list[str]]:
-    """What a worker is on RIGHT NOW, plus the names of any unreadable claims.
-
-    Read-only, and deliberately NOT `_load_claims`: that repairs as it reads,
-    deleting claim files it cannot parse. `status` is a question, and a
-    question must not be able to destroy the only record of where a running
-    task's work lives. A bad file is reported here and repaired by
-    `reconcile`, which is the command that exists to be told yes.
-
-    The only surface that answers "what is happening now" without asking
-    GitHub — and the authoritative one either way, since the claim file is
-    written BEFORE the label swap.
-    """
-    claims: list[Claim] = []
-    unreadable: list[str] = []
-    if not CLAIM_DIR.exists():
-        return claims, unreadable
-
-    prefix = f"{repo.replace('/', '__')}#"
-    for f in sorted(CLAIM_DIR.glob(f"{prefix}*.json")):
-        try:
-            claims.append(Claim(**json.loads(f.read_text())))
-        except (json.JSONDecodeError, KeyError, TypeError, OSError):
-            unreadable.append(f.name)
-    return sorted(claims, key=lambda c: c.number), unreadable
+    """Read-only status using the same non-following, non-destructive loader."""
+    claims, repairs = _load_claims(repo)
+    unreadable = [
+        claim_path(repo, repair.number).name + (".native.lock" if repair.detail.startswith("native lock") else "")
+        if repair.number else repair.detail for repair in repairs]
+    return sorted(claims.values(), key=lambda claim: claim.number), unreadable
 
 
 def _load_claims(repo: str) -> tuple[dict[int, Claim], list[Reconciliation]]:
-    """Read this repo's claim files. Unparseable ones are deleted, not guessed at."""
+    """Read owned regular claims; ambiguous evidence is retained, never deleted."""
     claims: dict[int, Claim] = {}
     repairs: list[Reconciliation] = []
-    if not CLAIM_DIR.exists():
-        return claims, repairs
-
     prefix = f"{repo.replace('/', '__')}#"
-    for f in sorted(CLAIM_DIR.glob(f"{prefix}*.json")):
-        try:
-            record = Claim(**json.loads(f.read_text()))
-        except (json.JSONDecodeError, KeyError, TypeError):
-            # A truncated or hand-edited claim file says nothing reliable about
-            # where work lives, so it cannot be resumed from.
-            f.unlink(missing_ok=True)
-            repairs.append(
-                Reconciliation(Repair.LITTER, 0, f"unparseable claim file {f.name}")
-            )
-            continue
-        claims[record.number] = record
+    try:
+        directory = os.open(CLAIM_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return claims, repairs
+    except OSError:
+        return claims, [Reconciliation(Repair.RETAINED, 0, "unsafe or unreadable claim directory")]
+    try:
+        info = os.fstat(directory)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o022):
+            return claims, [Reconciliation(Repair.RETAINED, 0, "unsafe claim directory requires inspection")]
+        for name in sorted(os.listdir(directory)):
+            # Persistent native locks are tombstones even when empty, malformed,
+            # symlinked or no longer paired with a readable claim. Never open them.
+            if name.startswith(prefix) and name.endswith('.json.native.lock'):
+                match = re.fullmatch(re.escape(prefix) + r"([1-9][0-9]*)\.json\.native\.lock", name)
+                number = int(match.group(1)) if match else 0
+                repairs.append(Reconciliation(Repair.RETAINED, number,
+                                               "native lock/tombstone requires inspection"))
+                continue
+            if not name.startswith(prefix) or not name.endswith('.json'):
+                continue
+            match = re.fullmatch(re.escape(prefix) + r"([1-9][0-9]*)\.json", name)
+            number = int(match.group(1)) if match else 0
+            try:
+                if not number:
+                    raise ValueError('Noncanonical claim identity')
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+                with os.fdopen(fd, 'rb') as stream:
+                    info = os.fstat(stream.fileno())
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                            or info.st_mode & 0o022 or info.st_nlink != 1 or info.st_size > 65536):
+                        raise ValueError('Unsafe claim file')
+                    raw = stream.read(65537)
+                    if len(raw) > 65536:
+                        raise ValueError('Oversized claim')
+                def unique(pairs):
+                    data = {}
+                    for key, value in pairs:
+                        if key in data:
+                            raise ValueError('Duplicate claim field')
+                        data[key] = value
+                    return data
+                record = Claim(**json.loads(raw, object_pairs_hook=unique))
+                if (record.repo != repo or type(record.number) is not int or record.number != number
+                        or type(record.worktree) is not str or not Path(record.worktree).is_absolute()
+                        or '\0' in record.worktree or '..' in Path(record.worktree).parts
+                        or any(type(value) is not str or not value for value in
+                               (record.branch, record.phase, record.started_at))
+                        or type(record.revise) is not bool):
+                    raise ValueError('Claim identity or fields differ')
+                claims[number] = record
+            except (OSError, ValueError, KeyError, TypeError):
+                repairs.append(Reconciliation(Repair.RETAINED, number,
+                                               "unsafe or unreadable claim requires inspection"))
+    finally:
+        os.close(directory)
     return claims, repairs
 
 
@@ -879,7 +952,7 @@ def reconcile(
 ) -> list[Reconciliation]:
     """Make labels and claim files agree. Call at startup, before claiming.
 
-    Four states, three needing repair:
+    Five states, four needing repair:
 
     | label     | claim file | worktree | action                              |
     |-----------|------------|----------|-------------------------------------|
@@ -887,13 +960,24 @@ def reconcile(
     | working   | yes        | no       | RELEASED — crashed before create    |
     | working   | no         | –        | RELEASED — orphaned                 |
     | absent    | yes        | –        | LITTER — delete the file            |
+    | any       | native     | any      | RETAINED — explicit inspection      |
 
     Releasing rather than resuming a half-created task is deliberate: a
     worktree that does not exist has produced nothing, so re-running from
     `agent:ready` costs one cycle and cannot double-commit.
     """
     claims, repairs = _load_claims(repo)
+    unsafe = {repair.number for repair in repairs if repair.repair is Repair.RETAINED}
+    retained = {number for number, record in claims.items() if record.native_recovery is not None}
+    for number in sorted(retained - unsafe):
+        repairs.append(Reconciliation(Repair.RETAINED, number, "native execution requires inspection"))
+    claims = {number: record for number, record in claims.items() if number not in retained | unsafe}
     working = {i.number for i in _list(repo, labels.working, runner=runner)}
+    if 0 in unsafe:
+        repairs.extend(Reconciliation(Repair.RETAINED, number, "ambiguous claim state requires inspection")
+                       for number in sorted(working - retained - unsafe))
+        return repairs
+    working -= retained | unsafe
 
     # `issue list --label` reads a search index that lags label writes by a few
     # seconds. A daemon restarting straight after a crash therefore sees its own

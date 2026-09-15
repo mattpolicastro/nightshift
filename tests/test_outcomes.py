@@ -269,3 +269,26 @@ def test_cli_reports_deferred_checks_as_stale_json(monkeypatch, capsys):
     assert len(payload["tasks"]) == 40
     assert len(payload["stale"]) == 8
     assert all("deferred" in i["error"] for i in payload["stale"])
+
+
+def test_native_retention_overrides_remote_resolution_and_refresh_failure(monkeypatch):
+    outcomes.record('a/b', 1, state='needs_decision', escalated=True, native_retained=True,
+                    pr_url='https://github.com/a/b/pull/2')
+    for runner in (github(issue_state='CLOSED'), github(pr_state='MERGED'), github(labels=[])):
+        item = outcomes.refresh(Labels(), runner=runner)[0]
+        assert item['state'] == 'needs_decision'
+        assert outcomes.attention([item]) == [item]
+    def offline(args): raise RuntimeError('offline')
+    assert outcomes.refresh(Labels(), runner=offline)[0]['state'] == 'needs_decision'
+    # A stale successful observation or error cannot hide locally retained work.
+    item = outcomes.tasks()[0]
+    with outcomes.database() as db:
+        db.execute('INSERT OR REPLACE INTO observations VALUES(?,?,?,?,?)',
+                   (item['id'], outcomes.now(), 'resolved', 'PR merged', 'offline'))
+    item = outcomes.tasks()[0]
+    assert item['state'] == 'needs_decision' and outcomes.attention([item])
+    outcomes.record('a/b', 1, state='resolved', reason='remote state update')
+    assert outcomes.tasks()[0]['state'] == 'needs_decision'
+    # Only an explicit local clearing event restores ordinary reconciliation.
+    outcomes.record('a/b', 1, native_retained=False)
+    assert outcomes.refresh(Labels(), runner=github(pr_state='MERGED'))[0]['state'] == 'resolved'

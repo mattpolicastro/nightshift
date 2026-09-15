@@ -37,8 +37,33 @@ and green GitHub CI on 2026-09-08. This validates that pipeline for one task;
 broader reliability across models is not yet established.
 
 OpenAI-compatible endpoints require an operator-supplied translating proxy and
-remain unvalidated end to end. Native Codex workers and automatic model selection
-are not implemented.
+remain unvalidated end to end. A native Codex transport is under development,
+targeting ChatGPT-managed subscription usage with Platform API-key fallback
+disabled. A private model-capable composition now joins the enrolled credential
+lease, managed-account admission, isolated executor, durable claim marker and
+cleanup-gated candidate export. Synthetic protocol tests and minimal live
+subscription canaries have qualified both implementation and review paths.
+Daemon dispatch remains disabled.
+Host-owned candidate commit, isolated verification, and a fresh authenticated
+review turn over an immutable candidate mount are implemented behind the private
+gate. A private controller now holds exclusive claim ownership, durably records
+both model-call intents and returned token evidence, advances the exact Claim for
+review, and stops after an independently reviewed candidate. Daemon coordination
+and shipping through this route remain disabled. A dormant private task lane now
+validates the subscription-only inputs, creates durable ownership before any Git
+operation, fetches an explicit public GitHub base without credentials, builds a
+fresh hook-free worktree, and keeps the same lock through controller cleanup.
+Its public entry point is blocked and it cannot dispatch, clean up, push or ship.
+A dormant typed dispatch boundary now distinguishes legacy, managed-native and
+blocked routes; malformed native intent cannot fall back to a legacy worker.
+A protected private loader can build that runtime only from strict host-owned
+manifest and identity records; its public loading surface remains disabled.
+See [implementation status](docs/native-worker-progress.md). Automatic model
+selection is not implemented.
+
+The native branch is intentionally pausing new runtime machinery while it
+consolidates around upstream Codex execution contracts. See the
+[native worker boundary decision](docs/native-worker-boundary.md).
 
 See [provider setup and support status](docs/providers.md) and
 [validation evidence](docs/validation.md). Planning is task preparation, not a

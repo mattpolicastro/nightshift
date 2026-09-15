@@ -104,6 +104,60 @@ class Endpoint:
     # down — that false negative has already happened once (SPEC §1.1).
     warmup_timeout_s: int = 180
     proxy_url: str = ""
+    # Driver is independent of endpoint protocol: legacy OpenAI endpoints still
+    # use Claude plus a proxy. Native Codex remains disabled until qualified.
+    driver: str = "claude-code"
+    auth: str = ""
+    reasoning_effort: str = "medium"
+    max_runtime_s: int = 1800
+    max_tool_calls: int = 100
+    max_output_tokens_total: int = 32000
+
+    def configuration_errors(self) -> list[str]:
+        """Reject ambiguous native routing before a request can carry a key."""
+        if not isinstance(self.driver, str) or self.driver not in {"claude-code", "codex-app-server"}:
+            return ["unsupported worker driver"]
+        if self.driver == "claude-code":
+            errors = []
+            if not isinstance(self.protocol, str) or self.protocol not in {"anthropic", "openai"}:
+                errors.append("Claude Code requires anthropic or legacy openai protocol")
+            if self.auth != "":
+                errors.append("explicit auth is only supported for native driver configuration")
+            return errors
+        errors = []
+        if self.protocol != "responses":
+            errors.append("codex-app-server requires protocol = responses")
+        if self.base_url != "https://api.openai.com/v1":
+            errors.append("native OpenAI requires the exact official API base URL")
+        if self.proxy_url:
+            errors.append("native OpenAI does not accept proxy_url")
+        if self.auth != "api_key" or self.billing != "metered":
+            errors.append("native OpenAI requires explicit api_key auth and metered billing")
+        if not isinstance(self.auth_env, str) or not self.auth_env or not self.auth_env.isidentifier():
+            errors.append("native OpenAI requires a credential environment-variable name")
+        if isinstance(self.auth_env, str) and self.auth_env in {"GH_TOKEN", "GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                             "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                             "NIGHTSHIFT_SLACK_WEBHOOK"}:
+            errors.append("native OpenAI cannot reuse another service's credential")
+        if not isinstance(self.models, (tuple, list)) or not self.models or any(not isinstance(m, str) or not m.strip()
+                                  or m == "OPERATOR_SELECTED_MODEL_ID" for m in self.models):
+            errors.append("native OpenAI requires explicit model identifiers")
+        for field_name in ("max_runtime_s", "max_tool_calls", "max_output_tokens_total"):
+            value = getattr(self, field_name)
+            if type(value) is not int or value <= 0:
+                errors.append(f"{field_name} must be a positive integer")
+        if not isinstance(self.reasoning_effort, str) or not self.reasoning_effort.strip():
+            errors.append("reasoning_effort must be explicit")
+        return errors
+
+    def execution_blocker(self) -> str | None:
+        errors = self.configuration_errors()
+        if errors:
+            return "; ".join(errors)
+        if self.driver == "codex-app-server":
+            return ("native Codex execution is disabled pending sandbox and "
+                    "credential-isolation qualification; no fallback will run")
+        return None
 
     @property
     def is_default(self) -> bool:
@@ -115,7 +169,8 @@ class Endpoint:
         credential and must not inherit the subscription's, whatever it is
         called.
         """
-        return self.name == DEFAULT_ENDPOINT_NAME and not self.url
+        return (self.driver == "claude-code" and self.auth == "" and self.protocol == "anthropic"
+                and self.name == DEFAULT_ENDPOINT_NAME and not self.url)
 
     @property
     def url(self) -> str:
@@ -375,10 +430,16 @@ def load(path: Path | None = None) -> Config:
 
     daemon = raw.get("daemon", {})
     endpoints = [_endpoint(e) for e in raw.get("endpoints", [])]
+    if len({e.name for e in endpoints}) != len(endpoints):
+        raise ValueError("endpoint names must be unique")
+    for endpoint in endpoints:
+        errors = endpoint.configuration_errors()
+        if errors:
+            raise ValueError(f"invalid endpoint {endpoint.name!r}: {'; '.join(errors)}")
     models = raw.get("models", {})
     labels = raw.get("labels", {})
 
-    return Config(
+    cfg = Config(
         repos=[
             Repo(
                 name=r["name"],
@@ -413,9 +474,17 @@ def load(path: Path | None = None) -> Config:
         chores_model=models.get("chores", ""),
         mirror_to_paseo=daemon.get("mirror_to_paseo", False),
     )
+    unresolved = cfg.undeclared_endpoint_refs()
+    if unresolved:
+        raise ValueError("model assignment names an undeclared endpoint")
+    return cfg
 
 
 def _endpoint(raw: dict) -> Endpoint:
+    if not isinstance(raw.get("models", []), list):
+        raise ValueError("endpoint models must be a list of model identifiers")
+    if not isinstance(raw.get("name"), str) or not raw["name"] or ":" in raw["name"]:
+        raise ValueError("endpoint name must be nonempty and cannot contain ':'")
     return Endpoint(
         name=raw["name"],
         protocol=raw.get("protocol", "anthropic"),
@@ -427,6 +496,12 @@ def _endpoint(raw: dict) -> Endpoint:
         max_turns_multiplier=float(raw.get("max_turns_multiplier", 1.0)),
         warmup_timeout_s=int(raw.get("warmup_timeout_s", 180)),
         proxy_url=raw.get("proxy_url", ""),
+        driver=raw.get("driver", "claude-code"),
+        auth=raw.get("auth", ""),
+        reasoning_effort=raw.get("reasoning_effort", "medium"),
+        max_runtime_s=raw.get("max_runtime_s", 1800),
+        max_tool_calls=raw.get("max_tool_calls", 100),
+        max_output_tokens_total=raw.get("max_output_tokens_total", 32000),
     )
 
 

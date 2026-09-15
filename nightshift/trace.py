@@ -47,9 +47,8 @@ class Result:
     output_tokens: int
     cache_read_tokens: int
     text: str
-    # Every Bash command the worker actually executed. The daemon checks this
-    # rather than the closing message: a worker that claims it ran the tests
-    # and a worker that ran them look identical in prose.
+    # Bash tool requests observed in the stream. These do not establish
+    # execution, completion, or exit status. Shipping uses host verification.
     commands: list[str] = field(default_factory=list)
     denials: list[Denial] = field(default_factory=list)
     # A `--model sonnet` run also bills small auxiliary haiku calls, so per-model
