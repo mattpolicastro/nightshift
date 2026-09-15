@@ -196,10 +196,10 @@ transport required for production source export.
   home and explicit remote capability roots in the production launcher. Keep
   filesystem authority at the executor boundary; do not assume package-local
   symlink confinement or rely solely on discovery-disable flags.
-- Wire typed driver results, explicit authentication/quota policy and native
-  accounting into a fail-closed daemon dispatch route. Keep the existing public
-  activation surface blocked until startup recovery and operator controls use the
-  same native ownership state.
+- Add a daemon caller for the dormant typed dispatch boundary, with host-owned
+  managed runtime construction and operator controls. Keep the public activation
+  surface blocked until startup recovery and dispatch use the same native ownership
+  state.
 - Define a separately qualified authenticated fetch policy before native tasks can
   work with private repositories; the dormant lane intentionally supports anonymous
   public GitHub bases only.

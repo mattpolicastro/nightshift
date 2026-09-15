@@ -54,6 +54,8 @@ validates the subscription-only inputs, creates durable ownership before any Git
 operation, fetches an explicit public GitHub base without credentials, builds a
 fresh hook-free worktree, and keeps the same lock through controller cleanup.
 Its public entry point is blocked and it cannot dispatch, clean up, push or ship.
+A dormant typed dispatch boundary now distinguishes legacy, managed-native and
+blocked routes; malformed native intent cannot fall back to a legacy worker.
 See [implementation status](docs/native-worker-progress.md). Automatic model
 selection is not implemented.
 

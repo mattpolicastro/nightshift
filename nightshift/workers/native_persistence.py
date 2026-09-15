@@ -487,16 +487,11 @@ class NativePreparationLock:
         self._initial_bytes = self._initial_stamp = None
         self._entered = self._ready = self._handed_off = False
         self._ownership_started = False
-        self._ownership_started = False
         self._lock_name = expected_claim.path.name + '.native.lock'
 
     @property
     def ownership_started(self):
         """Whether this attempt created persistent native ownership evidence."""
-        return self._ownership_started
-
-    @property
-    def ownership_started(self):
         return self._ownership_started
 
     def _directory(self, path, private=False):
@@ -544,7 +539,6 @@ class NativePreparationLock:
             self._directories.append((self.expected_claim.path.parent, self._parent, False))
             self._lock = os.open(self._lock_name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                                  0o600, dir_fd=self._parent)
-            self._ownership_started = True
             self._ownership_started = True
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             os.fsync(self._lock)

@@ -94,6 +94,13 @@ fetch/worktree preparation, claim races, persistence faults and cancellation ret
 local evidence and generic operator attention. Its public entry point always returns
 blocked; it cannot call legacy cleanup, retry, push, PR or shipping paths.
 
+A dormant typed dispatch seam now sits in front of that lane without changing the
+daemon. It revalidates the complete managed runtime and identity, checks canonical
+local Claim/tombstone evidence before delegation, and rejects worktree roots that
+overlap credential or recovery state. Routing has explicit legacy, managed-native
+and blocked results, so malformed native intent cannot silently run through the
+legacy worker. Public dispatch and all environment/config activation remain blocked.
+
 Recovery now treats unreadable claims, unsafe claim roots and orphan native lock
 tombstones as retained evidence. They cannot be deleted, released or reclaimed by
 legacy startup behavior, and unresolved native state stays visible even if GitHub

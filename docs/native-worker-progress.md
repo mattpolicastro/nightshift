@@ -111,6 +111,13 @@ Native recovery remains attention-visible regardless of remote issue/PR state
 until an explicit local recovery action clears it. These paths remain unwired from
 normal daemon dispatch.
 
+A separate dormant dispatch boundary now accepts only a privately constructed,
+fully revalidated managed runtime. It checks local Claim and tombstone evidence
+before inspecting runtime paths, rejects worktree roots that overlap credential or
+recovery namespaces, and distinguishes legacy, managed-native and blocked routes
+without fallback. Environment flags, generic endpoint configuration and public
+callers cannot activate it. The production daemon has no caller for this boundary.
+
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.
 A transitional Claude adapter now emits typed results while preserving legacy
