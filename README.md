@@ -61,6 +61,10 @@ manifest and identity records; its public loading surface remains disabled.
 See [implementation status](docs/native-worker-progress.md). Automatic model
 selection is not implemented.
 
+The native branch is intentionally pausing new runtime machinery while it
+consolidates around upstream Codex execution contracts. See the
+[native worker boundary decision](docs/native-worker-boundary.md).
+
 See [provider setup and support status](docs/providers.md) and
 [validation evidence](docs/validation.md). Planning is task preparation, not a
 separate model-backed execution phase in the current daemon.

@@ -1,5 +1,16 @@
 # Changelog
 
+## Native worker boundary decision — 2026-09-15
+
+The native effort paused daemon/claim expansion for a build-versus-
+adopt review. The accepted direction keeps Nightshift's queue ownership, exact
+candidate verification, independent review, subscription-only admission, retention
+and publication authority while delegating generic agent/session/process behavior
+to supported Codex and Docker contracts. SWE-ReX remains the narrower runtime
+alternative; OpenHands would be a broader product-level replacement. Consolidation
+of duplicate coordinators, reviewer variants, container prototypes and repeated
+validation suites now precedes daemon activation.
+
 ## Private stable ChatGPT runner and accounting evidence — 2026-09-14
 
 Added an unwired implementation adapter that validates a real durable queue
