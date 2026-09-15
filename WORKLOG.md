@@ -11,6 +11,11 @@ alternative; OpenHands would be a broader product-level replacement. Consolidati
 of duplicate coordinators, reviewer variants, container prototypes and repeated
 validation suites now precedes daemon activation.
 
+The first consolidation removes the unused one-command `container_exec` prototype
+and its parallel Docker lifecycle. Its shared typed result moved into the canonical
+owned Session, which already carries source transfer, policy inspection, recovery
+and cleanup. Immutable-image and local-socket rejection remain covered there.
+
 ## Private stable ChatGPT runner and accounting evidence — 2026-09-14
 
 Added an unwired implementation adapter that validates a real durable queue

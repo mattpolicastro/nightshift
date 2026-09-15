@@ -62,9 +62,9 @@ more of the product and does not by itself establish ChatGPT subscription behavi
    paths once their unique behavior is accounted for.
 3. Keep one reviewer adapter. Fold or remove the unused `reviewer`/`stable_reviewer`
    variant while preserving immutable exact-candidate review.
-4. Keep one container boundary. Remove superseded `container_exec`, snapshot and
-   session prototypes after the canonical Codex environment path passes the same
-   isolation contract.
+4. Keep one container boundary. The superseded one-command `container_exec` is
+   removed; continue consolidating snapshot/session prototypes only after the
+   canonical Codex environment path passes the same isolation contract.
 5. Consolidate loader/profile/dispatch validation around one private configuration
    boundary. Replace exhaustive repeated field matrices with representative parser
    tests and end-to-end contract tests.

@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import snapshot
-from .container_exec import ContainerResult
 
 OWNER_LABEL = "nightshift.session.owner"
 ENVIRONMENT = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -34,6 +33,18 @@ CLEANUP_SECONDS = 15
 
 class SessionError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ContainerResult:
+    status: str
+    exit_code: int | None = None
+    output: str = ""
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "succeeded" and self.exit_code == 0
 
 
 @dataclass(frozen=True)

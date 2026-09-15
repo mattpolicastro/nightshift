@@ -10,6 +10,27 @@ from nightshift.workers import container_session as module
 from nightshift.workers.snapshot import SourceFile
 
 
+def test_container_result_requires_success_and_zero_exit():
+    assert module.ContainerResult('succeeded', 0).ok
+    assert not module.ContainerResult('succeeded', 1).ok
+    assert not module.ContainerResult('failed', 0).ok
+
+
+@pytest.mark.parametrize('image', ['alpine:latest', 'sha256:abc',
+                                    'registry.invalid/image@sha256:' + 'a' * 64])
+def test_session_rejects_nonimmutable_image_references(tmp_path, image):
+    with pytest.raises(ValueError):
+        module.Session(image, [], docker_host='unix:///tmp/test.sock',
+                       recovery_dir=tmp_path / 'recovery')
+
+
+@pytest.mark.parametrize('host', ['tcp://example.invalid:2375', 'ssh://example.invalid', ''])
+def test_session_rejects_nonlocal_docker_transports(tmp_path, host):
+    with pytest.raises(ValueError):
+        module.Session('sha256:' + 'a' * 64, [], docker_host=host,
+                       recovery_dir=tmp_path / 'recovery')
+
+
 def session(tmp_path, **kwargs):
     return module.Session('sha256:' + 'a' * 64, [SourceFile('a', b'x')],
                           docker_host='unix:///tmp/test.sock', recovery_dir=tmp_path / 'recovery', **kwargs)
@@ -337,4 +358,24 @@ def test_readonly_cleanup_removes_both_owned_containers_before_volume(tmp_path, 
     obj.close()
     assert removed == [obj._review_name, obj.loader_name, obj.volume_name]
     assert obj.cleanup_succeeded
+    assert not obj.record_path.exists()
+
+
+def test_interrupted_command_cleans_owned_session_before_propagating(tmp_path, monkeypatch):
+    obj = active(tmp_path, monkeypatch)
+    obj._record()
+    pending = {obj.name, obj.volume_name}
+    monkeypatch.setattr(module.Session, '__enter__', lambda self: self)
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(obj, '_call', interrupted)
+    monkeypatch.setattr(obj, '_exists', lambda kind, name, deadline: name in pending)
+    monkeypatch.setattr(obj, '_inspect', lambda *a, **k:
+        {'Config': {'Labels': {module.OWNER_LABEL: obj.owner}},
+         'Labels': {module.OWNER_LABEL: obj.owner}})
+    monkeypatch.setattr(obj, '_checked', lambda args, **kwargs: pending.remove(args[-1]))
+    with pytest.raises(KeyboardInterrupt):
+        with obj:
+            obj.run(['sleep', '30'])
+    assert not pending and obj.cleanup_succeeded and obj.closed
     assert not obj.record_path.exists()

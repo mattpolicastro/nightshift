@@ -130,14 +130,6 @@ no account diagnostics or live credentials are published.
 
 ## Implemented transfer and lifecycle primitives
 
-`workers/container_exec.py` runs an absolute argv in a uniquely owned disposable
-container. It requires an immutable local image ID, rejects unexpected effective
-mounts/environment/policy before start, bounds output and elapsed execution,
-and removes the owned container on success, failure, timeout or cancellation.
-Real synthetic checks covered successful output, a timeout, an output flood and
-a detached child. This module runs an empty per-command workspace; it is not yet
-the persistent native worker lifecycle.
-
 `workers/snapshot.py` exports exact committed regular Git blobs and validates
 bounded source archives entirely in memory. Links, submodules, special files,
 control directories, traversal, Unicode/case aliases and conflicting entries

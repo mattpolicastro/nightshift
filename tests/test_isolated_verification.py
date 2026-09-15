@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from nightshift.workers import isolated_verification as verification, snapshot
-from nightshift.workers.container_exec import ContainerResult
+from nightshift.workers.container_session import ContainerResult
 
 IMAGE = "sha256:" + "a" * 64
 
