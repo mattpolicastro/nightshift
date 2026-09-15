@@ -118,6 +118,16 @@ recovery namespaces, and distinguishes legacy, managed-native and blocked routes
 without fallback. Environment flags, generic endpoint configuration and public
 callers cannot activate it. The production daemon has no caller for this boundary.
 
+The managed runtime can now be constructed by a private loader from separate
+host-owned manifest and identity records. Both records require canonical protected
+parents and owned `0600` regular files; bounded no-follow reads recheck file and
+parent identity, permissions and canonical paths after reading. The exact manifest
+schema permits only two ChatGPT-managed subscription phases with explicit models,
+reasoning, budgets, pinned binaries/images, local socket and disjoint protected
+namespaces. Unknown fields, API keys, custom endpoints and fallback are rejected.
+The public loader remains blocked, and no production manifest is installed by the
+repository.
+
 The transport's private fixture runner accepts an explicit test process and
 synthetic environment. It is not a production credential or launch path.
 A transitional Claude adapter now emits typed results while preserving legacy

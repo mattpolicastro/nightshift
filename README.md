@@ -56,6 +56,8 @@ fresh hook-free worktree, and keeps the same lock through controller cleanup.
 Its public entry point is blocked and it cannot dispatch, clean up, push or ship.
 A dormant typed dispatch boundary now distinguishes legacy, managed-native and
 blocked routes; malformed native intent cannot fall back to a legacy worker.
+A protected private loader can build that runtime only from strict host-owned
+manifest and identity records; its public loading surface remains disabled.
 See [implementation status](docs/native-worker-progress.md). Automatic model
 selection is not implemented.
 

@@ -196,8 +196,8 @@ transport required for production source export.
   home and explicit remote capability roots in the production launcher. Keep
   filesystem authority at the executor boundary; do not assume package-local
   symlink confinement or rely solely on discovery-disable flags.
-- Add a daemon caller for the dormant typed dispatch boundary, with host-owned
-  managed runtime construction and operator controls. Keep the public activation
+- Add a daemon caller for the dormant typed dispatch boundary, using the protected
+  host-owned runtime loader and explicit operator controls. Keep the public activation
   surface blocked until startup recovery and dispatch use the same native ownership
   state.
 - Define a separately qualified authenticated fetch policy before native tasks can

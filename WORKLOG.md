@@ -101,6 +101,15 @@ overlap credential or recovery state. Routing has explicit legacy, managed-nativ
 and blocked results, so malformed native intent cannot silently run through the
 legacy worker. Public dispatch and all environment/config activation remain blocked.
 
+A protected runtime loader now reads an exact versioned manifest and a separate
+opaque identity record without enabling dispatch. It accepts only owned `0600`
+regular files under canonical `0700` parents, bounds each read, rejects duplicate
+or unknown JSON fields, and rechecks both file and parent identity after the read.
+Cross-review found and fixed a renamed-parent symlink/permission race in that final
+check. Both phases must remain Codex app-server, built-in OpenAI, ChatGPT-authenticated
+and subscription-billed with explicit models, reasoning and complete finite budgets.
+API keys, URLs, fallback and environment activation are outside the schema.
+
 Recovery now treats unreadable claims, unsafe claim roots and orphan native lock
 tombstones as retained evidence. They cannot be deleted, released or reclaimed by
 legacy startup behavior, and unresolved native state stays visible even if GitHub
