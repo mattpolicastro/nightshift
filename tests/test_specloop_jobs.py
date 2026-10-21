@@ -443,6 +443,7 @@ def test_completion_commit_precedes_stop(tmp_path, control_race, completion, mon
         pytest.fail("completed jobs must not verify or signal a process")
 
     monkeypatch.setattr(os, "killpg", forbidden)
+    monkeypatch.setattr(jobs, "_verify_process", forbidden)
     if completion == "collect":
         jobs.finalize(directory, outcome)
         record = "collected.json"
@@ -451,7 +452,7 @@ def test_completion_commit_precedes_stop(tmp_path, control_race, completion, mon
         record = "result.json"
         first = lambda: jobs.finalize(directory, outcome)
     with control_race(directory, record, first,
-                      lambda: jobs.request_stop(directory, verify_identity=forbidden)) as (_, stopped):
+                      lambda: jobs.stop_job(tmp_path, directory.name)) as (_, stopped):
         assert stopped == "finished"
     assert not (directory / "stop.json").exists()
     assert json.loads((directory / "result.json").read_text()) == outcome
@@ -464,7 +465,7 @@ def test_completion_commit_precedes_stop(tmp_path, control_race, completion, mon
         # and before intake has cached it in the parent receipt.
         (directory / "result.json").unlink()
         jobs._children.clear()
-        assert jobs.request_stop(directory, verify_identity=forbidden) == "finished"
+        assert jobs.stop_job(tmp_path, directory.name) == "finished"
         assert (directory / "collected.json").read_text() == marker
 
 
@@ -487,7 +488,10 @@ def test_refused_stop_does_not_accept_intent_and_retry_preserves_it(tmp_path):
 
 
 @pytest.mark.scenario("background-job-control/owned-process-group-termination/stop-wrapper-and-descendants")
-def test_jobs_stop_terminates_process_group(tmp_path, monkeypatch):
+@pytest.mark.scenario("background-job-control/durable-cancellation/repeat-stop-safely")
+@pytest.mark.parametrize("ignoring_descendant", [False, pytest.param(True, marks=pytest.mark.scenario(
+    "background-job-control/owned-process-group-termination/escalate-unresponsive-group"))])
+def test_jobs_stop_terminates_process_group(tmp_path, monkeypatch, ignoring_descendant):
     """Real groups and pipe EOF prove termination, even where ps is denied.
 
     When ps is forbidden, only process inspection is injected. Each group
@@ -518,14 +522,19 @@ subprocess.run = inspect_self
 ''')
     executable = tmp_path / "specloop"
     executable.write_text(f"#!{sys.executable}\n" + '''
-import json, os, sys, time
+import json, os, signal, sys, time
 from pathlib import Path
 checkpoint = Path(sys.argv[2])
 os.fstat(int(os.environ["TEST_JOB_LIFELINE"]))
 grandchild = os.fork()
 if grandchild == 0:
+    if os.environ["TEST_IGNORE_TERM"] == "1":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    checkpoint.with_suffix(".grandchild").touch()
     time.sleep(20)
     os._exit(0)
+while not checkpoint.with_suffix(".grandchild").exists():
+    time.sleep(.01)
 checkpoint.with_suffix(".tmp").write_text(json.dumps({
     "child": os.getpid(), "grandchild": grandchild, "pgid": os.getpgrp()}))
 checkpoint.with_suffix(".tmp").replace(checkpoint)
@@ -553,6 +562,7 @@ time.sleep(20)
             child = subprocess.Popen(*args, **{
                 **kwargs, "pass_fds": (*kwargs["pass_fds"], writer),
                 "env": {**os.environ, "TEST_JOB_IDENTITY": token,
+                        "TEST_IGNORE_TERM": "1" if ignoring_descendant else "0",
                         "TEST_INJECT_INSPECTION": "1" if inject_inspection else "0",
                         "TEST_JOB_LIFELINE": str(writer)},
             })
@@ -563,7 +573,7 @@ time.sleep(20)
             os.close(writer)
         children.append(child)
         inspections[child.pid] = {"reader": reader, "identity": token,
-                                  "command": " ".join(args[0])}
+                                  "command": " ".join(args[0]), "wrapper": child}
         return child
 
     real_run = subprocess.run
@@ -577,13 +587,20 @@ time.sleep(20)
             rows = [f"{os.getpid()} {os.getpgrp()} S"]
             for pgid, record in inspections.items():
                 if executing(pgid):
-                    rows.extend(f"{pid} {pgid} S" for pid in record["members"])
+                    for pid in record["members"]:
+                        if pid == pgid and record["wrapper"].poll() is not None:
+                            continue
+                        # Conservatively retain descendants until pipe EOF;
+                        # getpgid may fail before their descriptors close.
+                        rows.append(f"{pid} {pgid} S")
             output = "\n".join(rows)
         else:
             pid = int(args[args.index("-p") + 1])
-            assert executing(pid), "inspection requested after group termination"
+            pgid, record = next((pgid, record) for pgid, record in inspections.items()
+                                if pid in record["members"])
+            assert executing(pgid), "inspection requested after group termination"
             if args == ["/bin/ps", "-p", str(pid), "-o", "lstart="]:
-                output = inspections[pid]["identity"]
+                output = record["identity"] + ("" if pid == pgid else f"-{pid}")
             else:
                 assert args == ["/bin/ps", "-ww", "-p", str(pid), "-o", "args="]
                 output = inspections[pid]["command"]
@@ -615,9 +632,35 @@ time.sleep(20)
         caller_group = os.getpgrp()
         assert caller_group not in {child.pid for child in children}
         jobs._children.clear()
+        signals = []
+        killpg, finish_stop = os.killpg, jobs.finish_stop
+
+        def signal_group(pgid, sig):
+            assert pgid == children[0].pid
+            assert json.loads((directory / "stop.json").read_text())["state"] == "stopping"
+            if sig == signal.SIGKILL:
+                assert executing(pgid)
+                assert children[0].poll() is not None
+                assert os.getpgid(family["grandchild"]) == pgid
+            signals.append((sig, time.monotonic()))
+            killpg(pgid, sig)
+
+        def confirmed_stop(path):
+            assert not executing(children[0].pid), "cannot mark stopped with live descendants"
+            finish_stop(path)
+
         started = time.monotonic()
-        assert jobs.stop_job(root, directory.name) == "stopped"
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "killpg", signal_group)
+            patch.setattr(jobs, "finish_stop", confirmed_stop)
+            assert jobs.stop_job(root, directory.name) == "stopped"
         assert time.monotonic() - started < 10
+        if ignoring_descendant:
+            assert [sig for sig, _ in signals] == [signal.SIGTERM, signal.SIGKILL]
+            assert signals[1][1] - signals[0][1] >= 5
+            assert time.monotonic() - signals[1][1] <= 1
+        else:
+            assert [sig for sig, _ in signals] == [signal.SIGTERM]
         assert not executing(children[0].pid)
         assert not jobs._executing_group(children[0].pid)
         children[0].wait(timeout=2)
@@ -638,6 +681,21 @@ time.sleep(20)
         with monkeypatch.context() as patch:
             patch.setattr(os, "killpg", lambda *a: pytest.fail("repeat stop must not signal"))
             assert jobs.stop_job(root, directory.name) == "stopped"
+        terminal = (directory / "stop.json").read_bytes()
+        # Fresh command process exercises the durable API independently of
+        # daemon handles. The jobs CLI dispatch is implemented separately.
+        repeated = real_run([sys.executable, "-c", '''
+import os, sys
+from pathlib import Path
+from nightshift.specloop_job import stop_job
+def forbidden(*args):
+    raise AssertionError("repeat stop must not signal or inspect a reused PID")
+os.killpg = os.getpgid = forbidden
+print(stop_job(Path(sys.argv[1]), sys.argv[2]))
+''', str(root), directory.name], capture_output=True, text=True, timeout=5)
+        assert repeated.returncode == 0, repeated.stderr
+        assert repeated.stdout.strip() == "stopped"
+        assert (directory / "stop.json").read_bytes() == terminal
     finally:
         try:
             # Kill the whole group even if its wrapper already exited.
@@ -646,6 +704,10 @@ time.sleep(20)
                     os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                except PermissionError:
+                    # macOS can deny a signal to an already vanished group.
+                    # Pipe EOF must independently prove there is no work left.
+                    eventually(lambda: not executing(child.pid))
             for child in children:
                 child.wait(timeout=3)
             eventually(lambda: all(not executing(pgid) for pgid in inspections))
@@ -739,6 +801,7 @@ def test_stop_rejects_path_and_inexact_identifiers_before_io(tmp_path, monkeypat
         jobs.stop_job(tmp_path, job_id)
 
 
+@pytest.mark.scenario("background-job-control/owned-process-group-termination/escalate-unresponsive-group")
 def test_stop_escalates_only_verified_group_and_releases_control_lock(tmp_path, monkeypatch, owned_job):
     directory, process = owned_job
     signals, waits = [], []
@@ -762,6 +825,7 @@ def test_stop_escalates_only_verified_group_and_releases_control_lock(tmp_path, 
     assert waits == [5, 1]
 
 
+@pytest.mark.scenario("background-job-control/owned-process-group-termination/report-termination-failure")
 @pytest.mark.parametrize("failure", ["permission", "surviving", "reused-after-term", "missing-after-term"])
 def test_stop_failure_retains_intent_without_false_success(tmp_path, monkeypatch, owned_job, failure):
     directory, process = owned_job
@@ -787,6 +851,195 @@ def test_stop_failure_retains_intent_without_false_success(tmp_path, monkeypatch
     assert stop["state"] == "stopping" and "stopped_at" not in stop
     assert stop["process"] == process
     assert signals == ([signal.SIGTERM, signal.SIGKILL] if failure == "surviving" else [signal.SIGTERM])
+
+
+@pytest.fixture
+def stop_clock(monkeypatch):
+    elapsed = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: elapsed.__setitem__(0, elapsed[0] + delay))
+    monkeypatch.setattr(jobs, "reap", lambda: None)
+    monkeypatch.setattr(os, "waitpid", lambda *a: (0, 0))
+    return elapsed
+
+
+@pytest.mark.scenario("background-job-control/owned-process-group-termination/report-termination-failure")
+@pytest.mark.parametrize("failure,diagnostic", [
+    ("term-permission", "signal permission denied"),
+    ("kill-permission", "signal permission denied"),
+    ("survives", "still executing after SIGKILL"),
+    ("probe-permission", "inspection denied"),
+    ("probe-timeout", "timed out"),
+    ("late-confirmation", "termination unconfirmed"),
+])
+def test_stop_failure_with_real_wait_retains_evidence(
+        tmp_path, monkeypatch, owned_job, stop_clock, failure, diagnostic):
+    directory, process = owned_job
+    path = directory.parent.parent / "7.json"
+    receipt = {"job": directory.name, "head": "original"}
+    jobs.save(path, receipt)
+    (directory / "log").write_text("preserved evidence\n")
+    evidence = {p: p.read_bytes() for p in (path, directory / "request.json",
+                directory / "process.json", directory / "log")}
+    signals, intents = [], []
+
+    def signal_group(pgid, sig):
+        assert pgid == process["pgid"]
+        signals.append((sig, stop_clock[0]))
+        intents.append((directory / "stop.json").read_bytes())
+        assert json.loads(intents[-1])["state"] == "stopping"
+        # Late finalization must remain evidence, never delivery eligibility.
+        jobs.finalize(directory, {"result": {"outcome": "late success"}})
+        if ((failure == "term-permission" and sig == signal.SIGTERM)
+                or (failure == "kill-permission" and sig == signal.SIGKILL)):
+            raise PermissionError("signal permission denied")
+
+    def probe(pgid, *, timeout=5):
+        assert pgid == process["pgid"]
+        if signals and signals[-1][0] == signal.SIGKILL:
+            assert 0 < timeout <= 1
+            if failure == "probe-permission":
+                raise PermissionError("inspection denied")
+            if failure in ("probe-timeout", "late-confirmation"):
+                stop_clock[0] += timeout + .01
+                if failure == "probe-timeout":
+                    raise subprocess.TimeoutExpired("ps", timeout)
+                return set()  # Confirmation arrived too late to claim success.
+        return {process["pid"], 2345}
+
+    monkeypatch.setattr(os, "killpg", signal_group)
+    monkeypatch.setattr(jobs, "_executing_group", probe)
+    with pytest.raises(jobs.StopJobError, match=diagnostic) as error:
+        jobs.stop_job(tmp_path, directory.name)
+    assert f"see {directory / 'log'}" in str(error.value)
+    assert signals[0] == (signal.SIGTERM, 0)
+    if failure != "term-permission":
+        assert signals[1] == (signal.SIGKILL, 5)
+    else:
+        assert len(signals) == 1
+    if failure == "survives":
+        assert stop_clock[0] == 6
+    assert (directory / "stop.json").read_bytes() == intents[0]
+    stop = json.loads(intents[0])
+    assert stop["requested_at"] and stop["process"] == process
+    assert "stopped_at" not in stop
+    assert all(p.read_bytes() == contents for p, contents in evidence.items())
+    assert json.loads((directory / "result.json").read_text())["result"]["outcome"] == "late success"
+    jobs._children.clear()
+    assert jobs.collect(path, receipt) is None
+    assert not (directory / "collected.json").exists()
+    assert jobs.list_jobs(tmp_path)[0][0].state == "stopping"
+
+
+@pytest.mark.scenario("background-job-control/owned-process-group-termination/escalate-unresponsive-group")
+@pytest.mark.scenario("background-job-control/owned-process-group-termination/report-termination-failure")
+@pytest.mark.parametrize("outcome", ["confirmed", "unconfirmed", "ownership-changed"])
+def test_grace_probe_timeout_still_verifies_and_escalates(
+        tmp_path, monkeypatch, owned_job, stop_clock, outcome):
+    directory, process = owned_job
+    signals, timeouts, verified = [], [], []
+    command_ps = subprocess.run
+    latency = .028
+    executing = {process["pid"], 2345}
+
+    def ps(args, **kwargs):
+        if args != ["/bin/ps", "-axo", "pid=,pgid=,stat="]:
+            return command_ps(args, **kwargs)
+        timeout = kwargs["timeout"]
+        if timeout < latency:
+            stop_clock[0] += timeout
+            timeouts.append((signals[-1][0], timeout))
+            raise subprocess.TimeoutExpired(args, timeout)
+        stop_clock[0] += latency
+        # Include the caller so an exited group is a valid, nonempty table.
+        rows = ["9999 9999 S", *(f"{pid} 1234 S" for pid in executing)]
+        return subprocess.CompletedProcess(args, 0, "\n".join(rows), "")
+
+    def start_identity(pid):
+        if timeouts:
+            verified.append(pid)
+            if outcome == "ownership-changed":
+                return "reused descendant"
+        return process["start_identity"]
+
+    def signal_group(pgid, sig):
+        assert pgid == process["pgid"]
+        assert json.loads((directory / "stop.json").read_text())["state"] == "stopping"
+        signals.append((sig, stop_clock[0]))
+        if sig == signal.SIGTERM:
+            executing.discard(process["pid"])  # Only the ignoring descendant remains.
+        elif outcome == "confirmed":
+            executing.clear()
+
+    real_finish = jobs.finish_stop
+
+    def finish(directory):
+        assert not executing, "must never mark stopped while members execute"
+        real_finish(directory)
+
+    monkeypatch.setattr(subprocess, "run", ps)
+    monkeypatch.setattr(jobs, "process_start_identity", start_identity)
+    monkeypatch.setattr(os, "killpg", signal_group)
+    monkeypatch.setattr(jobs, "finish_stop", finish)
+    if outcome == "confirmed":
+        assert jobs.stop_job(tmp_path, directory.name) == "stopped"
+        assert json.loads((directory / "stop.json").read_text())["state"] == "stopped"
+        assert stop_clock[0] - signals[-1][1] <= 1
+    else:
+        diagnostic = ("cannot verify surviving group ownership" if outcome == "ownership-changed"
+                      else "termination unconfirmed")
+        with pytest.raises(jobs.StopJobError, match=diagnostic):
+            jobs.stop_job(tmp_path, directory.name)
+        stop = json.loads((directory / "stop.json").read_text())
+        assert stop["state"] == "stopping" and "stopped_at" not in stop
+        assert stop["process"] == process
+        assert executing == {2345}
+    assert timeouts[0][0] == signal.SIGTERM
+    assert timeouts[0][1] == pytest.approx(.008)
+    assert verified == [2345]  # Ownership must be rechecked after the timed-out probe.
+    if outcome == "ownership-changed":
+        assert [sig for sig, _ in signals] == [signal.SIGTERM]
+    else:
+        assert [sig for sig, _ in signals] == [signal.SIGTERM, signal.SIGKILL]
+        assert signals[1][1] - signals[0][1] == pytest.approx(5 + latency)
+
+
+@pytest.mark.scenario("background-job-control/owned-process-group-termination/escalate-unresponsive-group")
+@pytest.mark.parametrize("survivor", ["owned", "reused", "moved-group", "moved-session", "new"])
+def test_escalation_checks_surviving_descendant_identity(
+        tmp_path, monkeypatch, owned_job, stop_clock, survivor):
+    directory, process = owned_job
+    signals = []
+
+    def probe(pgid, *, timeout=5):
+        if not signals:
+            return {1234, 2345}
+        if signals[-1][0] == signal.SIGKILL and stop_clock[0] >= 5.25:
+            return set()
+        return {3456} if survivor == "new" else {2345}
+
+    def signal_group(pgid, sig):
+        assert pgid == 1234
+        assert json.loads((directory / "stop.json").read_text())["state"] == "stopping"
+        signals.append((sig, stop_clock[0]))
+        if survivor == "reused":
+            monkeypatch.setattr(jobs, "process_start_identity", lambda pid: "new identity")
+        elif survivor in ("moved-group", "moved-session"):
+            monkeypatch.setattr(os, "getpgid" if survivor == "moved-group" else "getsid", lambda pid: 9998)
+
+    monkeypatch.setattr(jobs, "_executing_group", probe)
+    monkeypatch.setattr(os, "killpg", signal_group)
+    if survivor == "owned":
+        assert jobs.stop_job(tmp_path, directory.name) == "stopped"
+        assert signals == [(signal.SIGTERM, 0), (signal.SIGKILL, 5)]
+        assert 5.25 <= stop_clock[0] <= 6
+        assert json.loads((directory / "stop.json").read_text())["state"] == "stopped"
+    else:
+        with pytest.raises(jobs.StopJobError, match="cannot verify surviving group ownership"):
+            jobs.stop_job(tmp_path, directory.name)
+        assert signals == [(signal.SIGTERM, 0)]
+        stop = json.loads((directory / "stop.json").read_text())
+        assert stop["state"] == "stopping" and "stopped_at" not in stop
 
 
 @pytest.mark.scenario("background-job-control/owned-process-group-termination/refuse-unsafe-identity")

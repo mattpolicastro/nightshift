@@ -339,9 +339,54 @@ def _wait_group(process: dict, seconds: float) -> bool:
             os.waitpid(process["pid"], os.WNOHANG)
         except ChildProcessError:
             pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
         if not _executing_group(process["pgid"], timeout=remaining):
-            return True
+            return time.monotonic() <= deadline
         time.sleep(min(.05, max(0, deadline - time.monotonic())))
+
+
+def _group_identities(process: dict, members: set[int]) -> dict[int, str]:
+    """Remember live witnesses while the wrapper still proves ownership.
+
+    SIGTERM may kill the wrapper before an ignoring descendant. A surviving
+    member with the same start identity and group/session proves continuity
+    for escalation within this call; a later stop still requires the leader.
+    """
+    identities = {}
+    for pid in members:
+        try:
+            identity = process_start_identity(pid)
+            if os.getpgid(pid) == process["pgid"] and os.getsid(pid) == process["pgid"]:
+                identities[pid] = identity
+        except ProcessLookupError:
+            continue
+        except subprocess.CalledProcessError as exc:
+            # ps returns 1 when a member exits during inspection.
+            if exc.returncode != 1:
+                raise
+    return identities
+
+
+def _verify_escalation(directory: Path, process: dict, members: set[int],
+                       identities: dict[int, str]) -> None:
+    if process["pid"] in members:
+        if _verify_process(directory) != process:
+            raise ValueError("process identity changed before escalation")
+        return
+    for pid in members & identities.keys():
+        try:
+            if (process_start_identity(pid) == identities[pid]
+                    and os.getpgid(pid) == process["pgid"]
+                    and os.getsid(pid) == process["pgid"]):
+                return
+        except ProcessLookupError:
+            continue
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode != 1:
+                raise
+    raise ValueError("cannot verify surviving group ownership before SIGKILL")
 
 
 def stop_job(state_dir: Path, job_id: str) -> str:
@@ -375,21 +420,38 @@ def stop_job(state_dir: Path, job_id: str) -> str:
         if state != "stopping":
             return state
         # request_stop has released control.lock before any signal or wait.
+        identities = {}
         for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 1)):
-            if not _executing_group(process["pgid"]):
+            members = _executing_group(process["pgid"])
+            if not members:
                 finish_stop(job.directory)
                 return "stopped"
-            if _verify_process(job.directory) != process:
-                raise ValueError("process identity changed before signalling")
+            if sig == signal.SIGTERM:
+                identities = _group_identities(process, members)
+                if _verify_process(job.directory) != process:
+                    raise ValueError("process identity changed before signalling")
+            else:
+                _verify_escalation(job.directory, process, members, identities)
             try:
                 os.killpg(process["pgid"], sig)
             except ProcessLookupError:
                 # The group may have exited between verification and signal.
                 pass
-            if _wait_group(process, grace):
+            try:
+                terminated = _wait_group(process, grace)
+            except subprocess.TimeoutExpired:
+                # A probe uses the remaining phase budget. Near the TERM
+                # deadline even a normal ps can run out of time: proceed to
+                # fresh ownership verification and escalation. After KILL,
+                # a timed-out probe leaves termination unconfirmed.
+                if sig != signal.SIGTERM:
+                    raise
+                terminated = False
+            if terminated:
                 finish_stop(job.directory)
                 return "stopped"
-        raise ValueError("process group still executing after SIGKILL; retry stop after inspection")
+        raise ValueError("process group still executing after SIGKILL or termination unconfirmed "
+                         "within 1 second; retry stop after inspection")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise StopJobError(f"cannot stop job {job_id}: {exc}; see {job.log_path}") from exc
 
