@@ -613,18 +613,44 @@ def _approval_event(repo: str, number: int, label: str, *, runner) -> int:
 
 
 def _label_events(repo: str, number: int, labels: set[str], *, runner) -> dict[str, int]:
-    """Confirm the current label applications, including across paginated history."""
+    """Retain the ID-only receipt interface for current label applications."""
+    return {label: event["id"] for label, event in
+            _latest_label_events(repo, number, labels, runner=runner).items()}
+
+
+def _latest_label_events(repo: str, number: int, labels: set[str], *, runner) -> dict[str, dict]:
+    """Confirm current applications and retain their actor evidence.
+
+    GitHub returns events in chronological page order. Select the final event
+    before validating it, so an older application cannot authorize a newer one.
+    """
     pages = json.loads(runner([
         "api", f"repos/{repo}/issues/{number}/events", "--paginate", "--slurp",
     ]))
-    latest = {event["label"]["name"]: event for page in pages for event in page
-              if event.get("event") in ("labeled", "unlabeled")
-              and event.get("label", {}).get("name") in labels}
+    malformed = f"malformed label event history for #{number}; retry next poll"
+    if not isinstance(pages, list):
+        raise RuntimeError(malformed)
+    latest = {}
+    for page in pages:
+        if not isinstance(page, list):
+            raise RuntimeError(malformed)
+        for event in page:
+            if not isinstance(event, dict):
+                raise RuntimeError(malformed)
+            if event.get("event") not in ("labeled", "unlabeled"):
+                continue
+            label = event.get("label")
+            if not isinstance(label, dict) or not isinstance(label.get("name"), str):
+                raise RuntimeError(malformed)
+            if label["name"] in labels:
+                latest[label["name"]] = event
     for label in labels:
         event = latest.get(label, {})
-        if event.get("event") != "labeled" or not event.get("id"):
+        event_id = event.get("id")
+        if (event.get("event") != "labeled" or not isinstance(event_id, int)
+                or isinstance(event_id, bool) or event_id <= 0):
             raise RuntimeError(f"could not confirm {label} event for #{number}; retry next poll")
-    return {label: latest[label]["id"] for label in labels}
+    return latest
 
 
 _save = specloop_job.save
