@@ -29,6 +29,12 @@ harness, never taken from the agent.
   reviews and inline comments from OWNER, MEMBER or COLLABORATOR
   (`queue.trusted`). An issue opened by anyone else is escalated, not drafted.
   Keep it that way: on a public repository anyone can comment.
+- **Behaviour other work depends on belongs in `openspec/specs/`.** A direct PR
+  (one not built through the front door) that adds or changes such behaviour
+  updates the matching requirement in the same PR. The drafter and the
+  feasibility review read those requirements. A rule that lives only in code
+  gets broken by the next spec: spec PR #26 hid the action results that PR #23
+  had just made visible.
 - **State written by newer code must still load in older code.** Loaders ignore
   unknown fields, because a supervisor may still be running yesterday's code.
 

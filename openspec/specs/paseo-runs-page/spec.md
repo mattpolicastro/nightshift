@@ -42,3 +42,16 @@ When a status read fails, the page SHALL keep the last good list, marked stale.
 #### Scenario: Read failure keeps the list
 - **WHEN** a refresh fails after a successful read
 - **THEN** the previous runs are still shown, marked stale
+
+### Requirement: Results stay in view
+The outcome of an action sent from the page SHALL be shown with the run it was
+sent for, or, while that run is not displayed, above the list naming the change.
+It SHALL never be shown only somewhere the user did not act.
+
+#### Scenario: Refused publish shown in its row
+- **WHEN** Publish is confirmed on the second of two runs and the action is refused
+- **THEN** the refusal and its reason appear once, in that run's row
+
+#### Scenario: Run gone after the action
+- **WHEN** the run an action was sent for is no longer listed after the refresh
+- **THEN** its outcome appears above the list, naming the change
