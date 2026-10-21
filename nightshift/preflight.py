@@ -6,7 +6,7 @@ pause file left behind looks exactly like an empty queue.
 
 The negative control is the point. `~/.config/nightshift/env` holding a token
 that reaches the sandbox proves nothing about what else it reaches — the same
-trap as the vault's auth finding, where a valid-looking `claude -p` run was a
+trap as an earlier auth finding, where a valid-looking `claude -p` run was a
 false positive because an interactive login was answering instead of the
 token. A credential test without a thing that must FAIL is not a test.
 """
@@ -298,7 +298,7 @@ def run(cfg: Config, env: dict[str, str], *, runner=None, prober=None,
         # A verify command the workers' own allow-list forbids. Silent in the
         # same way as everything else here: the daemon starts, the repo looks
         # enrolled, and the gap surfaces only as a worker escalation that reads
-        # like task ambiguity rather than config. swift-app burned a full
+        # like task ambiguity rather than config. sample-app burned a full
         # run on this before anyone noticed the allow-list was all JS verbs.
         blocked = worker.unrunnable_verify_clauses(repo.verify)
         checks.append(

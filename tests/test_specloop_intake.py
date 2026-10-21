@@ -1,0 +1,705 @@
+"""Issue drafting through injected GitHub, specloop and git boundaries."""
+
+import json
+import subprocess
+from functools import partial
+
+import pytest
+
+from nightshift import daemon, queue, specloop_intake
+from nightshift.config import Config, Repo
+from test_engine_routing import DraftGh
+
+
+CHANGE = "sample-issue-7-add-a-gate"
+BRANCH = f"spec/{CHANGE}"
+
+
+class Commands:
+    def __init__(self, **result):
+        self.result = {"version": 1, "outcome": "drafted", "branch": BRANCH,
+                       "commit": "abc123", "questions": [], "contradictions": [],
+                       "problems": [], "risks": ["Timing needs a human check."], **result}
+        self.calls = []
+        self.push_fails = False
+
+    def __call__(self, args, **kwargs):
+        self.calls.append(args)
+        expected = {"capture_output": True, "text": True, "check": False}
+        if args[0] == "git":
+            expected["timeout"] = 30
+        assert kwargs == expected
+        if args[0] == "git":
+            return subprocess.CompletedProcess(args, int(self.push_fails and "push" in args), "", "push unavailable")
+        assert args[:2] == ["specloop", "propose"]
+        return subprocess.CompletedProcess(args, 0 if self.result["outcome"] == "drafted" else 1,
+                                           json.dumps(self.result), "")
+
+
+@pytest.fixture
+def repo(tmp_path):
+    manifest = tmp_path / "template.toml"
+    manifest.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / "manifest-source"))}\n')
+    return Repo("owner/sample", engine="specloop", manifest=manifest, base="develop", dir="unused-worker-clone")
+
+
+def poll(repo, tmp_path, gh, commands, labels=queue.Labels()):
+    return specloop_intake.propose_pending(repo, labels, tmp_path, runner=gh,
+                                         specloop_runner=commands, git_runner=commands)
+
+
+def calls(gh, *prefix):
+    return [call for call in gh.calls if call[:len(prefix)] == list(prefix)]
+
+
+@pytest.mark.scenario("issue-intake/drafting-from-an-issue/draft-pr-opened")
+@pytest.mark.parametrize("armed", [("spec:draft",), ("agent:ready",), ("spec:draft", "agent:ready")])
+def test_draft_pr_opened(repo, tmp_path, armed):
+    gh, commands = DraftGh(armed), Commands()
+    receipt, = poll(repo, tmp_path, gh, commands)
+    propose, push = commands.calls
+    assert propose == ["specloop", "propose", str(repo.manifest), "--change", CHANGE,
+                       "--branch", BRANCH, "--base", "develop", "--idea",
+                       "Add a gate\n\nPlease draft it.\n\nKeep it small.", "--json"]
+    assert push == ["git", "-C", str(tmp_path / "manifest-source"), "push", "origin",
+                    f"abc123:refs/heads/{BRANCH}"]
+    create, = calls(gh, "pr", "create")
+    assert create == ["pr", "create", "--repo", repo.name, "--head", BRANCH, "--base", "develop",
+                      "--draft", "--title", "Spec: Add a gate", "--body",
+                      "Closes #7\n\nFeasibility risks:\n- Timing needs a human check."]
+    assert calls(gh, "pr", "edit") == [["pr", "edit", gh.pr_url, "--repo", repo.name,
+                                         "--add-label", "spec:review"]]
+    assert gh.pr_url in gh.comments[-1]["body"]
+    assert f"<!-- nightshift:draft:{CHANGE}:pr-8 -->" in gh.comments[-1]["body"]
+    assert gh.comments[-1]["body"].startswith(queue.SELF_COMMENT_PREFIX)
+    assert gh.calls[-1][:3] == ["issue", "edit", "7"]
+    assert gh.labels == set()
+    assert receipt["delivered"] is True
+    poll(repo, tmp_path, gh, commands)
+    assert len(commands.calls) == 2
+    assert len(calls(gh, "pr", "create")) == len(calls(gh, "issue", "comment")) == 1
+
+
+def test_draft_change_and_branch_preserve_all_title_digits(repo, tmp_path):
+    gh = DraftGh(("spec:draft",))
+    change = "sample-issue-7-gate-0123456789"
+    branch = f"spec/{change}"
+    commands = Commands(branch=branch)
+
+    def titled_issue(args):
+        result = gh(args)
+        if args[:2] == ["issue", "view"]:
+            issue = json.loads(result)
+            issue["title"] = "!! Gate 0123456789 !!"
+            return json.dumps(issue)
+        return result
+
+    receipt, = poll(repo, tmp_path, titled_issue, commands)
+
+    propose, push = commands.calls
+    assert propose[propose.index("--change") + 1] == change
+    assert propose[propose.index("--branch") + 1] == branch
+    assert push[-1] == f"abc123:refs/heads/{branch}"
+    create, = calls(gh, "pr", "create")
+    assert create[create.index("--head") + 1] == branch
+    assert receipt["change"] == change
+    assert receipt["delivered"] is True
+
+
+@pytest.mark.scenario("issue-intake/drafting-from-an-issue/questions-posted")
+def test_questions_posted(repo, tmp_path):
+    gh = DraftGh(("spec:draft", "agent:ready"))
+    questions = ["Which gate voltage?", "Should it retrigger?"]
+    commands = Commands(outcome="needs_input", commit="", questions=questions)
+    poll(repo, tmp_path, gh, commands)
+    assert all(question in gh.comments[-1]["body"] for question in questions)
+    assert gh.labels == {"needs-human"}
+    assert not calls(gh, "pr", "create")
+    assert [c[0] for c in commands.calls] == ["specloop"]
+    poll(repo, tmp_path, gh, commands)
+    assert len(commands.calls) == 1
+
+
+@pytest.mark.scenario("issue-intake/drafting-from-an-issue/unfixable-draft-escalated")
+@pytest.mark.parametrize("findings", [
+    {"contradictions": [{"task": "1.2", "problem": "Frozen files must change", "evidence": "checker.py:7"}]},
+    {"problems": ["Scenario has no covering task", "Strict validation failed after 3 rounds"]},
+])
+def test_unfixable_draft_escalated(repo, tmp_path, findings):
+    gh, commands = DraftGh(("spec:draft",)), Commands(outcome="rejected", **findings)
+    poll(repo, tmp_path, gh, commands)
+    body = gh.comments[-1]["body"]
+    for items in findings.values():
+        for item in items:
+            assert all(value in body for value in item.values()) if isinstance(item, dict) else item in body
+    assert gh.labels == {"needs-human"}
+    assert not calls(gh, "pr", "create")
+    assert [c[0] for c in commands.calls] == ["specloop"]
+
+
+@pytest.mark.parametrize("operation,after_write", [
+    (("pr", "create"), False), (("pr", "create"), True),
+    (("pr", "edit"), False), (("issue", "comment"), True), (("issue", "edit"), False),
+])
+def test_restart_finishes_delivery_without_duplicate_pr_or_comment(repo, tmp_path, operation, after_write):
+    gh, commands = DraftGh(("spec:draft",)), Commands()
+
+    def interrupted(args):
+        if tuple(args[:2]) == operation:
+            if after_write:
+                gh(args)
+            raise queue.GhError("response lost", transient=True)
+        return gh(args)
+
+    with pytest.raises(queue.GhError):
+        poll(repo, tmp_path, interrupted, commands)
+    assert gh.labels == {"spec:draft"}
+    # The next pass reloads the receipt from disk and rechecks GitHub.
+    poll(repo, tmp_path, gh, commands)
+    assert len([c for c in commands.calls if c[0] == "specloop"]) == 1
+    assert len(gh.prs) == 1
+    assert len(gh.comments) == 2
+    assert gh.pr_url in gh.comments[-1]["body"]
+    assert gh.labels == set()
+
+
+def test_escalation_retry_edits_marked_comment(repo, tmp_path):
+    gh, commands = DraftGh(("spec:draft",)), Commands(outcome="needs_input", questions=["Which voltage?"])
+
+    def interrupted(args):
+        result = gh(args)
+        if args[:2] == ["issue", "comment"]:
+            raise queue.GhError("response lost", transient=True)
+        return result
+
+    with pytest.raises(queue.GhError):
+        poll(repo, tmp_path, interrupted, commands)
+    poll(repo, tmp_path, gh, commands)
+    assert len(commands.calls) == 1
+    assert len(gh.comments) == 2
+    assert "Which voltage?" in gh.comments[-1]["body"]
+    assert any("PATCH" in call for call in gh.calls)
+    assert gh.labels == {"needs-human"}
+
+
+def test_existing_pr_without_receipt_is_reused(repo, tmp_path):
+    gh, commands = DraftGh(("spec:draft",)), Commands()
+    gh.prs = [{"number": 8}]
+    poll(repo, tmp_path, gh, commands)
+    assert commands.calls == []
+    assert not calls(gh, "pr", "create")
+    assert gh.pr_url in gh.comments[-1]["body"]
+    assert gh.labels == set()
+
+
+@pytest.mark.scenario("issue-intake/drafting-from-an-issue/draft-pr-opened")
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+@pytest.mark.parametrize("delivery", ["delivered", "response_lost", "no_receipt"])
+def test_closed_pr_is_drafted_afresh_when_issue_is_rearmed(repo, tmp_path, armed, delivery):
+    gh, commands = DraftGh((armed,)), Commands()
+
+    def lost_label_response(args):
+        result = gh(args)
+        if args[:2] == ["issue", "edit"]:
+            raise queue.GhError("label response lost", transient=True)
+        return result
+
+    if delivery == "response_lost":
+        with pytest.raises(queue.GhError):
+            poll(repo, tmp_path, lost_label_response, commands)
+    else:
+        poll(repo, tmp_path, gh, commands)
+    path = tmp_path / "proposals/owner__sample/7.json"
+    if delivery == "no_receipt":
+        path.unlink()
+    gh.prs[0]["state"] = "CLOSED"
+    poll(repo, tmp_path, gh, commands)  # Closing alone does not arm the issue.
+    assert len(commands.calls) == 2
+    gh.label_event("needs-human", "unlabeled")
+    gh.label_event(armed, "labeled")
+    gh.comments.append({"id": 3, "body": "Try again with a 5V gate."})
+    gh.calls.clear()
+    commands.result["commit"] = "def456"
+
+    receipt, = poll(repo, tmp_path, gh, commands)
+
+    propose, lookup, push = commands.calls[2:]
+    assert propose[:2] == ["specloop", "propose"]
+    assert "ls-remote" in lookup
+    assert propose[propose.index("--branch") + 1] == BRANCH
+    assert "Try again with a 5V gate." in propose[propose.index("--idea") + 1]
+    assert f"--force-with-lease=refs/heads/{BRANCH}:abc123" in push
+    assert push[-1] == f"def456:refs/heads/{BRANCH}"
+    create, = calls(gh, "pr", "create")
+    assert "--draft" in create
+    assert create[create.index("--head") + 1] == BRANCH
+    assert "Closes #7" in create[-1]
+    assert [pr["state"] for pr in gh.prs] == ["CLOSED", "OPEN"]
+    assert calls(gh, "pr", "edit") == [[
+        "pr", "edit", "https://github.com/owner/sample/pull/9", "--repo", repo.name,
+        "--add-label", "spec:review",
+    ]]
+    assert len(gh.comments) == 4
+    assert "/pull/8" in gh.comments[1]["body"]
+    assert gh.pr_url in gh.comments[-1]["body"]
+    assert gh.labels == set()
+    assert receipt["replaces_pr"] == {"number": 8, "head": "abc123"}
+    assert json.loads(path.read_text()) == receipt
+    assert receipt["delivered"] is True
+    poll(repo, tmp_path, gh, commands)
+    assert len(commands.calls) == 5
+
+
+@pytest.mark.scenario("issue-intake/drafting-from-an-issue/draft-pr-opened")
+@pytest.mark.parametrize("failure", ["push", "create", "create_response", "label"])
+def test_replacement_draft_delivery_retry_does_not_redraft(repo, tmp_path, failure):
+    gh, commands = DraftGh(("spec:draft",)), Commands()
+    poll(repo, tmp_path, gh, commands)
+    gh.prs[0]["state"] = "CLOSED"
+    gh.label_event("needs-human", "unlabeled")
+    gh.label_event("spec:draft", "labeled")
+    commands.result["commit"] = "def456"
+    commands.push_fails = failure == "push"
+
+    def interrupted(args):
+        if args[:2] == ["pr", "create"] and failure in ("create", "create_response"):
+            if failure == "create_response":
+                gh(args)
+            raise queue.GhError("create unavailable", transient=True)
+        if args[:2] == ["pr", "edit"] and failure == "label":
+            raise queue.GhError("label unavailable", transient=True)
+        return gh(args)
+
+    with pytest.raises(RuntimeError):
+        poll(repo, tmp_path, interrupted, commands)
+    commands.push_fails = False
+    poll(repo, tmp_path, gh, commands)
+    assert len([c for c in commands.calls if c[0] == "specloop"]) == 2
+    assert len(gh.prs) == 2
+    assert gh.labels == set()
+    assert len(gh.comments) == 3
+    assert "/pull/8" in gh.comments[1]["body"]
+    assert gh.pr_url in gh.comments[-1]["body"]
+
+
+@pytest.mark.scenario("issue-intake/drafting-from-an-issue/draft-pr-opened")
+@pytest.mark.parametrize("branch_state", ["unchanged", "advanced", "deleted"])
+def test_fresh_draft_replaces_only_the_abandoned_git_tip(repo, tmp_path, branch_state):
+    source, remote = tmp_path / "manifest-source", tmp_path / "remote.git"
+
+    def git(*args, input=None):
+        return subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", *args],
+            input=input, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    git("init", "--bare", str(source))
+    git("init", "--bare", str(remote))
+    git("-C", str(source), "remote", "add", "origin", str(remote))
+    tree = git("-C", str(source), "hash-object", "-w", "-t", "tree", "--stdin", input="")
+    base = git("-C", str(source), "commit-tree", tree, "-m", "Base")
+    old = git("-C", str(source), "commit-tree", tree, "-p", base, "-m", "Abandoned draft")
+    fresh = git("-C", str(source), "commit-tree", tree, "-p", base, "-m", "Fresh draft")
+    gh, commands = DraftGh(("spec:draft",)), Commands(commit=old)
+
+    def real_push_poll(runner=gh):
+        return specloop_intake.propose_pending(
+            repo, queue.Labels(), tmp_path, runner=runner,
+            specloop_runner=commands, git_runner=subprocess.run,
+        )
+
+    real_push_poll()
+    gh.prs[0].update(state="CLOSED", headRefOid=old)
+    gh.label_event("needs-human", "unlabeled")
+    gh.label_event("spec:draft", "labeled")
+    commands.result["commit"] = fresh
+    if branch_state == "advanced":
+        newer = git("-C", str(source), "commit-tree", tree, "-p", old, "-m", "Human update")
+        git("-C", str(source), "push", "origin", f"{newer}:refs/heads/{BRANCH}")
+        with pytest.raises(RuntimeError, match="could not push"):
+            real_push_poll()
+        assert git("-C", str(remote), "rev-parse", BRANCH) == newer
+        assert len(gh.prs) == 1
+        assert gh.labels == {"spec:draft"}
+    else:
+        if branch_state == "deleted":
+            git("-C", str(source), "push", "origin", f":refs/heads/{BRANCH}")
+
+        def create_unavailable(args):
+            if args[:2] == ["pr", "create"]:
+                raise queue.GhError("HTTP 503", transient=True)
+            return gh(args)
+
+        with pytest.raises(queue.GhError):
+            real_push_poll(create_unavailable)
+        assert git("-C", str(remote), "rev-parse", BRANCH) == fresh
+        # Retrying a successful push with the original lease is safe when
+        # the remote already has exactly the desired commit.
+        real_push_poll()
+        assert git("-C", str(remote), "rev-parse", BRANCH) == fresh
+        assert len(commands.calls) == 2
+        assert len(gh.prs) == 2
+        assert gh.labels == set()
+
+
+def test_merged_pr_is_not_relabelled_or_redrafted(repo, tmp_path):
+    gh, commands = DraftGh(("spec:draft",)), Commands()
+    poll(repo, tmp_path, gh, commands)
+    gh.prs[0]["state"] = "MERGED"
+    gh.label_event("needs-human", "unlabeled")
+    gh.label_event("spec:draft", "labeled")
+    gh.calls.clear()
+    poll(repo, tmp_path, gh, commands)
+    assert len(commands.calls) == 2
+    assert not calls(gh, "pr", "edit")
+    assert not calls(gh, "issue", "edit")
+    assert not calls(gh, "api")
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_pr_closed_during_delivery_is_not_relabelled(repo, tmp_path, existing):
+    gh, commands = DraftGh(("spec:draft",)), Commands()
+    if existing:
+        gh.prs = [{"number": 8}]
+
+    def closed_during_delivery(args):
+        if args[:2] == ["pr", "view"] and args[-1] == "state,url":
+            gh.prs[0]["state"] = "CLOSED"
+        return gh(args)
+
+    with pytest.raises(RuntimeError, match="no longer open"):
+        poll(repo, tmp_path, closed_during_delivery, commands)
+    assert not calls(gh, "pr", "edit")
+    assert all(call[1].endswith("/events") for call in calls(gh, "api"))
+    assert not calls(gh, "issue", "comment")
+    assert gh.labels == {"spec:draft"}
+
+
+def test_pr_state_lookup_failure_preserves_receipt_and_armed_issue(repo, tmp_path):
+    gh, commands = DraftGh(("spec:draft",)), Commands()
+    poll(repo, tmp_path, gh, commands)
+    gh.label_event("needs-human", "unlabeled")
+    gh.label_event("spec:draft", "labeled")
+    path = tmp_path / "proposals/owner__sample/7.json"
+    saved = path.read_text()
+    gh.calls.clear()
+
+    def unavailable(args):
+        if args[:2] == ["pr", "view"]:
+            raise queue.GhError("HTTP 503", transient=True)
+        return gh(args)
+
+    with pytest.raises(queue.GhError):
+        poll(repo, tmp_path, unavailable, commands)
+    assert path.read_text() == saved
+    assert len(commands.calls) == 2
+    assert gh.labels == {"spec:draft"}
+    assert not calls(gh, "pr", "edit")
+
+
+def test_github_lookup_failure_reaches_repo_health_without_proposing(repo, tmp_path, monkeypatch):
+    gh, commands = DraftGh(("spec:draft",)), Commands()
+
+    def unavailable(args):
+        if args[:2] == ["pr", "list"]:
+            raise queue.GhError("HTTP 503", transient=True)
+        return gh(args)
+
+    monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
+    health = daemon.RepoHealth()
+    daemon.poll_specloop(Config(repos=[repo]), health, runner=unavailable, specloop_runner=commands)
+    assert health.failures == {repo.name: 1}
+    assert commands.calls == []
+    assert gh.labels == {"spec:draft"}
+    assert not calls(gh, "pr", "create")
+    # The worker lookup retains its existing best-effort contract.
+    assert queue._latest_pr_number(repo.name, BRANCH, runner=unavailable) is None
+
+
+def test_push_failure_keeps_receipt_and_retries_without_redrafting(repo, tmp_path):
+    gh, commands = DraftGh(("spec:draft",)), Commands()
+    commands.push_fails = True
+    with pytest.raises(RuntimeError, match="could not push"):
+        poll(repo, tmp_path, gh, commands)
+    assert not calls(gh, "pr", "create")
+    assert gh.labels == {"spec:draft"}
+    commands.push_fails = False
+    poll(repo, tmp_path, gh, commands)
+    assert [c[0] for c in commands.calls] == ["specloop", "git", "git"]
+    assert len(gh.prs) == 1
+
+
+def test_custom_labels(repo, tmp_path):
+    labels = queue.Labels(ready="ready", spec_draft="draft", spec_review="review", needs_human="human")
+    gh, commands = DraftGh(("draft", "ready")), Commands()
+    poll(repo, tmp_path, gh, commands, labels)
+    assert calls(gh, "pr", "edit")[0][-1] == "review"
+    assert gh.labels == set()
+
+
+def test_answered_escalation_can_be_rearmed(repo, tmp_path):
+    gh, commands = DraftGh(("spec:draft",)), Commands(outcome="needs_input", questions=["Which voltage?"])
+    poll(repo, tmp_path, gh, commands)
+    gh.label_event("needs-human", "unlabeled")
+    gh.label_event("spec:draft", "labeled")
+    gh.comments.append({"id": 3, "body": "Use 5V."})
+    commands.result["outcome"] = "drafted"
+    commands.result["questions"] = []
+    poll(repo, tmp_path, gh, commands)
+    assert "Use 5V." in commands.calls[1][commands.calls[1].index("--idea") + 1]
+    assert len(gh.comments) == 4
+    assert "Which voltage?" in gh.comments[1]["body"]
+    assert gh.pr_url in gh.comments[-1]["body"]
+
+
+@pytest.mark.scenario("issue-intake/drafting-from-an-issue/questions-posted")
+@pytest.mark.scenario("issue-intake/drafting-from-an-issue/unfixable-draft-escalated")
+@pytest.mark.parametrize("outcome,findings", [
+    ("needs_input", {"questions": ["Which voltage?"]}),
+    ("rejected", {"problems": ["The voltage requirements contradict each other."]}),
+])
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+def test_answer_after_lost_escalation_label_response_is_drafted(repo, tmp_path, outcome, findings, armed):
+    gh, commands = DraftGh((armed,)), Commands(outcome=outcome, **findings)
+
+    def interrupted(args):
+        result = gh(args)
+        if args[:2] == ["issue", "edit"]:
+            raise queue.GhError("label response lost", transient=True)
+        return result
+
+    with pytest.raises(queue.GhError):
+        poll(repo, tmp_path, interrupted, commands)
+    assert gh.labels == {"needs-human"}
+    path = tmp_path / "proposals/owner__sample/7.json"
+    assert not json.loads(path.read_text()).get("delivered")
+    assert not gh.prs
+    # A poll while awaiting the answer cannot complete the local receipt.
+    poll(repo, tmp_path, gh, commands)
+    assert len(commands.calls) == 1
+    assert not json.loads(path.read_text()).get("delivered")
+
+    gh.comments.append({"id": 3, "body": "Use 5V."})
+    gh.label_event("needs-human", "unlabeled")
+    gh.label_event(armed, "labeled")
+    commands.result.update(outcome="drafted", questions=[], problems=[])
+    poll(repo, tmp_path, gh, commands)
+
+    assert [c[0] for c in commands.calls] == ["specloop", "specloop", "git"]
+    assert "Use 5V." in commands.calls[1][commands.calls[1].index("--idea") + 1]
+    assert len(gh.prs) == 1
+    assert gh.labels == set()
+    assert len(gh.comments) == 4
+    assert gh.pr_url in gh.comments[-1]["body"]
+    assert gh.comments[2]["body"] == "Use 5V."
+    assert all(finding in gh.comments[1]["body"] for values in findings.values() for finding in values)
+    assert json.loads(path.read_text())["delivered"] is True
+
+
+@pytest.mark.scenario("issue-intake/drafting-from-an-issue/questions-posted")
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+@pytest.mark.parametrize("answered", [False, True])
+@pytest.mark.parametrize("lost_label_response", [False, True])
+def test_new_question_round_preserves_history_and_retries_its_own_comment(
+    repo, tmp_path, armed, answered, lost_label_response,
+):
+    gh = DraftGh((armed,))
+    commands = Commands(outcome="needs_input", questions=["Which voltage?"])
+    path = tmp_path / "proposals/owner__sample/7.json"
+
+    def interrupted_label(args):
+        result = gh(args)
+        if args[:2] == ["issue", "edit"]:
+            raise queue.GhError("label response lost", transient=True)
+        return result
+
+    if lost_label_response:
+        with pytest.raises(queue.GhError):
+            poll(repo, tmp_path, interrupted_label, commands)
+    else:
+        poll(repo, tmp_path, gh, commands)
+    first = json.loads(path.read_text())
+    assert bool(first.get("delivered")) is not lost_label_response
+    assert gh.labels == {"needs-human"}
+    assert first["drafting_events"] == {armed: 1}
+    original = gh.comments[1].copy()
+    if answered:
+        gh.comments.append({"id": 3, "body": "Use 5V."})
+        commands.result["questions"] = ["Should it retrigger?"]
+    # Even identical questions and input belong to a new round after re-arming.
+    gh.label_event("needs-human", "unlabeled")
+    gh.label_event(armed, "labeled")
+    rearm_event = gh.events[-1]["id"]
+    gh.label_event("unrelated", "labeled")
+    gh.label_event("unrelated", "unlabeled")
+
+    def interrupted(args):
+        result = gh(args)
+        if args[:2] == ["issue", "comment"] or "PATCH" in args:
+            raise queue.GhError("comment response lost", transient=True)
+        return result
+
+    with pytest.raises(queue.GhError):
+        poll(repo, tmp_path, interrupted, commands)
+    second = json.loads(path.read_text())
+    assert second["round_id"] != first["round_id"]
+    assert second["drafting_events"] == {armed: rearm_event}
+    assert not second.get("delivered")
+    assert gh.labels == {armed}
+    assert gh.comments[1] == original
+    new_comment = gh.comments[-1].copy()
+    assert commands.result["questions"][0] in new_comment["body"]
+    assert f":{second['round_id']} -->" in new_comment["body"]
+
+    # A lost PATCH response on the retry still cannot start a third round.
+    with pytest.raises(queue.GhError):
+        poll(repo, tmp_path, interrupted, commands)
+    poll(repo, tmp_path, gh, commands)
+    assert json.loads(path.read_text())["round_id"] == second["round_id"]
+    assert len(commands.calls) == 2
+    assert gh.labels == {"needs-human"}
+    assert len(gh.comments) == (4 if answered else 3)
+    assert gh.comments[1] == original
+    assert gh.comments[-1] == new_comment
+    assert [c[1] for c in gh.calls if "PATCH" in c] == [
+        f"repos/{repo.name}/issues/comments/{new_comment['id']}",
+    ] * 2
+    assert not gh.prs
+
+
+@pytest.mark.scenario("issue-intake/drafting-from-an-issue/questions-posted")
+@pytest.mark.parametrize("failure", ["unavailable", "empty", "unlabeled", "missing_id"])
+def test_unconfirmed_drafting_event_preserves_round_for_retry(repo, tmp_path, failure):
+    gh = DraftGh(("spec:draft",))
+    commands = Commands(outcome="needs_input", questions=["Which voltage?"])
+
+    def interrupted(args):
+        result = gh(args)
+        if args[:2] == ["issue", "comment"]:
+            raise queue.GhError("comment response lost", transient=True)
+        return result
+
+    with pytest.raises(queue.GhError):
+        poll(repo, tmp_path, interrupted, commands)
+    path = tmp_path / "proposals/owner__sample/7.json"
+    saved = path.read_text()
+    original = gh.comments[1].copy()
+
+    def unconfirmed(args):
+        if args[0] == "api" and args[1].endswith("/events"):
+            if failure == "unavailable":
+                raise queue.GhError("HTTP 503", transient=True)
+            event = {"id": 2, "event": "labeled", "label": {"name": "spec:draft"}}
+            if failure == "unlabeled":
+                event["event"] = "unlabeled"
+            elif failure == "missing_id":
+                del event["id"]
+            return json.dumps([[] if failure == "empty" else [event]])
+        return gh(args)
+
+    gh.calls.clear()
+    with pytest.raises(RuntimeError):
+        poll(repo, tmp_path, unconfirmed, commands)
+    assert path.read_text() == saved
+    assert len(commands.calls) == 1
+    assert gh.comments[1] == original
+    assert not calls(gh, "issue", "edit")
+    assert not calls(gh, "issue", "comment")
+    assert not any("PATCH" in call for call in gh.calls)
+    assert gh.labels == {"spec:draft"}
+
+    poll(repo, tmp_path, gh, commands)
+    assert len(commands.calls) == 1
+    assert len(gh.comments) == 2
+    assert gh.comments[1] == original
+    assert gh.labels == {"needs-human"}
+    assert not gh.prs
+
+
+@pytest.mark.scenario("issue-intake/drafting-from-an-issue/draft-pr-opened")
+@pytest.mark.scenario("issue-intake/drafting-from-an-issue/questions-posted")
+@pytest.mark.scenario("issue-intake/drafting-from-an-issue/unfixable-draft-escalated")
+@pytest.mark.parametrize("outcome,findings", [
+    ("drafted", {}),
+    ("needs_input", {"questions": ["Which voltage?"]}),
+    ("rejected", {"problems": ["The voltage requirements contradict each other."]}),
+])
+@pytest.mark.parametrize("after_write", [False, True])
+def test_comment_creation_reconciled_inside_gh_retry(
+    repo, tmp_path, monkeypatch, outcome, findings, after_write,
+):
+    gh = DraftGh(("spec:draft",))
+    commands = Commands(outcome=outcome, **findings)
+    attempts, waits = [], []
+
+    def run(args, **kwargs):
+        assert args[0] == "gh"
+        command = args[1:]
+        attempts.append(command)
+        if command[0] == "api" and command[1].endswith("/comments") and "PATCH" not in command:
+            # Reconciliation must read this issue in this repository before
+            # deciding whether the failed create needs to be retried.
+            assert command == [
+                "api", "repos/owner/sample/issues/7/comments", "--paginate", "--slurp",
+            ]
+        if command[:2] == ["issue", "comment"] and sum(
+            c[:2] == ["issue", "comment"] for c in attempts
+        ) == 1:
+            if after_write:
+                gh(command)
+            return subprocess.CompletedProcess(args, 1, "", "HTTP 502: Bad Gateway")
+        return subprocess.CompletedProcess(args, 0, gh(command), "")
+
+    monkeypatch.setattr(queue.subprocess, "run", run)
+    runner = partial(queue._gh, sleep=waits.append)
+    poll(repo, tmp_path, runner, commands)
+
+    assert waits == [2]
+    assert len(gh.comments) == 2  # one human comment, one marked delivery
+    assert sum(c[:2] == ["issue", "comment"] for c in attempts) == (1 if after_write else 2)
+    assert gh.labels == (set() if outcome == "drafted" else {"needs-human"})
+    assert len(gh.prs) == (1 if outcome == "drafted" else 0)
+    assert len([c for c in commands.calls if c[0] == "specloop"]) == 1
+
+    if outcome != "drafted":
+        # The next round posts a PR link while keeping the earlier findings.
+        gh.comments.append({"id": 3, "body": "Use 5V."})
+        gh.label_event("needs-human", "unlabeled")
+        gh.label_event("spec:draft", "labeled")
+        commands.result.update(outcome="drafted", questions=[], problems=[])
+        poll(repo, tmp_path, runner, commands)
+        assert len(gh.comments) == 4
+        assert gh.pr_url in gh.comments[-1]["body"]
+        assert all(finding in gh.comments[1]["body"] for values in findings.values() for finding in values)
+        assert "Which voltage?" not in gh.comments[-1]["body"]
+        assert "contradict" not in gh.comments[-1]["body"]
+
+
+def test_comment_retry_lookup_failure_preserves_issue_for_recovery(repo, tmp_path, monkeypatch):
+    gh = DraftGh(("spec:draft",))
+    commands = Commands(outcome="needs_input", questions=["Which voltage?"])
+    writes = []
+
+    def run(args, **kwargs):
+        command = args[1:]
+        if command[:2] == ["issue", "comment"]:
+            writes.append(command)
+            gh(command)
+            return subprocess.CompletedProcess(args, 1, "", "HTTP 502: Bad Gateway")
+        if command[0] == "api" and writes:
+            return subprocess.CompletedProcess(args, 1, "", "HTTP 503: Service Unavailable")
+        return subprocess.CompletedProcess(args, 0, gh(command), "")
+
+    monkeypatch.setattr(queue.subprocess, "run", run)
+    with pytest.raises(queue.GhError) as caught:
+        poll(repo, tmp_path, partial(queue._gh, sleep=lambda _: None), commands)
+    assert caught.value.transient
+    assert len(writes) == 1
+    assert len(gh.comments) == 2
+    assert gh.labels == {"spec:draft"}
+    assert not gh.prs
+
+    poll(repo, tmp_path, gh, commands)
+    assert len(commands.calls) == 1
+    assert len(gh.comments) == 2
+    assert gh.labels == {"needs-human"}

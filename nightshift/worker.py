@@ -1,7 +1,7 @@
 """Headless `claude -p` invocations.
 
 The flag sets here are not guesses — they were arrived at by hand-running two
-real tasks end-to-end on 2026-08-02 (see WORKLOG). Each non-obvious flag is
+real tasks end-to-end on 2026-08-02. Each non-obvious flag is
 commented with the failure it prevents; deleting one re-opens that failure.
 """
 
@@ -77,7 +77,7 @@ _IMPLEMENT_ALLOWED = [
     "Bash(pnpm:*)", "Bash(npm:*)",
     # The toolchain of the SECOND language enrolled here, and the reason
     # `unrunnable_verify_clauses` exists. This list was written for sample and
-    # every build verb in it is JS; swift-app was enrolled 2026-08-07 with
+    # every build verb in it is JS; sample-app was enrolled 2026-08-07 with
     # `verify = "swift build && swift test && swift format lint ..."` and
     # nothing granted `swift`. Its first worker (#1) planned the whole task
     # correctly, then found every route to the toolchain closed — bare `swift`,
@@ -126,7 +126,7 @@ def unrunnable_verify_clauses(verify: str, allowed: list[str] | None = None) -> 
     with a verify command its own workers were forbidden to run. That failure
     is invisible until a worker burns a run discovering it, and it reads like
     an escalation about the task rather than about the config — which is what
-    happened to swift-app #1 (see `Bash(swift:*)` above).
+    happened to sample-app #1 (see `Bash(swift:*)` above).
 
     Clause splitting matches `task.ran_verification` deliberately: the same
     string decides what a worker is permitted to run and what counts as having
@@ -381,7 +381,7 @@ def probe(endpoint: config.Endpoint, model: str, *, context_tokens: int = 0,
                 # contains `Write`, and deny beats allow — so the first version of
                 # this probe forbade the one tool it exists to test and failed
                 # a perfectly healthy endpoint. Found by running it against the
-                # EVO-X2 rather than by reading it.
+                # a local inference box rather than by reading it.
                 ["Read", "Write"], _DENIED,
                 endpoint, context_tokens, foreign_auth_envs,
             )

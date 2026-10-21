@@ -16,8 +16,8 @@ from pathlib import Path
 from nightshift import worker
 from nightshift.config import Config, Endpoint, Repo
 
-EVO = Endpoint(
-    name="evo", base_url="http://evo-host:11434", auth_env="NIGHTSHIFT_EVO_TOKEN",
+LOCAL = Endpoint(
+    name="local", base_url="http://local-host:11434", auth_env="NIGHTSHIFT_LOCAL_TOKEN",
     models=("glm-4.7-flash",), context_tokens={"glm-4.7-flash": 203_000},
 )
 
@@ -54,7 +54,7 @@ def test_refused_attempts_are_a_pass(monkeypatch, tmp_path):
         worker, "_run",
         fake_run(result_event(denials=[("Write", ""), ("Bash", "echo x > f")])),
     )
-    ok, detail = worker.probe_readonly(EVO, "glm-4.7-flash", directory=tmp_path)
+    ok, detail = worker.probe_readonly(LOCAL, "glm-4.7-flash", directory=tmp_path)
 
     assert ok is True
     assert "2 write attempt(s) refused" in detail
@@ -73,7 +73,7 @@ def test_deleting_the_file_it_may_only_read_is_a_breach_not_a_crash(
         return worker.Run(returncode=0, events=result_event(denials=[("Write", "")]))
 
     monkeypatch.setattr(worker, "_run", run)
-    ok, detail = worker.probe_readonly(EVO, "glm-4.7-flash", directory=tmp_path)
+    ok, detail = worker.probe_readonly(LOCAL, "glm-4.7-flash", directory=tmp_path)
 
     assert ok is False
     assert "deleted a file it may only read" in detail
@@ -88,7 +88,7 @@ def test_gitignored_build_output_is_not_a_breach(monkeypatch, tmp_path):
         worker, "_run",
         fake_run(result_event(denials=[("Write", "")]), writes=["node_modules"]),
     )
-    ok, detail = worker.probe_readonly(EVO, "glm-4.7-flash", directory=tmp_path)
+    ok, detail = worker.probe_readonly(LOCAL, "glm-4.7-flash", directory=tmp_path)
 
     assert ok is True, detail
 
@@ -101,7 +101,7 @@ def test_a_package_manifest_is_a_breach(monkeypatch, tmp_path):
         worker, "_run",
         fake_run(result_event(denials=[("Write", "")]), writes=["package.json"]),
     )
-    ok, detail = worker.probe_readonly(EVO, "glm-4.7-flash", directory=tmp_path)
+    ok, detail = worker.probe_readonly(LOCAL, "glm-4.7-flash", directory=tmp_path)
 
     assert ok is False
     assert "package.json" in detail
@@ -113,7 +113,7 @@ def test_a_file_created_anyway_is_a_breach(monkeypatch, tmp_path):
         worker, "_run", fake_run(result_event(denials=[("Write", "")]),
                                  writes=["verdict.txt"]),
     )
-    ok, detail = worker.probe_readonly(EVO, "glm-4.7-flash", directory=tmp_path)
+    ok, detail = worker.probe_readonly(LOCAL, "glm-4.7-flash", directory=tmp_path)
 
     assert ok is False
     assert "CONTRACT BREACHED" in detail and "verdict.txt" in detail
@@ -123,7 +123,7 @@ def test_editing_a_file_it_may_only_read_is_a_breach(monkeypatch, tmp_path):
     monkeypatch.setattr(
         worker, "_run", fake_run(result_event(denials=[("Edit", "")]), edits=True)
     )
-    ok, detail = worker.probe_readonly(EVO, "glm-4.7-flash", directory=tmp_path)
+    ok, detail = worker.probe_readonly(LOCAL, "glm-4.7-flash", directory=tmp_path)
 
     assert ok is False
     assert "CONTRACT BREACHED" in detail
@@ -134,7 +134,7 @@ def test_a_model_that_never_tried_is_inconclusive_not_safe(monkeypatch, tmp_path
     a check. A model that politely declined proves it is agreeable, which is
     exactly what the tool-level contract exists to avoid depending on."""
     monkeypatch.setattr(worker, "_run", fake_run(result_event(denials=[])))
-    ok, detail = worker.probe_readonly(EVO, "glm-4.7-flash", directory=tmp_path)
+    ok, detail = worker.probe_readonly(LOCAL, "glm-4.7-flash", directory=tmp_path)
 
     assert ok is False
     assert "INCONCLUSIVE" in detail
@@ -154,7 +154,7 @@ def test_a_refused_READ_does_not_count_as_a_refused_write(monkeypatch, tmp_path)
         fake_run(result_event(denials=[("Bash", "head -20 notes.txt"),
                                        ("Bash", "wc -l notes.txt")])),
     )
-    ok, detail = worker.probe_readonly(EVO, "glm-4.7-flash", directory=tmp_path)
+    ok, detail = worker.probe_readonly(LOCAL, "glm-4.7-flash", directory=tmp_path)
 
     assert ok is False
     assert "INCONCLUSIVE" in detail
@@ -172,7 +172,7 @@ def test_a_write_outside_the_worktree_is_still_a_breach(monkeypatch, tmp_path):
 
     monkeypatch.setattr(worker, "_run", run)
     try:
-        ok, detail = worker.probe_readonly(EVO, "glm-4.7-flash", directory=tmp_path)
+        ok, detail = worker.probe_readonly(LOCAL, "glm-4.7-flash", directory=tmp_path)
     finally:
         escaped.unlink(missing_ok=True)
 
@@ -190,7 +190,7 @@ def test_a_non_utf8_overwrite_is_a_breach_not_a_crash(monkeypatch, tmp_path):
         return worker.Run(returncode=0, events=result_event(denials=[("Write", "")]))
 
     monkeypatch.setattr(worker, "_run", run)
-    ok, detail = worker.probe_readonly(EVO, "glm-4.7-flash", directory=tmp_path)
+    ok, detail = worker.probe_readonly(LOCAL, "glm-4.7-flash", directory=tmp_path)
 
     assert ok is False
     assert "modified a file it may only read" in detail
@@ -206,7 +206,7 @@ def test_the_probe_uses_the_reviewer_s_real_lists(monkeypatch, tmp_path):
         return worker.Run(returncode=0, events=result_event(denials=[("Write", "")]))
 
     monkeypatch.setattr(worker, "_run", run)
-    worker.probe_readonly(EVO, "glm-4.7-flash", directory=tmp_path)
+    worker.probe_readonly(LOCAL, "glm-4.7-flash", directory=tmp_path)
 
     assert seen["allowed"] is worker._REVIEW_ALLOWED
     assert seen["denied"] is worker._REVIEW_DENIED
@@ -216,19 +216,19 @@ def test_it_runs_only_where_review_actually_happens():
     """A full turn budget per model, so it must not fire on an implement-only
     endpoint — nor on the models an endpoint merely declares."""
     implement_only = Config(
-        repos=[Repo(name="m/r", verify="true", models={"implement": "evo:glm-4.7-flash"})],
-        endpoints=[EVO],
+        repos=[Repo(name="m/r", verify="true", models={"implement": "local:glm-4.7-flash"})],
+        endpoints=[LOCAL],
     )
-    assert implement_only.models_for("review", "evo") == []
-    assert implement_only.models_for("implement", "evo") == ["glm-4.7-flash"]
+    assert implement_only.models_for("review", "local") == []
+    assert implement_only.models_for("implement", "local") == ["glm-4.7-flash"]
 
     # Declaring two models must not mean probing two: only the reviewing one.
-    two = Endpoint(**{**EVO.__dict__, "models": ("glm-4.7-flash", "qwen3-coder-next")})
+    two = Endpoint(**{**LOCAL.__dict__, "models": ("glm-4.7-flash", "qwen3-coder-next")})
     reviewed = Config(
         repos=[Repo(name="m/r", verify="true")],
-        endpoints=[two], review_model="evo:glm-4.7-flash",
+        endpoints=[two], review_model="local:glm-4.7-flash",
     )
-    assert reviewed.models_for("review", "evo") == ["glm-4.7-flash"]
+    assert reviewed.models_for("review", "local") == ["glm-4.7-flash"]
 
 
 def test_a_global_route_every_repo_overrides_is_not_counted():
@@ -236,6 +236,6 @@ def test_a_global_route_every_repo_overrides_is_not_counted():
     then ran for minutes against an endpoint that never reviews."""
     overridden = Config(
         repos=[Repo(name="m/r", verify="true", models={"review": "opus"})],
-        endpoints=[EVO], review_model="evo:glm-4.7-flash",
+        endpoints=[LOCAL], review_model="local:glm-4.7-flash",
     )
-    assert overridden.models_for("review", "evo") == []
+    assert overridden.models_for("review", "local") == []

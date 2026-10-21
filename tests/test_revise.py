@@ -257,7 +257,8 @@ class PrGh:
         if args[:2] == ["pr", "view"]:
             return json.dumps({"comments": self.comments, "reviews": self.reviews})
         if args[0] == "api":
-            return json.dumps(self.inline)
+            assert args[-2:] == ["--paginate", "--slurp"]
+            return json.dumps([self.inline])
         return ""
 
 

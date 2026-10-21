@@ -440,7 +440,7 @@ def run(
                     # handler, which releases the issue and deletes the branch
                     # — making the work claimable again, so it fails at the same
                     # push and spends another full budget. Twice in one day on
-                    # 2026-08-08 (swift-app #14), which is what that looks like.
+                    # 2026-08-08 (sample-app #14), which is what that looks like.
                     report.step = Step.ESCALATE
                     report.reason = (
                         "this task changes a GitHub Actions workflow, which the "
@@ -514,7 +514,7 @@ def _transcript_path(directory: Path | None, repo: str, name: str) -> Path | Non
 
     The REPO is in the name, by the same `owner__repo#N` convention
     `queue.claim_path` uses. Without it the filename was `<issue>-impl-1`, and
-    issue numbers are per repo: second-project's #11 and sample's #11 both
+    issue numbers are per repo: sample-app's #11 and sample's #11 both
     resolved to `11-impl-1.jsonl`, so one silently overwrote the other. Both
     issues exist today, and sample's transcripts for those numbers are already
     on disk.

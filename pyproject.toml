@@ -21,10 +21,14 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/mattpolicastro/nightshift"
 Source = "https://github.com/mattpolicastro/nightshift"
-Changelog = "https://github.com/mattpolicastro/nightshift/blob/main/WORKLOG.md"
+Changelog = "https://github.com/mattpolicastro/nightshift/blob/main/CHANGELOG.md"
 
 [project.scripts]
 nightshift = "nightshift.cli:main"
+specloop = "specloop.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["nightshift", "specloop"]
 
 [build-system]
 requires = ["hatchling"]

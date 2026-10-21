@@ -102,16 +102,16 @@ def test_progress_and_parse_answer_different_questions():
 
 def test_a_transcript_name_carries_its_repo(tmp_path):
     """Issue numbers are per repo. Without the repo in the name, sample #11 and
-    second-project #11 both resolved to `11-impl-1.jsonl` and one silently
+    sample-app #11 both resolved to `11-impl-1.jsonl` and one silently
     overwrote the other — and both of those issues exist today, with sample's
     transcripts for that number already on disk.
     """
     from nightshift import task
 
     sample = task._transcript_path(tmp_path, "matt/sample", "11-impl-1")
-    hypno = task._transcript_path(tmp_path, "matt/second-project", "11-impl-1")
+    other = task._transcript_path(tmp_path, "matt/sample-app", "11-impl-1")
 
-    assert sample != hypno
+    assert sample != other
     assert sample.name == "matt__sample#11-impl-1.jsonl"
 
 

@@ -52,6 +52,10 @@ def database():
                 event_id INTEGER PRIMARY KEY, checked_at TEXT, state TEXT,
                 resolution TEXT, error TEXT
             );
+            CREATE TABLE IF NOT EXISTS specloop_snapshot (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                data TEXT NOT NULL, checked_at TEXT, error TEXT
+            );
         """)
         with db:
             yield db

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
@@ -18,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from . import outcomes, notify, preflight, queue, recovery, task, trace, vcs
+from . import outcomes, notify, preflight, queue, recovery, specloop_intake, specloop_job, task, trace, vcs
 from .config import Config, Repo
 from .queue import Repair
 from .task import Step
@@ -221,12 +222,14 @@ class RepoHealth:
     seconds is not news.
     """
 
-    #: Consecutive failed passes per repo. Cleared the moment one succeeds.
+    #: Failed passes per repo since recovery; pending retries retain the count.
     failures: dict[str, int] = field(default_factory=dict)
     #: Repos already announced, so a long outage is one message, not one a poll.
     announced: set[str] = field(default_factory=set)
     #: Transient failures tolerated before the outage is worth a human's time.
     threshold: int = 3
+    #: Repeated item errors may need intervention even when other work succeeds.
+    item_failures: dict[tuple[str, str, int], int] = field(default_factory=dict)
 
     def record(self, repo: str, exc: Exception, webhook: str = "") -> None:
         count = self.failures.get(repo, 0) + 1
@@ -261,6 +264,8 @@ def startup(cfg: Config, repo_dirs: dict[str, Path],
     """
     repairs: list[queue.Reconciliation] = []
     for repo in cfg.repos:
+        if repo.engine != "worker":
+            continue
         # Per repo, and non-fatal. This call was unguarded until 2026-09-05,
         # so one `gh issue list` failing ended the process BEFORE the loop had
         # claimed anything — 105 of the log's 107 tracebacks, across seven
@@ -383,7 +388,7 @@ class Claimed:
 def endpoints_ready(cfg: Config, repo: Repo, *, prober=None) -> tuple[bool, str]:
     """Can every endpoint this repo's phases need actually be reached?
 
-    An endpoint is a machine that may be off — the EVO-X2 is always-on but MLPC
+    An endpoint is a machine that may be off — a local inference box is always-on but a GPU box
     is powered up for a specific job, so unreachability is the normal case
     rather than the exception. Checked BEFORE claiming, because claiming work
     that cannot run means an issue labelled `agent:working` with nothing
@@ -446,10 +451,12 @@ def claim_next(
     walk starts from the top every time. What it no longer does is let one repo
     hold every slot. Before per-repo caps, a repo with a deep queue refilled
     from the top on each free slot and everything below it starved (observed
-    2026-08-07: swift-app at "0 working, 2 ready" for a day behind sample).
+    2026-08-07: sample-app at "0 working, 2 ready" for a day behind sample).
     """
     running = running or {}
     for repo in cfg.repos:
+        if repo.engine != "worker":
+            continue
         if running.get(repo.name, 0) >= max(1, repo.concurrency):
             continue
         repo_dir = repo_dirs.get(repo.name)
@@ -481,6 +488,104 @@ def claim_next(
         log.info("claimed %s #%s — %s", repo.name, issue.number, issue.title)
         return Claimed(repo=repo, repo_dir=repo_dir, issue=issue, claim=claim)
     return None
+
+
+def poll_specloop(cfg: Config, health: RepoHealth, *, runner=None, specloop_runner=None) -> None:
+    """Route specloop actions independently of worker slots and quota.
+
+    Recheck the kill switch at every external operation, including delivery
+    retries. A pause created during drafting must also stop its push/labels.
+    Already admitted runs are driven by specloop's separate supervisor.
+    """
+    def check_running():
+        if paused():
+            raise specloop_intake.Paused()
+
+    def guarded(run):
+        def call(*args, **kwargs):
+            check_running()
+            return run(*args, **kwargs)
+        return call
+
+    def gh(args):
+        check_running()
+        with queue.gh_guard(check_running):
+            return (runner or queue._gh)(args)
+
+    specloop_job.reap()
+    cli = guarded(specloop_runner or subprocess.run)
+    intake_cli = guarded(specloop_runner) if specloop_runner is not None else None
+    launcher = guarded(subprocess.Popen)
+    git = guarded(subprocess.run)
+    for repo in cfg.repos:
+        if paused():
+            return
+        if repo.engine != "specloop":
+            continue
+        errors = []
+        failed_items = set()
+        pending_items = set()
+
+        def item_pending(number):
+            pending_items.add((repo.name, stage, number))
+
+        def item_failed(number, exc):
+            errors.append(exc)
+            key = (repo.name, stage, number)
+            failed_items.add(key)
+            health.item_failures[key] = health.item_failures.get(key, 0) + 1
+            log.warning("specloop %s %s #%s failed — %s", stage, repo.name, number, exc)
+            # Give ambiguous failures time to reconcile with durable state.
+            # Unavailable GitHub reads remain repository outages, not holds on
+            # items whose eligibility we could not establish.
+            transient_github = isinstance(exc, queue.GhError) and exc.transient
+            if (isinstance(exc, specloop_intake.DeliveryError)
+                    or (health.item_failures[key] >= health.threshold and not transient_github)):
+                # Keep the receipt and arming label: after the human resolves
+                # the branch and removes needs-human, delivery can resume.
+                reporting_errors = specloop_intake.report_failure(
+                    repo, cfg.labels, number, stage, kind, exc, runner=gh,
+                )
+                for error in reporting_errors:
+                    log.warning("specloop %s %s #%s escalation failed — %s",
+                                stage, repo.name, number, error)
+                errors.extend(reporting_errors)
+
+        stages = (
+            ("draft", "issue", specloop_intake.propose_pending,
+             dict(specloop_runner=intake_cli, git_runner=git, launcher=launcher,
+                  on_pending=item_pending)),
+            ("admit", "pr", specloop_intake.admit_pending,
+             dict(specloop_runner=intake_cli, git_runner=git, launcher=launcher, status_runner=cli,
+                  on_pending=item_pending)),
+            ("revise", "pr", specloop_intake.revise_pending,
+             dict(specloop_runner=intake_cli, git_runner=git, launcher=launcher, status_runner=cli,
+                  on_pending=item_pending)),
+            ("publish", "pr", specloop_intake.publish_pending, dict(specloop_runner=cli)),
+        )
+        for stage, kind, action, kwargs in stages:
+            try:
+                action(repo, cfg.labels, STATE_DIR, runner=gh, on_error=item_failed, **kwargs)
+            except specloop_intake.Paused:
+                return
+            except Exception as exc:  # noqa: BLE001 — other stages must still run
+                log.warning("specloop %s %s failed — %s", stage, repo.name, exc)
+                errors.append(exc)
+            else:
+                for key in list(health.item_failures):
+                    # Completion or an item no longer armed (including a
+                    # needs-human hold) settles the failure. Launching or
+                    # awaiting a retry does not prove recovery.
+                    if (key[:2] == (repo.name, stage)
+                            and key not in failed_items and key not in pending_items):
+                        del health.item_failures[key]
+        # Count failed polls, not failed items/stages. A later success must not
+        # erase an earlier failure or prevent a persistent outage notification.
+        if errors:
+            error = next((exc for exc in errors if not getattr(exc, "transient", True)), errors[0])
+            health.record(repo.name, error, cfg.slack_webhook)
+        elif not any(key[0] == repo.name for key in health.item_failures):
+            health.recovered(repo.name)
 
 
 def run_claimed(cfg: Config, claimed: Claimed, tally: Tally) -> None:
@@ -696,6 +801,7 @@ def loop(cfg: Config, repo_dirs: dict[str, Path], *, once: bool = False) -> Tall
             if service:
                 beat(started_at)
             _harvest(in_flight, tally)
+            specloop_job.reap()
 
             if paused():
                 # In-flight tasks are deliberately left to finish. The pause
@@ -706,6 +812,8 @@ def loop(cfg: Config, repo_dirs: dict[str, Path], *, once: bool = False) -> Tall
                     break
                 time.sleep(cfg.poll_seconds)
                 continue
+
+            poll_specloop(cfg, health)
 
             if window.rolled_over(tally):
                 log.info("subscription window rolled over — cap reset")
@@ -753,7 +861,7 @@ def loop(cfg: Config, repo_dirs: dict[str, Path], *, once: bool = False) -> Tall
             # Fill every free slot the caps still allow, re-walking the repo
             # list each time. `claim_next` skips a repo already at its own
             # concurrency, so a repo with a deep queue can no longer take every
-            # slot — which is what starved swift-app behind sample.
+            # slot — which is what starved sample-app behind sample.
             dispatched = 0
             while len(in_flight) < slots and spent + dispatched < cfg.max_tasks_per_night:
                 claimed = claim_next(

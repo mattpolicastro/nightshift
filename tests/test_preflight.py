@@ -2,7 +2,7 @@
 
 The check that carries its weight is the negative control. A token that can
 read the sandbox has proven nothing about what else it can read — the same
-shape as the vault's auth finding, where `claude -p` succeeded on a bogus
+shape as an earlier auth finding, where `claude -p` succeeded on a bogus
 token because an interactive login was quietly answering instead.
 """
 
@@ -101,7 +101,7 @@ def test_an_inherited_api_key_is_reported():
 def test_base_url_is_reported_too():
     """Would silently redirect workers at Ollama."""
     checks = preflight.run(
-        cfg(), {"GH_TOKEN": "github_pat_x", "ANTHROPIC_BASE_URL": "http://evo:11434"},
+        cfg(), {"GH_TOKEN": "github_pat_x", "ANTHROPIC_BASE_URL": "http://local:11434"},
         runner=reader({SANDBOX}),
     )
     assert find(checks, "ANTHROPIC_BASE_URL").ok is False

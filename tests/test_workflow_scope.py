@@ -1,6 +1,6 @@
 """The workflow-scope refusal is correct. It used to fire far too late.
 
-BACKLOG §8. Two of the 107 tracebacks are this, both swift-app #14 on
+From the worker engine's September backlog. Two of the 107 tracebacks are this, both sample-app #14 on
 2026-08-08:
 
     ! [remote rejected] claude/14 -> claude/14 (refusing to allow a Personal
@@ -112,7 +112,7 @@ def test_the_title_counts_too(monkeypatch, tmp_path):
             return '{"labels": [{"name": "agent:ready"}]}'
         return ""
 
-    assert queue.claim("matt/swift-app", tmp_path, Labels(), runner=runner) is None
+    assert queue.claim("matt/sample-app", tmp_path, Labels(), runner=runner) is None
     assert [c for c in calls if c[:2] == ["issue", "comment"]]
 
 
@@ -133,7 +133,7 @@ def test_such_an_issue_is_escalated_rather_than_claimed(monkeypatch, tmp_path):
             return '{"labels": [{"name": "agent:ready"}]}'
         return ""
 
-    claimed = queue.claim("matt/swift-app", tmp_path, Labels(), runner=runner)
+    claimed = queue.claim("matt/sample-app", tmp_path, Labels(), runner=runner)
 
     assert claimed is None, "it must not be claimed"
     commented = [c for c in calls if c[:2] == ["issue", "comment"]]

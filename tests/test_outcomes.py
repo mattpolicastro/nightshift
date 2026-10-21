@@ -263,6 +263,9 @@ def test_cli_reports_deferred_checks_as_stale_json(monkeypatch, capsys):
     monkeypatch.setattr(cli.config, "load_env_file", lambda: None)
     monkeypatch.setattr(cli.config, "load", lambda path: Config(repos=[]))
     monkeypatch.setattr(outcomes, "_read_github", lambda args, deadline: github()(args))
+    # Attention now reads specloop too; isolate that CLI from the live service.
+    monkeypatch.setattr(cli.specloop_attention.specloop_client, "call",
+                        lambda *args, **kwargs: {"version": 1, "runs": []})
     seed_history(active=40)
     assert cli.main(["attention", "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)

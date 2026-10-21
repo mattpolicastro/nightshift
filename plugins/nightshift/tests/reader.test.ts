@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createReader } from '../reader.server';
+import { createReader } from '../server/reader';
 
 const task = {
   repo: 'owner/repo', issue: 1, title: 'Fix retries', summary: 'Retries now recover',

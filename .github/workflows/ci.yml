@@ -13,7 +13,8 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # specloop verifies under macOS sandbox-exec, so its tests need macOS.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6

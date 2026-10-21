@@ -1,0 +1,11 @@
+#!/bin/bash
+# launchd entry point for `specloop serve`.
+#
+# launchd reads no shell config, so PATH is set here: node/npx (OpenSpec CLI)
+# live under ~/n/bin, codex, cmake, gh and uv under Homebrew. Credentials are
+# not sourced here: Codex profiles use their own login, and a manifest's
+# env_file supplies anything else (CLAUDE_CODE_OAUTH_TOKEN, the Slack webhook).
+set -euo pipefail
+export PATH="$HOME/n/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+cd "$HOME/Projects/nightshift"
+exec /opt/homebrew/bin/uv run --no-sync specloop serve

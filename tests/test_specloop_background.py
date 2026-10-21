@@ -1,0 +1,527 @@
+"""Real background processes; fake GitHub/git and a blocking specloop CLI."""
+
+import json
+import os
+import subprocess
+import sys
+import time
+from functools import partial
+from pathlib import Path
+
+import pytest
+
+from nightshift import daemon, queue, specloop_job
+from nightshift.config import Config, Repo
+from specloop.state import Run
+from test_engine_routing import DraftGh
+from test_queue import FakeGh
+from test_specloop_approval import ApprovalGh, HEAD
+from test_specloop_command_json import BRANCH, CHANGE, git, template
+from test_specloop_isolation import Pipeline, CHECKS
+
+
+# Keep tests bounded even if a regression waits synchronously for the CLI.
+CLI = '''
+import json, os, sys, time
+from pathlib import Path
+root = Path(os.environ["TEST_INTAKE_ROOT"])
+if sys.argv[1] == "status":
+    print(json.dumps({"version": 1, "runs": []}))
+    sys.exit(0)
+with (root / "started").open("a") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\\n")
+deadline = time.monotonic() + 15
+while not (root / "release").exists():
+    if time.monotonic() > deadline:
+        (root / "timed-out").touch()
+        break
+    time.sleep(.01)
+result = json.loads((root / "cli-result.json").read_text())
+(root / "finished").touch()
+print(json.dumps(result))
+sys.exit(int(result.get("outcome") in ("refused", "needs_input", "rejected")))
+'''
+
+
+def eventually(predicate):
+    deadline = time.monotonic() + 5
+    while not predicate():
+        assert time.monotonic() < deadline, "background process did not reach its checkpoint"
+        time.sleep(.01)
+
+
+@pytest.fixture
+def background(tmp_path, monkeypatch):
+    executable = tmp_path / "specloop"
+    executable.write_text(f"#!{sys.executable}\n" + CLI)
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    # Verification runs from a writable build directory beside the source.
+    # The child needs the package under test, not the caller's working directory
+    # (or an older installed copy). Exercise that layout even in local runs.
+    source = str(Path(specloop_job.__file__).resolve().parent.parent)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(
+        [source, *filter(None, os.environ.get("PYTHONPATH", "").split(os.pathsep))]
+    ))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TEST_INTAKE_ROOT", str(tmp_path))
+    monkeypatch.setattr(daemon, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(queue, "CLAIM_DIR", tmp_path / "claims")
+    manifest = tmp_path / "manifest.toml"
+    manifest.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / "source"))}\n')
+    repo = Repo("owner/sample", engine="specloop", manifest=manifest)
+    children = []
+    original = subprocess.Popen
+
+    def launch(*args, **kwargs):
+        child = original(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    (tmp_path / "cli-result.json").write_text(json.dumps({
+        "version": 1, "outcome": "needs_input", "questions": ["Which voltage?"],
+    }))
+    yield tmp_path, repo, children
+    (tmp_path / "release").touch()
+    for child in children:
+        child.wait(timeout=5)
+    specloop_job.reap()
+
+
+@pytest.mark.scenario("issue-intake/approval-admits/approved-spec-admitted")
+@pytest.mark.parametrize("checkpoint", ["cleanup", "feasibility", "state", "refusal_cleanup"])
+def test_same_branch_background_admissions_share_run_lock(template, background, checkpoint):
+    """Two PR jobs use the real CLI and contend before admission commits state."""
+    from nightshift import specloop_intake
+
+    path, source = template
+    root, _, children = background
+    repo = Repo("owner/sample", engine="specloop", manifest=path)
+    remote = root / "remote.git"
+    git(source, "clone", "-q", "--bare", str(source), str(remote))
+    git(source, "remote", "add", "origin", str(remote))
+    pipeline = Pipeline(repo)
+    pipeline.approved(1)
+    pipeline.prs[1].update(headRefName=BRANCH, headRefOid=git(source, "rev-parse", BRANCH))
+    run = Run.for_change(CHANGE)
+    run.dir.mkdir(parents=True)
+    (run.dir / "stale-clone").mkdir()
+    (run.dir / "stale-clone" / "partial").touch()
+    (run.dir / "lock").touch()
+    lock_inode = (run.dir / "lock").stat().st_ino
+
+    # Only the external feasibility/validator boundaries are faked. The CLI,
+    # clone, cleanup, flock, state write and intake job lifecycle are real.
+    (root / "checkpoint").write_text(checkpoint)
+    (root / "specloop").write_text(f"#!{sys.executable}\n" + '''
+import os, sys, time
+from pathlib import Path
+from specloop import cli, state
+root = Path(os.environ["TEST_INTAKE_ROOT"])
+state.ROOT = root / "home"
+checkpoint = (root / "checkpoint").read_text()
+args = sys.argv[1:]
+owner = "--pr" in args and args[args.index("--pr") + 1].endswith("/1")
+def pause(stage):
+    if not owner or checkpoint != stage or (root / "release").exists():
+        return
+    run_dir = state.runs_dir() / args[args.index("--change") + 1]
+    artifact = run_dir / "live-artifact"
+    artifact.write_text("live admission evidence")
+    (root / "started").touch()
+    deadline = time.monotonic() + 15
+    while not (root / "release").exists():
+        if time.monotonic() > deadline:
+            raise RuntimeError("test admission was not released")
+        time.sleep(.01)
+    assert artifact.read_text() == "live admission evidence"
+    artifact.unlink()
+clear = cli._clear_admission
+clears = 0
+def cleanup(run):
+    global clears
+    clear(run)
+    clears += 1
+    pause("cleanup" if clears == 1 else "refusal_cleanup")
+cli._clear_admission = cleanup
+cli.problems_with = lambda *args: []
+def feasibility(*args):
+    pause("feasibility")
+    if owner and checkpoint == "refusal_cleanup" and not (root / "release").exists():
+        raise ValueError("test refusal")
+    return {"contradictions": [], "risks": []}
+cli.feasibility.check = feasibility
+save = state.Run.save
+def save_state(run):
+    pause("state")
+    save(run)
+state.Run.save = save_state
+sys.exit(cli.main(args))
+''')
+
+    def poll():
+        return specloop_intake.admit_pending(
+            repo, queue.Labels(), daemon.STATE_DIR, runner=pipeline.gh,
+        )
+
+    poll()
+    eventually(lambda: (root / "started").exists())
+    assert not (run.dir / "state.json").exists()
+    assert not (run.dir / "stale-clone").exists()
+    pipeline.approved(2)
+    pipeline.prs[2].update(headRefName=BRANCH, headRefOid=pipeline.prs[1]["headRefOid"])
+    poll()  # The second PR has a different job lock but the same change lock.
+    second_receipt = daemon.STATE_DIR / "admissions/owner__sample/2.json"
+    second_job = json.loads(second_receipt.read_text())["job"]
+    result_path = second_receipt.parent / "2.jobs" / second_job / "result.json"
+    eventually(result_path.exists)
+    poll()
+    first_receipt = daemon.STATE_DIR / "admissions/owner__sample/1.json"
+    first_job = json.loads(first_receipt.read_text())["job"]
+    assert not (first_receipt.parent / "1.jobs" / first_job / "result.json").exists()
+    assert (run.dir / "live-artifact").read_text() == "live admission evidence"
+    assert (run.dir / "lock").stat().st_ino == lock_inode
+    with run.lock() as mine:
+        assert not mine
+    refused = json.loads(second_receipt.read_text())["result"]
+    assert refused["outcome"] == "refused"
+    assert "another process" in refused["reasons"][0]
+    assert {"name": "needs-human"} in pipeline.prs[2]["labels"]
+    assert "build has started" not in pipeline.prs[2]["comments"][0]["body"]
+
+    (root / "release").touch()
+    for child in children:
+        child.wait(timeout=5)
+    poll()
+    if checkpoint == "refusal_cleanup":
+        assert list(run.dir.iterdir()) == [run.dir / "lock"]
+        pipeline.prs[1]["labels"] = [{"name": "spec:approved"}]
+        poll()
+        children[-1].wait(timeout=5)
+        poll()
+    poll()
+    assert Run.for_change(CHANGE).state.pr == pipeline.prs[1]["url"]
+    assert git(run.dir / "repo.git", "rev-parse", BRANCH) == pipeline.prs[1]["headRefOid"]
+    assert sum("build has started" in c["body"] for c in pipeline.prs[1]["comments"]) == 1
+    assert not pipeline.prs[1]["labels"]
+    assert (run.dir / "lock").stat().st_ino == lock_inode
+    with run.lock() as mine:
+        assert mine
+
+
+@pytest.mark.scenario("issue-intake/engine-per-repository/worker-repository-unchanged")
+def test_long_propose_allows_worker_claim_heartbeat_and_harvest(background, monkeypatch):
+    root, repo, _ = background
+    gh = DraftGh(("spec:draft",))
+    worker_gh = FakeGh({"agent:ready": [7]})
+    cfg = Config(repos=[repo, Repo("owner/worker", verify="true")], poll_seconds=.01)
+    monkeypatch.setattr(queue, "_gh", gh)
+    monkeypatch.setattr(daemon, "startup", lambda *a: None)
+    monkeypatch.setattr(daemon, "_note_unclean_exit", lambda *a: None)
+    monkeypatch.setattr(daemon.notify, "send", lambda *a: None)
+    monkeypatch.setattr(queue, "claim", partial(queue.claim, runner=worker_gh))
+    claim = daemon.claim_next
+    claims, beats, harvested = [], [], []
+    real_beat, real_harvest = daemon.beat, daemon._harvest
+
+    def beat(*args):
+        real_beat(*args)
+        beats.append(json.loads(daemon.HEARTBEAT_FILE.read_text()))
+
+    def claim_worker(*args, **kwargs):
+        eventually(lambda: (root / "started").exists())
+        # This is still the first poll: the spec repo precedes the worker repo.
+        assert len(beats) == 2  # startup and this poll
+        assert not (root / "finished").exists()
+        result = claim(*args, **kwargs)
+        claims.append(result)
+        return result
+
+    def run_worker(cfg, claimed, tally):
+        assert claimed.repo.engine == "worker"
+        tally.shipped += 1
+
+    class Stop(Exception):
+        pass
+
+    def harvest(in_flight, tally):
+        result = real_harvest(in_flight, tally)
+        if tally.shipped and not harvested:
+            assert not (root / "finished").exists()
+            harvested.append(tally.shipped)
+            raise Stop
+        return result
+
+    monkeypatch.setattr(daemon, "claim_next", claim_worker)
+    monkeypatch.setattr(daemon, "run_claimed", run_worker)
+    monkeypatch.setattr(daemon, "beat", beat)
+    monkeypatch.setattr(daemon, "_harvest", harvest)
+    with pytest.raises(Stop):
+        daemon.loop(cfg, {"owner/worker": root})
+    assert len(claims) == 1 and claims[0].issue.number == 7
+    assert queue.claim_path("owner/worker", 7).exists()
+    assert harvested and len(beats) >= 3
+    assert any("agent:working" in edit and "agent:ready" in edit for edit in worker_gh.edits())
+    receipt = json.loads((daemon.STATE_DIR / "proposals/owner__sample/7.json").read_text())
+    assert "job" in receipt and "result" not in receipt
+    assert len((root / "started").read_text().splitlines()) == 1
+    assert gh.labels == {"spec:draft"}
+
+
+@pytest.mark.parametrize("command,outcome", [
+    ("propose", "needs_input"), ("propose", "drafted"),
+    ("admit", "refused"), ("admit", "admitted"),
+])
+def test_jobs_survive_polls_and_restart_then_deliver_once(background, monkeypatch, command, outcome):
+    root, repo, children = background
+    change = "sample-issue-7-add-a-gate"
+    result = {"version": 1, "outcome": outcome, "branch": f"spec/{change}",
+              "commit": HEAD, "head": HEAD, "questions": ["Which voltage?"],
+              "reasons": ["Contradictory voltage."], "risks": []}
+    (root / "cli-result.json").write_text(json.dumps(result))
+    gh = DraftGh(("spec:draft",)) if command == "propose" else ApprovalGh()
+    original_run = subprocess.run
+
+    def run(args, **kwargs):
+        if args[0] == "git":
+            return subprocess.CompletedProcess(args, 0, HEAD, "")
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    cfg, health = Config(repos=[repo]), daemon.RepoHealth()
+    poll = partial(daemon.poll_specloop, cfg, health, runner=gh)
+    poll()
+    eventually(lambda: (root / "started").exists())
+    path = daemon.STATE_DIR / ("proposals/owner__sample/7.json" if command == "propose"
+                               else "admissions/owner__sample/8.json")
+    saved = path.read_text()
+    assert "result" not in json.loads(saved)
+    for _ in range(3):
+        poll()
+    # Forget process handles as a daemon restart would; the file lock and
+    # receipt alone must prevent duplicates and recover the completed result.
+    specloop_job._children.clear()
+    poll()
+    assert path.read_text() == saved
+    assert len((root / "started").read_text().splitlines()) == 1
+    assert not health.failures
+    assert not gh.prs and not any("--remove-label" in call for call in gh.calls)
+
+    daemon.PAUSE_FILE.touch()
+    (root / "release").touch()
+    for child in children:
+        child.wait(timeout=5)
+    before = list(gh.calls)
+    poll()
+    assert gh.calls == before and path.read_text() == saved
+    daemon.PAUSE_FILE.unlink()
+    poll()
+    poll()
+    receipt = json.loads(path.read_text())
+    assert receipt["delivered"]
+    assert receipt["result"]["outcome"] == outcome
+    assert not health.failures
+    assert len((root / "started").read_text().splitlines()) == 1
+    if command == "propose":
+        assert gh.labels == ({"needs-human"} if outcome == "needs_input" else set())
+        assert len(gh.comments) == 2
+        assert len(gh.prs) == int(outcome == "drafted")
+    else:
+        assert gh.labels == ({"needs-human", "spec:review"} if outcome == "refused" else set())
+        assert len(gh.comments) == 1
+        assert ("Admission refused" if outcome == "refused" else "build has started") in gh.comments[0]["body"]
+
+
+@pytest.mark.parametrize("failure", ["invalid_result", "dead_child", "missing_executable"])
+def test_failed_background_job_reports_health_before_retry(background, monkeypatch, failure):
+    root, repo, children = background
+    gh = DraftGh(("spec:draft",))
+    health = daemon.RepoHealth()
+    poll = partial(daemon.poll_specloop, Config(repos=[repo]), health, runner=gh)
+    if failure == "invalid_result":
+        (root / "cli-result.json").write_text('{"version":1,"outcome":"wrong"}')
+        (root / "release").touch()
+    elif failure == "missing_executable":
+        (root / "specloop").unlink()
+        # Ensure there is no real specloop elsewhere on PATH.
+        monkeypatch.setenv("PATH", str(root))
+    if failure == "dead_child":
+        launch = subprocess.Popen
+
+        def die(args, **kwargs):
+            # Exit without running the wrapper, deterministically leaving a
+            # dead job rather than racing the CLI's inherited lock.
+            return launch([sys.executable, "-c", "pass"], **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", die)
+    poll()
+    children[0].wait(timeout=5)
+    poll()
+    assert health.failures == {repo.name: 1}
+    assert gh.labels == {"spec:draft"}
+    assert not gh.prs and len(gh.comments) == 1
+    receipt = json.loads((daemon.STATE_DIR / "proposals/owner__sample/7.json").read_text())
+    assert "job" not in receipt and "result" not in receipt
+
+
+@pytest.mark.parametrize("command", ["propose", "admit"])
+def test_pause_immediately_before_launch_stops_new_job(background, monkeypatch, command):
+    root, repo, _ = background
+    gh = DraftGh(("spec:draft",)) if command == "propose" else ApprovalGh()
+    original_run = subprocess.run
+
+    def github(args):
+        result = gh(args)
+        if command == "propose" and args[0] == "api" and args[1].endswith("/events"):
+            daemon.PAUSE_FILE.touch()
+        return result
+
+    def run(args, **kwargs):
+        if args[0] == "git":
+            if "rev-parse" in args:
+                daemon.PAUSE_FILE.touch()
+            return subprocess.CompletedProcess(args, 0, HEAD, "")
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    health = daemon.RepoHealth()
+    daemon.poll_specloop(Config(repos=[repo]), health, runner=github)
+    assert daemon.PAUSE_FILE.exists()
+    assert not (root / "started").exists()
+    assert not specloop_job._children
+    assert not health.failures
+    path = daemon.STATE_DIR / ("proposals/owner__sample/7.json" if command == "propose"
+                               else "admissions/owner__sample/8.json")
+    assert "job" not in json.loads(path.read_text())
+    assert not any("--remove-label" in call for call in gh.calls)
+
+
+def test_spawn_failure_can_retry_on_next_poll(background, monkeypatch):
+    root, repo, children = background
+    gh, health = DraftGh(("spec:draft",)), daemon.RepoHealth()
+    poll = partial(daemon.poll_specloop, Config(repos=[repo]), health, runner=gh)
+    launch = subprocess.Popen
+
+    def unavailable(*args, **kwargs):
+        raise OSError("out of process slots")
+
+    monkeypatch.setattr(subprocess, "Popen", unavailable)
+    poll()
+    assert health.failures == {repo.name: 1}
+    assert not (root / "started").exists()
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    poll()
+    eventually(lambda: (root / "started").exists())
+    # A successful launch is not yet a successful retry.
+    assert health.failures == {repo.name: 1}
+    assert health.item_failures == {(repo.name, "draft", 7): 1}
+    assert len((root / "started").read_text().splitlines()) == 1
+    (root / "release").touch()
+    children[-1].wait(timeout=5)
+    poll()
+    assert not health.failures and not health.item_failures
+
+
+@pytest.mark.scenario("issue-intake/approval-admits/approved-spec-admitted")
+@pytest.mark.scenario("issue-intake/publication/ready-run-published")
+@pytest.mark.parametrize("command", ["propose", "admit"])
+@pytest.mark.parametrize("failure", ["error", "invalid_result"])
+def test_background_retries_retain_failures_until_reported_or_recovered(
+    background, monkeypatch, command, failure,
+):
+    root, repo, children = background
+    pipeline = Pipeline(repo)
+    pipeline.ready(30, daemon.STATE_DIR)
+    if command == "propose":
+        pipeline.issue(1)
+        item, stage = pipeline.issues[1], "draft"
+    else:
+        pipeline.approved(1)
+        item, stage = pipeline.prs[1], "admit"
+    # Only item 1 waits/fails. Other jobs finish normally through the same
+    # production launcher, file lock, result collection and delivery paths.
+    executable = root / "specloop"
+    executable.write_text(f"#!{sys.executable}\n" + '''
+import json, os, sys, time
+from pathlib import Path
+root = Path(os.environ["TEST_INTAKE_ROOT"])
+args = sys.argv[1:]
+change = args[args.index("--change") + 1]
+result = {"version": 1, "outcome": "drafted" if args[0] == "propose" else "admitted",
+          "branch": "spec/" + change, "commit": "a" * 40, "head": "a" * 40}
+if "-issue-1-" in change:
+    deadline = time.monotonic() + 15
+    while not (root / "release").exists():
+        if time.monotonic() > deadline:
+            sys.exit(1)
+        time.sleep(.01)
+    override = json.loads((root / "cli-result.json").read_text())
+    if override:
+        result = override
+print(json.dumps(result))
+sys.exit(int("error" in result))
+''')
+    bad_result = ({"version": 1, "error": "persistent job failure"} if failure == "error"
+                  else {"version": 1, "outcome": "wrong"})
+    (root / "cli-result.json").write_text(json.dumps(bad_result))
+    monkeypatch.setattr(subprocess, "run", pipeline.command)
+    notifications = []
+    monkeypatch.setattr(daemon.notify, "send", lambda *args: notifications.append(args))
+    health = daemon.RepoHealth()
+    poll = partial(daemon.poll_specloop, Config(repos=[repo]), health, runner=pipeline.gh)
+    key = (repo.name, stage, 1)
+
+    for attempt in range(1, 4):
+        pipeline.issue(10 + attempt)
+        change = pipeline.approved(40 + attempt)
+        first_child = len(children)
+        poll()  # Launch the retry and unrelated jobs.
+        for _ in range(2):
+            poll()  # The failing job's inherited lock is still held.
+            assert health.failures.get(repo.name, 0) == attempt - 1
+            assert health.item_failures.get(key, 0) == attempt - 1
+            assert not notifications
+        assert len(children) == first_child + 3
+        (root / "release").touch()
+        for child in children[first_child:]:
+            child.wait(timeout=5)
+        poll()  # Collect the failure and both successful sibling jobs.
+        assert health.item_failures[key] == attempt
+        assert health.failures == {repo.name: attempt}
+        assert not pipeline.issues[10 + attempt]["labels"]
+        pr = pipeline.prs[40 + attempt]
+        receipt = json.loads((daemon.STATE_DIR / f"admissions/owner__sample/{40 + attempt}.json").read_text())
+        assert receipt["result"]["outcome"] == "admitted"
+        requests = [json.loads(path.read_text())["args"] for path in
+                    (daemon.STATE_DIR / f"admissions/owner__sample/{40 + attempt}.jobs").glob("*/request.json")]
+        assert len(requests) == 1 and requests[0][requests[0].index("--pr") + 1] == pr["url"]
+        assert "build has started" in pr["comments"][0]["body"]
+        assert CHECKS in pipeline.prs[30]["comments"][-1]["body"]
+        assert pipeline.prs[30]["url"] in pipeline.prs[30]["comments"][-1]["body"]
+        assert ({"name": "needs-human"} in item["labels"]) == (attempt == 3)
+        # Supply the supervisor's next status snapshot for publication on the
+        # next poll, while item 1 is still awaiting a retry or human input.
+        pipeline.runs[change] = dict(change=change, pr=pr["url"], head=HEAD, status="paused",
+                                     pause={"reason": "ready_to_publish", "detail": CHECKS})
+        (root / "release").unlink()
+
+    assert len(notifications) == 1 and repo.name in notifications[0][1]
+    assert "Human input is needed" in item["comments"][-1]["body"]
+    launches = len(children)
+    poll()  # The reported hold prevents another launch; publication continues.
+    assert len(children) == launches
+    assert not health.item_failures and not health.failures
+    for number in (41, 42, 43):
+        assert CHECKS in pipeline.prs[number]["comments"][-1]["body"]
+
+    # Human resolution permits another asynchronous attempt. Recovery is
+    # recorded only after its result and notification are delivered.
+    item["labels"].remove({"name": "needs-human"})
+    (root / "cli-result.json").write_text("{}")
+    poll()
+    (root / "release").touch()
+    children[-1].wait(timeout=5)
+    poll()
+    assert not health.item_failures and not health.failures and not health.announced
+    assert ("Spec draft ready" if command == "propose" else "build has started") in item["comments"][-1]["body"]

@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  `specloop serve`: drives every admitted, running OpenSpec change unattended.
+  NOT auto-installed. Separate from the nightshift daemon (and from its pause
+  file): admitting a change with `specloop admit` is the approval it acts on.
+
+  Install:
+    cp launchd/com.mattpolicastro.specloop.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.mattpolicastro.specloop.plist
+  Stop (the current task's agent session is killed with its process group;
+  every step is resumable, so nothing is lost but that session):
+    launchctl bootout gui/$(id -u)/com.mattpolicastro.specloop
+  Restart on new code:
+    launchctl kickstart -k gui/$(id -u)/com.mattpolicastro.specloop
+  After editing this file, kickstart is not enough: bootout, copy, then
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mattpolicastro.specloop.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mattpolicastro.specloop</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOUR_USERNAME/Projects/nightshift/bin/specloop-serve</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Always restart; never in a tight loop (ThrottleInterval). Unlike the
+       nightshift daemon, a clean exit is not a reason to stay down: on
+       2026-10-20 `launchctl kickstart -k` left the supervisor stopped because
+       SIGTERM made it exit 0. `launchctl bootout` still stops it for good. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>300</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOUR_USERNAME/.logs/specloop.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOUR_USERNAME/.logs/specloop.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/YOUR_USERNAME/Projects/nightshift</string>
+
+  <!-- Must run in the user's GUI session: verification steps that open a
+       window (screenshots, GUI checks) need it. A LaunchAgent (not a LaunchDaemon) gives it that.
+
+       Standard, not Background. Verification and mutation testing are CPU
+       work, and Background (with Nice 5) confined them to the efficiency
+       cores with throttled I/O. On 2026-10-20 that made the same test suite
+       take 273 s under the supervisor against 51 s in the same sandbox by
+       hand, and stretched one evidence gate to 91 minutes. -->
+  <key>ProcessType</key>
+  <string>Standard</string>
+</dict>
+</plist>

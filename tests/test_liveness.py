@@ -1,6 +1,6 @@
 """Is the daemon alive? The question `status` could not answer.
 
-BACKLOG §2. The log's last line was a startup message from 2026-09-03 and the
+From the worker engine's September backlog. The log's last line was a startup message from 2026-09-03 and the
 queue had been empty since, which is exactly what a crashed daemon produces
 too. `status` read GitHub and reported the QUEUE, and said "running" from a
 pause file — a statement about a file, not a process — so settling it took `ps`
