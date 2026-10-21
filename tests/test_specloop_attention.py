@@ -8,12 +8,22 @@ from nightshift.config import Config
 
 
 PR = "https://github.com/example/repo/pull/7"
+MISSING_ALLOWANCE = object()
+HUMAN_REASONS = [
+    "stuck", "blocked", "needs_human", "gate_evidence", "phase_gate",
+    "ready_to_publish", "human_checks", "coverage", "acceptance",
+    "violation_repeat", "review_invalid", "secret",
+]
 
 
-def run_record(change="add-gate", status="paused", reason="stuck", pr=PR):
+def run_record(change="add-gate", status="paused", reason="stuck", pr=PR,
+               auto_resumes_remaining=0):
+    pause = {"reason": reason, "task": "1.1", "detail": "Needs a decision"} if reason else None
+    if pause is not None and auto_resumes_remaining is not MISSING_ALLOWANCE:
+        pause["auto_resumes_remaining"] = auto_resumes_remaining
     return {
         "change": change, "status": status, "pr": pr,
-        "pause": {"reason": reason, "task": "1.1", "detail": "Needs a decision"} if reason else None,
+        "pause": pause,
         "tasks": {"done": 0, "total": 1}, "head": "abc123",
     }
 
@@ -71,8 +81,8 @@ def test_running_finished_and_automatic_pauses_not_listed(status, capsys):
         run_record("running", "running", None),
         run_record("finished", "done", None),
         run_record("old-pause", "running", "stuck"),
-        run_record("infra", reason="infra"),
-        run_record("usage-limit", reason="usage_limit"),
+        run_record("infra", reason="infra", auto_resumes_remaining=2),
+        run_record("usage-limit", reason="usage_limit", auto_resumes_remaining=None),
     ])
     assert cli.main(["attention", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["specloop"] == []
@@ -83,17 +93,102 @@ def test_running_finished_and_automatic_pauses_not_listed(status, capsys):
         assert change not in text
 
 
-@pytest.mark.parametrize("reason", [
-    "stuck", "blocked", "needs_human", "gate_evidence", "phase_gate",
-    "ready_to_publish", "human_checks", "coverage", "acceptance",
-    "violation_repeat", "review_invalid", "secret",
-])
+@pytest.mark.scenario("attention/pause-driven-attention/other-human-pauses-listed")
+@pytest.mark.parametrize("reason", HUMAN_REASONS + ["new_human_reason", "usage_limit"])
 def test_all_human_pause_reasons(status, capsys, reason):
     status["result"] = status_result([run_record(reason=reason, pr=None)])
     assert cli.main(["attention", "--json"]) == 0
     entry = json.loads(capsys.readouterr().out)["specloop"][0]
     assert entry["reason"] == reason
     assert entry["pr"] is None
+    assert cli.main(["attention"]) == 0
+    assert f"add-gate — {reason}" in capsys.readouterr().out
+
+
+def assert_pause_listed(status, capsys, change, reason):
+    status["result"] = status_result([run_record(change, reason=reason)])
+    assert cli.main(["attention"]) == 0
+    text = capsys.readouterr().out
+    assert f"{change} — {reason}" in text
+    assert PR in text
+    assert cli.main(["attention", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["specloop"]) == 1
+    entry = payload["specloop"][0]
+    assert (entry["change"], entry["reason"], entry["pr"]) == (change, reason, PR)
+    assert set(entry) == {"change", "reason", "pr", "checked_at", "error", "stale"}
+    assert entry["stale"] is False
+    assert payload["specloop_error"] is None
+
+
+@pytest.mark.scenario("attention/pause-driven-attention/exhausted-infra-pause-listed")
+def test_exhausted_infra_pause_is_listed(status, capsys):
+    assert_pause_listed(status, capsys, "exhausted-infra", "infra")
+
+
+@pytest.mark.scenario("attention/pause-driven-attention/requested-pause-listed")
+def test_requested_pause_is_listed(status, capsys):
+    assert_pause_listed(status, capsys, "requested-pause", "requested")
+
+
+@pytest.mark.scenario("attention/pause-driven-attention/automatic-recovery-omitted")
+@pytest.mark.parametrize("reason", ["infra", "usage_limit", "new_automatic_reason", "stuck"])
+@pytest.mark.parametrize("allowance", [1, 2, None])
+def test_automatic_recovery_is_omitted(status, capsys, reason, allowance):
+    run = run_record("automatic-wait", reason=reason, auto_resumes_remaining=allowance)
+    run["pause"]["resume_at"] = 1  # Overdue deadlines do not exhaust the allowance.
+    status["result"] = status_result([run])
+    assert cli.main(["attention", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["specloop"] == []
+    assert cli.main(["attention"]) == 0
+    text = capsys.readouterr().out
+    assert "0 specloop run(s) need you" in text
+    assert "automatic-wait" not in text
+
+
+@pytest.mark.scenario("attention/pause-driven-attention/nonpaused-runs-omitted")
+@pytest.mark.parametrize(("run_status", "reason"), [
+    ("running", "infra"), ("done", "infra"), ("aborted", "infra"),
+    ("running", None), ("done", None), ("aborted", None), ("paused", None),
+])
+def test_status_and_pause_gate_attention(status, capsys, run_status, reason):
+    status["result"] = status_result([run_record("not-waiting", run_status, reason)])
+    assert cli.main(["attention", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["specloop"] == []
+    assert cli.main(["attention"]) == 0
+    text = capsys.readouterr().out
+    assert "0 specloop run(s) need you" in text
+    assert "not-waiting" not in text
+
+
+@pytest.mark.scenario("attention/allowance-compatibility-and-snapshots/legacy-pause-without-allowance")
+@pytest.mark.parametrize("reason", HUMAN_REASONS + ["infra", "requested", "unknown", "usage_limit"])
+def test_legacy_pause_without_allowance(status, capsys, reason):
+    status["result"] = status_result([
+        run_record("legacy-pause", reason=reason, auto_resumes_remaining=MISSING_ALLOWANCE),
+        run_record("unlimited-pause", reason=reason, auto_resumes_remaining=None),
+    ])
+    assert cli.main(["attention", "--json"]) == 0
+    entries = json.loads(capsys.readouterr().out)["specloop"]
+    expected = [] if reason == "usage_limit" else [("legacy-pause", reason, PR)]
+    assert [(entry["change"], entry["reason"], entry["pr"]) for entry in entries] == expected
+    assert cli.main(["attention"]) == 0
+    text = capsys.readouterr().out
+    assert "unlimited-pause" not in text
+    if expected:
+        assert f"legacy-pause — {reason}" in text
+        assert PR in text
+    else:
+        assert "legacy-pause" not in text
+
+
+@pytest.mark.parametrize("allowance", [True, False, -1, 0.0, 1.5, "0", [], {}])
+@pytest.mark.parametrize("run_status", ["paused", "running"])
+def test_invalid_allowance_is_rejected(allowance, run_status):
+    with pytest.raises(ValueError, match="auto_resumes_remaining"):
+        specloop_attention._entries({"runs": [
+            run_record(status=run_status, auto_resumes_remaining=allowance),
+        ]})
 
 
 @pytest.mark.scenario("attention/stale-tolerance/unreadable-status-marked-stale")
