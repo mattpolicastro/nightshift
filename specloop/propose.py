@@ -106,6 +106,16 @@ def paths(text: str) -> set[str]:
     return found
 
 
+# "Do not edit `tests/x.py`": overlap feedback itself makes drafters write this.
+NEGATED = re.compile(r"\b(?:do not|don't|never|without)\b(?:[^.;]|\.(?=\S)){0,60}?\b(?:edit|chang|touch|modif)"
+                     r"|\bleave\b(?:[^.;]|\.(?=\S)){0,60}?\b(?:unchanged|untouched|alone|as is)\b", re.I)
+
+
+def edited_paths(text: str) -> set[str]:
+    """Paths a task names, minus those in a clause telling the implementer to leave them alone."""
+    return set().union(*(paths(c) for c in re.split(r"(?<=[.;])\s+", text) if not NEGATED.search(c)))
+
+
 def is_test(path: str) -> bool:
     name = path.rsplit("/", 1)[-1]
     return path.startswith("tests/") or "/tests/" in path or name.startswith("test_") or ".test." in name
@@ -146,7 +156,7 @@ def overlaps(work: Path, change: str, planned: dict[str, list[str]]) -> list[str
     task_file = openspec.change_dir(work, change) / "tasks.md"
     found = []
     for t in tasks.parse(task_file.read_text()) if task_file.exists() else []:
-        for path in sorted(p for p in paths(t.text) if is_test(p) and p in planned):
+        for path in sorted(p for p in edited_paths(t.text) if is_test(p) and p in planned):
             found.append(f"task {t.label}: `{path}` is also being changed by {', '.join(planned[path])}; "
                          "put these tests in a new file")
     return found
@@ -190,7 +200,7 @@ def _changed(work: Path) -> list[str]:
 
 
 def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m: Manifest, out: Path,
-          rounds: int = 3, agent=None, *, branch: str | None = None,
+          rounds: int = 4, agent=None, *, branch: str | None = None,
           from_branch: str | None = None) -> Draft:
     agent = agent or agents.run
     # Resolve in the source: a clone renames local branches to origin/* and
