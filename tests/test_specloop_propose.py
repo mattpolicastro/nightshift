@@ -229,3 +229,13 @@ def test_the_drafter_gets_four_rounds_by_default(source, tmp_path):
     agent = drafter(PARTIAL, PARTIAL, PARTIAL, GOOD)
     d = propose.draft(source, "main", "sign-helpers", "add sign", [], M, tmp_path / "out", agent=agent)
     assert len([c for c in agent.calls if c.access == "write"]) == 4 and not d.problems and d.commit
+
+
+def test_drafter_is_told_to_name_files_the_implementer_must_avoid(source, tmp_path, monkeypatch):
+    # Spec PR #42 wrote "tests in the work-in-flight list must remain untouched",
+    # an instruction its implementer could not follow.
+    other_run(source, tmp_path, monkeypatch)
+    agent = drafter(SEPARATE)
+    propose.draft(source, "main", "sign-helpers", "add sign", [], M, tmp_path / "out", agent=agent)
+    prompt = [c for c in agent.calls if c.access == "write"][0].prompt
+    assert "The implementer never sees this list: if the change must avoid a file, name it." in prompt
