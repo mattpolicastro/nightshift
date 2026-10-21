@@ -202,8 +202,8 @@ look like an absent label or an empty set of comments.
             return receipt
         if not _start(path, receipt, [
             "propose", str(repo.manifest), "--change", change,
-            "--branch", branch, "--base", repo.base, "--idea", idea,
-        ], runner=specloop_runner, launcher=launcher):
+            "--branch", branch, "--base", repo.base,
+        ], idea=idea, runner=specloop_runner, launcher=launcher):
             return _PENDING
         _save(path, receipt)
         _deliver(repo, labels, number, change, receipt, current, runner=gh, git_runner=git_runner)
@@ -642,7 +642,14 @@ def _validate(result: dict, command: str, receipt: dict) -> None:
         raise specloop_client.SpecloopError("revise returned no landed commit")
 
 
-def _start(path: Path, receipt: dict, args: list[str], *, runner, launcher) -> bool:
+def _start(path: Path, receipt: dict, args: list[str], *, runner, launcher,
+           idea: str | None = None) -> bool:
+    if idea is not None:
+        # Retain a distinct input for each invocation, including detached readers.
+        payload = (path.parent / f"{path.stem}.jobs" / f"idea-{uuid.uuid4().hex}.txt").resolve()
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_text(idea, encoding="utf-8")
+        args = [*args, "--idea-file", str(payload)]
     # An injected completed-process runner keeps CLI protocol/delivery tests
     # deterministic. Production launches a durable subprocess and returns now.
     if runner is None:

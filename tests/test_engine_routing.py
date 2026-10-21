@@ -3,6 +3,7 @@
 import json
 import subprocess
 from functools import partial
+from pathlib import Path
 
 import pytest
 
@@ -211,7 +212,10 @@ def test_specloop_repository_drafts_without_worker_claims(isolated, monkeypatch,
     assert command[-1] == "--json"
     assert command[command.index("--change") + 1] == "sample-issue-7-add-a-gate"
     assert command[command.index("--branch") + 1] == "spec/sample-issue-7-add-a-gate"
-    assert command[command.index("--idea") + 1] == "Add a gate\n\nPlease draft it.\n\nKeep it small."
+    assert "--idea" not in command
+    payload = Path(command[command.index("--idea-file") + 1])
+    assert payload.is_absolute()
+    assert payload.read_text(encoding="utf-8") == "Add a gate\n\nPlease draft it.\n\nKeep it small."
     receipt = json.loads((daemon.STATE_DIR / "proposals/owner__sample/7.json").read_text())
     assert receipt["result"]["outcome"] == "drafted"
     assert receipt["result"]["commit"] == "abc123"

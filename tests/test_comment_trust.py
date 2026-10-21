@@ -11,7 +11,7 @@ import pytest
 
 from nightshift import queue, specloop_intake
 from test_engine_routing import DraftGh
-from test_specloop_intake import Commands, poll, repo  # noqa: F401 (fixture)
+from test_specloop_intake import Commands, idea_file, poll, repo  # noqa: F401 (fixture)
 
 pytestmark = pytest.mark.real_trust
 
@@ -70,7 +70,7 @@ def test_an_outsiders_comment_is_left_out_of_the_draft(repo, tmp_path):  # noqa:
     commands = Commands()
     poll(repo, tmp_path, gh, commands)
     propose = commands.calls[0]
-    idea = propose[propose.index("--idea") + 1]
+    idea = idea_file(propose).read_text(encoding="utf-8")
     assert "from OWNER" in idea and "from NONE" not in idea
 
 
