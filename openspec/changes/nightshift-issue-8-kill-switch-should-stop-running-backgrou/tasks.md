@@ -5,7 +5,7 @@
 
 ## 2. Cancellation state and completion ordering
 
-- [ ] 2.1 Add per-job control locking, durable stop intent, and serialized wrapper finalization/result collection in `nightshift/specloop_job.py`. Make cancelled collection retain its parent job reference via the existing pending return. Add barrier-driven tests proving both race orderings, late-result suppression, restart persistence and no automatic retries or health escalation. Covers `background-job-control/durable-cancellation/stopped-job-stays-stopped`, `background-job-control/durable-cancellation/stop-wins-completion-race`, `background-job-control/durable-cancellation/completion-wins-stop-race`.
+- [x] 2.1 Add per-job control locking, durable stop intent, and serialized wrapper finalization/result collection in `nightshift/specloop_job.py`. Make cancelled collection retain its parent job reference via the existing pending return. Add barrier-driven tests proving both race orderings, late-result suppression, restart persistence and no automatic retries or health escalation. Covers `background-job-control/durable-cancellation/stopped-job-stays-stopped`, `background-job-control/durable-cancellation/stop-wins-completion-race`, `background-job-control/durable-cancellation/completion-wins-stop-race`.
 
 ## 3. Safe process group stopping
 
