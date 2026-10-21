@@ -11,6 +11,23 @@ type Confirmation = Extract<ActionDecision, { kind: 'confirm' }>;
 type Workspaces = Awaited<ReturnType<ReturnType<typeof getPaseoClient>['workspaces']['list']>>['entries'];
 type HostProps = Pick<PluginSurfaceProps, 'host' | 'navigation'>;
 
+function actionStyles(colors: Colors, role: 'primary' | 'destructive' | 'outlined') {
+  const primary = role === 'primary';
+  const destructive = role === 'destructive';
+  return {
+    button: {
+      minHeight: 44, minWidth: 44, paddingHorizontal: 14, paddingVertical: 10,
+      borderRadius: 8, borderWidth: 1, alignItems: 'center' as const, justifyContent: 'center' as const,
+      backgroundColor: primary ? colors.accent : colors.surface1,
+      borderColor: destructive ? colors.statusDanger : primary ? colors.accent : colors.border,
+    },
+    text: {
+      color: destructive ? colors.statusDanger : primary ? colors.accentForeground : colors.foreground,
+      fontWeight: '600' as const,
+    },
+  };
+}
+
 function FactoryRow({ run, colors, disabled, act, report, notice, host, navigation, workspaces, onDetailsOpen }: {
   run: FactoryRun; colors: Colors; disabled: boolean;
   act: (input: FactoryActInput) => Promise<void>; report: (message: string) => void; notice: string | null;
@@ -89,12 +106,15 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
         placeholderTextColor={colors.foregroundMuted}
         style={{ color: colors.foreground, borderColor: colors.border, borderWidth: 1, borderRadius: 8, padding: 12, minHeight: 72 }} />
     </View> : null}
-    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 16 }}>
-      {buttons.map(button => <Pressable key={button.verb} accessibilityRole="button"
-        accessibilityLabel={`${button.label} ${run.change}`} disabled={disabled || confirmation !== null}
-        onPress={() => choose(button.verb)} style={{ paddingVertical: 12, opacity: disabled || confirmation ? 0.5 : 1 }}>
-        <Text style={{ color: colors.accent, fontWeight: '600' }}>{button.label}</Text>
-      </Pressable>)}
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+      {buttons.map((button, index) => {
+        const styles = actionStyles(colors, button.verb === 'abort' ? 'destructive' : index === 0 ? 'primary' : 'outlined');
+        return <Pressable key={button.verb} accessibilityRole="button"
+          accessibilityLabel={`${button.label} ${run.change}`} disabled={disabled || confirmation !== null}
+          onPress={() => choose(button.verb)} style={{ ...styles.button, opacity: disabled || confirmation ? 0.5 : 1 }}>
+          <Text style={styles.text}>{button.label}</Text>
+        </Pressable>;
+      })}
     </View>
     {confirmation ? <View style={{ gap: 8 }}>
       <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{confirmation.message}</Text>
