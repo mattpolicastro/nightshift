@@ -40,7 +40,8 @@ class Receipt:
     tail: str
 
 
-def profile(build: Path, m: Manifest, *, prepare: bool = False, home: Path | None = None) -> str:
+def profile(build: Path, m: Manifest, *, prepare: bool = False, home: Path | None = None,
+            src: Path | None = None) -> str:
     # The sandbox matches real paths: /tmp/x is /private/tmp/x to it.
     build = build.resolve()
 
@@ -59,7 +60,10 @@ def profile(build: Path, m: Manifest, *, prepare: bool = False, home: Path | Non
         # verification's own directory, the manifest's variables, and
         # [sandbox] prepare_read. Credential denials below still win. Later
         # rules take precedence in a sandbox profile.
-        allowed = [str(build.parent), *(v for v in m.vars.values() if v.startswith("/")), *m.prepare_read]
+        # The candidate's extracted source is readable too: for a mutant it sits
+        # outside the mutant's own directory, and copying it is what prepare does.
+        allowed = [str(build.parent), *([str(src.resolve())] if src else []),
+                   *(v for v in m.vars.values() if v.startswith("/")), *m.prepare_read]
         reads = (f"(deny file-read* (subpath {q(str(home or Path.home()))}))\n(allow file-read-metadata)\n"
                  f"(allow file-read* {' '.join(f'(subpath {q(p)})' for p in allowed)})")
     return f"""(version 1)
@@ -133,7 +137,7 @@ def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out
     sb.write_text(profile(build, m))
     prep_sb = out / "prepare.sb"
     if m.prepare:
-        prep_sb.write_text(profile(build, m, prepare=True))
+        prep_sb.write_text(profile(build, m, prepare=True, src=src))
     values = {**m.vars, "src": str(src), "build": str(build), "sha": sha}
     env = {"PATH": PATH, "HOME": str(build / "home"), "TMPDIR": str(build / "tmp"),
            "LANG": "en_US.UTF-8", "COPYFILE_DISABLE": "1"}

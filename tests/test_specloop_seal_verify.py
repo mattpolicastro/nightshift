@@ -327,3 +327,18 @@ def test_profile_uses_real_paths(tmp_path):
     (tmp_path / "link").symlink_to(tmp_path / "real")
     text = verify.profile(tmp_path / "link" / "build", M)
     assert str((tmp_path / "real" / "build").resolve()) in text and str(tmp_path / "link") not in text
+
+
+@pytest.mark.skipif(verify.already_sandboxed(), reason="asserts the sandbox policy; an enclosing sandbox replaces it")
+def test_prepare_can_read_a_candidate_source_outside_its_own_directory(tmp_path):
+    # Mutants run in out/mutant-N/build while the candidate stays in out/src.
+    home = tmp_path / "home"
+    src, build = home / "run" / "v" / "src", home / "run" / "v" / "mutant-1" / "build"
+    src.mkdir(parents=True); build.mkdir(parents=True)
+    (src / "f").write_text("candidate")
+    sb = tmp_path / "p.sb"
+    sb.write_text(verify.profile(build, M, prepare=True, home=home, src=src))
+    out = subprocess.run(verify.wrap(["/bin/cat", str(src / "f")], sb), capture_output=True, text=True).stdout
+    assert out == "candidate"
+    sb.write_text(verify.profile(build, M, prepare=True, home=home))
+    assert subprocess.run(verify.wrap(["/bin/cat", str(src / "f")], sb), capture_output=True, text=True).stdout == ""

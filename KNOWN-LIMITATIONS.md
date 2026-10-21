@@ -1,7 +1,8 @@
 # Known limitations
 
-Open gaps and queued follow-ups for Nightshift and its specloop engine. Fixes land
-through Nightshift's own front door: each item is meant to become an issue.
+Open gaps and queued follow-ups for Nightshift and its specloop engine. Each is
+tracked as a GitHub issue (see the tracking issue, #17), and fixes land through
+Nightshift's own front door.
 
 ## Queued follow-ups
 
@@ -21,8 +22,6 @@ through Nightshift's own front door: each item is meant to become an issue.
   - Feedback is anything newer than the branch tip's commit time, so comments
     posted during a long revision session are skipped, and re-labelling before
     the next publish re-queues the last round's comments.
-  - A build-stage revise while the supervisor holds the lock escalates
-    (`refused`) instead of retrying.
   - A revise job that crashes after committing appends a duplicate round.
 - **Kill switch:** jobs already running finish, including an admission, while
   paused. Jobs are their own sessions, so unloading the daemon does not stop
@@ -46,7 +45,6 @@ through Nightshift's own front door: each item is meant to become an issue.
     unrecovered.
   - Change names drop the repo owner.
 - **specloop CLI:**
-  - `publish` takes no run lock.
   - The `propose` JSON `branch` field ignores its fallback ref.
   - A backticked `a/b/c` in review feedback parses as a scenario ID.
   - The implementer recipe and feasibility review don't show prepare steps.
