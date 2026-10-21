@@ -406,9 +406,32 @@ def _gh(*args: str) -> str:
     return p.stdout.strip()
 
 
+class PublishTarget(ValueError):
+    """Pushing to the source clone's origin would not reach the manifest's repository."""
+
+
+def _repository(url: str) -> str:
+    """host/owner/repo of a hosted remote URL; "" for a local path."""
+    m = re.match(r"(?:[a-z][a-z0-9+.-]*://(?:[^@/]+@)?|[^@/:]+@)([^/:]+)(?::\d+)?[/:](.+?)(?:\.git)?/?$", url)
+    return f"{m.group(1)}/{m.group(2)}" if m else ""
+
+
 def _remote(ctx: loop.Ctx) -> str:
-    return subprocess.run(["git", "-C", str(ctx.m.repo), "remote", "get-url", "origin"],
-                          capture_output=True, text=True, check=True).stdout.strip()
+    # Publishing reaches GitHub through the clone's origin, so a clone of
+    # someone else's repository would send the run's branch there.
+    github = ctx.m.github.rstrip("/")
+    if not github:
+        raise PublishTarget(f"the manifest names no GitHub repository; add github = \"owner/repo\" "
+                            f"under [run] in {ctx.run.dir / 'manifest.toml'}")
+    url = subprocess.run(["git", "-C", str(ctx.m.repo), "remote", "get-url", "origin"],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    parts = github.split("/")
+    expected = "/".join([parts[0] if len(parts) == 3 else "github.com", *parts[-2:]])
+    actual = _repository(url)
+    if actual and actual.casefold() != expected.casefold():
+        raise PublishTarget(f"origin of {ctx.m.repo} is {actual}, but the manifest publishes to {github}; "
+                            f"repoint origin before publishing")
+    return url
 
 
 def _pr_body(ctx: loop.Ctx) -> str:
@@ -464,7 +487,13 @@ def _publish(args, run: Run) -> int:
         print(reason, file=sys.stderr)
         return 1
     ctx = _ctx(run)
-    _push(ctx.repo, _remote(ctx), ctx.ref)
+    try:
+        remote = _remote(ctx)
+    except PublishTarget as e:
+        _outcome(args, reasons=[str(e)])
+        print(e, file=sys.stderr)
+        return 1
+    _push(ctx.repo, remote, ctx.ref)
     url = st.pr
     if not url:
         # Creation may have succeeded before its response or local state was
@@ -566,11 +595,14 @@ def act(args) -> int:
                 command = {"resume": _resume, "accept": _accept, "publish": _publish,
                            "finish": _finish, "abort": _abort}[args.verb]
                 # Reuse command transitions on the reloaded run; serve drives it later.
-                command_args = argparse.Namespace(change=args.change, note=args.note, no_run=True, task=None)
+                command_args = argparse.Namespace(change=args.change, note=args.note, no_run=True, task=None,
+                                                  document={})
                 code = command(command_args, run)
+                reasons = command_args.document.get("reasons") if code else None
                 document.update(outcome="done" if code == 0 else "refused",
-                                detail=f"{args.verb} {'completed' if code == 0 else 'could not be completed'} "
-                                       f"for {args.change}")
+                                detail="; ".join(reasons) if reasons else
+                                f"{args.verb} {'completed' if code == 0 else 'could not be completed'} "
+                                f"for {args.change}")
         except Exception as e:
             code = 1
             document["detail"] = str(e)

@@ -11,9 +11,9 @@ type Confirmation = Extract<ActionDecision, { kind: 'confirm' }>;
 type Workspaces = Awaited<ReturnType<ReturnType<typeof getPaseoClient>['workspaces']['list']>>['entries'];
 type HostProps = Pick<PluginSurfaceProps, 'host' | 'navigation'>;
 
-function FactoryRow({ run, colors, disabled, act, report, host, navigation, workspaces, onDetailsOpen }: {
+function FactoryRow({ run, colors, disabled, act, report, notice, host, navigation, workspaces, onDetailsOpen }: {
   run: FactoryRun; colors: Colors; disabled: boolean;
-  act: (input: FactoryActInput) => Promise<void>; report: (message: string) => void;
+  act: (input: FactoryActInput) => Promise<void>; report: (message: string) => void; notice: string | null;
   workspaces: Workspaces; onDetailsOpen: () => void;
 } & HostProps) {
   const [note, setNote] = useState('');
@@ -99,7 +99,8 @@ function FactoryRow({ run, colors, disabled, act, report, host, navigation, work
     {confirmation ? <View style={{ gap: 8 }}>
       <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{confirmation.message}</Text>
       <View style={{ flexDirection: 'row', gap: 24 }}>
-        <Pressable accessibilityRole="button" disabled={disabled} onPress={() => choose(confirmation.request.verb, true)} style={{ paddingVertical: 12 }}>
+        <Pressable accessibilityRole="button" accessibilityLabel={`Confirm ${confirmation.request.verb} ${run.change}`}
+          disabled={disabled} onPress={() => choose(confirmation.request.verb, true)} style={{ paddingVertical: 12 }}>
           <Text style={{ color: colors.accent, fontWeight: '600' }}>Confirm {confirmation.request.verb}</Text>
         </Pressable>
         <Pressable accessibilityRole="button" onPress={() => setConfirmation(null)} style={{ paddingVertical: 12 }}>
@@ -107,6 +108,7 @@ function FactoryRow({ run, colors, disabled, act, report, host, navigation, work
         </Pressable>
       </View>
     </View> : null}
+    {notice ? <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{notice}</Text> : null}
   </View>;
 }
 
@@ -115,7 +117,8 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
   const send = useRpc(factoryAct);
   const [data, setData] = useState<FactorySnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<string | null>(null);
+  // An action's outcome shows beside the run it was sent for, not above a long list.
+  const [notice, setNotice] = useState<{ change: string; text: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [acting, setActing] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspaces>([]);
@@ -180,12 +183,12 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
     if (actionInFlight.current) return;
     actionInFlight.current = true;
     setActing(true);
-    setResult(null);
+    setNotice({ change: input.change, text: 'Sending action…' });
     try {
       const outcome = await send(input);
-      if (alive.current) setResult(`${input.change}: ${outcome.outcome === 'done' ? 'Done' : 'Refused'} · ${outcome.detail}`);
+      if (alive.current) setNotice({ change: input.change, text: `${outcome.outcome === 'done' ? 'Done' : 'Refused'} · ${outcome.detail}` });
     } catch {
-      if (alive.current) setResult(`${input.change}: Could not confirm the action result. Check the refreshed status before retrying.`);
+      if (alive.current) setNotice({ change: input.change, text: 'Could not confirm the action result. Check the refreshed status before retrying.' });
     } finally {
       // Wait out an older read before requesting the post-action snapshot.
       await inFlight.current;
@@ -205,11 +208,12 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
       <Text style={{ color: colors.accent, fontWeight: '600' }}>{loading ? 'Checking…' : 'Refresh Factory'}</Text>
     </Pressable>
     {error || data?.error ? <Text accessibilityRole="alert" style={{ color: colors.statusWarning }}>{error || data?.error}</Text> : null}
-    {result ? <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{result}</Text> : null}
-    {acting ? <Text style={{ color: colors.foregroundMuted }}>Sending action…</Text> : null}
+    {notice && !data?.runs.some(run => run.change === notice.change)
+      ? <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{`${notice.change}: ${notice.text}`}</Text> : null}
     {data && !data.runs.length ? <Text style={{ color: colors.foreground }}>No Factory runs.</Text> : null}
     {orderFactoryRuns(data?.runs ?? []).map(run => <FactoryRow key={run.change} run={run} colors={colors}
-      disabled={acting} act={act} report={setResult} host={host} navigation={navigation}
+      disabled={acting} act={act} report={text => setNotice({ change: run.change, text })}
+      notice={notice?.change === run.change ? notice.text : null} host={host} navigation={navigation}
       workspaces={workspaces} onDetailsOpen={() => { void loadWorkspaces(); }} />)}
   </View>;
 }
