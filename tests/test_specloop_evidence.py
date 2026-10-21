@@ -92,6 +92,44 @@ def test_mutation_separates_weak_from_strong_tests(tmp_path, tests, expect_pass)
     assert (tmp_path / "out" / "evidence.json").exists()
 
 
+def test_mutation_on_first_source_line_is_executed(tmp_path):
+    repo, _, head = project(tmp_path, STRONG)
+    mut = evidence.Mutant("calc.py", 1, "rename", CODE.splitlines()[0],
+                          "def renamed_within(x, lo, hi):")
+    out = tmp_path / "out"
+
+    assert evidence.mutate(repo, head, [mut], M, out)
+    assert mut.result == "killed"
+    receipts = json.loads((out / "mutant-1" / "receipts.json").read_text())
+    assert [r["id"] for r in receipts] == ["test"]
+    assert receipts[0]["passed"] is False
+    assert "has no attribute 'within'" in receipts[0]["tail"]
+    assert (repo / "calc.py").read_text() == CODE
+
+
+def test_mutant_source_preserves_symlink_imports(tmp_path):
+    repo, _, _ = project(tmp_path, STRONG.replace("import calc", "import calc_alias as calc"))
+    (repo / "calc_alias.py").symlink_to("calc.py")
+    sh(repo, "git", "add", "calc_alias.py")
+    sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "source alias")
+    head = sh(repo, "git", "rev-parse", "HEAD")
+    mut = evidence.Mutant("calc.py", 2, "<=", CODE.splitlines()[1],
+                          "    return lo < x and x <= hi")
+    out = tmp_path / "out"
+
+    assert evidence.mutate(repo, head, [mut], M, out)
+    # The alias must resolve to the private mutated file. Dereferencing it
+    # during copying gives tests an unchanged module and a false survival.
+    assert mut.result == "killed"
+    receipts = json.loads((out / "mutant-1" / "receipts.json").read_text())
+    assert [r["id"] for r in receipts] == ["test"]
+    assert receipts[0]["passed"] is False
+    assert "AssertionError: False is not true" in receipts[0]["tail"]
+    assert (repo / "calc_alias.py").is_symlink()
+    assert (repo / "calc_alias.py").read_text() == CODE
+    assert (repo / "calc.py").read_text() == CODE
+
+
 def test_uncovered_scenarios_fail_and_exempt_ones_do_not(tmp_path):
     src, base, head = project(tmp_path, STRONG)
     m = replace(M, mutation_steps=(), coverage_exempt={"c/r/human": "human"})
