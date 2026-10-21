@@ -386,3 +386,29 @@ test('finished runs are folded under a collapsed toggle', async t => {
     }
   });
 });
+
+test('Finished disclosure preserves its touch spacing and semibold label across toggles', async t => {
+  const page = view({ runs: [{ ...run, status: 'done' }] });
+  t.after(page.dispose);
+  await page.settle();
+
+  for (const expanded of [false, true, false]) {
+    const toggle = page.find('Finished (1)');
+    assert.ok(toggle);
+    assert.equal(toggle.props.accessibilityState.expanded, expanded);
+    // Keep the disclosure's touch spacing and emphasis consistent with Details.
+    assert.equal(toggle.props.style.paddingVertical, 10);
+    assert.equal(toggle.props.style.alignSelf, 'flex-start');
+    const label = toggle.children.find((child): child is Node =>
+      typeof child !== 'string' && child.type === 'Text');
+    assert.ok(label);
+    assert.equal(page.text(label.children), 'Finished (1)');
+    assert.equal(label.props.style.fontWeight, '600');
+    if (expanded) {
+      const details = page.find(`Details for ${run.change}`);
+      assert.ok(details);
+      assert.equal(toggle.props.style.paddingVertical, details.props.style.paddingVertical);
+    }
+    await page.press('Finished (1)');
+  }
+});
