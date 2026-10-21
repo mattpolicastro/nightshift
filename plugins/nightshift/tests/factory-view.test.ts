@@ -561,3 +561,123 @@ test('factory-finished-runs/visible-action-results/result-remains-in-an-active-r
     }
   }
 });
+
+function assertRefreshedGroups(page: ReturnType<typeof view>, expected: {
+  active: FactoryRun[]; finished: FactoryRun[]; expanded: boolean; summary: string; error?: string;
+}) {
+  const { active, finished, expanded, summary, error } = expected;
+  assert.ok(page.nodes().some(node => node.type === 'Text' && page.text(node.children) === summary), summary);
+  const labels = page.nodes().map(node => node.props.accessibilityLabel as string | undefined)
+    .filter(label => label?.startsWith('Details for ') || label?.startsWith('Finished ('));
+  assert.deepEqual(labels, [
+    ...active.map(item => `Details for ${item.change}`),
+    ...(finished.length ? [`Finished (${finished.length})`] : []),
+    ...(expanded ? finished.map(item => `Details for ${item.change}`) : []),
+  ], 'active rows precede the disclosure and any visible finished rows, without duplicates');
+  if (finished.length) {
+    assert.equal(page.find(`Finished (${finished.length})`)?.props.accessibilityState.expanded, expanded);
+  }
+  for (const item of [...active, ...(expanded ? finished : [])]) {
+    const row = page.nodes().find(node => node.type === 'View' && node.children.some(child =>
+      typeof child !== 'string' && child.props.accessibilityLabel === `Details for ${item.change}`));
+    assert.ok(row, `visible row for ${item.change}`);
+    assert.ok(page.text(row.children).includes(`${item.status} · ${item.tasks.done}/${item.tasks.total} tasks done`));
+  }
+  if (!expanded) for (const item of finished) assert.ok(!page.text().includes(item.change), 'finished row is folded');
+  assert.equal(page.text().includes('No Factory runs.'), active.length + finished.length === 0);
+  assert.deepEqual(page.nodes().filter(node => node.props.accessibilityRole === 'alert')
+    .map(node => page.text(node.children)), error ? [error] : []);
+  assert.equal(page.find('Refresh Factory')?.props.disabled, false, 'refresh is available again');
+}
+
+test('factory-finished-runs/existing-interactions-remain-intact/refresh-updates-groups-without-resetting-disclosure', async t => {
+  for (const from of ['paused', 'running'] as const) for (const to of ['done', 'aborted'] as const) {
+    for (const expanded of [false, true]) {
+      await t.test(`${from} to ${to}, disclosure ${expanded ? 'expanded' : 'collapsed'}`, async t => {
+        const target: FactoryRun = { ...run, change: 'transition-target', status: from, context: undefined };
+        const otherActive: FactoryRun = { ...run, change: 'still-running', status: 'running', context: undefined };
+        const otherFinished: FactoryRun = { ...run, change: 'already-finished', status: 'done', context: undefined };
+        let runs = [otherFinished, target, otherActive];
+        const page = view({ read: async () => ({ runs, stale: false, fetchedAt: '', error: null }) });
+        t.after(page.dispose);
+        await page.settle();
+        // Explicitly choose collapsed too, so retention is tested beyond the mount default.
+        await page.press('Finished (1)');
+        if (!expanded) await page.press('Finished (1)');
+        assertRefreshedGroups(page, { active: [target, otherActive], finished: [otherFinished], expanded,
+          summary: '2 runs · 1 finished' });
+
+        const transitioned = { ...target, status: to, tasks: { done: 3, total: 3 } };
+        runs = [otherFinished, transitioned, otherActive];
+        await page.press('Refresh Factory');
+        const refreshed = { active: [otherActive], finished: [otherFinished, transitioned], expanded,
+          summary: '1 run · 2 finished' };
+        assertRefreshedGroups(page, refreshed);
+        await page.press('Refresh Factory');
+        assertRefreshedGroups(page, refreshed);
+
+        // Retain the choice through both an active-only snapshot and a completely empty one.
+        for (const remaining of [[otherActive], []]) {
+          runs = remaining;
+          await page.press('Refresh Factory');
+          assertRefreshedGroups(page, { active: remaining, finished: [], expanded,
+            summary: remaining.length ? '1 run' : '0 runs' });
+          runs = [otherFinished, transitioned, otherActive];
+          await page.press('Refresh Factory');
+          assertRefreshedGroups(page, refreshed);
+        }
+        assert.equal(page.calls.reads, 7, 'only mount and the six requested refreshes read');
+        assert.deepEqual(page.calls.actions, []);
+        assert.deepEqual(page.calls.hosts, []);
+        assert.equal(page.calls.lists, 0);
+      });
+    }
+  }
+});
+
+test('factory-finished-runs/existing-interactions-remain-intact/failed-refresh-retains-groups-and-stale-handling', async t => {
+  for (const failure of ['rejected RPC', 'stale snapshot'] as const) for (const expanded of [false, true]) {
+    await t.test(`${failure}, disclosure ${expanded ? 'expanded' : 'collapsed'}`, async t => {
+      const paused: FactoryRun = { ...run, change: 'waiting', context: undefined };
+      const running: FactoryRun = { ...run, change: 'building', status: 'running', context: undefined };
+      const done: FactoryRun = { ...run, change: 'completed', status: 'done', context: undefined };
+      const aborted: FactoryRun = { ...run, change: 'stopped', status: 'aborted', context: undefined };
+      const runs = [done, running, aborted, paused];
+      let fail = false;
+      const error = failure === 'rejected RPC'
+        ? 'Factory refresh failed. Any previously loaded list is stale and retained.'
+        : 'Factory status unavailable. Last successful snapshot retained.';
+      const page = view({ read: async () => {
+        if (fail && failure === 'rejected RPC') throw new Error('RPC connection lost');
+        return { runs, stale: fail, fetchedAt: '', error: fail ? error : null };
+      } });
+      t.after(page.dispose);
+      await page.settle();
+      await page.press('Finished (2)');
+      if (!expanded) await page.press('Finished (2)');
+      const good = { active: [paused, running], finished: [done, aborted], expanded, summary: '2 runs · 2 finished' };
+      assertRefreshedGroups(page, good);
+
+      fail = true;
+      const stale = { ...good, summary: '2 runs · 2 finished · Stale', error };
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await page.press('Refresh Factory');
+        assertRefreshedGroups(page, stale);
+      }
+      const readsAfterFailure = page.calls.reads;
+      await page.press('Finished (2)');
+      assertRefreshedGroups(page, { ...stale, expanded: !expanded });
+      await page.press('Finished (2)');
+      assertRefreshedGroups(page, stale);
+      assert.equal(page.calls.reads, readsAfterFailure, 'retained finished rows remain accessible without a read');
+
+      fail = false;
+      await page.press('Refresh Factory');
+      assertRefreshedGroups(page, good);
+      assert.equal(page.calls.reads, 4, 'mount, two failed refreshes, and recovery');
+      assert.deepEqual(page.calls.actions, []);
+      assert.deepEqual(page.calls.hosts, []);
+      assert.equal(page.calls.lists, 0);
+    });
+  }
+});
