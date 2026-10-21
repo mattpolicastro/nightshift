@@ -5,6 +5,46 @@ const labels: Record<Verb, string> = {
   resume: 'Resume', accept: 'Accept', publish: 'Publish', finish: 'Finish', abort: 'Abort',
 };
 
+// Only the SDK descriptor fields used to match; preserve the full entry for navigation.
+type WorkspaceMatchFields = {
+  workspaceDirectory: string;
+  archivingAt?: string | null;
+  activityAt: string | null;
+};
+
+export function matchWorkspace<T extends WorkspaceMatchFields>(repo: string, workspaces: readonly T[]): T | null {
+  if (!repo) return null;
+  const activity = (workspace: T) => {
+    const time = Date.parse(workspace.activityAt ?? '');
+    return Number.isFinite(time) ? time : -Infinity;
+  };
+  return workspaces.filter(workspace => workspace.archivingAt == null &&
+    workspace.workspaceDirectory.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, '~') === repo)
+    .sort((a, b) => activity(b) - activity(a))[0] ?? null;
+}
+
+export function factoryMoreCommand(change: FactoryRun['change']): string {
+  // Changes come from the validated run schema's shell-safe identifier.
+  return `specloop status ${change} --events 20`;
+}
+
+export function factoryDetails(run: FactoryRun) {
+  const context = run.context;
+  return {
+    fields: [
+      { label: 'Summary', text: context?.summary },
+      { label: 'Repository', text: context?.repo },
+      { label: 'Branch', text: context?.branch },
+      { label: 'Task', text: context?.task
+        ? [context.task.label, context.task.section, context.task.text].filter(Boolean).join(' · ') : '' },
+      { label: 'Pause detail', text: context?.detail },
+    ].filter((field): field is { label: string; text: string } => Boolean(field.text)),
+    recent: context?.recent ?? [],
+    github: context?.github ?? '',
+    command: factoryMoreCommand(run.change),
+  };
+}
+
 export function orderFactoryRuns(runs: readonly FactoryRun[]): FactoryRun[] {
   // Stable within each group, without changing the cached snapshot.
   return [...runs.filter(run => run.status === 'paused'), ...runs.filter(run => run.status !== 'paused')];

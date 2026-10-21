@@ -27,6 +27,20 @@ current pause:
 | Finish | At `human_checks`, after completing the PR's human checks, archive the change, push to GitHub and mark the PR ready for review. |
 | Abort | Stop a paused run. Available at every pause; a `secret` pause otherwise needs inspection by hand. |
 
+Each row also has **Details**, collapsed initially. Open it to see the change
+summary, repository and branch, current or paused task, full pause detail and
+recent events, when available. Home directories appear as `~`. A published
+change can include an **Open change on GitHub** link to its change folder.
+Details always includes `specloop status <change> --events 20` to run on the Paseo host.
+
+**Open in Paseo** appears in Details when the host supports workspace navigation
+and has a matching workspace for the run's repository. The page loads workspaces
+from the selected host when Details is first opened, and reuses that
+list while the page is open. Workspaces being archived are excluded; if
+several match, the most recently active one opens. If workspace lookup fails,
+the host lacks the required methods, or no workspace matches, the button is
+absent and the other details remain available.
+
 **Publish and Finish both push to GitHub, so the page asks for confirmation
 before sending either action.** Cancel sends nothing. Finish does not merge
 the PR. After an action, the page shows the result and refreshes the list.

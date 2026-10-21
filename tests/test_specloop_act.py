@@ -687,10 +687,22 @@ def test_publish_and_finish_use_existing_transitions(admitted, tmp_path, monkeyp
     assert run.state.pause.reason == "human_checks"
     assert git(remote, "rev-parse", BRANCH) == completed
     assert calls == []  # Adopt the existing PR.
+    assert cli.main(["status", "--json", CHANGE]) == 0
+    entry = json.loads(capfd.readouterr().out)["runs"][0]
+    assert entry["context"]["github"] == (
+        f"https://github.com/example/repo/tree/{BRANCH}/openspec/changes/{CHANGE}"
+    )
     act(capfd, run, "finish")
     assert run.state.status == "done" and run.state.pause is None
     assert calls == [("pr", "ready", run.state.pr, "-R", "example/repo")]
     assert "archive/" in git(remote, "ls-tree", "-r", "--name-only", BRANCH)
+    assert cli.main(["status", "--json", CHANGE]) == 0
+    entry = json.loads(capfd.readouterr().out)["runs"][0]
+    assert entry["status"] == "done"
+    assert entry["context"]["github"] == (
+        f"https://github.com/example/repo/tree/{BRANCH}"
+        f"/openspec/changes/archive/2026-10-20-{CHANGE}"
+    )
 
 
 def test_publish_failure_returns_refused_json(admitted, monkeypatch, capfd):
@@ -897,6 +909,10 @@ def test_finish_restarts_from_archive(admitted, tmp_path, monkeypatch, capfd, fa
         assert entry["status"] == "paused" and entry["pause"]["reason"] == "human_checks"
         assert entry["head"] == archived and entry["tasks"] == {"done": 1, "total": 1}
         assert entry["action"]["actions"] == ["finish", "abort"]
+        assert entry["context"]["github"] == (
+            f"https://github.com/example/repo/tree/{BRANCH}"
+            f"/openspec/changes/archive/2026-10-20-{CHANGE}"
+        )
         assert cli.main(["status"]) == 0
         output = capfd.readouterr().out
         assert "tasks: 1/1 done" in output and "could not read tasks" not in output
@@ -912,6 +928,13 @@ def test_finish_restarts_from_archive(admitted, tmp_path, monkeypatch, capfd, fa
     assert not draft
     assert git(bare, "rev-parse", BRANCH) == git(remote, "rev-parse", BRANCH) == archived
     assert archives == [CHANGE] and pushes == [archived] * 3
+    assert cli.main(["status", "--json", CHANGE]) == 0
+    entry = json.loads(capfd.readouterr().out)["runs"][0]
+    assert entry["status"] == "done"
+    assert entry["context"]["github"] == (
+        f"https://github.com/example/repo/tree/{BRANCH}"
+        f"/openspec/changes/archive/2026-10-20-{CHANGE}"
+    )
     events = [json.loads(line) for line in (run.dir / "events.jsonl").read_text().splitlines()]
     assert [e["head"] for e in events if e["event"] == "finished"] == [archived]
     act(capfd, run, "finish", code=1)

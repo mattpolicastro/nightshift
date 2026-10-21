@@ -8,10 +8,17 @@ export const factoryActionSchema = z.object({
   actions: z.array(factoryVerbSchema),
   pause_id: z.string().optional(),
 });
+export const factoryContextSchema = z.object({
+  summary: z.string(), repo: z.string(), branch: z.string(),
+  task: z.object({ label: z.string(), section: z.string(), text: z.string() }).nullable(),
+  detail: z.string(),
+  recent: z.array(z.object({ at: z.string(), text: z.string() })),
+  github: z.string(),
+});
 export const factoryRunSchema = z.object({
   change: changeSchema, status: z.enum(['running', 'paused', 'done', 'aborted']),
   tasks: z.object({ done: z.number().int().nonnegative(), total: z.number().int().nonnegative() }),
-  pr: z.string(), action: factoryActionSchema.optional(),
+  pr: z.string(), action: factoryActionSchema.optional(), context: factoryContextSchema.optional(),
 });
 export const factorySnapshotSchema = z.object({
   runs: z.array(factoryRunSchema), stale: z.boolean(), fetchedAt: z.string(),

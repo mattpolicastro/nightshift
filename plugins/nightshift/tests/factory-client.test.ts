@@ -1,7 +1,44 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { FactoryActInput, FactoryRun } from '../shared/factory';
-import { orderFactoryRuns, factoryButtons, decideFactoryAction } from '../client/factory-model';
+import { orderFactoryRuns, factoryButtons, decideFactoryAction, matchWorkspace, factoryMoreCommand } from '../client/factory-model';
+
+test('run-context/details-in-the-factory-section/workspace-matched-for-open-in-paseo', () => {
+  const older = {
+    id: 'older', workspaceDirectory: '/Users/studio/Projects/nightshift',
+    archivingAt: null, activityAt: '2026-10-20T12:00:00Z',
+  };
+  const active = { ...older, id: 'active', activityAt: '2026-10-21T12:00:00Z' };
+  const archiving = { ...active, id: 'archiving', archivingAt: '2026-10-21T13:00:00Z', activityAt: '2026-10-21T13:00:00Z' };
+  const unknownActivity = { ...older, id: 'unknown', activityAt: null };
+  const workspaces = Object.freeze([archiving, unknownActivity, older, active]);
+  const repo = '~/Projects/nightshift';
+  assert.equal(matchWorkspace(repo, workspaces), active);
+  assert.equal(matchWorkspace(repo, [archiving]), null);
+  assert.equal(matchWorkspace(repo, [{ ...archiving, archivingAt: '' }]), null);
+  assert.equal(matchWorkspace(repo, []), null);
+  assert.equal(matchWorkspace('', workspaces), null);
+  assert.equal(matchWorkspace('~/Projects/other', workspaces), null);
+  assert.equal(matchWorkspace('~/Projects/night', workspaces), null);
+  assert.equal(matchWorkspace(repo, [unknownActivity]), unknownActivity);
+  assert.equal(matchWorkspace(repo, [older, { ...older, id: 'tied' }]), older);
+  assert.deepEqual(workspaces, [archiving, unknownActivity, older, active]);
+
+  for (const workspaceDirectory of ['/home/studio/Projects/nightshift', repo]) {
+    const workspace = { workspaceDirectory, activityAt: null };
+    assert.equal(matchWorkspace(repo, [workspace]), workspace);
+  }
+  for (const workspaceDirectory of ['/mnt/Users/studio/Projects/nightshift', '/Users/studio/Projects/nightshift-extra']) {
+    assert.equal(matchWorkspace(repo, [{ ...active, workspaceDirectory }]), null);
+  }
+  const shared = { ...active, workspaceDirectory: '/srv/nightshift' };
+  assert.equal(matchWorkspace('/srv/nightshift', [shared]), shared);
+});
+
+test('run-context/details-in-the-factory-section/more-command-offered', () => {
+  assert.equal(factoryMoreCommand('factory-context'), 'specloop status factory-context --events 20');
+  assert.equal(factoryMoreCommand('another.change_2'), 'specloop status another.change_2 --events 20');
+});
 
 function paused(change: string, actions: FactoryActInput['verb'][] = ['resume', 'abort']): FactoryRun {
   return {

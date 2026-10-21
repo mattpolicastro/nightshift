@@ -1,21 +1,27 @@
-import { type PluginSurfaceProps, useRpc } from '@getpaseo/plugin/client';
+import { getPaseoClient, type PluginSurfaceProps, useRpc } from '@getpaseo/plugin/client';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Linking, Pressable, Text, TextInput, View } from 'react-native';
 import {
   factoryRuns, factoryAct, type FactoryRun, type FactorySnapshot, type FactoryActInput,
 } from '../shared/factory';
-import { decideFactoryAction, factoryButtons, orderFactoryRuns, type ActionDecision } from './factory-model';
+import { decideFactoryAction, factoryButtons, factoryDetails, matchWorkspace, orderFactoryRuns, type ActionDecision } from './factory-model';
 
 type Colors = PluginSurfaceProps['theme']['colors'];
 type Confirmation = Extract<ActionDecision, { kind: 'confirm' }>;
+type Workspaces = Awaited<ReturnType<ReturnType<typeof getPaseoClient>['workspaces']['list']>>['entries'];
+type HostProps = Pick<PluginSurfaceProps, 'host' | 'navigation'>;
 
-function FactoryRow({ run, colors, disabled, act, report }: {
+function FactoryRow({ run, colors, disabled, act, report, host, navigation, workspaces, onDetailsOpen }: {
   run: FactoryRun; colors: Colors; disabled: boolean;
   act: (input: FactoryActInput) => Promise<void>; report: (message: string) => void;
-}) {
+  workspaces: Workspaces; onDetailsOpen: () => void;
+} & HostProps) {
   const [note, setNote] = useState('');
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const buttons = factoryButtons(run);
+  const details = factoryDetails(run);
+  const workspace = matchWorkspace(run.context?.repo ?? '', workspaces);
 
   function choose(verb: FactoryActInput['verb'], confirmed = false) {
     if (disabled) return;
@@ -43,6 +49,39 @@ function FactoryRow({ run, colors, disabled, act, report }: {
       style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
       <Text style={{ color: colors.accent, fontWeight: '600' }}>Open PR ↗</Text>
     </Pressable> : null}
+    <Pressable accessibilityRole="button" accessibilityLabel={`Details for ${run.change}`}
+      accessibilityState={{ expanded: detailsOpen }}
+      onPress={() => { if (!detailsOpen) onDetailsOpen(); setDetailsOpen(!detailsOpen); }}
+      style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
+      <Text style={{ color: colors.accent, fontWeight: '600' }}>Details {detailsOpen ? '▴' : '▾'}</Text>
+    </Pressable>
+    {detailsOpen ? <View style={{ gap: 8 }}>
+      {details.fields.map(field => <View key={field.label} style={{ gap: 4 }}>
+        <Text style={{ color: colors.foregroundMuted }}>{field.label}</Text>
+        <Text selectable style={{ color: colors.foreground }}>{field.text}</Text>
+      </View>)}
+      {details.recent.length ? <View style={{ gap: 4 }}>
+        <Text style={{ color: colors.foregroundMuted }}>Recent events</Text>
+        {details.recent.map((event, index) => <Text key={`${event.at}:${index}`} selectable style={{ color: colors.foreground }}>
+          {new Date(event.at).toLocaleString()} · {event.text}
+        </Text>)}
+      </View> : null}
+      {details.github ? <Pressable accessibilityRole="link" accessibilityLabel={`Open change ${run.change} on GitHub`}
+        onPress={() => { void Linking.openURL(details.github).catch(() => report('Could not open GitHub.')); }}
+        style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
+        <Text style={{ color: colors.accent, fontWeight: '600' }}>Open change on GitHub ↗</Text>
+      </Pressable> : null}
+      {workspace && typeof navigation?.openWorkspace === 'function' ? <Pressable accessibilityRole="button"
+        accessibilityLabel={`Open ${run.change} in Paseo`}
+        onPress={() => {
+          try { navigation.openWorkspace({ serverId: host.id, workspaceId: workspace.id }); }
+          catch { report('Could not open the Paseo workspace.'); }
+        }} style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
+        <Text style={{ color: colors.accent, fontWeight: '600' }}>Open in Paseo</Text>
+      </Pressable> : null}
+      <Text style={{ color: colors.foregroundMuted }}>More detail (run on the Paseo host)</Text>
+      <Text selectable style={{ color: colors.foreground }}>{details.command}</Text>
+    </View> : null}
     {buttons.some(button => button.verb === 'resume') ? <View style={{ gap: 4 }}>
       <Text style={{ color: colors.foregroundMuted }}>Resume note (optional)</Text>
       <TextInput accessibilityLabel={`Resume note for ${run.change}`} value={note} onChangeText={setNote}
@@ -71,7 +110,7 @@ function FactoryRow({ run, colors, disabled, act, report }: {
   </View>;
 }
 
-export function FactorySection({ theme }: Pick<PluginSurfaceProps, 'theme'>) {
+export function FactorySection({ theme, host, navigation }: Pick<PluginSurfaceProps, 'theme'> & HostProps) {
   const read = useRpc(factoryRuns);
   const send = useRpc(factoryAct);
   const [data, setData] = useState<FactorySnapshot | null>(null);
@@ -79,10 +118,33 @@ export function FactorySection({ theme }: Pick<PluginSurfaceProps, 'theme'>) {
   const [result, setResult] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [acting, setActing] = useState(false);
+  const [workspaces, setWorkspaces] = useState<Workspaces>([]);
+  const workspacesRequested = useRef(false);
   const alive = useRef(false);
   const inFlight = useRef<Promise<void> | null>(null);
   const actionInFlight = useRef(false);
   const colors = theme.colors;
+
+  async function loadWorkspaces() {
+    if (workspacesRequested.current || typeof navigation?.openWorkspace !== 'function') return;
+    workspacesRequested.current = true;
+    try {
+      const client = getPaseoClient(host.id);
+      if (typeof client?.workspaces?.list !== 'function') return;
+      // Follow pagination: the matching workspace may not be on the first page.
+      const entries = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < 20; page++) {
+        const result = await client.workspaces.list({ page: { limit: 200, ...(cursor ? { cursor } : {}) } });
+        entries.push(...result.entries);
+        if (!result.pageInfo?.hasMore || !result.pageInfo.nextCursor) break;
+        cursor = result.pageInfo.nextCursor;
+      }
+      if (alive.current) setWorkspaces(entries);
+    } catch {
+      // Older hosts and failed reads still offer the rest of Details.
+    }
+  }
 
   const refresh = useCallback((): Promise<void> => {
     if (inFlight.current) return inFlight.current;
@@ -147,6 +209,7 @@ export function FactorySection({ theme }: Pick<PluginSurfaceProps, 'theme'>) {
     {acting ? <Text style={{ color: colors.foregroundMuted }}>Sending action…</Text> : null}
     {data && !data.runs.length ? <Text style={{ color: colors.foreground }}>No Factory runs.</Text> : null}
     {orderFactoryRuns(data?.runs ?? []).map(run => <FactoryRow key={run.change} run={run} colors={colors}
-      disabled={acting} act={act} report={setResult} />)}
+      disabled={acting} act={act} report={setResult} host={host} navigation={navigation}
+      workspaces={workspaces} onDetailsOpen={() => { void loadWorkspaces(); }} />)}
   </View>;
 }

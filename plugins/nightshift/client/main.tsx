@@ -12,7 +12,7 @@ export function MainSurface(props: PluginSurfaceProps) {
   return <AttentionSurface key={props.host.id} {...props} />;
 }
 
-function AttentionSurface({ theme, host, layout }: PluginSurfaceProps) {
+function AttentionSurface({ theme, host, layout, navigation }: PluginSurfaceProps) {
   const rpc = useRpc(attention);
   const [data, setData] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -99,7 +99,7 @@ function AttentionSurface({ theme, host, layout }: PluginSurfaceProps) {
         <Text key={task.key} style={{ color: colors.statusWarning }}>Could not recheck {task.key}. Last known: {task.state.replaceAll('_', ' ')} · {date(task.checkedAt)}</Text>
       ))}
       {data ? <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>List loaded: {date(data.fetchedAt)} · Opening a task does not resolve it.</Text> : null}
-      <FactorySection theme={theme} />
+      <FactorySection theme={theme} host={host} navigation={navigation} />
     </ScrollView>
   );
 }
