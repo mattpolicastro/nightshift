@@ -39,6 +39,8 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
   const buttons = factoryButtons(run);
   const details = factoryDetails(run);
   const workspace = matchWorkspace(run.context?.repo ?? '', workspaces);
+  const confirmStyles = actionStyles(colors, confirmation?.request.verb === 'abort' ? 'destructive' : 'primary');
+  const cancelStyles = actionStyles(colors, 'outlined');
 
   function choose(verb: FactoryActInput['verb'], confirmed = false) {
     if (disabled) return;
@@ -118,13 +120,13 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
     </View>
     {confirmation ? <View style={{ gap: 8 }}>
       <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{confirmation.message}</Text>
-      <View style={{ flexDirection: 'row', gap: 24 }}>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
         <Pressable accessibilityRole="button" accessibilityLabel={`Confirm ${confirmation.request.verb} ${run.change}`}
-          disabled={disabled} onPress={() => choose(confirmation.request.verb, true)} style={{ paddingVertical: 12 }}>
-          <Text style={{ color: colors.accent, fontWeight: '600' }}>Confirm {confirmation.request.verb}</Text>
+          disabled={disabled} onPress={() => choose(confirmation.request.verb, true)} style={confirmStyles.button}>
+          <Text style={confirmStyles.text}>Confirm {confirmation.request.verb}</Text>
         </Pressable>
-        <Pressable accessibilityRole="button" onPress={() => setConfirmation(null)} style={{ paddingVertical: 12 }}>
-          <Text style={{ color: colors.foreground }}>Cancel</Text>
+        <Pressable accessibilityRole="button" onPress={() => setConfirmation(null)} style={cancelStyles.button}>
+          <Text style={cancelStyles.text}>Cancel</Text>
         </Pressable>
       </View>
     </View> : null}

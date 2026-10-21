@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import React from 'react';
 import ts from 'typescript';
-import type { FactoryActInput, FactoryRun } from '../shared/factory';
+import type { FactoryActInput, FactoryRun, FactorySnapshot } from '../shared/factory';
 
 // Distinct sentinels make incorrect token choices visible in rendered styles.
 export const colors = {
@@ -19,7 +19,10 @@ export type Node = { type: unknown; props: Props; children: (Node | string)[] };
 type Hook = { value?: any; deps?: unknown[]; cleanup?: () => void };
 
 // Render the real TSX with per-component hooks; keep host dependencies inert.
-export function styleView(runs: FactoryRun[], options: { act?: (input: FactoryActInput) => Promise<unknown> } = {}) {
+export function styleView(runs: FactoryRun[], options: {
+  act?: (input: FactoryActInput) => Promise<unknown>;
+  read?: () => Promise<FactorySnapshot>;
+} = {}) {
   const components = new Map<string, Hook[]>();
   let hooks: Hook[], cursor = 0;
   let effects: (() => void)[] = [];
@@ -50,7 +53,7 @@ export function styleView(runs: FactoryRun[], options: { act?: (input: FactoryAc
   };
   const actions: FactoryActInput[] = [];
   const runsRpc = {}, actRpc = {};
-  const read = async () => ({ runs, stale: false, fetchedAt: '', error: null });
+  const read = options.read ?? (async () => ({ runs, stale: false, fetchedAt: '', error: null }));
   const act = async (input: FactoryActInput) => {
     actions.push(input);
     return options.act ? options.act(input) : { outcome: 'done', detail: 'Completed' };
@@ -108,9 +111,9 @@ export function styleView(runs: FactoryRun[], options: { act?: (input: FactoryAc
   return {
     actions, nodes, text, find, settle,
     setColors(next: typeof colors) { themeColors = next; draw(); },
-    async press(label: string) {
-      const button = find(label);
-      assert.ok(button, `Missing ${label}`);
+    async press(control: string | Node) {
+      const button = typeof control === 'string' ? find(control) : control;
+      assert.ok(button, `Missing ${control}`);
       if (!button.props.disabled) button.props.onPress();
       draw();
       await settle();
