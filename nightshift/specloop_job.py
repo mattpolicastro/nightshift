@@ -11,8 +11,11 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
+import signal
 import subprocess
 import sys
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -275,6 +278,120 @@ def finish_stop(directory: Path) -> None:
             save(directory / "stop.json", {
                 **stop, "state": "stopped", "stopped_at": datetime.now(timezone.utc).isoformat(),
             })
+
+
+class StopJobError(RuntimeError):
+    """An unknown, unsafe or uncontrollable job (CLI callers should exit 1)."""
+
+
+def _verify_process(directory: Path) -> dict:
+    process = _read_process(directory)
+    if process is None or process["start_identity"] is None:
+        raise ValueError("process identity unavailable; legacy or starting job cannot be stopped")
+    pid, pgid = process["pid"], process["pgid"]
+    if pgid in (0, 1, os.getpgrp()) or pid != pgid:
+        raise ValueError("unsafe process group: expected an independent wrapper leader")
+    stop = _read_stop(directory)
+    if stop is not None and stop.get("process") != process:
+        raise ValueError("process identity differs from accepted stop intent")
+    if (os.getpgid(pid) != pgid or os.getsid(pid) != pgid
+            or process_start_identity(pid) != process["start_identity"]):
+        raise ValueError("wrapper process identity or session no longer matches")
+    command = subprocess.run(
+        ["/bin/ps", "-ww", "-p", str(pid), "-o", "args="],
+        capture_output=True, text=True, timeout=5, check=True,
+    ).stdout.strip()
+    # ps renders argv with spaces (including spaces inside path arguments).
+    # Anchor the entire wrapper suffix, including its exact absolute job path.
+    if not re.fullmatch(
+        r".+ -m nightshift\.specloop_job " + re.escape(str(directory.resolve())) + r" [0-9]+",
+        command,
+    ):
+        raise ValueError("leader command does not identify this job's wrapper")
+    return process
+
+
+def _executing_group(pgid: int, *, timeout: float = 5) -> set[int]:
+    """Probe every member; zombies waiting for a parent are no longer work."""
+    result = subprocess.run(
+        ["/bin/ps", "-axo", "pid=,pgid=,stat="],
+        capture_output=True, text=True, timeout=timeout, check=True,
+    )
+    if not result.stdout.strip():
+        raise ValueError("process inspection returned no process table")
+    members = set()
+    for line in result.stdout.splitlines():
+        pid, group, state = line.split()
+        if int(group) == pgid and not state.startswith("Z"):
+            members.add(int(pid))
+    return members
+
+
+def _wait_group(process: dict, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        reap()
+        # A restarted caller may still be the parent but have lost its Popen.
+        try:
+            os.waitpid(process["pid"], os.WNOHANG)
+        except ChildProcessError:
+            pass
+        if not _executing_group(process["pgid"], timeout=remaining):
+            return True
+        time.sleep(min(.05, max(0, deadline - time.monotonic())))
+
+
+def stop_job(state_dir: Path, job_id: str) -> str:
+    """Stop an exactly identified owned group; return stopped or finished.
+
+    Raise StopJobError on refusal or operational failure. Accepted intent is
+    retained on failure, suppressing collection until an operator retries.
+    """
+    # Reject paths and UUID prefixes before any filesystem access.
+    if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise StopJobError("expected an exact full job ID, not a path or prefix")
+    rows, errors = list_jobs(state_dir)
+    matches = [job for job in rows if job.id == job_id]
+    if len(matches) != 1:
+        detail = "; ".join(errors)
+        raise StopJobError(f"{'unknown' if not matches else 'ambiguous'} job ID {job_id}"
+                           + (f": {detail}" if detail else ""))
+    job = matches[0]
+    try:
+        if job.state == "unknown":
+            raise ValueError("unreadable job records: " + "; ".join(
+                error for error in errors if str(job.directory) in error))
+        process = None
+
+        def verify():
+            nonlocal process
+            process = _verify_process(job.directory)
+            return process
+
+        state = request_stop(job.directory, verify_identity=verify)
+        if state != "stopping":
+            return state
+        # request_stop has released control.lock before any signal or wait.
+        for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 1)):
+            if not _executing_group(process["pgid"]):
+                finish_stop(job.directory)
+                return "stopped"
+            if _verify_process(job.directory) != process:
+                raise ValueError("process identity changed before signalling")
+            try:
+                os.killpg(process["pgid"], sig)
+            except ProcessLookupError:
+                # The group may have exited between verification and signal.
+                pass
+            if _wait_group(process, grace):
+                finish_stop(job.directory)
+                return "stopped"
+        raise ValueError("process group still executing after SIGKILL; retry stop after inspection")
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise StopJobError(f"cannot stop job {job_id}: {exc}; see {job.log_path}") from exc
 
 
 def finalize(directory: Path, outcome: dict) -> None:
