@@ -14,6 +14,7 @@ import tomllib
 import uuid
 from functools import partial
 from pathlib import Path
+from urllib.parse import quote
 
 from . import queue, specloop_client, specloop_job
 from .config import Repo
@@ -651,6 +652,63 @@ def _latest_label_events(repo: str, number: int, labels: set[str], *, runner) ->
                 or isinstance(event_id, bool) or event_id <= 0):
             raise RuntimeError(f"could not confirm {label} event for #{number}; retry next poll")
     return latest
+
+
+def _valid_actor_login(login) -> bool:
+    # GitHub usernames, including enterprise managed users (alice_acme) and
+    # app bot logins. Never accept URL syntax, whitespace, or the placeholder
+    # GitHub uses for deleted accounts.
+    return (isinstance(login, str) and login.lower() != "ghost"
+            and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9]|[-_](?=[A-Za-z0-9])){0,38}(?:\[bot\])?",
+                             login) is not None)
+
+
+def _membership_status(endpoint: str, *, runner) -> int:
+    """Read a membership endpoint, preserving failures other than HTTP 404.
+
+    queue._gh returns stdout on success but puts only stderr in GhError on
+    failure. gh reports a negative membership check as `gh: ... (HTTP 404)`.
+    A missing status or an unexpected response must remain a lookup failure.
+    """
+    try:
+        response = runner(["api", endpoint, "--include"])
+    except queue.GhError as exc:
+        error = str(exc).rsplit(" failed: ", 1)[-1].strip()
+        if not exc.transient and re.search(r"(?:^HTTP 404:|\(HTTP 404\)$)", error):
+            return 404
+        raise
+    if isinstance(response, str):
+        response = response.replace("\r\n", "\n")
+        match = re.match(r"HTTP/(?:1\.[01]|2(?:\.0)?) (\d{3})(?: [^\n]*)?\n", response)
+        if match and "\n\n" in response:
+            status = int(match[1])
+            if status in (204, 404):
+                return status
+    raise RuntimeError(f"unconfirmed membership response from {endpoint}; retry next poll")
+
+
+def _label_actor_association(repo: str, event: dict, *, runner) -> str | None:
+    """Resolve only the label actor using current positive membership evidence."""
+    actor = event.get("actor")
+    login = actor.get("login") if isinstance(actor, dict) else None
+    if not _valid_actor_login(login):
+        return None
+
+    repository = json.loads(runner(["api", f"repos/{repo}"]))
+    owner = repository.get("owner") if isinstance(repository, dict) else None
+    if (not isinstance(owner, dict) or not _valid_actor_login(owner.get("login"))
+            or owner.get("type") not in ("User", "Organization")):
+        raise RuntimeError(f"unconfirmed repository owner for {repo}; retry next poll")
+
+    association = None
+    if owner["type"] == "User" and owner["login"].lower() == login.lower():
+        association = "OWNER"
+    elif _membership_status(f"repos/{repo}/collaborators/{quote(login, safe='')}", runner=runner) == 204:
+        association = "COLLABORATOR"
+    elif owner["type"] == "Organization" and _membership_status(
+            f"orgs/{quote(owner['login'], safe='')}/members/{quote(login, safe='')}", runner=runner) == 204:
+        association = "MEMBER"
+    return association if association in queue.TRUSTED_ASSOCIATIONS else None
 
 
 _save = specloop_job.save
