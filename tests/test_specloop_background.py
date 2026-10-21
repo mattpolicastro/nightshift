@@ -14,6 +14,7 @@ import pytest
 
 from nightshift import daemon, queue, specloop_job
 from nightshift.config import Config, Repo
+from specloop import serve, state
 from specloop.state import Run
 from test_engine_routing import DraftGh
 from test_queue import FakeGh
@@ -375,8 +376,8 @@ def test_cancelled_jobs_remain_pending_after_restart_and_resume(
     directory = path.parent / f"{number}.jobs" / receipt["job"]
     process = json.loads((directory / "process.json").read_text())
     # The subprocess is held behind the fixture's release-file barrier.
-    # Signalling is a later task: let it finish to exercise a late result
-    # from the real wrapper after accepted intent, even if termination fails.
+    # Let it finish to exercise a late result from the real wrapper after
+    # accepted intent. Process-group signalling is covered in the job tests.
     assert specloop_job.request_stop(directory, verify_identity=lambda: process) == "stopping"
     intent = (directory / "stop.json").read_bytes()
     labels, comments, prs = set(gh.labels), list(gh.comments), list(gh.prs)
@@ -413,13 +414,18 @@ def test_cancelled_jobs_remain_pending_after_restart_and_resume(
     specloop_job.finish_stop(directory)
     stopped = (directory / "stop.json").read_bytes()
     assert json.loads(stopped)["stopped_at"]
-    daemon.PAUSE_FILE.unlink()
-    specloop_job._children.clear()
-    health = daemon.RepoHealth()
-    for _ in range(5):
-        poll()
-        assert_held("stopped")
-        assert (directory / "stop.json").read_bytes() == stopped
+    evidence = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+    # Restart while paused, resume with the original arming labels, then
+    # restart once more. None of these transitions releases a confirmed stop.
+    for paused in (True, False, False):
+        if not paused:
+            daemon.PAUSE_FILE.unlink(missing_ok=True)
+        specloop_job._children.clear()
+        health = daemon.RepoHealth()
+        for _ in range(5):
+            poll()
+            assert_held("stopped")
+            assert {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()} == evidence
 
 
 @pytest.mark.parametrize("failure", ["invalid_result", "dead_child", "missing_executable"])
@@ -612,6 +618,129 @@ def _finish_while_paused(job):
     _finish_delivery_job(job)
     assert job.path.read_bytes() == saved and job.calls == calls
     _assert_paused_delivery_held(job)
+
+
+@pytest.mark.scenario("paused-job-delivery/resume-pending-delivery/resume-once-after-restart")
+@pytest.mark.parametrize("stage", ["draft", "admit", "spec_revision", "build_revision"])
+def test_finished_job_delivers_once_after_paused_restart(delivery_job, stage):
+    job = delivery_job(stage)
+    comments_before = len(job.gh.comments)
+    _finish_while_paused(job)
+    result = job.result_path.read_bytes()
+    assert not (job.directory / "collected.json").exists()
+
+    # The result must be recovered from disk after completion, with neither
+    # process handles nor the previous daemon's health state available.
+    specloop_job._children.clear()
+    job.health = daemon.RepoHealth()
+    _assert_paused_delivery_held(job)
+    daemon.PAUSE_FILE.unlink()
+    job.poll()
+    receipt = job.path.read_bytes()
+    assert json.loads(receipt)["delivered"] is True
+    assert json.loads(receipt)["result"] == job.result
+    assert (job.directory / "collected.json").exists()
+    assert len(job.gh.comments) == comments_before + 1
+    assert len(job.gh.prs) == int(stage == "draft")
+    assert job.gh.labels == ({"spec:review"} if "revision" in stage else set())
+    completion = {"draft": "Spec draft ready", "admit": "build has started",
+                  "spec_revision": "Revised the spec", "build_revision": "build has resumed"}
+    assert completion[stage] in job.gh.comments[-1]["body"]
+    assert sum(call[:3] == ["gh", "pr", "create"] for call in job.calls) == int(stage == "draft")
+    kind = "issue" if stage == "draft" else "pr"
+    assert sum(call[:3] == ["gh", kind, "comment"] for call in job.calls) == 1
+    assert sum(call[0] == "git" and call[3] == "push" for call in job.calls) == int(
+        stage in ("draft", "spec_revision")
+    )
+
+    effects = deepcopy((job.gh.labels, job.gh.comments, job.gh.prs))
+    delivered_at = len(job.calls)
+    for _ in range(3):
+        job.health = daemon.RepoHealth()
+        specloop_job._children.clear()
+        job.poll()
+        assert job.path.read_bytes() == receipt
+        assert job.result_path.read_bytes() == result
+        assert (job.gh.labels, job.gh.comments, job.gh.prs) == effects
+        assert not job.health.failures and not job.health.item_failures and not job.health.announced
+        assert len(job.children) == 1
+        assert len(list(job.directory.parent.iterdir())) == 1
+        assert len((job.root / "started").read_text().splitlines()) == 1
+    # Repeated polls may read status, but must dispatch no further delivery.
+    for call in job.calls[delivered_at:]:
+        assert not (call[0] == "git" and call[3] == "push")
+        assert not (call[:2] in (["gh", "pr"], ["gh", "issue"])
+                    and call[2] in ("create", "comment", "edit"))
+        assert not (call[:2] == ["gh", "api"] and "PATCH" in call)
+        assert call[:2] != ["specloop", "publish"]
+
+
+@pytest.mark.scenario("paused-job-delivery/independent-supervisor-boundary/admission-already-committed")
+@pytest.mark.parametrize("cancelled", [False, True], ids=["paused", "cancelled"])
+@pytest.mark.parametrize("already_driving", [False, True], ids=["supervisor-starts", "supervisor-continues"])
+def test_committed_admission_survives_delivery_hold(delivery_job, monkeypatch, cancelled, already_driving):
+    job = delivery_job("admit")
+    monkeypatch.setattr(state, "ROOT", job.root / "specloop-home")
+    change = json.loads(job.path.read_text())["change"]
+    # Model the admission commit before the blocked CLI returns its result.
+    # The independent supervisor uses real local state; only driver launch is
+    # fake, so this cannot start a build or contact an external service.
+    run = Run.for_change(change)
+    run.state.pr = job.gh.pr_url
+    run.state.task("1.1")
+    run.save()
+    run.manifest_path.write_bytes((job.root / "manifest.toml").read_bytes())
+    run.event("admitted", head=HEAD)
+    with run.lock() as mine:
+        assert mine
+    committed = {p.name: p.read_bytes() for p in run.dir.iterdir()}
+    job.runs.append({"change": change, "pr": job.gh.pr_url, "status": "running"})
+    drivers, spawned, notifications = serve.Drivers(), [], []
+    monkeypatch.setattr(daemon.notify, "send", lambda *args: notifications.append(args))
+
+    def spawn(change):
+        spawned.append(change)
+        return SimpleNamespace(poll=lambda: None)
+
+    def supervisor_poll():
+        return serve.pass_once(notifications.append, spawn=spawn, drivers=drivers)
+
+    if already_driving:
+        assert supervisor_poll() == [change]
+    pending = job.path.read_bytes()
+    effects = deepcopy((job.gh.labels, job.gh.comments, job.gh.prs))
+    daemon.PAUSE_FILE.touch()
+    if cancelled:
+        process = json.loads((job.directory / "process.json").read_text())
+        assert specloop_job.request_stop(job.directory, verify_identity=lambda: process) == "stopping"
+    _finish_delivery_job(job)
+    if cancelled:
+        # Confirm only after the real wrapper exits; retain its late success.
+        specloop_job.finish_stop(job.directory)
+    result = job.result_path.read_bytes()
+
+    for resumed in (False, cancelled):
+        if resumed:
+            daemon.PAUSE_FILE.unlink()
+        specloop_job._children.clear()
+        job.health = daemon.RepoHealth()
+        for _ in range(3):
+            job.poll()
+            expected = [] if spawned else [change]
+            assert supervisor_poll() == expected
+            assert spawned == [change] and drivers.alive() == [change]
+            assert {p.name: p.read_bytes() for p in run.dir.iterdir()} == committed
+            assert Run.for_change(change).state.status == "running"
+            assert job.path.read_bytes() == pending
+            assert job.result_path.read_bytes() == result
+            assert not (job.directory / "collected.json").exists()
+            assert (job.gh.labels, job.gh.comments, job.gh.prs) == effects
+            assert not job.health.failures and not job.health.item_failures and not job.health.announced
+            assert not notifications
+            assert len(job.children) == 1
+            rows, errors = specloop_job.list_jobs(daemon.STATE_DIR)
+            assert not errors and len(rows) == 1
+            assert rows[0].state == ("stopped" if cancelled else "finished")
 
 
 @pytest.mark.scenario("paused-job-delivery/pause-gates-launches-and-delivery/admission-finishes-while-paused")
