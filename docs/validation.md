@@ -1,5 +1,114 @@
 # Validation and scope
 
+## Background job control — 2026-10-21
+
+### Local automated checks
+
+Task 6.1 extends the existing scenario tests for retained evidence, label
+reapplication after cancellation, and inventory of finished admissions held
+by pause. These are implementation-session results, not trusted acceptance
+evidence; the harness independently reruns its verification commands.
+
+Environment: macOS, Python 3.14.6, pytest 9.1.1. Commands used the preinstalled
+virtual environment with `UV_OFFLINE=1`, `UV_NO_SYNC=1`,
+`UV_PROJECT_ENVIRONMENT` pointing to that environment,
+`UV_CACHE_DIR=build/uv-cache`, `PYTHONPATH=.`, and
+`PYTHONDONTWRITEBYTECODE=1`. No dependency download or installation was needed.
+
+The targeted `uv run pytest -q ... -p no:cacheprovider` invocation selected
+the two named acceptance tests below, plus
+`test_cancelled_jobs_remain_pending_after_restart_and_resume` and
+`test_committed_admission_survives_delivery_hold`: **17 passed in 14.24s**,
+exit 0. Both named acceptance tests passed, including all three termination
+parameter cases:
+
+- `tests/test_specloop_jobs.py::test_jobs_stop_terminates_process_group`
+- `tests/test_specloop_background.py::test_paused_daemon_does_not_deliver_finished_admission`
+
+Full `uv run pytest -p no:cacheprovider`: **1,276 passed, 5 skipped, 2 failed
+in 183.57s**, exit 1. Both named acceptance tests also passed in this run.
+The two failures were outside the changed tests:
+
+- `tests/test_reviewer_readonly.py::test_a_write_outside_the_worktree_is_still_a_breach`:
+  the sandbox denies writing `/tmp/verdict.txt` (`Operation not permitted`),
+  before the expected `CONTRACT BREACHED` diagnostic. An isolated rerun
+  reproduced the failure.
+- `tests/test_specloop_seal_verify.py::test_a_step_leaves_no_background_processes`:
+  `pgrep` exits 3 with `sysmond service not found` / `Cannot get process list`,
+  instead of exit 1 for no matching process.
+
+These existing tests and their production code are unchanged; no test was
+weakened or newly skipped. The full suite is not claimed green in this sandbox.
+
+The termination test uses disposable real wrapper/child/grandchild groups
+and pipe EOF to confirm exit. In a sandbox that denies `ps`, it injects
+process inspection while retaining real signals and group-exit checks.
+Delivery tests use fake GitHub/git/specloop interfaces and temporary state;
+the independent-supervisor test uses real local run state with a fake driver
+launch. These checks cannot establish launchd behavior or remote push effects.
+
+### CI and harness evidence
+
+Current-change CI and trusted harness results: **pending**. No CI result is
+claimed from the local commands above. Historical CI results below describe
+their dated snapshots only.
+
+### Manual host checks
+
+| Check | Actual host result for this change |
+| --- | --- |
+| macOS launchd unload with a surviving detached job | **Pending — not performed.** No daemon service was loaded or unloaded in this implementation session. |
+| Stop during an observed push to a disposable remote | **Pending — not performed.** No network or remote mutation was performed in this implementation session. |
+
+Complete both checks before operational rollout. Use a disposable repository,
+remote and isolated daemon setup (for example, a dedicated test account), not
+production work. Preserve logs and receipt copies. Record the date, host/OS,
+revision, commands and exit codes, job ID, PID/PGID, observations and evidence
+paths separately from automated/CI results. If a check is not run, leave it
+pending rather than inferring success from pytest.
+
+**macOS launchd unload procedure:**
+
+1. Start the disposable daemon under launchd and launch a long-running,
+   disposable tracked drafting/admission/revision job. Confirm it is running
+   with `uv run nightshift jobs`; record its full ID, process identity and log
+   path before unloading.
+2. Run `uv run nightshift pause`, then unload the disposable daemon's actual
+   plist using `launchctl unload <disposable-daemon.plist>`. Verify the daemon
+   service is unloaded. Pause itself must not terminate the tracked job.
+3. From another terminal in the same test account, run `uv run nightshift jobs`
+   and verify the detached job survived. Run `uv run nightshift jobs stop <id>`
+   with its full ID. Record the exit code and elapsed time; check the group has
+   no executing members, inventory says `stopped`, and logs/receipts remain.
+4. Reload the disposable daemon with pause still present, then resume and poll.
+   Verify the stopped attempt is neither delivered nor replaced. If testing
+   admitted work, inspect the independent supervisor and its run processes
+   separately; unloading Nightshift does not stop them. Keep or restore pause
+   while cleaning up disposable work after inspecting its state.
+
+**Disposable-remote mid-push procedure:**
+
+1. Record the disposable remote's refs and PRs and the local checkout,
+   admission/run state, job receipts and logs. Arrange a sufficiently slow
+   push to observe it in flight. Determine whether that push belongs to the
+   selected job's process group or is a daemon-owned delivery operation.
+2. While the push is visibly in progress, pause Nightshift and request
+   `uv run nightshift jobs stop <id>`. Record the observed push, group
+   membership, stop outcome and timing. If no in-flight push was observed,
+   the check remains pending; a completed push is not a mid-push check.
+3. Inspect remote refs/PRs again, plus local refs, logs, results, stop record
+   and committed admission state. Record any accepted remote effects, even
+   if stop succeeded locally. A daemon-owned push outside the selected group
+   is not killed by jobs stop; an operation already dispatched may finish.
+   A completed job can report `already finished` and retain delivery
+   eligibility. Neither outcome guarantees rollback.
+4. Keep pause in place while reconciling what actually happened. Any manual
+   receipt recovery comes only after inspection of local and remote state,
+   control of relevant independent writers, and backup of evidence, as
+   described in [the operator guidance](../README.md#pause-and-job-control).
+   Clean up only the disposable resources deliberately; do not treat cleanup
+   or a retry as proof that the interrupted push had no effects.
+
 ## Current public snapshot
 
 On 2026-09-08, the sanitized public snapshot passed 358 Python tests with one

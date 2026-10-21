@@ -632,6 +632,8 @@ time.sleep(20)
             attempts.append((directory, path, receipt, family))
         selected, unrelated = attempts
         directory, path, receipt, family = selected
+        unrelated_evidence = {p: p.read_bytes() for p in
+                              [unrelated[1], *unrelated[0].iterdir()] if p.is_file()}
         preserved = {p: p.read_bytes() for p in (directory / "process.json",
                      directory / "request.json", directory / "log", path, root / "pause")}
         caller_group = os.getpgrp()
@@ -743,6 +745,7 @@ raise SystemExit(cli.main(["jobs", "stop", job_id, "--config", str(Path(root) / 
         assert all(p.read_bytes() == data for p, data in preserved.items())
         assert b"job evidence" in (directory / "log").read_bytes()
         assert not (unrelated[0] / "stop.json").exists()
+        assert all(p.read_bytes() == data for p, data in unrelated_evidence.items())
         stop = json.loads((directory / "stop.json").read_text())
         assert stop["state"] == "stopped" and stop["requested_at"] and stop["stopped_at"]
         assert stop["process"] == json.loads((directory / "process.json").read_text())

@@ -427,6 +427,17 @@ def test_cancelled_jobs_remain_pending_after_restart_and_resume(
             assert_held("stopped")
             assert {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()} == evidence
 
+    # Reapplying a trigger label is not manual receipt recovery and must not
+    # release the local hold documented for operators.
+    gh.labels.clear()
+    poll()
+    gh.labels.update(labels)
+    specloop_job._children.clear()
+    health = daemon.RepoHealth()
+    poll()
+    assert_held("stopped")
+    assert {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()} == evidence
+
 
 @pytest.mark.parametrize("failure", ["invalid_result", "dead_child", "missing_executable"])
 def test_failed_background_job_reports_health_before_retry(background, monkeypatch, failure):
@@ -718,6 +729,7 @@ def test_committed_admission_survives_delivery_hold(delivery_job, monkeypatch, c
         # Confirm only after the real wrapper exits; retain its late success.
         specloop_job.finish_stop(job.directory)
     result = job.result_path.read_bytes()
+    job_evidence = {p.name: p.read_bytes() for p in job.directory.iterdir() if p.is_file()}
 
     for resumed in (False, cancelled):
         if resumed:
@@ -733,6 +745,7 @@ def test_committed_admission_survives_delivery_hold(delivery_job, monkeypatch, c
             assert Run.for_change(change).state.status == "running"
             assert job.path.read_bytes() == pending
             assert job.result_path.read_bytes() == result
+            assert {p.name: p.read_bytes() for p in job.directory.iterdir() if p.is_file()} == job_evidence
             assert not (job.directory / "collected.json").exists()
             assert (job.gh.labels, job.gh.comments, job.gh.prs) == effects
             assert not job.health.failures and not job.health.item_failures and not job.health.announced
@@ -745,7 +758,20 @@ def test_committed_admission_survives_delivery_hold(delivery_job, monkeypatch, c
 
 @pytest.mark.scenario("paused-job-delivery/pause-gates-launches-and-delivery/admission-finishes-while-paused")
 def test_paused_daemon_does_not_deliver_finished_admission(delivery_job):
-    _finish_while_paused(delivery_job("admit"))
+    job = delivery_job("admit")
+    _finish_while_paused(job)
+    # The operator can discover completed execution after a daemon restart
+    # without collecting its result or releasing paused delivery.
+    specloop_job._children.clear()
+    job.health = daemon.RepoHealth()
+    evidence = {p.name: p.read_bytes() for p in job.directory.iterdir() if p.is_file()}
+    rows, errors = specloop_job.list_jobs(daemon.STATE_DIR)
+    assert not errors and len(rows) == 1
+    assert rows[0].id == job.directory.name and rows[0].state == "finished"
+    assert rows[0].log_path.is_file()
+    _assert_paused_delivery_held(job)
+    assert not (job.directory / "collected.json").exists()
+    assert {p.name: p.read_bytes() for p in job.directory.iterdir() if p.is_file()} == evidence
 
 
 @pytest.mark.scenario("paused-job-delivery/pause-gates-launches-and-delivery/draft-or-revision-finishes-while-paused")

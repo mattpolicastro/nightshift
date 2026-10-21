@@ -144,11 +144,13 @@ Make `specloop` available on the daemon's PATH and run the separate supervisor
 Worker quotas and endpoint/model settings do not provide specloop quota pacing;
 specloop uses its manifest's provider profiles.
 
-The daemon's kill switch is `~/.nightshift/pause`. While that file exists, the daemon performs no intake,
-approval, revision or publication. Already-running drafting/admission jobs may
-finish, but delivery waits. Already-admitted runs continue under the separate
-specloop supervisor; stopping those requires stopping its run processes or
-unloading its launchd job.
+The daemon's kill switch is `~/.nightshift/pause`: it holds new work and
+completion delivery. Running drafting, admission and revision jobs may finish
+locally. Use `nightshift jobs` and `nightshift jobs stop <id>` to select and
+terminate a tracked background job. An admission that has already committed
+runnable state may still start or continue building under the independent
+`specloop serve` supervisor. See [pause and job control](#pause-and-job-control)
+for these boundaries and recovery guidance.
 
 ### Prepare dependencies before verification
 
@@ -273,7 +275,7 @@ holding a tool loop are different claims.
 | `recovery.py`                                 | ✅ what to do with an interrupted task, by recorded phase                       |
 | `preflight.py`                                | ✅ what must hold before an unattended night, incl. a token negative control    |
 | `tests/`                                      | regression suite; rerun `uv run pytest` to establish a current count/result    |
-| `cli.py`                                      | ✅ `attention`/`status`/`pause`/`resume`/`run`/`reconcile`/`preflight`; `digest` is Phase 2 |
+| `cli.py`                                      | ✅ `attention`/`status`/`pause`/`resume`/`jobs`/`run`/`reconcile`/`preflight`; `digest` is Phase 2 |
 | `specloop_intake.py`, `specloop_job.py`, `specloop_client.py`, `specloop_attention.py` | ✅ the GitHub front door for specloop repositories: drafting, admission, revision, publication, attention |
 | `../specloop/` | ✅ the build engine (its own CLI): loop, seal, verify, review, evidence, gates, serve |
 | `config.py`, `vcs.py`, `task.py`, `notify.py` | ✅ config, worktrees, state machine, Slack                                      |
@@ -289,12 +291,84 @@ uv run nightshift status      # what's running now, queue depth, blocked, alerti
 uv run nightshift preflight   # is it safe to leave alone tonight?
 uv run nightshift reconcile   # repair crash state
 uv run nightshift run --once  # claim and run one task
-uv run nightshift pause     # pause daemon actions; admitted specloop runs continue
-uv run nightshift resume
+uv run nightshift pause       # hold new work and completion delivery
+uv run nightshift jobs        # list local background attempts, including history
+uv run nightshift jobs stop <id>  # replace <id> with the full ID from jobs
+uv run nightshift resume      # resume eligible delivery; stopped jobs stay held
 ```
 
 Copy `config.example.toml` to `config.toml` (gitignored) before running the
 daemon.
+
+### Pause and job control
+
+`nightshift pause` creates `~/.nightshift/pause`; `nightshift resume` removes
+it. Pause prevents new daemon launches and completion-delivery operations,
+including pushes, PR creation, comments, label changes and publication.
+An already-running job can finish and write its local result while paused;
+its receipt stays undelivered. Resume delivers eligible retained results once
+without rerunning the job, including after a daemon restart. An external
+operation already dispatched when pause appears may finish. Pause does not
+roll back git or GitHub effects, or terminate current worker-engine tasks.
+
+`nightshift jobs` and `nightshift jobs stop <id>` work offline without a running
+daemon or valid repository configuration. Inventory includes proposal,
+admission and revision attempts, with full ID, repository/item, command,
+execution state, available PID/PGID and log path. `finished` means execution
+completed; delivery may still be pending. States also include `starting`,
+`running`, `failed`, `stopping`, `stopped` and `unknown`. Unreadable entries
+produce diagnostics and exit 1 while valid rows remain visible; an empty
+inventory prints `No background jobs.` and exits 0.
+
+To stop one job, copy its exact full ID (32 hexadecimal characters as printed;
+no prefixes or paths). Stop verifies the wrapper's process-start identity,
+process group and job-directory argument before signalling the owned POSIX
+group. It sends SIGTERM, allows **5 seconds** for exit, then escalates to
+SIGKILL if the same owned group still executes, allowing **1 further second**
+to confirm termination. These are termination-phase deadlines; identity
+inspection also takes time. `stopped` is recorded only after no executing
+group members remain. The wrapper, children and grandchildren in that group
+are covered; descendants that create another session/group are outside it.
+Other jobs and the caller are unaffected, and stop does not change pause.
+
+A successful or repeated confirmed stop exits 0. A job whose completion won
+the race reports `already finished`, exits 0 and retains its delivery
+eligibility. Unsafe identity, unknown IDs and operational failures exit 1;
+malformed command syntax exits 2. Older jobs without verifiable process
+identity remain listable but cannot safely be stopped by this command. A PID
+alone is insufficient. Identity mismatches, a missing wrapper leader with
+live descendants, and unavailable process inspection cause refusal. If a new
+job is still awaiting metadata, inspect it and retry. If signalling or exit
+confirmation fails after stop intent was accepted, the job stays `stopping`
+and delivery remains held; inspect the diagnostic and log before retrying.
+
+**Stopped jobs stay held.** Logs, requests, results and receipts remain on
+disk. The intake receipt retains its job reference, so polling, daemon
+restart, resume and label removal/reapplication do not deliver that result or
+start a replacement attempt. Intentional cancellation does not count as a
+health failure or trigger escalation. Internally the receipt remains pending;
+`nightshift jobs` is the authoritative view of its stopped state. There is no
+job retry command.
+
+Manual receipt recovery is an operator decision: **pause first**, then inspect
+the job log, request/result, stop record and parent intake receipt, the local
+checkout and committed specloop admission/run state, and remote refs, PRs,
+comments and labels. Admission can commit runnable state before returning a
+result. Nightshift pause or job termination leaves that state intact, and the
+independent `specloop serve` supervisor may start or continue the build even
+while Nightshift withholds delivery. Control that supervisor and its active
+run processes separately if they must stop; unloading a supervisor alone is
+not proof that detached run processes exited. Job control does not cancel
+worker-engine tasks or already-admitted runs.
+
+Only after inspecting local and remote state, and ensuring relevant writers
+are quiescent, back up the receipts and evidence and decide whether to repair
+the receipt or deliberately enable another attempt. Do not blindly remove a
+job reference or stop record to retry: SIGKILL may leave partial artifacts,
+and remote effects or admission may already have committed. Neither pause,
+stop nor receipt recovery promises rollback. Resume only when the intended
+delivery/retry is safe. The [validation record](docs/validation.md#background-job-control--2026-10-21)
+separates automated checks from pending launchd and disposable-remote checks.
 
 ### What needs you
 
@@ -417,14 +491,38 @@ first item is a real credential problem, not a formality.
       five-hour window, a cap of 8 is roughly $35–70 per window and up to ~4.8
       windows a day, so the name undersells it badly. Set it to what you want
       spent between resets, not per night.
-- [ ] **Know the two stop buttons.** `nightshift pause` is graceful — the
-      current task finishes. `launchctl unload` is not.
+- [ ] **Check the control boundaries.** Pause holds daemon launches and
+      delivery; `nightshift jobs stop <id>` terminates one tracked group.
+      On disposable work, unload the daemon, then list and stop the surviving
+      detached job from another terminal. Separately, stop during an observed
+      push to a disposable remote; inspect remote refs/PRs and local logs and
+      record any accepted remote effects. A daemon-owned push outside the
+      selected group is not killed by jobs stop. CI cannot establish what the
+      remote accepted during interruption. Follow the
+      [manual launchd and mid-push procedures](docs/validation.md#manual-host-checks)
+      before operational rollout; unperformed host checks remain pending.
 
 ```sh
 cp launchd/com.mattpolicastro.nightshift.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.mattpolicastro.nightshift.plist
 tail -f ~/.logs/nightshift.log
 ```
+
+To unload the daemon while holding later delivery:
+
+```sh
+uv run nightshift pause
+launchctl unload ~/Library/LaunchAgents/com.mattpolicastro.nightshift.plist
+# From another terminal, inventory and stop each selected surviving job:
+uv run nightshift jobs
+uv run nightshift jobs stop <id>
+uv run nightshift jobs
+```
+
+Unloading stops the daemon service, not its detached drafting, admission or
+revision jobs, and does not revoke committed admission or stop independent
+specloop builds. Keep pause in place until inspection is complete; reloading
+the daemon does not clear pause or stopped-job holds.
 
 `bin/nightshift-daemon` exists because launchd reads no shell config — not
 `.zprofile`, not `.zshenv` — so credentials must be sourced explicitly. It
