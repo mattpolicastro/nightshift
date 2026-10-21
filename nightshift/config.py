@@ -153,7 +153,7 @@ class Assignment:
 @dataclass(frozen=True)
 class Repo:
     name: str
-    verify: str
+    verify: str = ""
     base: str = "main"
     # Empty means the `~/Projects/<repo-name>` convention. See `clone_dir`.
     dir: str = ""
@@ -161,7 +161,7 @@ class Repo:
     # default because the alternative — a global pool handed out in config
     # order — starves everything below the first repo: `claim_next` refills
     # from the top of the list on every free slot, so a repo with a deep queue
-    # holds them all indefinitely. Observed 2026-08-07, when swift-app sat
+    # holds them all indefinitely. Observed 2026-08-07, when sample-app sat
     # at "0 working, 2 ready" for a full day behind sample.
     #
     # This is the FAIRNESS knob. `Config.concurrency` is still the machine-wide
@@ -172,6 +172,21 @@ class Repo:
     # low-stakes repo can run local while anything that matters stays on the
     # subscription.
     models: dict[str, str] = field(default_factory=dict)
+    engine: str = "worker"
+    manifest: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.engine not in ("worker", "specloop"):
+            raise ValueError(f"{self.name}: engine must be 'worker' or 'specloop'")
+        if self.engine == "specloop" and self.manifest is None:
+            raise ValueError(f"{self.name}: specloop requires a manifest path")
+        if self.manifest is not None:
+            if not isinstance(self.manifest, (str, Path)) or not str(self.manifest).strip():
+                raise ValueError(f"{self.name}: manifest must be a non-empty path")
+            manifest = Path(self.manifest).expanduser().resolve()
+            if not manifest.is_file():
+                raise ValueError(f"{self.name}: manifest is not a file: {manifest}")
+            object.__setattr__(self, "manifest", manifest)
 
     @property
     def base_ref(self) -> str:
@@ -244,7 +259,7 @@ class Config:
     #
     # It is NOT the real fix, and raising it further is not either. All three of
     # those issues were oversized, and #106 was already a split. The cost is
-    # ORIENTATION — dashboard's MatrixView.tsx is 1,469 lines, and an issue that
+    # ORIENTATION — sample-midi's MatrixView.tsx is 1,469 lines, and an issue that
     # says "wire a nav deck" makes the worker find everything before it can
     # start. The fix is smaller issues with file:line anchors; this only stops
     # a task that was nearly done from dying on the last turn.
@@ -269,8 +284,8 @@ class Config:
     # Read by nobody yet — there is no chores phase. Parsed so preflight can
     # validate the assignment before something starts running it.
     chores_model: str = ""
-    #: Legacy PR #6 option; parsed for compatibility, currently inactive.
-    #: Task outcomes replace automatic phase mirroring (SPEC-paseo-outcomes.md).
+    #: Legacy option; parsed for compatibility, currently inactive. Task
+    #: outcomes replaced automatic phase mirroring.
     mirror_to_paseo: bool = False
     notes: list[str] = field(default_factory=list)
 
@@ -382,11 +397,13 @@ def load(path: Path | None = None) -> Config:
         repos=[
             Repo(
                 name=r["name"],
-                verify=r["verify"],
+                verify=r["verify"] if r.get("engine", "worker") == "worker" else r.get("verify", ""),
                 base=r.get("base", "main"),
                 dir=r.get("dir", ""),
                 concurrency=r.get("concurrency", 1),
                 models=dict(r.get("models", {})),
+                engine=r.get("engine", "worker"),
+                manifest=_manifest_path(r, path.parent),
             )
             for r in raw.get("repos", [])
         ],
@@ -395,6 +412,9 @@ def load(path: Path | None = None) -> Config:
             working=labels.get("working", "agent:working"),
             done=labels.get("done", "agent:done"),
             needs_human=labels.get("needs_human", "needs-human"),
+            spec_draft=labels.get("spec_draft", "spec:draft"),
+            spec_review=labels.get("spec_review", "spec:review"),
+            spec_approved=labels.get("spec_approved", "spec:approved"),
         ),
         poll_seconds=daemon.get("poll_seconds", 120),
         max_tasks_per_night=daemon.get("max_tasks_per_night", 8),
@@ -413,6 +433,17 @@ def load(path: Path | None = None) -> Config:
         chores_model=models.get("chores", ""),
         mirror_to_paseo=daemon.get("mirror_to_paseo", False),
     )
+
+
+def _manifest_path(repo: dict, config_dir: Path) -> Path | None:
+    """Resolve manifest paths beside the config, independent of daemon cwd."""
+    if "manifest" not in repo:
+        return None
+    value = repo["manifest"]
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{repo['name']}: manifest must be a non-empty path")
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else config_dir / path
 
 
 def _endpoint(raw: dict) -> Endpoint:

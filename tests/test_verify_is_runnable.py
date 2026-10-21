@@ -1,6 +1,6 @@
 """A worker must be able to run its own repo's verify command.
 
-Observed 2026-08-07 on swift-app #1, the first task in the first non-JS
+Observed 2026-08-07 on sample-app #1, the first task in the first non-JS
 repo enrolled here. The worker read the issue and the requirements, arrived at
 a correct implementation plan, and then could not run `swift` at all — not the
 bare name, not `/usr/bin/swift`, not via `sh -c`, not from a subagent, and not
@@ -9,7 +9,7 @@ with `dangerouslyDisableSandbox` (which is gated the same way). Plain reads and
 was simply never listed.
 
 `_IMPLEMENT_ALLOWED` was written for sample and every build verb in it is JS —
-`pnpm`, `npm`, `node`. swift-app was enrolled with
+`pnpm`, `npm`, `node`. sample-app was enrolled with
 `verify = "swift build && swift test && swift format lint ..."` and nothing
 checked that the enrolled verify command and the hand-kept allow-list agreed.
 Enrolling a repo is an edit to one file, granting a toolchain is an edit to

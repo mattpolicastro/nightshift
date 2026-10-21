@@ -1,6 +1,6 @@
 """A transient GitHub error must not be a daemon exit.
 
-BACKLOG §1, and the largest known defect in the system: `startup()` called
+From the worker engine's September backlog, and the largest known defect in the system: `startup()` called
 `queue.reconcile` per repo with no guard, and `_gh` raised on any non-zero
 `gh` exit, so ONE failed API call ended the process before the loop had
 claimed anything. The log holds 107 tracebacks across seven dates — 08-09,

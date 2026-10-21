@@ -119,9 +119,10 @@ Start by reading what is already there:
   git log --oneline {base}..HEAD
   git diff {base}...HEAD
 
-The requested changes are in the issue comments below, newest last. They are \
-the authority on what to change — the issue body describes the original task \
-and has not been rewritten.
+The requested changes are in the issue comments below, newest last; only \
+comments from the repository's collaborators are shown. They are the authority \
+on what to change — the issue body describes the original task and has not \
+been rewritten.
 
 **Do not reset, rebase, force-push, amend, or revert the existing commits.** \
 Add new commits on top. The existing diff was accepted apart from the points \

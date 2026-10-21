@@ -42,7 +42,7 @@ unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
 # verify AFTER a task had already spent its implement pass.
 export PATH="/opt/homebrew/bin:$HOME/n/bin:$PATH"
 
-# `swift` is swift-app's verify command and resolves at /usr/bin/swift, so
+# `swift` is sample-app's verify command and resolves at /usr/bin/swift, so
 # launchd's own PATH already reaches it — it is listed anyway because the whole
 # point of this loop is that a missing verify binary otherwise surfaces AFTER a
 # task has spent its implement pass.

@@ -1,0 +1,84 @@
+# Example: a trusted specloop manifest for building this repository with itself.
+# Copy it OUTSIDE the repository (agents can read anything in the checkout),
+# adjust the paths, and admit it with `specloop admit <manifest> --change <name>`.
+# Runs commit to the run's own bare repository, so the harness executing them is
+# not what they change.
+
+[run]
+repo = "/path/to/nightshift"   # your local checkout
+change = "example-change"
+branch = "spec/example-change"
+env_file = "~/.config/specloop/env"
+
+[roles]
+implement = "codex-astra"
+review = "codex-astra"
+feasibility = "codex-astra"
+
+[profiles.codex-astra]
+adapter = "codex"
+model = "gpt-6-astra"
+effort = "high"
+
+[profiles.local-qwen]
+adapter = "claude"
+model = "qwen3-coder-next"
+base_url = "http://YOUR_OLLAMA_HOST:11434"
+
+[paths]
+allowed = ["nightshift/**", "specloop/**", "tests/**", "README.md", "KNOWN-LIMITATIONS.md",
+           "config.example.toml", "docs/specloop/**"]
+# The live daemon config, the trusted manifests, the service wrappers, the
+# dependency set and the human records are not the agents' to change.
+frozen = ["openspec/**", "specloop/manifests/**", "config.toml", "launchd/**", "bin/**",
+          "plugins/**", "pyproject.toml", "uv.lock", "CLAUDE.md", "CHANGELOG.md",
+          ".github/**"]
+
+[gates]
+# Gate after the daemon intake (section 2): the GitHub flow is reviewed as a
+# whole before the PR-review loop builds on it. Since 2026-10-20 a fresh agent
+# does that review; a human is paused for only if it fails twice.
+phases = [2]
+review = "agent"
+# A stuck task gets one arbiter ruling (accept, retry with a note, or a human).
+stuck = "agent"
+evidence = true
+mutation_steps = ["unit-tests"]
+mutation_paths = ["specloop/**", "nightshift/**"]
+mutation_count = 10
+mutation_min = 0.8
+
+[limits]
+max_attempts = 3
+max_infra = 3
+implement_minutes = 45
+review_minutes = 20
+idle_minutes = 10
+
+[sandbox]
+# tests/test_reviewer_readonly.py simulates a reviewer escaping to this exact
+# file (worker.SCRATCH_DIR / _PROBE_TARGET); nothing else under /tmp is writable.
+writable = ["/private/tmp/verdict.txt"]
+deny_read = ["~/.codex", "~/.claude", "~/.specloop/homes", "~/.ssh", "~/.config", "~/.aws",
+             "~/Library/Keychains"]
+
+[vars]
+venv = "/path/to/nightshift/.venv"
+checks = "/path/to/manifests/nightshift"   # where you keep scenario_plugin.py and negative_control.py
+
+[[verify]]
+id = "unit-tests"
+run = ["/usr/bin/env", "PYTHONPATH={src}:{checks}", "PYTHONDONTWRITEBYTECODE=1",
+       "{venv}/bin/python", "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider",
+       "-p", "scenario_plugin", "--rootdir={src}", "{src}/tests"]
+timeout = 900
+
+[[verify]]
+id = "negative-control"
+run = ["/usr/bin/env", "PYTHONDONTWRITEBYTECODE=1", "{venv}/bin/python", "-m", "pytest", "-q",
+       "-p", "no:cacheprovider", "{checks}/negative_control.py"]
+expect = 1
+timeout = 120
+
+[coverage]
+step = "unit-tests"

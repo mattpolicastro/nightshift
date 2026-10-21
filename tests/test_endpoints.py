@@ -38,12 +38,12 @@ class FakePopen:
 
 SANDBOX = "matt/sandbox"
 
-EVO = Endpoint(
-    name="evo",
+LOCAL = Endpoint(
+    name="local",
     protocol="anthropic",
     billing="none",
-    base_url="http://evo-host:11434",
-    auth_env="NIGHTSHIFT_EVO_TOKEN",
+    base_url="http://local-host:11434",
+    auth_env="NIGHTSHIFT_LOCAL_TOKEN",
     models=("glm-4.7-flash", "qwen3-coder-next"),
     context_tokens={"glm-4.7-flash": 203_000, "qwen3-coder-next": 262_000},
     max_turns_multiplier=1.5,
@@ -73,8 +73,8 @@ def test_a_bare_model_name_resolves_to_the_default_endpoint():
 
 
 def test_endpoint_colon_model_selects_explicitly():
-    a = cfg(endpoints=[EVO], implement_model="evo:glm-4.7-flash").assign("implement")
-    assert a.endpoint.name == "evo"
+    a = cfg(endpoints=[LOCAL], implement_model="local:glm-4.7-flash").assign("implement")
+    assert a.endpoint.name == "local"
     assert a.model == "glm-4.7-flash"
 
 
@@ -86,23 +86,23 @@ def test_a_colon_in_a_model_name_is_not_an_endpoint():
     that name — which is also what keeps every pre-endpoints config meaning
     what it meant.
     """
-    c = cfg(endpoints=[EVO], implement_model="qwen3.8:27b")
+    c = cfg(endpoints=[LOCAL], implement_model="qwen3.8:27b")
     assert c.assign("implement").endpoint.is_default
     assert c.assign("implement").model == "qwen3.8:27b"
 
-    tagged = cfg(endpoints=[EVO], implement_model="evo:glm-4.7-flash:latest")
-    assert tagged.assign("implement").endpoint.name == "evo"
+    tagged = cfg(endpoints=[LOCAL], implement_model="local:glm-4.7-flash:latest")
+    assert tagged.assign("implement").endpoint.name == "local"
     assert tagged.assign("implement").model == "glm-4.7-flash:latest"
 
 
 def test_a_typo_d_endpoint_is_reported_rather_than_silently_defaulted():
-    """`evoo:glm-…` would otherwise run on the SUBSCRIPTION, billed and slow.
+    """`locall:glm-…` would otherwise run on the SUBSCRIPTION, billed and slow.
 
     Silent fallback turns free work into billed work and hides that the local
     tier is down — the failure §6 refuses.
     """
-    c = cfg(endpoints=[EVO], implement_model="evoo:glm-4.7-flash")
-    assert c.undeclared_endpoint_refs() == ["evoo:glm-4.7-flash"]
+    c = cfg(endpoints=[LOCAL], implement_model="locall:glm-4.7-flash")
+    assert c.undeclared_endpoint_refs() == ["locall:glm-4.7-flash"]
     checks = preflight.run(c, {}, runner=lambda args: '{"name":"x"}')
     assert _find(checks, "endpoint refs").ok is False
 
@@ -130,16 +130,16 @@ def test_a_per_repo_models_table_overrides_the_global_one(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text(
         "[[endpoints]]\n"
-        'name = "evo"\nbase_url = "http://evo-host:11434"\n'
-        'auth_env = "NIGHTSHIFT_EVO_TOKEN"\n\n'
+        'name = "local"\nbase_url = "http://local-host:11434"\n'
+        'auth_env = "NIGHTSHIFT_LOCAL_TOKEN"\n\n'
         '[[repos]]\nname = "o/sandbox"\nverify = "pnpm test"\n'
-        '[repos.models]\nimplement = "evo:glm-4.7-flash"\n\n'
+        '[repos.models]\nimplement = "local:glm-4.7-flash"\n\n'
         '[[repos]]\nname = "o/real"\nverify = "pnpm test"\n\n'
         '[models]\nimplement = "sonnet"\nreview = "opus"\n'
     )
     c = config_mod.load(p)
     sandbox, real = c.repos
-    assert c.assign("implement", sandbox).endpoint.name == "evo"
+    assert c.assign("implement", sandbox).endpoint.name == "local"
     assert c.assign("implement", real).endpoint.is_default
     # The override is per phase, not per repo: review is untouched.
     assert c.assign("review", sandbox).endpoint.is_default
@@ -147,7 +147,7 @@ def test_a_per_repo_models_table_overrides_the_global_one(tmp_path):
 
 def test_the_turn_budget_is_scaled_by_the_endpoint():
     """A local model is slower per turn, and a truncation costs the whole run."""
-    a = cfg(endpoints=[EVO], implement_model="evo:glm-4.7-flash").assign("implement")
+    a = cfg(endpoints=[LOCAL], implement_model="local:glm-4.7-flash").assign("implement")
     assert a.max_turns(140) == 210
     assert a.context_tokens == 203_000
 
@@ -184,13 +184,13 @@ def test_a_local_worker_carries_no_subscription_token(env_file, monkeypatch):
     """The §3 invariant, and the one that must fail loudly if `_env` is reordered."""
     env_file.write_text(
         "export CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat-real'\n"
-        "export NIGHTSHIFT_EVO_TOKEN='ignored-by-ollama'\n"
+        "export NIGHTSHIFT_LOCAL_TOKEN='ignored-by-ollama'\n"
     )
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    env = worker._env(EVO)
+    env = worker._env(LOCAL)
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
-    assert env["ANTHROPIC_BASE_URL"] == "http://evo-host:11434"
+    assert env["ANTHROPIC_BASE_URL"] == "http://local-host:11434"
     assert env["ANTHROPIC_AUTH_TOKEN"] == "ignored-by-ollama"
     # No context window claimed unless one is configured: the CLI's own
     # catalog is right for a model it knows, and wrong only for one it does not.
@@ -200,8 +200,8 @@ def test_a_local_worker_carries_no_subscription_token(env_file, monkeypatch):
 def test_the_configured_context_window_reaches_the_run(env_file):
     """Claude Code has no catalog entry for these models, so absent this it
     assumes 200k and auto-compacts to it — wasting a 203k model."""
-    env_file.write_text("export NIGHTSHIFT_EVO_TOKEN='x'\n")
-    env = worker._env(EVO, context_tokens=203_000)
+    env_file.write_text("export NIGHTSHIFT_LOCAL_TOKEN='x'\n")
+    env = worker._env(LOCAL, context_tokens=203_000)
     assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "203000"
 
 
@@ -216,8 +216,8 @@ def test_the_default_endpoint_still_gets_the_oauth_token(env_file):
 def test_an_endpoint_gets_its_own_config_dir(env_file):
     """CONFIG_DIR caches credentials, so nothing from the subscription session
     is reachable from a worker aimed somewhere else."""
-    env_file.write_text("export NIGHTSHIFT_EVO_TOKEN='x'\n")
-    assert worker._env(EVO)["CLAUDE_CONFIG_DIR"] == str(worker.CONFIG_DIR / "evo")
+    env_file.write_text("export NIGHTSHIFT_LOCAL_TOKEN='x'\n")
+    assert worker._env(LOCAL)["CLAUDE_CONFIG_DIR"] == str(worker.CONFIG_DIR / "local")
 
 
 def test_a_base_url_in_the_env_file_is_not_an_override(env_file):
@@ -229,7 +229,7 @@ def test_a_base_url_in_the_env_file_is_not_an_override(env_file):
     """
     env_file.write_text(
         "export CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat-real'\n"
-        "export ANTHROPIC_BASE_URL='http://evo-host:11434'\n"
+        "export ANTHROPIC_BASE_URL='http://local-host:11434'\n"
         "export ANTHROPIC_AUTH_TOKEN='whatever'\n"
     )
     env = worker._env()
@@ -241,7 +241,7 @@ def test_a_base_url_in_the_env_file_is_not_an_override(env_file):
 def test_a_base_url_in_the_env_file_fails_preflight(env_file):
     checks = preflight.run(
         cfg(),
-        {"GH_TOKEN": "github_pat_x", "ANTHROPIC_BASE_URL": "http://evo-host:11434"},
+        {"GH_TOKEN": "github_pat_x", "ANTHROPIC_BASE_URL": "http://local-host:11434"},
         runner=lambda args: '{"name":"x"}',
     )
     assert _find(checks, "ANTHROPIC_BASE_URL").ok is False
@@ -249,18 +249,18 @@ def test_a_base_url_in_the_env_file_fails_preflight(env_file):
 
 def test_a_worker_holds_no_other_endpoint_s_credential(env_file):
     env_file.write_text(
-        "export NIGHTSHIFT_EVO_TOKEN='evo'\nexport NIGHTSHIFT_OAI_TOKEN='oai'\n"
+        "export NIGHTSHIFT_LOCAL_TOKEN='local'\nexport NIGHTSHIFT_OAI_TOKEN='oai'\n"
     )
-    c = cfg(endpoints=[EVO, OAI])
-    env = worker._env(EVO, foreign_auth_envs=c.foreign_auth_envs(EVO))
-    assert env["ANTHROPIC_AUTH_TOKEN"] == "evo"
+    c = cfg(endpoints=[LOCAL, OAI])
+    env = worker._env(LOCAL, foreign_auth_envs=c.foreign_auth_envs(LOCAL))
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "local"
     assert "NIGHTSHIFT_OAI_TOKEN" not in env
 
 
 def test_an_endpoint_whose_credential_is_unset_refuses_to_run(env_file):
     env_file.write_text("")
-    with pytest.raises(ValueError, match="NIGHTSHIFT_EVO_TOKEN"):
-        worker._env(EVO)
+    with pytest.raises(ValueError, match="NIGHTSHIFT_LOCAL_TOKEN"):
+        worker._env(LOCAL)
 
 
 def test_an_openai_endpoint_is_driven_through_its_proxy(env_file):
@@ -281,7 +281,7 @@ def test_the_invocation_carries_the_endpoint_all_the_way_to_the_subprocess(
 ):
     """The seam between `Assignment` and `claude -p`. Unit-testing `_env` and
     the call site separately left the join itself unchecked."""
-    env_file.write_text("export NIGHTSHIFT_EVO_TOKEN='ollama-ignores-this'\n")
+    env_file.write_text("export NIGHTSHIFT_LOCAL_TOKEN='ollama-ignores-this'\n")
     seen = {}
 
     def fake_popen(args, **kw):
@@ -291,8 +291,8 @@ def test_the_invocation_carries_the_endpoint_all_the_way_to_the_subprocess(
     monkeypatch.setattr(worker.subprocess, "Popen", fake_popen)
 
     c = Config(repos=[Repo(name=SANDBOX, verify="pnpm test",
-                           models={"implement": "evo:glm-4.7-flash"})],
-               endpoints=[EVO])
+                           models={"implement": "local:glm-4.7-flash"})],
+               endpoints=[LOCAL])
     a = c.assign("implement", c.repos[0])
     worker.implement(
         Path("/tmp"), "prompt", model=a.model,
@@ -304,7 +304,7 @@ def test_the_invocation_carries_the_endpoint_all_the_way_to_the_subprocess(
     args, env = seen["args"], seen["env"]
     assert args[args.index("--model") + 1] == "glm-4.7-flash"
     assert args[args.index("--max-turns") + 1] == "210"  # 140 x 1.5
-    assert env["ANTHROPIC_BASE_URL"] == "http://evo-host:11434"
+    assert env["ANTHROPIC_BASE_URL"] == "http://local-host:11434"
     assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "203000"
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
 
@@ -316,18 +316,18 @@ def test_the_tool_loop_probe_does_not_deny_the_tool_it_probes_for(
 
     `worker.probe` was passing the REVIEWER's deny list, which contains
     `Write`, and deny beats allow — so the probe could never pass whatever the
-    model did. Found on 2026-09-04 by running it against the EVO-X2, where
+    model did. Found on 2026-09-04 by running it against a local inference box, where
     `glm-4.7-flash` came back "no usable tool loop" after 142 seconds, having
     already been measured holding one.
     """
-    env_file.write_text("export NIGHTSHIFT_EVO_TOKEN='x'\n")
+    env_file.write_text("export NIGHTSHIFT_LOCAL_TOKEN='x'\n")
     seen = {}
 
     monkeypatch.setattr(
         worker.subprocess, "Popen",
         lambda args, **kw: (seen.update(args=args), FakePopen())[1],
     )
-    worker.probe(EVO, "glm-4.7-flash")
+    worker.probe(LOCAL, "glm-4.7-flash")
 
     args = seen["args"]
     allowed = args[args.index("--allowedTools") + 1:args.index("--disallowedTools")]
@@ -340,7 +340,7 @@ def test_the_probe_fails_a_run_that_errored_or_truncated(env_file, monkeypatch, 
     """A correct file left behind by a failed run is not a working endpoint —
     the daemon's own rule is that a run which hit `--max-turns` is a failed
     task, not a partial success."""
-    env_file.write_text("export NIGHTSHIFT_EVO_TOKEN='x'\n")
+    env_file.write_text("export NIGHTSHIFT_LOCAL_TOKEN='x'\n")
 
     def fake_run(worktree, prompt, model, max_turns, allowed, denied,
                  endpoint=None, context_tokens=0, foreign_auth_envs=()):
@@ -351,7 +351,7 @@ def test_the_probe_fails_a_run_that_errored_or_truncated(env_file, monkeypatch, 
         }))
 
     monkeypatch.setattr(worker, "_run", fake_run)
-    ok, detail = worker.probe(EVO, "glm-4.7-flash", directory=tmp_path)
+    ok, detail = worker.probe(LOCAL, "glm-4.7-flash", directory=tmp_path)
     assert ok is False
     assert "9 turns" in detail
 
@@ -398,13 +398,13 @@ def test_an_openai_endpoint_with_no_proxy_fails_preflight(env_file):
 
 
 def test_preflight_fails_when_a_model_is_absent_from_its_endpoint(env_file):
-    env_file.write_text("export NIGHTSHIFT_EVO_TOKEN='x'\n")
+    env_file.write_text("export NIGHTSHIFT_LOCAL_TOKEN='x'\n")
     checks = _preflight(
-        cfg(endpoints=[EVO]),
-        {"NIGHTSHIFT_EVO_TOKEN": "x"},
+        cfg(endpoints=[LOCAL]),
+        {"NIGHTSHIFT_LOCAL_TOKEN": "x"},
         available=("glm-4.7-flash",),
     )
-    absent = _find(checks, "endpoint evo models")
+    absent = _find(checks, "endpoint local models")
     assert absent.ok is False
     assert "qwen3-coder-next" in absent.detail
 
@@ -412,43 +412,43 @@ def test_preflight_fails_when_a_model_is_absent_from_its_endpoint(env_file):
 def test_preflight_fails_when_a_model_declares_no_context_window(env_file):
     """Absent it the run inherits an assumed 200k window — silently wasting a
     262k model, and silently overrunning a smaller one."""
-    env_file.write_text("export NIGHTSHIFT_EVO_TOKEN='x'\n")
-    thin = Endpoint(**{**EVO.__dict__, "context_tokens": {"glm-4.7-flash": 203_000}})
-    checks = _preflight(cfg(endpoints=[thin]), {"NIGHTSHIFT_EVO_TOKEN": "x"})
-    assert _find(checks, "endpoint evo context windows").ok is False
+    env_file.write_text("export NIGHTSHIFT_LOCAL_TOKEN='x'\n")
+    thin = Endpoint(**{**LOCAL.__dict__, "context_tokens": {"glm-4.7-flash": 203_000}})
+    checks = _preflight(cfg(endpoints=[thin]), {"NIGHTSHIFT_LOCAL_TOKEN": "x"})
+    assert _find(checks, "endpoint local context windows").ok is False
 
 
 def test_preflight_fails_when_an_endpoint_cannot_be_reached(env_file):
-    env_file.write_text("export NIGHTSHIFT_EVO_TOKEN='x'\n")
+    env_file.write_text("export NIGHTSHIFT_LOCAL_TOKEN='x'\n")
 
     def dead(ep, token):
         raise OSError("Connection refused")
 
     checks = preflight.run(
-        cfg(endpoints=[EVO]),
-        {"GH_TOKEN": "github_pat_x", "NIGHTSHIFT_EVO_TOKEN": "x"},
+        cfg(endpoints=[LOCAL]),
+        {"GH_TOKEN": "github_pat_x", "NIGHTSHIFT_LOCAL_TOKEN": "x"},
         runner=lambda args: '{"name":"x"}',
         prober=dead,
     )
-    assert _find(checks, "endpoint evo reachable").ok is False
+    assert _find(checks, "endpoint local reachable").ok is False
 
 
 def test_preflight_proves_the_isolation_rather_than_asserting_it(env_file):
     env_file.write_text(
         "export CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat-real'\n"
-        "export NIGHTSHIFT_EVO_TOKEN='x'\n"
+        "export NIGHTSHIFT_LOCAL_TOKEN='x'\n"
     )
-    checks = _preflight(cfg(endpoints=[EVO]), {"NIGHTSHIFT_EVO_TOKEN": "x"})
-    assert _find(checks, "endpoint evo isolation").ok is True
+    checks = _preflight(cfg(endpoints=[LOCAL]), {"NIGHTSHIFT_LOCAL_TOKEN": "x"})
+    assert _find(checks, "endpoint local isolation").ok is True
 
 
 def test_review_on_a_non_default_endpoint_says_so_out_loud(env_file):
     """Not a failure — a decision the operator has to see on the night they
     made it, rather than find in a config file three weeks later."""
-    env_file.write_text("export NIGHTSHIFT_EVO_TOKEN='x'\n")
+    env_file.write_text("export NIGHTSHIFT_LOCAL_TOKEN='x'\n")
     checks = _preflight(
-        cfg(endpoints=[EVO], review_model="evo:glm-4.7-flash"),
-        {"NIGHTSHIFT_EVO_TOKEN": "x"},
+        cfg(endpoints=[LOCAL], review_model="local:glm-4.7-flash"),
+        {"NIGHTSHIFT_LOCAL_TOKEN": "x"},
     )
     loud = _find(checks, "review endpoint")
     assert loud.ok is True
@@ -457,35 +457,35 @@ def test_review_on_a_non_default_endpoint_says_so_out_loud(env_file):
 
 
 def test_a_per_repo_override_is_reported_too(env_file):
-    """Found by running preflight against the real EVO-X2: `[repos.models]` is
+    """Found by running preflight against the real a local inference box: `[repos.models]` is
     the RECOMMENDED way to route — one repo local, everything that matters on
     the subscription — so leaving it out made the most likely routing the one
     nothing announced."""
-    env_file.write_text("export NIGHTSHIFT_EVO_TOKEN='x'\n")
+    env_file.write_text("export NIGHTSHIFT_LOCAL_TOKEN='x'\n")
     local = Repo(name="matt/low-stakes", verify="pnpm test",
-                 models={"implement": "evo:glm-4.7-flash"})
+                 models={"implement": "local:glm-4.7-flash"})
     c = Config(repos=[Repo(name=SANDBOX, verify="pnpm test"), local],
-               endpoints=[EVO])
-    checks = _preflight(c, {"NIGHTSHIFT_EVO_TOKEN": "x"})
+               endpoints=[LOCAL])
+    checks = _preflight(c, {"NIGHTSHIFT_LOCAL_TOKEN": "x"})
     loud = _find(checks, "implement endpoint matt/low-stakes")
     assert loud.ok is True
-    assert "evo:glm-4.7-flash" in loud.detail
+    assert "local:glm-4.7-flash" in loud.detail
     # The repo that was NOT overridden says nothing.
     assert not _has(checks, f"implement endpoint {SANDBOX}")
 
 
 def test_a_global_route_is_not_repeated_for_every_repo(env_file):
-    env_file.write_text("export NIGHTSHIFT_EVO_TOKEN='x'\n")
+    env_file.write_text("export NIGHTSHIFT_LOCAL_TOKEN='x'\n")
     c = Config(repos=[Repo(name=SANDBOX, verify="pnpm test")],
-               endpoints=[EVO], implement_model="evo:glm-4.7-flash")
-    checks = _preflight(c, {"NIGHTSHIFT_EVO_TOKEN": "x"})
+               endpoints=[LOCAL], implement_model="local:glm-4.7-flash")
+    checks = _preflight(c, {"NIGHTSHIFT_LOCAL_TOKEN": "x"})
     assert len([c_ for c_ in checks if c_.name.startswith("implement endpoint")]) == 1
 
 
 def test_nothing_endpoint_shaped_is_reported_when_nothing_is_configured():
     checks = preflight.run(cfg(), {"GH_TOKEN": "github_pat_x"},
                            runner=lambda args: '{"name":"x"}')
-    assert not _has(checks, "endpoint evo")
+    assert not _has(checks, "endpoint local")
     assert not _has(checks, "review endpoint")
 
 
@@ -622,7 +622,7 @@ def test_an_unreachable_endpoint_leaves_the_task_armed(monkeypatch):
     def dead(ep, token):
         raise OSError("Connection refused")
 
-    c = cfg(endpoints=[EVO], implement_model="evo:glm-4.7-flash")
+    c = cfg(endpoints=[LOCAL], implement_model="local:glm-4.7-flash")
     assert daemon.claim_next(c, {SANDBOX: Path("/tmp/x")}, prober=dead) is None
     assert claimed == []
 

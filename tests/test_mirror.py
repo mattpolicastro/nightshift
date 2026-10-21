@@ -53,7 +53,7 @@ def transcript_at(path: Path, worktree: Path, session=SESSION) -> Path:
 def session_file(root: Path, worktree: Path, session=SESSION) -> Path:
     """Where a worker's isolated CLAUDE_CONFIG_DIR keeps its session."""
     slug = str(worktree).replace("/", "-")
-    d = root / "evo" / "projects" / slug
+    d = root / "local" / "projects" / slug
     d.mkdir(parents=True)
     f = d / f"{session}.jsonl"
     f.write_text("{}\n")

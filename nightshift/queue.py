@@ -16,7 +16,7 @@ matching label is inert litter, whereas a label with no claim file is an issue
 that looks owned by nobody.
 
 Single-daemon assumption: claiming is check-then-act against the GitHub API and
-is therefore racy between two daemons. One daemon on the Mac Studio is the
+is therefore racy between two daemons. One daemon on the host Mac is the
 design (plan: concurrency 1 cloud), so this is not defended against — it is
 recorded here so nobody later assumes otherwise.
 """
@@ -28,6 +28,8 @@ import logging
 import re
 import subprocess
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
@@ -52,6 +54,9 @@ class Labels:
     #: used to be "close the PR and let it start over", throwing away a diff
     #: that was mostly correct.
     revise: str = "agent:revise"
+    spec_draft: str = "spec:draft"
+    spec_review: str = "spec:review"
+    spec_approved: str = "spec:approved"
 
     @property
     def admission(self) -> tuple[str, str]:
@@ -193,6 +198,23 @@ _TRANSIENT_MARKERS = (
 _RETRIES = 3
 _BACKOFF_SECONDS = (2, 8)
 
+# Scoped to the calling context so specloop's pause cannot interrupt worker
+# operations running concurrently in another thread.
+_GH_GUARD = ContextVar("gh_guard", default=None)
+
+
+@contextmanager
+def gh_guard(check):
+    """Check a caller's kill switch before every subprocess, including retries.
+
+    Reconciliation uses nested _gh calls, which inherit the same guard.
+    """
+    token = _GH_GUARD.set(check)
+    try:
+        yield
+    finally:
+        _GH_GUARD.reset(token)
+
 
 def _is_transient(stderr: str) -> bool:
     """Only a RECOGNISED outage is retried; everything else fails fast.
@@ -213,9 +235,19 @@ def _gh(args: list[str], *, sleep=time.sleep) -> str:
     incident ran three quarters of an hour, and what survives that is the
     caller skipping the repo for this pass rather than the process exiting.
     Both halves are needed and they are not the same fix.
+
+    Marked spec intake comments are reconciled before retrying a create: a
+    failed response does not mean GitHub failed to store the comment.
     """
     last = ""
     for attempt in range(_RETRIES):
+        if attempt:
+            reconciled = _reconcile_intake_comment(args, sleep=sleep)
+            if reconciled is not None:
+                return reconciled
+        guard = _GH_GUARD.get()
+        if guard is not None:
+            guard()
         proc = subprocess.run(
             ["gh", *args], capture_output=True, text=True, check=False
         )
@@ -234,6 +266,32 @@ def _gh(args: list[str], *, sleep=time.sleep) -> str:
         f"gh {' '.join(args)} failed after {_RETRIES} attempts: {last}",
         transient=True,
     )
+
+
+def _reconcile_intake_comment(args: list[str], *, sleep) -> str | None:
+    """Recover an ambiguous intake-comment create, or confirm it is absent.
+
+    Only specloop's marked creates opt in; worker retry behavior is unchanged.
+    A failed read propagates so it cannot authorize another create. Updating a
+    known comment ID is safe to retry even if a PATCH response is also lost.
+    """
+    if (args[:2] not in (["issue", "comment"], ["pr", "comment"])
+            or "--body" not in args or "--repo" not in args):
+        return None
+    body = args[args.index("--body") + 1]
+    marker = re.search(r"<!-- nightshift:(?:draft|admit|publish):[^\s<>]+ -->$", body)
+    if marker is None:
+        return None
+    repo = args[args.index("--repo") + 1]
+    pages = json.loads(_gh([
+        "api", f"repos/{repo}/issues/{args[2]}/comments", "--paginate", "--slurp",
+    ], sleep=sleep))
+    previous = next((comment for page in pages for comment in page
+                     if marker.group() in (comment.get("body") or "")), None)
+    if previous is None:
+        return None
+    return _gh(["api", f"repos/{repo}/issues/comments/{previous['id']}",
+                "--method", "PATCH", "-f", f"body={body}"], sleep=sleep)
 
 
 def _now() -> str:
@@ -291,6 +349,18 @@ def title_of(repo: str, number: int, *, runner=_gh) -> str:
         return ""
 
 
+#: Who may steer an agent through GitHub text. On a public repository anyone can
+#: comment, and an issue's author can edit it after it is labelled; only these
+#: associations are people the owner has given access. Anything else is dropped
+#: before it reaches a prompt, and a missing association counts as untrusted.
+TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+
+def trusted(item: dict, key: str = "authorAssociation") -> bool:
+    """`authorAssociation` from gh's JSON; REST payloads spell it `author_association`."""
+    return (item.get(key) or "").upper() in TRUSTED_ASSOCIATIONS
+
+
 def comments_of(
     repo: str, number: int, since: str | None = None, *, runner=_gh
 ) -> list[str]:
@@ -317,7 +387,7 @@ def comments_of(
     except RuntimeError:
         return []
     found = _newer_than(json.loads(out or "{}").get("comments") or [], since, "createdAt")
-    return [b for b in (_block(c.get("author"), c.get("body")) for c in found) if b]
+    return [b for b in (_block(c.get("author"), c.get("body")) for c in found if trusted(c)) if b]
 
 
 #: Every comment the daemon writes starts with this (`daemon.py:137`, `:406`).
@@ -341,7 +411,8 @@ def _newer_than(items: list[dict], since: str | None, key: str) -> list[dict]:
 
 
 def pr_feedback(
-    repo: str, branch: str, since: str | None = None, *, runner=_gh
+    repo: str, branch: str, since: str | None = None, *, runner=_gh,
+    strict: bool = False, number: int | None = None,
 ) -> list[str]:
     """Review feedback on the branch's most recent PR, oldest first.
 
@@ -355,8 +426,12 @@ def pr_feedback(
     Only the most recent PR for the branch. A revise that opens a new PR leaves
     the old closed one holding the previous round's feedback, and re-feeding
     that would make every revision re-litigate the one before it.
+
+    Specloop supplies a PR number and strict=True: failed reads must propagate
+    rather than authorize an empty revision. Worker callers remain best effort.
     """
-    number = _latest_pr_number(repo, branch, runner=runner)
+    if number is None:
+        number = _latest_pr_number(repo, branch, runner=runner, strict=strict)
     if number is None:
         return []
 
@@ -365,26 +440,38 @@ def pr_feedback(
         out = runner(
             ["pr", "view", str(number), "--repo", repo, "--json", "comments,reviews"]
         )
-        found = json.loads(out or "{}")
+        found = json.loads(out if strict else out or "{}")
     except RuntimeError:
+        if strict:
+            raise
         found = {}
 
     for c in _newer_than(found.get("comments") or [], since, "createdAt"):
-        blocks.append(_block(c.get("author"), c.get("body")))
+        if trusted(c):
+            blocks.append(_block(c.get("author"), c.get("body")))
 
     for r in _newer_than(found.get("reviews") or [], since, "submittedAt"):
+        if not trusted(r):
+            continue
         state = (r.get("state") or "").replace("_", " ").lower()
         label = f" ({state})" if state and state != "commented" else ""
         blocks.append(_block(r.get("author"), r.get("body"), suffix=label))
 
     # `gh pr view` cannot reach these; only the REST endpoint has them.
+    # Slurp wraps the paginated arrays in one JSON document, even when review
+    # feedback spans multiple pages. Without it json.loads sees extra data.
     try:
-        out = runner(["api", f"repos/{repo}/pulls/{number}/comments", "--paginate"])
-        inline = json.loads(out or "[]")
+        out = runner(["api", f"repos/{repo}/pulls/{number}/comments", "--paginate", "--slurp"])
+        pages = json.loads(out if strict else out or "[]")
+        inline = [comment for page in pages for comment in page]
     except RuntimeError:
+        if strict:
+            raise
         inline = []
 
     for c in _newer_than(inline, since, "created_at"):
+        if not trusted(c, "author_association"):
+            continue
         where = c.get("path") or ""
         line = c.get("line") or c.get("original_line")
         if where and line:
@@ -402,12 +489,14 @@ def _block(author: dict | None, body: str | None, suffix: str = "") -> str:
     return f"**{name}{suffix}:**\n\n{text}" if text else ""
 
 
-def _latest_pr_number(repo: str, branch: str, *, runner=_gh) -> int | None:
+def _latest_pr_number(repo: str, branch: str, *, runner=_gh, strict: bool = False) -> int | None:
     """The highest-numbered PR for a branch, open or closed.
 
     Highest number rather than `--limit 1`, because that trusts an ordering
     `gh` does not promise, and picking the WRONG one here means revising
-    against a previous round's feedback.
+    against a previous round's feedback. Specloop uses strict=True so a failed
+    read cannot authorize creating a duplicate PR; worker callers keep their
+    historical best-effort behavior.
     """
     try:
         out = runner(
@@ -421,8 +510,10 @@ def _latest_pr_number(repo: str, branch: str, *, runner=_gh) -> int | None:
             ]
         )
     except RuntimeError:
+        if strict:
+            raise
         return None
-    found = [p.get("number") for p in json.loads(out or "[]") if p.get("number")]
+    found = [p.get("number") for p in json.loads(out if strict else out or "[]") if p.get("number")]
     return max(found) if found else None
 
 
@@ -522,7 +613,7 @@ def base_branch(body: str) -> str | None:
 
     THE POINT IS THREADING, not novelty. Measured 2026-08-09: all four merge
     conflicts in a single day were two parallel issues editing one file —
-    demo's `global.css` twice, dashboard's list components, then
+    sample-ui's `global.css` twice, sample-midi's list components, then
     `MatrixView.tsx`. Each resolution ran against a `main` that had moved
     underneath the branch, and each cost a rebase plus a fresh CI run.
 
@@ -708,7 +799,7 @@ def claim(
             # Refuse before spending anything. The refusal used to arrive at
             # `git push` — after implement, after verify, after review — so a
             # task that was never going to land spent a full budget first
-            # (swift-app #14, twice on 2026-08-08). One API call instead.
+            # (sample-app #14, twice on 2026-08-08). One API call instead.
             log.info(
                 "#%d names %s — escalating rather than claiming it",
                 candidate.number,

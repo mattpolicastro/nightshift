@@ -10,7 +10,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import outcomes, config, daemon, preflight, queue, trace
+from . import outcomes, config, daemon, preflight, queue, specloop_attention, trace
 
 
 def _repo_dirs(cfg: config.Config) -> dict[str, Path]:
@@ -107,8 +107,8 @@ def main(argv: list[str] | None = None) -> int:
         default="status",
         choices=["status", "pause", "resume", "run", "reconcile", "preflight", "digest", "attention"],
     )
-    parser.add_argument("--json", action="store_true", help="attention: machine-readable task records")
-    parser.add_argument("--offline", action="store_true", help="attention: use cached records without GitHub")
+    parser.add_argument("--json", action="store_true", help="attention: machine-readable tasks and specloop pauses")
+    parser.add_argument("--offline", action="store_true", help="attention: use cached records without GitHub or specloop")
     parser.add_argument("--once", action="store_true", help="one task, then exit")
     parser.add_argument(
         "--deep",
@@ -152,15 +152,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "attention":
         items = outcomes.tasks() if args.offline else outcomes.refresh(cfg.labels)
+        specloop = specloop_attention.snapshot(offline=args.offline)
         if args.json:
             print(json.dumps({"version": 1, "offline": args.offline,
                               "tasks": outcomes.attention(items),
+                              "specloop": specloop["entries"],
+                              "specloop_error": specloop["error"],
                               "stale": [i for i in items if i.get("error")]}, indent=2))
         else:
             if args.offline:
-                print("Cached outcomes (GitHub not checked)")
+                print("Cached outcomes (GitHub and specloop not checked)")
             print(outcomes.render(items))
-        return 1 if any(i.get("error") for i in items) else 0
+            print(specloop_attention.render(specloop))
+        return 1 if specloop["error"] or any(i.get("error") for i in items) else 0
 
     if args.command == "status":
         # The process, THEN the queue. Until 2026-09-05 this line said

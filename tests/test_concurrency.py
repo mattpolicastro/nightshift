@@ -18,7 +18,7 @@ for N > 1, and each one has a test here:
      had anything ready", which becomes a lie the moment dispatch and
      completion stop being the same instant.
   4. **Repo priority survives.** `config.toml` documents that sample drains
-     before swift-app *because* concurrency was 1. That ordering has to be
+     before sample-app *because* concurrency was 1. That ordering has to be
      rebuilt deliberately rather than inherited.
 """
 
@@ -238,7 +238,7 @@ def test_a_repo_at_its_cap_is_skipped_not_the_end_of_the_walk(monkeypatch):
 
     Before per-repo caps, `claim_next` re-walked from the top on every free
     slot, so a repo with a deep queue took them all and everything below it
-    starved — swift-app sat at "0 working, 2 ready" for a full day behind
+    starved — sample-app sat at "0 working, 2 ready" for a full day behind
     sample on 2026-08-07, with the swift grant it had been waiting for already
     live.
 
