@@ -592,3 +592,231 @@ test('confirmation buttons preserve the action gate', async t => {
     });
   });
 });
+
+const secondTheme = Object.fromEntries(Object.keys(colors).map(key => [key, `second-theme-${key}`])) as typeof colors;
+
+function assertDisclosure(page: StylePage, label: string, expanded: boolean, tokens = colors) {
+  const button = page.find(label);
+  assert.ok(button);
+  assert.equal(button.type, 'Pressable');
+  assert.equal(button.props.accessibilityLabel, label);
+  assert.equal(button.props.accessibilityRole, 'button');
+  assert.deepEqual({ ...button.props.accessibilityState }, { expanded });
+  assert.equal(button.props.disabled, undefined);
+  assert.deepEqual({ ...button.props.style }, {
+    paddingVertical: 10, alignSelf: 'flex-start', minHeight: 44,
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+  });
+  const finished = label.startsWith('Finished');
+  assert.equal(page.text(button.children), finished ? label : `Details ${expanded ? '▴' : '▾'}`);
+  const text = button.children[0] as Node;
+  assert.equal(text.type, 'Text');
+  assert.deepEqual({ ...text.props.style }, { color: tokens.foregroundMuted, fontWeight: '600' });
+  assert.equal(button.children.length, finished ? 2 : 1);
+  if (finished) {
+    assert.equal(parentOf(page, button), page.nodes()[0], 'Finished remains a direct section child');
+    const chevron = button.children[1] as Node;
+    assert.equal(chevron.type, 'View');
+    assert.deepEqual(chevron.children, [], 'the chevron adds no descendant text');
+    assert.equal(chevron.props.accessible, false);
+    assert.equal(chevron.props.accessibilityElementsHidden, true);
+    assert.equal(chevron.props.importantForAccessibility, 'no-hide-descendants');
+    assert.equal(chevron.props.accessibilityLabel, undefined);
+    assert.equal(chevron.props.accessibilityRole, undefined);
+    assert.deepEqual(JSON.parse(JSON.stringify(chevron.props.style)), {
+      width: 8, height: 8, borderRightWidth: 2, borderBottomWidth: 2,
+      borderColor: tokens.foregroundMuted, transform: [{ rotate: expanded ? '225deg' : '45deg' }],
+    });
+  } else {
+    const card = parentOf(page, button);
+    assert.equal(parentOf(page, card), page.nodes()[0], 'Details remains a direct card child');
+    assert.equal(page.text([card.children[0]]), label.slice('Details for '.length));
+  }
+}
+
+function assertRefresh(page: StylePage, loading: boolean, acting: boolean, tokens = colors) {
+  const button = page.find('Refresh Factory');
+  assert.ok(button);
+  assert.equal(button.type, 'Pressable');
+  assert.equal(button.props.accessibilityRole, 'button');
+  assert.equal(button.props.accessibilityLabel, 'Refresh Factory');
+  assert.equal(button.props.disabled, loading || acting);
+  assert.equal(page.text(button.children), loading ? 'Checking…' : 'Refresh Factory');
+  assert.equal(page.nodes()[0].children[2], button, 'Refresh stays in its header slot');
+  assert.deepEqual({ ...button.props.style }, {
+    paddingVertical: 8, paddingHorizontal: 12, alignSelf: 'flex-start', minHeight: 44, minWidth: 44,
+    borderRadius: 8, borderWidth: 1, borderColor: tokens.border, backgroundColor: tokens.surface2,
+    alignItems: 'center', justifyContent: 'center',
+  });
+  assert.equal(button.children.length, 1);
+  const text = button.children[0] as Node;
+  assert.equal(text.type, 'Text');
+  assert.deepEqual({ ...text.props.style }, { color: tokens.foreground, fontSize: 13, fontWeight: '600' });
+}
+
+test('paseo-runs-page/secondary-disclosure-presentation/disclosures-decorate-existing-state', async t => {
+  const finished: FactoryRun = { change: 'finished-run', status: 'done', tasks: { done: 3, total: 3 }, pr: '' };
+  let lookups = 0;
+  const page = styleView([navigationRun, finished], {
+    navigation: { openWorkspace() {} },
+    client: { workspaces: { list: async () => { lookups++; return { entries: [linkedWorkspace] }; } } },
+  });
+  t.after(page.dispose);
+  await page.settle();
+  assertDisclosure(page, 'Finished (1)', false);
+  assertDisclosure(page, 'Details for linked-run', false);
+  assertDetails(page, navigationRun, false);
+  assert.equal(page.find('Details for finished-run'), undefined);
+  for (let cycle = 0; cycle < 2; cycle++) {
+    await page.press('Finished (1)');
+    assertDisclosure(page, 'Finished (1)', true);
+    assertDisclosure(page, 'Details for finished-run', false);
+    await page.press('Finished (1)');
+    assertDisclosure(page, 'Finished (1)', false);
+    assert.equal(page.find('Details for finished-run'), undefined);
+    assert.equal(page.reads.length, 1);
+    assert.deepEqual(page.actions, []);
+    assert.deepEqual(page.hosts, []);
+    assert.equal(lookups, 0, 'Finished never looks up workspaces');
+  }
+  for (let cycle = 0; cycle < 2; cycle++) {
+    await page.press('Details for linked-run');
+    assertDisclosure(page, 'Details for linked-run', true);
+    assertDetails(page, navigationRun, true);
+    await page.press('Details for linked-run');
+    assertDisclosure(page, 'Details for linked-run', false);
+    assertDetails(page, navigationRun, false);
+    assert.equal(lookups, 1, 'Details keeps its single shared lazy lookup');
+    assert.deepEqual(page.hosts, ['host-1']);
+    assert.equal(page.reads.length, 1);
+    assert.deepEqual(page.actions, []);
+  }
+});
+
+test('paseo-runs-page/secondary-refresh-presentation/refresh-remains-a-secondary-button', async t => {
+  const runs = [runWith(['resume'])];
+  const snapshot: FactorySnapshot = { runs, stale: false, fetchedAt: '', error: null };
+  let completeRead!: (value: FactorySnapshot) => void;
+  let completeAction!: (value: unknown) => void;
+  const page = styleView(runs, {
+    read: () => new Promise(resolve => { completeRead = resolve; }),
+    act: () => new Promise(resolve => { completeAction = resolve; }),
+  });
+  t.after(page.dispose);
+  await page.settle();
+  function check(loading: boolean, acting: boolean) {
+    for (const tokens of [colors, secondTheme]) {
+      page.setColors(tokens);
+      assertRefresh(page, loading, acting, tokens);
+    }
+  }
+  check(true, false);
+  await page.press('Refresh Factory');
+  page.find('Refresh Factory')!.props.onPress(); // In-flight reads still coalesce native callbacks.
+  await page.settle();
+  assert.equal(page.reads.length, 1);
+  completeRead(snapshot);
+  await page.settle();
+  check(false, false);
+  await page.press('Refresh Factory');
+  check(true, false);
+  assert.equal(page.reads.length, 2, 'an idle press requests one refresh');
+  await page.press('Refresh Factory');
+  assert.equal(page.reads.length, 2, 'a disabled press requests nothing');
+  completeRead(snapshot);
+  await page.settle();
+  check(false, false);
+  await page.press('Resume styled-run');
+  check(false, true);
+  await page.press('Refresh Factory');
+  assert.equal(page.reads.length, 2, 'Refresh is disabled while sending an action');
+  assert.deepEqual(page.actions.map(input => ({ ...input })), [
+    { change: 'styled-run', verb: 'resume', expect: 'stuck:1' },
+  ]);
+  completeAction({ outcome: 'done', detail: 'Resumed' });
+  await page.settle();
+  check(true, true);
+  assert.equal(page.reads.length, 3, 'the action retains its post-action refresh');
+  await page.press('Refresh Factory');
+  assert.equal(page.reads.length, 3);
+  completeRead(snapshot);
+  await page.settle();
+  check(false, false);
+  assert.deepEqual(page.reads.map(input => ({ ...(input as object) })), Array.from({ length: 3 }, () => ({ refresh: true })));
+  assert.equal(page.actions.length, 1);
+  assert.deepEqual(page.hosts, []);
+});
+
+test('paseo-runs-page/host-theme-presentation/rendered-styles-follow-the-supplied-theme', async t => {
+  for (const verb of ['publish', 'finish', 'abort'] as const) await t.test(verb, async t => {
+    const run = { ...navigationRun, action: { ...navigationRun.action!, actions: ['resume', 'accept', verb] as Verb[] } };
+    const runs: FactoryRun[] = [run, ...(['running', 'done', 'aborted'] as const).map(status => ({
+      change: `theme-${status}`, status, tasks: { done: 1, total: 3 }, pr: '',
+    }))];
+    let lookups = 0;
+    const page = styleView(runs, {
+      navigation: { openWorkspace() {} },
+      client: { workspaces: { list: async () => { lookups++; return { entries: [linkedWorkspace] }; } } },
+    });
+    t.after(page.dispose);
+    await page.settle();
+    await page.press('Details for linked-run');
+    await page.press('Finished (2)');
+    await page.press(`${labels[verb]} linked-run`);
+    // Theme changes must preserve every rendered node's text and accessibility.
+    const semantics = () => page.nodes().map(node => ({
+      type: node.type, text: page.text(node.children), label: node.props.accessibilityLabel,
+      role: node.props.accessibilityRole, state: { ...node.props.accessibilityState }, disabled: node.props.disabled,
+      accessible: node.props.accessible, hidden: node.props.accessibilityElementsHidden,
+      important: node.props.importantForAccessibility,
+    }));
+    const originalSemantics = semantics();
+    for (const tokens of [colors, secondTheme]) {
+      page.setColors(tokens);
+      assert.deepEqual(semantics(), originalSemantics);
+      assertNavigation(page, run, [0, 1, 2], tokens);
+      assertDisclosure(page, 'Details for linked-run', true, tokens);
+      assertDisclosure(page, 'Finished (2)', true, tokens);
+      for (const status of ['running', 'done', 'aborted']) assertDisclosure(page, `Details for theme-${status}`, false, tokens);
+      assertRefresh(page, false, false, tokens);
+      const confirm = page.find(`Confirm ${verb} linked-run`)!;
+      const cancel = parentOf(page, confirm).children[1] as Node;
+      const destructive = verb === 'abort';
+      const controls = [
+        [page.find('Resume linked-run')!, 'Resume', 'Resume linked-run', true, tokens.accent, tokens.accentForeground, tokens.accent],
+        [page.find('Accept linked-run')!, 'Accept', 'Accept linked-run', true, tokens.surface1, tokens.foreground, tokens.border],
+        [page.find(`${labels[verb]} linked-run`)!, labels[verb], `${labels[verb]} linked-run`, true,
+          tokens.surface1, destructive ? tokens.statusDanger : tokens.foreground, destructive ? tokens.statusDanger : tokens.border],
+        [confirm, `Confirm ${verb}`, `Confirm ${verb} linked-run`, false,
+          destructive ? tokens.surface1 : tokens.accent, destructive ? tokens.statusDanger : tokens.accentForeground,
+          destructive ? tokens.statusDanger : tokens.accent],
+        [cancel, 'Cancel', undefined, undefined, tokens.surface1, tokens.foreground, tokens.border],
+      ] as const;
+      for (const [button, text, label, disabled, background, foreground, border] of controls) {
+        assert.equal(button.type, 'Pressable');
+        assert.equal(button.props.accessibilityRole, 'button');
+        assert.equal(button.props.accessibilityLabel, label);
+        assert.equal(button.props.disabled, disabled);
+        assert.equal(page.text(button.children), text);
+        assert.equal(button.props.style.backgroundColor, background);
+        assert.equal(button.props.style.borderColor, border);
+        assert.equal((button.children[0] as Node).props.style.color, foreground);
+      }
+      const statusColors = { paused: tokens.statusWarning, running: tokens.accent, done: tokens.statusSuccess, aborted: tokens.foregroundMuted };
+      for (const row of runs) {
+        const card = parentOf(page, page.find(`Details for ${row.change}`)!);
+        const sentence = card.children[1] as Node;
+        const chip = sentence.children[0] as Node;
+        assert.equal(page.text(sentence.children), `${row.status} · 1/3 tasks done`);
+        assert.equal(sentence.props.style.color, tokens.foregroundMuted);
+        assert.equal(chip.props.style.color, statusColors[row.status]);
+        assert.equal(chip.props.style.backgroundColor, tokens.surface2);
+      }
+      assert.equal(page.reads.length, 1);
+      assert.deepEqual(page.actions, []);
+      assert.deepEqual(page.hosts, ['host-1']);
+      assert.equal(lookups, 1, 'theme changes trigger no extra lookup');
+      assert.deepEqual(page.urls, []);
+    }
+  });
+});

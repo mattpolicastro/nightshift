@@ -128,8 +128,9 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
     <Pressable accessibilityRole="button" accessibilityLabel={`Details for ${run.change}`}
       accessibilityState={{ expanded: detailsOpen }}
       onPress={() => { if (!detailsOpen) onDetailsOpen(); setDetailsOpen(!detailsOpen); }}
-      style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
-      <Text style={{ color: colors.accent, fontWeight: '600' }}>Details {detailsOpen ? '▴' : '▾'}</Text>
+      style={{ paddingVertical: 10, alignSelf: 'flex-start', minHeight: 44,
+        flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+      <Text style={{ color: colors.foregroundMuted, fontWeight: '600' }}>Details {detailsOpen ? '▴' : '▾'}</Text>
     </Pressable>
     {detailsOpen ? <View style={{ gap: 8 }}>
       {details.fields.map(field => <View key={field.label} style={{ gap: 4 }}>
@@ -250,8 +251,10 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
       {data ? `${active.length} ${active.length === 1 ? 'run' : 'runs'}${finished.length ? ` · ${finished.length} finished` : ''}${data.stale || error ? ' · Stale' : ''}` : 'Loading Factory…'}
     </Text>
     <Pressable accessibilityRole="button" accessibilityLabel="Refresh Factory" disabled={loading || acting}
-      onPress={() => void refresh()} style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
-      <Text style={{ color: colors.accent, fontWeight: '600' }}>{loading ? 'Checking…' : 'Refresh Factory'}</Text>
+      onPress={() => void refresh()} style={{ paddingVertical: 8, paddingHorizontal: 12, alignSelf: 'flex-start',
+        minHeight: 44, minWidth: 44, borderRadius: 8, borderWidth: 1, borderColor: colors.border,
+        backgroundColor: colors.surface2, alignItems: 'center', justifyContent: 'center' }}>
+      <Text style={{ color: colors.foreground, fontSize: 13, fontWeight: '600' }}>{loading ? 'Checking…' : 'Refresh Factory'}</Text>
     </Pressable>
     {error || data?.error ? <Text accessibilityRole="alert" style={{ color: colors.statusWarning }}>{error || data?.error}</Text> : null}
     {notice && !noticeInRow
@@ -260,8 +263,12 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
     {active.map(renderRow)}
     {finished.length ? <Pressable accessibilityRole="button" accessibilityLabel={`Finished (${finished.length})`}
       accessibilityState={{ expanded: finishedOpen }} onPress={() => setFinishedOpen(open => !open)}
-      style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
-      <Text style={{ color: colors.accent, fontWeight: '600' }}>{`Finished (${finished.length})`}</Text>
+      style={{ paddingVertical: 10, alignSelf: 'flex-start', minHeight: 44,
+        flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+      <Text style={{ color: colors.foregroundMuted, fontWeight: '600' }}>{`Finished (${finished.length})`}</Text>
+      <View accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
+        style={{ width: 8, height: 8, borderRightWidth: 2, borderBottomWidth: 2,
+          borderColor: colors.foregroundMuted, transform: [{ rotate: finishedOpen ? '225deg' : '45deg' }] }} />
     </Pressable> : null}
     {finishedOpen ? finished.map(renderRow) : null}
   </View>;
