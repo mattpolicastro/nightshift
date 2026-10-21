@@ -630,6 +630,154 @@ def test_concurrent_private_workers_release_processes_and_trees(tmp_path, monkey
         verify.cleanup(out)
 
 
+def _evidence_with_results(*results):
+    return evidence.Evidence(1, covered=["c/r/s"], mutants=[
+        evidence.Mutant("calc.py", i, "<", "a < b", "a <= b", result)
+        for i, result in enumerate(results, 1)
+    ])
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/timeout-scoring/mixed-results-exclude-timeouts")
+@pytest.mark.parametrize("results,score,fraction,timeout_line", [
+    (("killed", "survived", "timeout", "timeout", "invalid", "equivalent"),
+     0.5, "1/2 caught (1 marked equivalent)", "2 of 6 mutants timed out and were not counted"),
+    (("survived", "timeout", "timeout"),
+     0.0, "0/1 caught", "2 of 3 mutants timed out and were not counted"),
+])
+def test_timeouts_do_not_raise_the_score(results, score, fraction, timeout_line):
+    ev = _evidence_with_results(*results)
+    assert ev.score == score and not ev.unmeasured
+    assert ev.passed(score) and not ev.passed(score + 0.1)
+    survivor = results.index("survived") + 1
+    assert ev.summary().splitlines() == [
+        "section 1: 1 scenario(s) covered",
+        f"mutation: {fraction}",
+        f"  survived: calc.py:{survivor} <  `a <= b`",
+        timeout_line,
+    ]
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/timeout-scoring/all-timeouts-are-unmeasured")
+@pytest.mark.scenario("parallel-evidence-mutants/timeout-reporting/unmeasured-summary-explains-timeouts")
+def test_all_timeouts_is_unmeasured():
+    ev = _evidence_with_results("timeout", "timeout", "timeout")
+    assert not ev.baseline_failed
+    assert ev.score is None and ev.unmeasured
+    assert not any(ev.passed(minimum) for minimum in (0, 0.5, 0.8, 1))
+    assert ev.summary().splitlines() == [
+        "section 1: 1 scenario(s) covered",
+        "mutation: none of the 3 mutants could be judged (every one was invalid or timed out), "
+        "so nothing was measured; check mutation_steps and any prepare steps",
+        "3 of 3 mutants timed out and were not counted",
+    ]
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/timeout-scoring/timeouts-mixed-with-invalid-are-unmeasured")
+@pytest.mark.scenario("parallel-evidence-mutants/timeout-reporting/unmeasured-summary-explains-timeouts")
+def test_timeouts_and_invalid_mutants_are_unmeasured():
+    ev = _evidence_with_results("timeout", "invalid", "timeout")
+    assert ev.score is None and ev.unmeasured
+    assert not any(ev.passed(minimum) for minimum in (0, 0.5, 0.8, 1))
+    assert ev.summary().splitlines() == [
+        "section 1: 1 scenario(s) covered",
+        "mutation: none of the 3 mutants could be judged (every one was invalid or timed out), "
+        "so nothing was measured; check mutation_steps and any prepare steps",
+        "2 of 3 mutants timed out and were not counted",
+    ]
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/timeout-scoring/equivalent-and-skipped-behavior-retained")
+def test_equivalent_and_timeout_mutants_retain_coverage_and_baseline_rules():
+    ev = _evidence_with_results("equivalent", "timeout")
+    assert ev.score is None and not ev.unmeasured
+    assert all(ev.passed(minimum) for minimum in (0, 0.5, 0.8, 1))
+    assert ev.summary().splitlines() == [
+        "section 1: 1 scenario(s) covered",
+        "1 of 2 mutants timed out and were not counted",
+    ]
+    for failed in (replace(ev, uncovered=["c/r/missing"]), replace(ev, baseline_failed=True)):
+        assert failed.score is None and not failed.unmeasured
+        assert not failed.passed(0)
+        assert failed.summary().splitlines().count("1 of 2 mutants timed out and were not counted") == 1
+    assert "UNCOVERED: c/r/missing" in replace(ev, uncovered=["c/r/missing"]).summary()
+    assert "the unmutated head fails mutation_steps" in replace(ev, baseline_failed=True).summary()
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/timeout-scoring/equivalent-and-skipped-behavior-retained")
+@pytest.mark.parametrize("steps,base,reason", [
+    ((), "base", "no mutation_steps in the manifest"),
+    (("test",), "", "section started before evidence was recorded"),
+    (("test",), "base", "no mutable lines added under mutation_paths"),
+])
+def test_skipped_mutation_retains_reason_and_coverage_failure(tmp_path, monkeypatch, steps, base, reason):
+    monkeypatch.setattr(evidence, "git", lambda *args: b"")
+    for seen in ({"c/r/s"}, set()):
+        ev = evidence.gather(tmp_path, base, "head", ["c/r/s"], seen,
+                             replace(M, mutation_steps=steps), tmp_path / "out", 1)
+        assert ev.mutants == [] and ev.skipped == reason
+        assert ev.score is None and not ev.unmeasured
+        assert ev.passed(0) is bool(seen) and ev.passed(1) is bool(seen)
+        coverage = ("section 1: 1 scenario(s) covered" if seen else
+                    "section 1: 0 scenario(s) covered, UNCOVERED: c/r/s")
+        assert ev.summary() == f"{coverage}\nmutation: skipped ({reason})"
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/stable-evidence-results/all-invalid-remains-unmeasured")
+@pytest.mark.parametrize("results,expected", [
+    (("killed", "survived", "invalid", "equivalent"),
+     "mutation: 1/2 caught (1 marked equivalent)\n  survived: calc.py:2 <  `a <= b`"),
+    (("invalid", "invalid", "invalid"),
+     "mutation: none of the 3 mutants could be judged (every one was invalid), "
+     "so nothing was measured; check mutation_steps and any prepare steps"),
+    (("equivalent",), ""),
+])
+def test_zero_timeout_summary_is_unchanged(results, expected):
+    ev = _evidence_with_results(*results)
+    assert ev.summary() == "section 1: 1 scenario(s) covered" + (f"\n{expected}" if expected else "")
+    if all(result == "invalid" for result in results):
+        assert ev.score is None and ev.unmeasured
+        assert not any(ev.passed(minimum) for minimum in (0, 0.5, 0.8, 1))
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/timeout-scoring/all-timeouts-are-unmeasured")
+@pytest.mark.parametrize("parallel", [1, 2])
+def test_all_timeout_section_pauses_without_strengthening(tmp_path, monkeypatch, parallel):
+    from specloop import loop
+    from specloop.state import Run
+
+    ev = _evidence_with_results("timeout", "timeout", "timeout")
+    run = Run(tmp_path / "run")
+    run.state.section_base["1"] = "base"
+    m = replace(M, mutation_min=0, mutation_parallel=parallel, coverage_step="")
+    ctx = loop.Ctx(run, m, {})
+    all_tasks = tasks.parse("## 1. Core\n\n- [x] 1.1 Cover `c/r/s`\n")
+    original_tasks = [asdict(task) for task in all_tasks]
+    calls = []
+
+    def gather(repo, base, head, cited, seen, manifest, out, section):
+        calls.append(section)
+        assert (repo, base, head) == (ctx.repo, "base", "head")
+        assert cited == ["c/r/s"] and seen == {"c/r/s"}
+        assert manifest == m and out == run.dir / "gates" / "section-1-0"
+        return ev
+
+    def unexpected_strengthening(*args, **kwargs):
+        pytest.fail("unmeasured evidence must pause without strengthening tasks")
+
+    monkeypatch.setattr(evidence, "gather", gather)
+    monkeypatch.setattr(tasks, "extend_section", unexpected_strengthening)
+    monkeypatch.setattr(loop, "_rewrite_tasks", unexpected_strengthening)
+    assert not loop.section_evidence(ctx, 1, "head", all_tasks)
+    assert calls == [1] and [asdict(task) for task in all_tasks] == original_tasks
+    saved = Run(run.dir).state
+    assert saved.status == "paused"
+    assert saved.pause.reason == "gate_evidence" and saved.pause.task == "section:1"
+    assert saved.pause.detail == ev.summary()
+    assert "3 of 3 mutants timed out and were not counted" in saved.pause.detail
+    assert saved.strengthen_rounds == {} and saved.evidence_scores == {}
+    assert saved.tasks == {} and saved.evidenced == [] and saved.evidence_summary == {}
+
+
 def test_all_invalid_mutants_are_unmeasured_not_a_pass():
     from specloop.evidence import Evidence, Mutant
 
