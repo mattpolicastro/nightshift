@@ -1,6 +1,6 @@
 ## 1. Manifest configuration
 
-- [ ] 1.1 Add `Manifest.mutation_parallel` and strict positive-integer parsing in `specloop/manifest.py`, with default, invalid-type, explicit serial limit and template/load round-trip tests in `tests/test_specloop_units.py`. Cover `parallel-evidence-mutants/configurable-concurrency/default-and-explicit-limits` and `parallel-evidence-mutants/configurable-concurrency/invalid-limit-rejected`.
+- [x] 1.1 Add `Manifest.mutation_parallel` and strict positive-integer parsing in `specloop/manifest.py`, with default, invalid-type, explicit serial limit and template/load round-trip tests in `tests/test_specloop_units.py`. Cover `parallel-evidence-mutants/configurable-concurrency/default-and-explicit-limits` and `parallel-evidence-mutants/configurable-concurrency/invalid-limit-rejected`.
 
 ## 2. Isolated mutant execution
 
