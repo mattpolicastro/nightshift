@@ -3,7 +3,9 @@ import os
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Barrier
 
 import pytest
 
@@ -224,6 +226,181 @@ def test_a_hanging_mutant_is_caught_by_a_scaled_timeout(tmp_path, monkeypatch):
     hung = [x for x in ev.mutants if x.after.strip() == "i += 2"]
     assert hung and hung[0].result == "killed"
     assert _time.monotonic() - started < 50  # not the 60 s step ceiling per hanging mutant
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/baseline-step-time-boxes/missing-duration-uses-manifest-ceiling")
+@pytest.mark.parametrize("prepared", [False, True])
+def test_mutant_timeout_overrides_are_exact_and_immutable(tmp_path, monkeypatch, prepared):
+    # Exercise the floor, fractional scaling, zero/missing durations, and caps
+    # both below the scaled duration and below the floor, for each kind of step.
+    durations = (2, 12.125, 0, None, 25, 1)
+    ceilings = (100, 100, 75, 80, 40, 5)
+    expected = (30.0, 36.375, 75, 80, 40, 5)
+
+    def make_steps(prefix):
+        return tuple(manifest.Step(f"{prefix}-{i}", ("/usr/bin/true",), timeout=ceiling)
+                     for i, ceiling in enumerate(ceilings))
+
+    selected = make_steps("verify")
+    preparation = make_steps("prepare") if prepared else ()
+    unselected = manifest.Step("unselected", ("/usr/bin/false",), timeout=999)
+    m = replace(M, prepare=preparation, verify=selected + (unselected,),
+                mutation_steps=tuple(s.id for s in reversed(selected)))
+    original = replace(m)
+    receipts = [verify.Receipt(s.id, list(s.run), s.expect, 0, True, seconds, "")
+                for group in (preparation, selected) for s, seconds in zip(group, durations)]
+    out = tmp_path / "out"
+    baseline_calls = []
+
+    def baseline(repo, head, steps, baseline_m, run_out):
+        baseline_calls.append(run_out)
+        assert baseline_m is m and steps == selected
+        assert tuple(s.timeout for s in steps) == ceilings
+        assert baseline_m.prepare == preparation
+        (run_out / "src").mkdir(parents=True)
+        (run_out / "src" / "calc.py").write_text(CODE)
+        return receipts
+
+    calls = []
+
+    def run_mutant(src, head, steps, bounded, run_out):
+        assert m == original
+        assert bounded is not m
+        assert steps == tuple(replace(s, timeout=t) for s, t in zip(selected, expected))
+        assert bounded == replace(m, prepare=tuple(
+            replace(s, timeout=t) for s, t in zip(preparation, expected)))
+        assert all(a is not b for a, b in zip(steps, selected))
+        assert all(a is not b for a, b in zip(bounded.prepare, preparation))
+        calls.append((steps, bounded))
+        # Subsequent workers must use the snapshot, not recompute from receipts.
+        for receipt in receipts:
+            receipt.seconds = 999
+        return [verify.Receipt(s.id, list(s.run), s.expect, 0, True, 999, "")
+                for s in bounded.prepare + steps]
+
+    monkeypatch.setattr(verify, "run_steps", baseline)
+    monkeypatch.setattr(verify, "run_extracted", run_mutant)
+    before = CODE.splitlines()[1]
+    mutants = [evidence.Mutant("calc.py", 2, "comment", before, before + f" # {i}")
+               for i in range(3)]
+    assert evidence.mutate(tmp_path, "head", mutants, m, out)
+    assert baseline_calls == [out] and len(calls) == 3
+    assert all(steps is calls[0][0] and bounded is calls[0][1] for steps, bounded in calls)
+    assert [mut.result for mut in mutants] == ["survived"] * 3
+    assert m == original
+
+
+PROCESS_TREE_STEP = '''from pathlib import Path
+import json, os, subprocess, sys, time
+source = Path("{src}/calc.py").read_text()
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+artifacts = Path("artifacts")
+artifacts.mkdir(exist_ok=True)
+(artifacts / "pids.json").write_text(json.dumps([os.getpid(), child.pid]))
+(artifacts / "source.txt").write_text(source)
+print("diagnostic", flush=True)
+if "# timeout" in source:
+    time.sleep(60)
+sys.exit(3 if "# failure" in source else 0)
+'''
+
+
+def assert_worker_resources_released(run_out, expected_exit, expected_source):
+    assert not (run_out / "src").exists()
+    assert not (run_out / "build").exists()
+    assert (run_out / "artifacts" / "source.txt").read_text() == expected_source
+    receipts = json.loads((run_out / "receipts.json").read_text())
+    diagnostic = next(r for r in receipts if r["tail"] == "diagnostic\n")
+    assert diagnostic["exit"] == expected_exit
+    assert diagnostic["passed"] is (expected_exit == 0)
+    assert (run_out / f"{diagnostic['id']}.log").read_text() == "diagnostic\n"
+    for pid in json.loads((run_out / "artifacts" / "pids.json").read_text()):
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            assert time.monotonic() < deadline, f"step process {pid} still running"
+            time.sleep(0.05)
+    return receipts
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/baseline-step-time-boxes/preparation-timeout-is-invalid")
+@pytest.mark.scenario("parallel-evidence-mutants/worker-cleanup/completed-workers-release-resources")
+@pytest.mark.parametrize("stage", ["dependencies", "configure", "build", "test"])
+def test_real_mutant_step_timeout_stops_its_process_group(tmp_path, monkeypatch, stage):
+    repo, _, head = project(tmp_path, STRONG)
+    out = tmp_path / "out"
+    monkeypatch.setattr(evidence, "MIN_MUTANT_SECONDS", 1.0)
+    target = manifest.Step(stage, (sys.executable, "-c", PROCESS_TREE_STEP), timeout=10)
+    later = manifest.Step("later", ("/usr/bin/true",), timeout=10)
+    m = replace(M, prepare=(target,) if stage == "dependencies" else (),
+                verify=(later,) if stage == "dependencies" else (target, later),
+                mutation_steps=(stage, "later"))
+    real_run = verify.run_extracted
+    observed = []
+
+    def run(src, sha, steps, run_m, run_out):
+        scheduled = run_m.prepare + steps
+        observed.append(run_out)
+        assert all(s.timeout == (10 if run_out == out else 1.0) for s in scheduled)
+        receipts = real_run(src, sha, steps, run_m, run_out)
+        if run_out == out:
+            # Control baseline timing only; all commands and timeout handling are real.
+            for receipt in receipts:
+                receipt.seconds = 0.01
+        return receipts
+
+    monkeypatch.setattr(verify, "run_extracted", run)
+    before = CODE.splitlines()[1]
+    mutants = [evidence.Mutant("calc.py", 2, "comment", before, before + f" # {outcome}")
+               for outcome in ("timeout", "failure", "success")]
+    assert evidence.mutate(repo, head, mutants, m, out)
+    failure = "killed" if stage == "test" else "invalid"
+    assert [mut.result for mut in mutants] == [failure, failure, "survived"]
+    assert len(observed) == 4 and observed[0] == out
+    for number, (mut, code) in enumerate(zip(mutants, (None, 3, 0)), 1):
+        worker = out / f"mutant-{number}"
+        receipts = assert_worker_resources_released(worker, code, CODE.replace(before, mut.after))
+        assert [r["id"] for r in receipts] == ([stage, "later"] if code == 0 else [stage])
+        assert (worker / "later.log").exists() is (code == 0)
+    assert_worker_resources_released(out, 0, CODE)
+    assert target.timeout == 10 and later.timeout == 10
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/worker-cleanup/completed-workers-release-resources")
+@pytest.mark.parametrize("prepared", [False, True])
+def test_concurrent_private_workers_release_processes_and_trees(tmp_path, monkeypatch, prepared):
+    repo, _, head = project(tmp_path, STRONG)
+    out = tmp_path / "out"
+    target = manifest.Step("exercise", (sys.executable, "-c", PROCESS_TREE_STEP), timeout=1)
+    m = replace(M, prepare=(target,) if prepared else (), verify=() if prepared else (target,))
+    verify.extract(repo, head, out / "src")
+    before = CODE.splitlines()[1]
+    mutants = [evidence.Mutant("calc.py", 2, "comment", before, before + f" # {outcome}")
+               for outcome in ("timeout", "failure", "success")]
+    # Exercise worker concurrency independently of the coordinator's scheduling.
+    barrier = Barrier(3)
+    real_run = verify.run_extracted
+
+    def overlapping_run(src, sha, steps, run_m, run_out):
+        barrier.wait(timeout=10)
+        return real_run(src, sha, steps, run_m, run_out)
+
+    monkeypatch.setattr(verify, "run_extracted", overlapping_run)
+    try:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(evidence._mutate_one, i, mut, out / "src", head, m.verify, m, out)
+                       for i, mut in enumerate(mutants, 1)]
+            results = [future.result() for future in futures]
+        failure = "invalid" if prepared else "killed"
+        assert results == [failure, failure, "survived"]
+        assert (out / "src" / "calc.py").read_text() == CODE
+        for i, (mut, code) in enumerate(zip(mutants, (None, 3, 0)), 1):
+            assert_worker_resources_released(out / f"mutant-{i}", code, CODE.replace(before, mut.after))
+    finally:
+        verify.cleanup(out)
 
 
 def test_all_invalid_mutants_are_unmeasured_not_a_pass():

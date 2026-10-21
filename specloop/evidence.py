@@ -192,14 +192,17 @@ def mutate(repo: Path, head: str, mutants: list[Mutant], m: Manifest, out: Path)
             for mut in mutants:
                 mut.result = "invalid"
             return False
-        # Preserve the existing unprepared time box through the common runner.
+        # Snapshot the baseline's per-step limits once, before any mutant runs.
+        # Copies keep the baseline and shared manifest at their original ceilings.
         budget = {r.id: max(MIN_MUTANT_SECONDS, MUTANT_TIME_FACTOR * r.seconds)
-                  for r in receipts if r.seconds}
-        if not m.prepare:
-            steps = tuple(replace(s, timeout=min(s.timeout, budget.get(s.id, s.timeout)))
-                          for s in steps)
+                  for r in receipts if r.seconds is not None and r.seconds > 0}
+        steps = tuple(replace(s, timeout=min(s.timeout, budget.get(s.id, s.timeout)))
+                      for s in steps)
+        mutant_manifest = replace(m, prepare=tuple(
+            replace(s, timeout=min(s.timeout, budget.get(s.id, s.timeout)))
+            for s in m.prepare))
         for number, mut in enumerate(mutants, 1):
-            mut.result = _mutate_one(number, mut, out / "src", head, steps, m, out)
+            mut.result = _mutate_one(number, mut, out / "src", head, steps, mutant_manifest, out)
         return True
     finally:
         verify.cleanup(out)
