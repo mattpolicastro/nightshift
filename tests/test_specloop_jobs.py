@@ -202,6 +202,34 @@ def test_legacy_and_malformed_records_preserve_valid_rows(tmp_path, record, cont
 
 
 @pytest.mark.scenario("background-job-control/local-job-inventory/legacy-and-unreadable-records")
+@pytest.mark.parametrize("invalid_fields", [
+    pytest.param({"pid": 0}, id="zero-pid"),
+    pytest.param({"pgid": 0}, id="zero-pgid"),
+    pytest.param({"start_identity": "", "identity_error": "lookup denied"}, id="empty-identity"),
+    pytest.param({"start_identity": " ", "identity_error": "lookup denied"}, id="blank-identity"),
+    pytest.param({"start_identity": 123, "identity_error": "lookup denied"}, id="non-string-identity"),
+    pytest.param({"start_identity": None, "identity_error": ""}, id="empty-error"),
+    pytest.param({"start_identity": None, "identity_error": " "}, id="blank-error"),
+])
+def test_inventory_rejects_invalid_process_identity(tmp_path, invalid_fields):
+    directory = attempt(tmp_path)
+    process = identity(directory)
+    process.update(invalid_fields)
+    jobs.save(directory / "process.json", process)
+    jobs.save(directory / "result.json", {"result": {"outcome": "drafted"}})
+
+    rows, errors = jobs.list_jobs(tmp_path)
+
+    assert len(rows) == 1 and rows[0].directory == directory
+    assert rows[0].state == "unknown"
+    assert rows[0].process is None and not rows[0].identity_available
+    assert rows[0].pid is None and rows[0].pgid is None
+    assert len(errors) == 1
+    assert str(directory / "process.json") in errors[0]
+    assert "invalid process identity" in errors[0]
+
+
+@pytest.mark.scenario("background-job-control/local-job-inventory/legacy-and-unreadable-records")
 def test_unreadable_record_and_directory_are_reported(tmp_path, monkeypatch):
     good = attempt(tmp_path, job_id="1" * 32)
     bad = attempt(tmp_path, job_id="2" * 32)
@@ -290,6 +318,7 @@ def test_process_start_identity_uses_bounded_local_ps(monkeypatch):
     assert jobs.process_start_identity(123) == "Wed Oct 21 12:00:00 2026"
     args, kwargs = calls[0]
     assert args == ["/bin/ps", "-p", "123", "-o", "lstart="]
+    assert kwargs["capture_output"] is True and kwargs["text"] is True
     assert kwargs["timeout"] == 5 and kwargs["check"]
     assert kwargs["env"]["LC_ALL"] == "C"
 

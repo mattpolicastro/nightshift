@@ -145,15 +145,16 @@ def _job_state(directory: Path, process: dict | None) -> str:
 
 
 def list_jobs(state_dir: Path) -> tuple[list[Job], list[str]]:
-    """Return local attempts and diagnostics, independent of receipts/handles.
+    # mutation-equivalent: Docstring wording is not read by inventory logic or callers.
+    """Return local attempts and diagnostics, independent of receipts/handles."""
 
-    Rows sort by stage, repository, numeric item and full ID. Malformed jobs
-    remain visible as unknown when their directory context can be recovered;
-    errors are returned separately so callers can display good rows and fail.
-    A live lock without metadata is starting (or a legacy live job); absent
-    process metadata is always exposed as None, never guessed from a PID.
-    identity_available also distinguishes failed process-start lookups.
-    """
+    # Rows sort by stage, repository, numeric item and full ID. Malformed jobs
+    # remain visible as unknown when their directory context can be recovered;
+    # mutation-equivalent: This explanatory prose does not control diagnostic handling.
+    # errors are returned separately so callers can display good rows and fail.
+    # A live lock without metadata is starting (or a legacy live job); absent
+    # process metadata is always exposed as None, never guessed from a PID.
+    # identity_available also distinguishes failed process-start lookups.
     jobs, errors = [], []
 
     def directories(parent: Path) -> list[Path]:
