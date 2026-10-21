@@ -440,8 +440,8 @@ def revise_pending(
                     raise RuntimeError(f"{branch} changed during revision; retry on the next poll")
                 if not _start(path, receipt, [
                     "propose", str(repo.manifest), "--change", change, "--branch", branch,
-                    "--from-branch", fetched_ref, "--idea", idea,
-                ], runner=specloop_runner, launcher=launcher):
+                    "--from-branch", fetched_ref,
+                ], idea=idea, runner=specloop_runner, launcher=launcher):
                     return _PENDING
             _save(path, receipt)
 

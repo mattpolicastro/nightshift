@@ -8,6 +8,7 @@ import pytest
 from nightshift import daemon, queue, specloop_intake, specloop_job
 from nightshift.config import Config, Repo
 from test_specloop_approval import ApprovalGh, BRANCH, CHANGE, HEAD
+from test_specloop_intake import idea_file
 
 
 REVISED = "b" * 40
@@ -145,7 +146,7 @@ def test_spec_revised_from_review_through_daemon(setup, tmp_path, monkeypatch, i
     assert proposal[:8] == ["specloop", "propose", str(repo.manifest), "--change", CHANGE,
                             "--branch", BRANCH, "--from-branch"]
     assert proposal[8] == f"refs/nightshift/revise/{CHANGE}"
-    idea = proposal[proposal.index("--idea") + 1]
+    idea = idea_file(proposal).read_text(encoding="utf-8")
     assert "The original issue and comments." in idea and "Handle empty input" in idea
     assert "Old feedback" not in idea and "Draft ready" not in idea
     assert gh.head == REVISED and gh.labels == {"spec:review"}
@@ -166,19 +167,91 @@ def test_spec_revised_from_review_through_daemon(setup, tmp_path, monkeypatch, i
     assert commands.calls[push - 1] == proposal
 
 
+@pytest.mark.real_trust
+@pytest.mark.scenario("issue-intake/file-based-drafting-input/spec-revision-feedback")
+@pytest.mark.parametrize("original_receipt", [True, False])
+def test_large_spec_feedback_uses_idea_file(setup, tmp_path, original_receipt):
+    repo, gh, commands = setup
+    original_path = tmp_path / "proposals" / "owner__sample" / "7.json"
+    if original_receipt:
+        original = json.loads(original_path.read_text())["idea"]
+    else:
+        original_path.unlink()
+        original = "Spec: Add a gate\n\nCloses #7"
+    large = "BEGIN REVIEW λ\n\n" + "Preserve every case 🦉\n" * 60_000 + "END REVIEW"
+    assert len(large.encode("utf-8")) >= 1024 * 1024
+    for comment in gh.feedback:
+        comment["authorAssociation"] = "COLLABORATOR"
+    gh.feedback[1]["body"] = large
+    gh.feedback.append({"author": {"login": "outsider"}, "authorAssociation": "NONE",
+                        "body": "Untrusted instruction", "createdAt": "2026-10-20T14:00:00Z"})
+    gh.inline = [
+        {"user": {"login": "reviewer"}, "author_association": "MEMBER",
+         "path": "specs/gate/spec.md", "line": 9, "body": "Keep blank lines.\n\nAnd Unicode: café.",
+         "created_at": "2026-10-20T14:00:00Z"},
+        {"user": {"login": "outsider"}, "author_association": "NONE",
+         "body": "Untrusted inline instruction", "created_at": "2026-10-20T14:00:00Z"},
+    ]
+    feedback = (f"**reviewer:**\n\n{large}\n\n---\n\n"
+                "**reviewer on `specs/gate/spec.md:9`:**\n\nKeep blank lines.\n\nAnd Unicode: café.")
+    expected = original + "\n\n## New PR review feedback\n\n" + feedback
+
+    def run(args, **kwargs):
+        if args[:2] == ["specloop", "propose"]:
+            payload = idea_file(args)
+            assert payload.parent == (tmp_path / "revisions" / "owner__sample" / "8.jobs").resolve()
+            assert payload.read_bytes() == expected.encode("utf-8")
+            assert args == ["specloop", "propose", str(repo.manifest), "--change", CHANGE,
+                            "--branch", BRANCH, "--from-branch", f"refs/nightshift/revise/{CHANGE}",
+                            "--idea-file", str(payload), "--json"]
+            assert all("BEGIN REVIEW" not in arg and original not in arg for arg in args)
+        return commands(args, **kwargs)
+
+    for _ in range(2):
+        specloop_intake.revise_pending(repo, queue.Labels(), tmp_path, runner=gh,
+                                      specloop_runner=run, git_runner=commands)
+    proposal, = commands.proposals
+    assert idea_file(proposal).read_bytes() == expected.encode("utf-8")
+    assert gh.head == REVISED and gh.labels == {"spec:review"}
+    comment, = gh.comments
+    assert feedback in comment["body"] and REVISED in comment["body"]
+    assert "Old feedback" not in comment["body"] and "Untrusted" not in comment["body"]
+    assert not any(call[:2] == ["pr", "create"] for call in gh.calls)
+    assert all(call[2] == "8" for call in gh.calls if call[:2] in (["pr", "edit"], ["pr", "comment"]))
+    receipt = json.loads((tmp_path / "revisions" / "owner__sample" / "8.json").read_text())
+    assert receipt["delivered"] is True
+
+
+@pytest.mark.scenario("issue-intake/durable-drafting-payload/later-round-preserves-earlier-input")
 def test_delivery_retry_does_not_redraft_or_duplicate_comment(setup, tmp_path):
     _, gh, commands = setup
     gh.fail_comment = True
     with pytest.raises(RuntimeError, match="response lost"):
         poll(setup, tmp_path)
+    earlier = idea_file(commands.proposals[0])
+    saved = earlier.read_bytes()
     assert gh.head == REVISED and "agent:revise" in gh.labels
     poll(setup, tmp_path)
     assert len(commands.proposals) == len(gh.comments) == 1
     assert gh.labels == {"spec:review"}
+    assert list(earlier.parent.glob("idea-*.txt")) == [earlier]
+    assert saved == ("Add a gate\n\nThe original issue and comments."
+                     "\n\n## New PR review feedback\n\n**reviewer:**\n\nHandle empty input").encode("utf-8")
+    gh.feedback.append({"author": {"login": "reviewer"}, "body": "Second round: café.\n\nKeep it complete.",
+                        "createdAt": "2026-10-20T14:00:00Z"})
     gh.label_event("agent:revise", "labeled")
     commands.fetch_head = REVISED
     poll(setup, tmp_path)
     assert len(commands.proposals) == len(gh.comments) == 2
+    later = idea_file(commands.proposals[-1])
+    assert later != earlier and later.parent == earlier.parent
+    assert later.read_bytes() == saved + (
+        "\n\n---\n\n**reviewer:**\n\nSecond round: café.\n\nKeep it complete."
+    ).encode("utf-8")
+    assert earlier.read_bytes() == saved
+    assert set(earlier.parent.glob("idea-*.txt")) == {earlier, later}
+    assert gh.head == REVISED and gh.labels == {"spec:review"}
+    assert "Second round: café." in gh.comments[-1]["body"]
 
 
 @pytest.mark.parametrize("failure", ["feedback", "status", "fetch", "push"])
@@ -293,7 +366,7 @@ def test_answer_after_lost_needs_human_response_retries_propose(setup, tmp_path,
     poll(setup, tmp_path)
     assert len(commands.proposals) == 2 and gh.head == REVISED
     proposal = commands.proposals[-1]
-    assert "Use stereo." in proposal[proposal.index("--idea") + 1]
+    assert "Use stereo." in idea_file(proposal).read_text(encoding="utf-8")
     assert gh.labels == {"spec:review"} and len(gh.comments) == 1
     assert REVISED in gh.comments[0]["body"]
 
@@ -312,11 +385,19 @@ def test_moved_pr_does_not_overwrite_human_commit(setup, tmp_path):
     assert len(commands.proposals) == 1 and "agent:revise" in gh.labels
 
 
+@pytest.mark.scenario("issue-intake/file-based-drafting-input/spec-revision-feedback")
 def test_async_revision_is_collected_before_delivery(setup, tmp_path, monkeypatch):
     repo, gh, commands = setup
     jobs = []
+    expected = ("Add a gate\n\nThe original issue and comments."
+                "\n\n## New PR review feedback\n\n**reviewer:**\n\nHandle empty input")
 
     def start(path, receipt, args, **kwargs):
+        payload = idea_file(args)
+        assert payload.parent == (tmp_path / "revisions" / "owner__sample" / "8.jobs").resolve()
+        assert payload.read_bytes() == expected.encode("utf-8")
+        assert args == ["propose", str(repo.manifest), "--change", CHANGE, "--branch", BRANCH,
+                        "--from-branch", f"refs/nightshift/revise/{CHANGE}", "--idea-file", str(payload)]
         jobs.append(args)
         receipt["job"] = "pending"
         specloop_job.save(path, receipt)
@@ -328,7 +409,13 @@ def test_async_revision_is_collected_before_delivery(setup, tmp_path, monkeypatc
         specloop_intake.revise_pending(repo, queue.Labels(), tmp_path, runner=gh,
                                       git_runner=commands, status_runner=commands, on_pending=pending.append)
     assert len(jobs) == 1 and pending == [8, 8]
+    payload = idea_file(jobs[0])
+    assert list(payload.parent.glob("idea-*.txt")) == [payload]
+    assert payload.read_bytes() == expected.encode("utf-8")
     assert gh.head == HEAD and not gh.comments
     monkeypatch.setattr(specloop_job, "collect", lambda *a: commands.result)
     poll(setup, tmp_path)
     assert not commands.proposals and gh.head == REVISED and gh.labels == {"spec:review"}
+    assert payload.read_bytes() == expected.encode("utf-8")
+    comment, = gh.comments
+    assert "Handle empty input" in comment["body"] and REVISED in comment["body"]
