@@ -1,7 +1,7 @@
 ## 1. Event selection and actor evidence
 
 - [x] 1.1 After #12, extract `_latest_label_events` in `nightshift/specloop_intake.py`, retaining ID-only `_label_events` and `_approval_event` interfaces. Add pagination, reapplication, unlabeled, and invalid-ID tests in new `tests/test_specloop_label_authorization.py`; cover `issue-intake/latest-label-actor-authorization/latest-application-wins` and `issue-intake/actor-relationship-resolution/lookup-failure-defers-action`.
-- [ ] 1.2 Implement `_label_actor_association` and membership HTTP-status parsing in `nightshift/specloop_intake.py`; add real-trust tests in the new authorization test file for personal owners, collaborators, organization members, public nonmembers, absent/deleted actors, and lookup failures. Cover `issue-intake/actor-relationship-resolution/identity-without-association-resolved`, `issue-intake/actor-relationship-resolution/other-authors-cannot-authorize`, and `issue-intake/actor-relationship-resolution/lookup-failure-defers-action`.
+- [x] 1.2 Implement `_label_actor_association` and membership HTTP-status parsing in `nightshift/specloop_intake.py`; add real-trust tests in the new authorization test file for personal owners, collaborators, organization members, public nonmembers, absent/deleted actors, and lookup failures. Cover `issue-intake/actor-relationship-resolution/identity-without-association-resolved`, `issue-intake/actor-relationship-resolution/other-authors-cannot-authorize`, and `issue-intake/actor-relationship-resolution/lookup-failure-defers-action`.
 
 ## 2. Rejection and drafting authorization
 
