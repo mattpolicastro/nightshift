@@ -22,6 +22,9 @@ type Hook = { value?: any; deps?: unknown[]; cleanup?: () => void };
 export function styleView(runs: FactoryRun[], options: {
   act?: (input: FactoryActInput) => Promise<unknown>;
   read?: () => Promise<FactorySnapshot>;
+  client?: unknown;
+  navigation?: { openWorkspace?: (input: { serverId: string; workspaceId: string }) => void };
+  openURL?: (url: string) => Promise<void>;
 } = {}) {
   const components = new Map<string, Hook[]>();
   let hooks: Hook[], cursor = 0;
@@ -52,8 +55,12 @@ export function styleView(runs: FactoryRun[], options: {
     },
   };
   const actions: FactoryActInput[] = [];
+  const reads: unknown[] = [], hosts: string[] = [], urls: string[] = [];
   const runsRpc = {}, actRpc = {};
-  const read = options.read ?? (async () => ({ runs, stale: false, fetchedAt: '', error: null }));
+  const read = async (input: unknown) => {
+    reads.push(input);
+    return options.read ? options.read() : { runs, stale: false, fetchedAt: '', error: null };
+  };
   const act = async (input: FactoryActInput) => {
     actions.push(input);
     return options.act ? options.act(input) : { outcome: 'done', detail: 'Completed' };
@@ -71,11 +78,14 @@ export function styleView(runs: FactoryRun[], options: {
       if (name === 'react-native') return {
         View: 'View', Text: 'Text', Pressable: 'Pressable', TextInput: 'TextInput',
         AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) },
-        Linking: { openURL: async () => {} },
+        Linking: { openURL: async (url: string) => { urls.push(url); await options.openURL?.(url); } },
       };
       if (name === '@getpaseo/plugin/client') return {
         useRpc: (rpc: unknown) => rpc === runsRpc ? read : act,
-        getPaseoClient: () => ({ workspaces: { list: async () => ({ entries: [] }) } }),
+        getPaseoClient: (host: string) => {
+          hosts.push(host);
+          return 'client' in options ? options.client : { workspaces: { list: async () => ({ entries: [] }) } };
+        },
       };
       if (name === '../shared/factory') return { factoryRuns: runsRpc, factoryAct: actRpc };
       return require(name);
@@ -97,7 +107,7 @@ export function styleView(runs: FactoryRun[], options: {
   let tree: (Node | string)[] = [];
   function draw() {
     tree = render(React.createElement(exports.FactorySection, {
-      theme: { colors: themeColors }, host: { id: 'host-1', label: 'Host' }, navigation: {},
+      theme: { colors: themeColors }, host: { id: 'host-1', label: 'Host' }, navigation: options.navigation ?? {},
     }), 'root');
     const pending = effects;
     effects = [];
@@ -109,7 +119,7 @@ export function styleView(runs: FactoryRun[], options: {
   async function settle() { await new Promise(resolve => setImmediate(resolve)); draw(); }
   draw();
   return {
-    actions, nodes, text, find, settle,
+    actions, reads, hosts, urls, nodes, text, find, settle,
     setColors(next: typeof colors) { themeColors = next; draw(); },
     async press(control: string | Node) {
       const button = typeof control === 'string' ? find(control) : control;

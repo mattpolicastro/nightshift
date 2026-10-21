@@ -39,6 +39,8 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
   const buttons = factoryButtons(run);
   const details = factoryDetails(run);
   const workspace = matchWorkspace(run.context?.repo ?? '', workspaces);
+  const showChangeLink = detailsOpen && Boolean(details.github);
+  const showWorkspaceLink = detailsOpen && workspace !== null && typeof navigation?.openWorkspace === 'function';
   const confirmStyles = actionStyles(colors, confirmation?.request.verb === 'abort' ? 'destructive' : 'primary');
   const cancelStyles = actionStyles(colors, 'outlined');
   const statusColor = {
@@ -71,44 +73,6 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
       <Text style={{ color: colors.foreground, fontWeight: '600' }}>{run.action.headline}</Text>
       <Text style={{ color: colors.foreground }}>{run.action.why}</Text>
     </> : null}
-    {run.pr ? <Pressable accessibilityRole="link" accessibilityLabel={`Open PR for ${run.change}`}
-      onPress={() => { void Linking.openURL(run.pr).catch(() => report('Could not open GitHub.')); }}
-      style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
-      <Text style={{ color: colors.accent, fontWeight: '600' }}>Open PR ↗</Text>
-    </Pressable> : null}
-    <Pressable accessibilityRole="button" accessibilityLabel={`Details for ${run.change}`}
-      accessibilityState={{ expanded: detailsOpen }}
-      onPress={() => { if (!detailsOpen) onDetailsOpen(); setDetailsOpen(!detailsOpen); }}
-      style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
-      <Text style={{ color: colors.accent, fontWeight: '600' }}>Details {detailsOpen ? '▴' : '▾'}</Text>
-    </Pressable>
-    {detailsOpen ? <View style={{ gap: 8 }}>
-      {details.fields.map(field => <View key={field.label} style={{ gap: 4 }}>
-        <Text style={{ color: colors.foregroundMuted }}>{field.label}</Text>
-        <Text selectable style={{ color: colors.foreground }}>{field.text}</Text>
-      </View>)}
-      {details.recent.length ? <View style={{ gap: 4 }}>
-        <Text style={{ color: colors.foregroundMuted }}>Recent events</Text>
-        {details.recent.map((event, index) => <Text key={`${event.at}:${index}`} selectable style={{ color: colors.foreground }}>
-          {new Date(event.at).toLocaleString()} · {event.text}
-        </Text>)}
-      </View> : null}
-      {details.github ? <Pressable accessibilityRole="link" accessibilityLabel={`Open change ${run.change} on GitHub`}
-        onPress={() => { void Linking.openURL(details.github).catch(() => report('Could not open GitHub.')); }}
-        style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
-        <Text style={{ color: colors.accent, fontWeight: '600' }}>Open change on GitHub ↗</Text>
-      </Pressable> : null}
-      {workspace && typeof navigation?.openWorkspace === 'function' ? <Pressable accessibilityRole="button"
-        accessibilityLabel={`Open ${run.change} in Paseo`}
-        onPress={() => {
-          try { navigation.openWorkspace({ serverId: host.id, workspaceId: workspace.id }); }
-          catch { report('Could not open the Paseo workspace.'); }
-        }} style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
-        <Text style={{ color: colors.accent, fontWeight: '600' }}>Open in Paseo</Text>
-      </Pressable> : null}
-      <Text style={{ color: colors.foregroundMuted }}>More detail (run on the Paseo host)</Text>
-      <Text selectable style={{ color: colors.foreground }}>{details.command}</Text>
-    </View> : null}
     {buttons.some(button => button.verb === 'resume') ? <View style={{ gap: 4 }}>
       <Text style={{ color: colors.foregroundMuted }}>Resume note (optional)</Text>
       <TextInput accessibilityLabel={`Resume note for ${run.change}`} value={note} onChangeText={setNote}
@@ -137,6 +101,49 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
           <Text style={cancelStyles.text}>Cancel</Text>
         </Pressable>
       </View>
+    </View> : null}
+    {run.pr || showChangeLink || showWorkspaceLink ? <View style={{
+      flexDirection: 'row', flexWrap: 'wrap', gap: 12,
+      borderTopWidth: 1, borderColor: colors.border, paddingTop: 8,
+    }}>
+      {run.pr ? <Pressable accessibilityRole="link" accessibilityLabel={`Open PR for ${run.change}`}
+        onPress={() => { void Linking.openURL(run.pr).catch(() => report('Could not open GitHub.')); }}
+        style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
+        <Text style={{ color: colors.accent, fontWeight: '600', textDecorationLine: 'underline' }}>Open PR ↗</Text>
+      </Pressable> : null}
+      {showChangeLink ? <Pressable accessibilityRole="link" accessibilityLabel={`Open change ${run.change} on GitHub`}
+        onPress={() => { void Linking.openURL(details.github).catch(() => report('Could not open GitHub.')); }}
+        style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
+        <Text style={{ color: colors.accent, fontWeight: '600', textDecorationLine: 'underline' }}>Open change on GitHub ↗</Text>
+      </Pressable> : null}
+      {showWorkspaceLink && workspace ? <Pressable accessibilityRole="button"
+        accessibilityLabel={`Open ${run.change} in Paseo`}
+        onPress={() => {
+          try { navigation.openWorkspace({ serverId: host.id, workspaceId: workspace.id }); }
+          catch { report('Could not open the Paseo workspace.'); }
+        }} style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
+        <Text style={{ color: colors.accent, fontWeight: '600', textDecorationLine: 'underline' }}>Open in Paseo</Text>
+      </Pressable> : null}
+    </View> : null}
+    <Pressable accessibilityRole="button" accessibilityLabel={`Details for ${run.change}`}
+      accessibilityState={{ expanded: detailsOpen }}
+      onPress={() => { if (!detailsOpen) onDetailsOpen(); setDetailsOpen(!detailsOpen); }}
+      style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
+      <Text style={{ color: colors.accent, fontWeight: '600' }}>Details {detailsOpen ? '▴' : '▾'}</Text>
+    </Pressable>
+    {detailsOpen ? <View style={{ gap: 8 }}>
+      {details.fields.map(field => <View key={field.label} style={{ gap: 4 }}>
+        <Text style={{ color: colors.foregroundMuted }}>{field.label}</Text>
+        <Text selectable style={{ color: colors.foreground }}>{field.text}</Text>
+      </View>)}
+      {details.recent.length ? <View style={{ gap: 4 }}>
+        <Text style={{ color: colors.foregroundMuted }}>Recent events</Text>
+        {details.recent.map((event, index) => <Text key={`${event.at}:${index}`} selectable style={{ color: colors.foreground }}>
+          {new Date(event.at).toLocaleString()} · {event.text}
+        </Text>)}
+      </View> : null}
+      <Text style={{ color: colors.foregroundMuted }}>More detail (run on the Paseo host)</Text>
+      <Text selectable style={{ color: colors.foreground }}>{details.command}</Text>
     </View> : null}
     {notice ? <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{notice}</Text> : null}
   </View>;

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { FactoryActInput, FactoryRun, FactorySnapshot } from '../shared/factory';
-import { colors, styleView } from './factory-style-harness';
+import { colors, styleView, type Node } from './factory-style-harness';
 
 test('status chip colour follows the run status', async t => {
   await t.test('paseo-runs-page/status-chip-presentation/chip-follows-all-run-statuses', async t => {
@@ -74,6 +74,270 @@ test('status chip colour follows the run status', async t => {
 type Verb = FactoryActInput['verb'];
 type Role = 'primary' | 'destructive' | 'outlined';
 const labels = { resume: 'Resume', accept: 'Accept', publish: 'Publish', finish: 'Finish', abort: 'Abort' };
+
+const navigationRun: FactoryRun = {
+  change: 'linked-run', status: 'paused', tasks: { done: 1, total: 3 },
+  pr: 'https://github.com/owner/repo/pull/42',
+  action: { kind: 'pause', headline: 'Review needed', why: 'Paused', command: '', actions: ['resume', 'abort'], pause_id: 'stuck:1' },
+  context: {
+    summary: 'Group the navigation.', repo: '~/Projects/nightshift', branch: 'spec/linked-run',
+    task: { label: '2.2', section: 'Paseo plugin', text: 'Group links.' },
+    detail: 'Keep the diagnostic.\nAnd its second line.',
+    recent: [
+      { at: '2026-10-21T12:00:00Z', text: 'task 2.2 attempt 1 failed' },
+      { at: '2026-10-21T11:00:00Z', text: 'task 1.1 landed' },
+    ],
+    github: 'https://github.com/owner/repo/tree/spec/linked-run/openspec/changes/linked-run',
+  },
+};
+const linkedWorkspace = {
+  id: 'workspace-42', workspaceDirectory: '/Users/studio/Projects/nightshift',
+  archivingAt: null, activityAt: '2026-10-21T12:00:00Z',
+};
+type StylePage = ReturnType<typeof styleView>;
+function parentOf(page: StylePage, child: Node) {
+  const parent = page.nodes().find(node => node.children.includes(child));
+  assert.ok(parent);
+  return parent;
+}
+function assertNavigation(page: StylePage, run: FactoryRun, visible: number[], tokens = colors) {
+  const descriptors = [
+    [`Open PR for ${run.change}`, 'link', 'Open PR ↗'],
+    [`Open change ${run.change} on GitHub`, 'link', 'Open change on GitHub ↗'],
+    [`Open ${run.change} in Paseo`, 'button', 'Open in Paseo'],
+  ];
+  const toggle = page.find(`Details for ${run.change}`)!;
+  const card = parentOf(page, toggle);
+  const controls = visible.map(index => {
+    const [label, role, text] = descriptors[index];
+    const matches = page.nodes(card.children).filter(node => node.props.accessibilityLabel === label);
+    assert.equal(matches.length, 1, `${label} appears exactly once`);
+    const control = matches[0];
+    assert.equal(control.type, 'Pressable');
+    assert.equal(control.props.accessibilityRole, role);
+    assert.equal(control.props.accessibilityLabel, label);
+    assert.equal(control.props.disabled, undefined);
+    assert.equal(page.text(control.children), text);
+    assert.deepEqual({ ...control.props.style }, { paddingVertical: 10, alignSelf: 'flex-start' });
+    assert.equal(control.children.length, 1);
+    const labelNode = control.children[0] as Node;
+    assert.equal(labelNode.type, 'Text');
+    assert.deepEqual({ ...labelNode.props.style }, {
+      color: tokens.accent, fontWeight: '600', textDecorationLine: 'underline',
+    });
+    return control;
+  });
+  descriptors.forEach(([label], index) => {
+    if (!visible.includes(index)) assert.equal(page.find(label), undefined, `${label} stays unavailable`);
+  });
+  const groups = page.nodes(card.children).filter(node => node.type === 'View' &&
+    (node.props.style?.borderTopWidth === 1 || controls.some(control => node.children.includes(control))));
+  assert.equal(groups.length, visible.length ? 1 : 0, 'omit the secondary row when it has no items');
+  if (!visible.length) return;
+  const group = groups[0];
+  assert.deepEqual(group.children, controls, 'all navigation items share one immediate parent in order');
+  assert.deepEqual({ ...group.props.style }, {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 12,
+    borderTopWidth: 1, borderColor: tokens.border, paddingTop: 8,
+  });
+  assert.equal(parentOf(page, group), card, 'the navigation row is a direct card child');
+  assert.equal(card.children[card.children.indexOf(toggle) - 1], group, 'navigation sits directly above Details');
+  for (const button of page.nodes(card.children).filter(node => node.type === 'Pressable' &&
+    (node.props.accessibilityLabel === `Resume ${run.change}` || node.props.accessibilityLabel === `Abort ${run.change}` ||
+      node.props.accessibilityLabel === `Confirm abort ${run.change}` || page.text(node.children) === 'Cancel'))) {
+    const actionGroup = parentOf(page, button);
+    assert.notEqual(actionGroup, group);
+    assert.ok(!page.nodes(actionGroup.children).includes(group), 'navigation is outside action and confirmation groups');
+    const branch = card.children.find(child => typeof child !== 'string' && page.nodes([child]).includes(button))!;
+    assert.ok(card.children.indexOf(branch) < card.children.indexOf(group), 'actions and confirmations precede navigation');
+  }
+}
+function assertDetails(page: StylePage, run: FactoryRun, expanded: boolean) {
+  const toggle = page.find(`Details for ${run.change}`)!;
+  assert.equal(toggle.props.accessibilityRole, 'button');
+  assert.equal(toggle.props.accessibilityState.expanded, expanded);
+  assert.equal(page.text(toggle.children), `Details ${expanded ? '▴' : '▾'}`);
+  const card = parentOf(page, toggle);
+  const command = `specloop status ${run.change} --events 20`;
+  if (!expanded) {
+    assert.equal(page.text(card.children).includes(command), false);
+    return;
+  }
+  const content = card.children[card.children.indexOf(toggle) + 1] as Node;
+  assert.equal(content.type, 'View', 'Details content stays adjacent to the toggle');
+  const texts = page.nodes(content.children).filter(node => node.type === 'Text');
+  const context = run.context;
+  const fields = [
+    ['Summary', context?.summary], ['Repository', context?.repo], ['Branch', context?.branch],
+    ['Task', context?.task ? `${context.task.label} · ${context.task.section} · ${context.task.text}` : undefined],
+    ['Pause detail', context?.detail],
+  ].filter((field): field is [string, string] => Boolean(field[1]));
+  const events = context?.recent ?? [];
+  assert.deepEqual(texts.map(node => page.text(node.children)), [
+    ...fields.flat(), ...(events.length ? ['Recent events', ...events.map(event => `${new Date(event.at).toLocaleString()} · ${event.text}`)] : []),
+    'More detail (run on the Paseo host)', command,
+  ]);
+  for (const value of [...fields.map(([, value]) => value), command]) {
+    assert.equal(texts.find(node => page.text(node.children) === value)!.props.selectable, true);
+  }
+}
+
+test('links are grouped apart from actions', async t => {
+  await t.test('paseo-runs-page/secondary-navigation-group/links-share-a-group-apart-from-actions', async t => {
+    const opened: unknown[] = [], lookups: unknown[] = [];
+    const page = styleView([navigationRun], {
+      navigation: { openWorkspace: input => { opened.push({ ...input }); } },
+      client: { workspaces: { list: async (input: unknown) => { lookups.push(input); return { entries: [linkedWorkspace] }; } } },
+    });
+    t.after(page.dispose);
+    await page.settle();
+    assertNavigation(page, navigationRun, [0]);
+    assert.deepEqual(page.hosts, []);
+    await page.press('Details for linked-run');
+    assertNavigation(page, navigationRun, [0, 1, 2]);
+    assertDetails(page, navigationRun, true);
+    await page.press('Abort linked-run');
+    assert.ok(page.find('Confirm abort linked-run'));
+    assertNavigation(page, navigationRun, [0, 1, 2]);
+    const nextColors = Object.fromEntries(Object.entries(colors).map(([key, value]) => [key, `next-${value}`])) as typeof colors;
+    page.setColors(nextColors);
+    assertNavigation(page, navigationRun, [0, 1, 2], nextColors);
+    await page.press('Open PR for linked-run');
+    await page.press('Open change linked-run on GitHub');
+    await page.press('Open linked-run in Paseo');
+    assert.deepEqual(page.urls, [navigationRun.pr, navigationRun.context!.github]);
+    assert.deepEqual(opened, [{ serverId: 'host-1', workspaceId: linkedWorkspace.id }]);
+    assert.deepEqual(page.actions, []);
+    assert.deepEqual(page.hosts, ['host-1']);
+    assert.deepEqual(JSON.parse(JSON.stringify(lookups)), [{ page: { limit: 200 } }]);
+    assert.deepEqual(page.reads.map(input => ({ ...input as object })), [{ refresh: true }]);
+  });
+
+  await t.test('paseo-runs-page/secondary-navigation-group/grouping-preserves-link-availability', async t => {
+    await t.test('lookup stays lazy and shared through collapse, loading and reopening', async t => {
+      let complete!: (value: unknown) => void;
+      const pending = new Promise(resolve => { complete = resolve; });
+      let lookups = 0;
+      const first = { ...navigationRun, pr: '' };
+      const second = { ...navigationRun, change: 'second-run' };
+      const page = styleView([first, second], {
+        navigation: { openWorkspace() {} },
+        client: { workspaces: { list: () => { lookups++; return pending; } } },
+      });
+      t.after(page.dispose);
+      await page.settle();
+      assertNavigation(page, first, []);
+      assertNavigation(page, second, [0]);
+      assert.equal(lookups, 0);
+      assert.deepEqual(page.hosts, []);
+      await page.press('Details for linked-run');
+      assertNavigation(page, first, [1]);
+      assertDetails(page, first, true);
+      await page.press('Details for linked-run');
+      await page.press('Details for second-run');
+      assertNavigation(page, first, []);
+      assertNavigation(page, second, [0, 1]);
+      assert.equal(lookups, 1);
+      complete({ entries: [linkedWorkspace] });
+      await page.settle();
+      assertNavigation(page, first, []);
+      assertDetails(page, first, false);
+      assertNavigation(page, second, [0, 1, 2]);
+      for (const run of [first, second]) {
+        if (run === first) await page.press(`Details for ${run.change}`);
+        assertNavigation(page, run, run.pr ? [0, 1, 2] : [1, 2]);
+        assertDetails(page, run, true);
+        await page.press(`Details for ${run.change}`);
+        assertNavigation(page, run, run.pr ? [0] : []);
+        assertDetails(page, run, false);
+        await page.press(`Details for ${run.change}`);
+        assertNavigation(page, run, run.pr ? [0, 1, 2] : [1, 2]);
+        assertDetails(page, run, true);
+      }
+      assert.equal(lookups, 1);
+      assert.deepEqual(page.hosts, ['host-1']);
+      assert.equal(page.reads.length, 1);
+      assert.deepEqual(page.actions, []);
+      assert.deepEqual(page.urls, []);
+    });
+
+    const cases = [
+      { name: 'no URLs', github: '', entries: [linkedWorkspace], visible: [2] },
+      { name: 'no matching workspace', entries: [{ ...linkedWorkspace, workspaceDirectory: '/srv/other' }], visible: [1] },
+      { name: 'archived workspace', entries: [{ ...linkedWorkspace, archivingAt: '2026-10-21T13:00:00Z' }], visible: [1] },
+      { name: 'empty workspace list', entries: [], visible: [1] },
+      { name: 'no navigation support', navigation: {}, entries: [linkedWorkspace], visible: [1] },
+      { name: 'no client', client: undefined, visible: [1] },
+      { name: 'no workspace API', client: {}, visible: [1] },
+      { name: 'no workspace list method', client: { workspaces: {} }, visible: [1] },
+      { name: 'lookup fails', fails: true, visible: [1] },
+      { name: 'no context', context: undefined, entries: [linkedWorkspace], visible: [] },
+      { name: 'empty context', context: { summary: '', repo: '', branch: '', task: null, detail: '', recent: [], github: '' },
+        entries: [linkedWorkspace], visible: [] },
+      { name: 'no visible navigation', github: '', entries: [], visible: [] },
+    ];
+    for (const fixture of cases) for (const pr of ['', navigationRun.pr]) {
+      await t.test(`${fixture.name}, ${pr ? 'with' : 'without'} PR`, async t => {
+        const run: FactoryRun = { ...navigationRun, pr, context: 'context' in fixture ? fixture.context : {
+          ...navigationRun.context!, github: fixture.github ?? navigationRun.context!.github,
+        } };
+        let lookups = 0;
+        const page = styleView([run], {
+          navigation: fixture.navigation ?? { openWorkspace() {} },
+          client: 'client' in fixture ? fixture.client : { workspaces: { list: async () => {
+            lookups++;
+            if (fixture.fails) throw new Error('offline');
+            return { entries: fixture.entries ?? [] };
+          } } },
+        });
+        t.after(page.dispose);
+        await page.settle();
+        const collapsed = pr ? [0] : [];
+        const expanded = [...collapsed, ...fixture.visible];
+        assertNavigation(page, run, collapsed);
+        assertDetails(page, run, false);
+        assert.deepEqual(page.hosts, []);
+        assert.equal(lookups, 0);
+        for (let cycle = 0; cycle < 2; cycle++) {
+          await page.press('Details for linked-run');
+          assertNavigation(page, run, expanded);
+          assertDetails(page, run, true);
+          await page.press('Details for linked-run');
+          assertNavigation(page, run, collapsed);
+          assertDetails(page, run, false);
+        }
+        assert.equal(lookups, fixture.navigation || 'client' in fixture ? 0 : 1);
+        assert.deepEqual(page.hosts, fixture.navigation ? [] : ['host-1']);
+        assert.equal(page.reads.length, 1);
+        assert.deepEqual(page.actions, []);
+        assert.deepEqual(page.urls, []);
+      });
+    }
+  });
+
+  await t.test('navigation failures keep the existing error messages', async t => {
+    const page = styleView([navigationRun], {
+      navigation: { openWorkspace() { throw new Error('unavailable'); } },
+      client: { workspaces: { list: async () => ({ entries: [linkedWorkspace] }) } },
+      openURL: async () => { throw new Error('unavailable'); },
+    });
+    t.after(page.dispose);
+    await page.settle();
+    await page.press('Details for linked-run');
+    for (const [label, message] of [
+      ['Open PR for linked-run', 'Could not open GitHub.'],
+      ['Open change linked-run on GitHub', 'Could not open GitHub.'],
+      ['Open linked-run in Paseo', 'Could not open the Paseo workspace.'],
+    ]) {
+      await page.press(label);
+      assert.deepEqual(page.nodes().filter(node => node.props.accessibilityRole === 'alert')
+        .map(node => page.text(node.children)), [message]);
+    }
+    assert.deepEqual(page.actions, []);
+    assert.equal(page.reads.length, 1);
+  });
+});
+
 function runWith(actions: Verb[]): FactoryRun {
   Object.freeze(actions);
   return {
