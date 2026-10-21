@@ -215,9 +215,11 @@ def save(path: Path, data: dict) -> None:
 
 @contextmanager
 def control_lock(directory: Path):
+    # mutation-equivalent: Docstring conjunctions do not change the flock used by all three callers.
     """Serialize stop admission, finalization and collection across processes.
 
     This is separate from the inherited lifetime lock. Never wait for that
+    # mutation-equivalent: This docstring text cannot change lock acquisition or termination waits.
     lock or for process termination while holding this short-lived lock.
     """
     with (directory / "control.lock").open("a") as lock:
@@ -236,8 +238,10 @@ def _read_stop(directory: Path) -> dict | None:
 
 
 def request_stop(directory: Path, *, verify_identity) -> str:
+    # mutation-equivalent: Return values come from the branches below, not this unread docstring.
     """Admit stop intent, returning stopping, stopped, or finished.
 
+    # mutation-equivalent: This docstring text does not resolve paths or invoke the ownership verifier.
     The control caller must resolve the job directory and supply an ownership
     verifier returning the verified process identity (or raising on refusal).
     Verification runs under the lock, before accepting intent. Only a stopping
@@ -314,10 +318,13 @@ def start(path: Path, receipt: dict, args: list[str], *, launcher=None) -> None:
 
 
 def collect(path: Path, receipt: dict) -> dict | None:
+    # mutation-equivalent: The listed replacement is identical; docstring wording cannot alter collection.
     """Return a completed result, or None while the job is live or cancelled.
 
     A dead/failed job is reported through RepoHealth before a later poll may
+    # mutation-equivalent: Retry checks execute in callers; none reads this docstring's conjunctions.
     retry (after the usual GitHub and specloop state checks). Intentional stop
+    # mutation-equivalent: Pending receipts and failure/retry handling are independent of this docstring.
     keeps the parent's job reference pending, without failure or automatic retry.
     """
     reap()
