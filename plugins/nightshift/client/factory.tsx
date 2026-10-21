@@ -4,7 +4,7 @@ import { AppState, Linking, Pressable, Text, TextInput, View } from 'react-nativ
 import {
   factoryRuns, factoryAct, type FactoryRun, type FactorySnapshot, type FactoryActInput,
 } from '../shared/factory';
-import { decideFactoryAction, factoryButtons, factoryDetails, matchWorkspace, orderFactoryRuns, type ActionDecision } from './factory-model';
+import { decideFactoryAction, factoryButtons, factoryDetails, groupFactoryRuns, matchWorkspace, type ActionDecision } from './factory-model';
 
 type Colors = PluginSurfaceProps['theme']['colors'];
 type Confirmation = Extract<ActionDecision, { kind: 'confirm' }>;
@@ -117,8 +117,9 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
   const send = useRpc(factoryAct);
   const [data, setData] = useState<FactorySnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // An action's outcome shows beside the run it was sent for, not above a long list.
+  // Keep outcomes beside their rendered row, or above the list while folded or absent.
   const [notice, setNotice] = useState<{ change: string; text: string } | null>(null);
+  const [finishedOpen, setFinishedOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [acting, setActing] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspaces>([]);
@@ -198,22 +199,33 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
     }
   }
 
+  const { active, finished } = groupFactoryRuns(data?.runs ?? []);
+  const noticeInRow = notice && (active.some(run => run.change === notice.change) ||
+    (finishedOpen && finished.some(run => run.change === notice.change)));
+  const renderRow = (run: FactoryRun) => <FactoryRow key={run.change} run={run} colors={colors}
+    disabled={acting} act={act} report={text => setNotice({ change: run.change, text })}
+    notice={noticeInRow && notice?.change === run.change ? notice.text : null} host={host} navigation={navigation}
+    workspaces={workspaces} onDetailsOpen={() => { void loadWorkspaces(); }} />;
+
   return <View style={{ gap: 12 }}>
     <Text accessibilityRole="header" style={{ color: colors.foreground, fontSize: 24, fontWeight: '700' }}>Factory</Text>
     <Text style={{ color: data?.stale || error ? colors.statusWarning : colors.foregroundMuted }}>
-      {data ? `${data.runs.length} ${data.runs.length === 1 ? 'run' : 'runs'}${data.stale || error ? ' · Stale' : ''}` : 'Loading Factory…'}
+      {data ? `${active.length} ${active.length === 1 ? 'run' : 'runs'}${finished.length ? ` · ${finished.length} finished` : ''}${data.stale || error ? ' · Stale' : ''}` : 'Loading Factory…'}
     </Text>
     <Pressable accessibilityRole="button" accessibilityLabel="Refresh Factory" disabled={loading || acting}
       onPress={() => void refresh()} style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
       <Text style={{ color: colors.accent, fontWeight: '600' }}>{loading ? 'Checking…' : 'Refresh Factory'}</Text>
     </Pressable>
     {error || data?.error ? <Text accessibilityRole="alert" style={{ color: colors.statusWarning }}>{error || data?.error}</Text> : null}
-    {notice && !data?.runs.some(run => run.change === notice.change)
+    {notice && !noticeInRow
       ? <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{`${notice.change}: ${notice.text}`}</Text> : null}
-    {data && !data.runs.length ? <Text style={{ color: colors.foreground }}>No Factory runs.</Text> : null}
-    {orderFactoryRuns(data?.runs ?? []).map(run => <FactoryRow key={run.change} run={run} colors={colors}
-      disabled={acting} act={act} report={text => setNotice({ change: run.change, text })}
-      notice={notice?.change === run.change ? notice.text : null} host={host} navigation={navigation}
-      workspaces={workspaces} onDetailsOpen={() => { void loadWorkspaces(); }} />)}
+    {data && !active.length && !finished.length ? <Text style={{ color: colors.foreground }}>No Factory runs.</Text> : null}
+    {active.map(renderRow)}
+    {finished.length ? <Pressable accessibilityRole="button" accessibilityLabel={`Finished (${finished.length})`}
+      accessibilityState={{ expanded: finishedOpen }} onPress={() => setFinishedOpen(open => !open)}
+      style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
+      <Text style={{ color: colors.accent, fontWeight: '600' }}>{`Finished (${finished.length})`}</Text>
+    </Pressable> : null}
+    {finishedOpen ? finished.map(renderRow) : null}
   </View>;
 }
