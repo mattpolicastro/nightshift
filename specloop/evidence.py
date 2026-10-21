@@ -16,6 +16,7 @@ import json
 import random
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -203,8 +204,17 @@ def mutate(repo: Path, head: str, mutants: list[Mutant], m: Manifest, out: Path)
         mutant_manifest = replace(m, prepare=tuple(
             replace(s, timeout=min(s.timeout, budget.get(s.id, s.timeout)))
             for s in m.prepare))
-        for number, mut in enumerate(mutants, 1):
-            mut.result = _mutate_one(number, mut, out / "src", head, steps, mutant_manifest, out)
+        if mutants:
+            # The pool drains even on an unexpected worker error, before the
+            # outer finally releases the baseline source shared by all workers.
+            with ThreadPoolExecutor(max_workers=min(m.mutation_parallel, len(mutants))) as pool:
+                futures = {
+                    pool.submit(_mutate_one, index + 1, mut, out / "src", head,
+                                steps, mutant_manifest, out): index
+                    for index, mut in enumerate(mutants)
+                }
+                for future in as_completed(futures):
+                    mutants[futures[future]].result = future.result()
         return True
     finally:
         verify.cleanup(out)

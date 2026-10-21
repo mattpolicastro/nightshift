@@ -5,7 +5,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from threading import Barrier
+from threading import Barrier, Event, Lock
 
 import pytest
 
@@ -453,13 +453,239 @@ def test_all_invalid_mutants_are_unmeasured_not_a_pass():
     assert Evidence(1).passed(0.8)  # no mutants generated (e.g. no mutable lines) is still not a failure
 
 
+@pytest.mark.parametrize("parallel", [
+    pytest.param(2, marks=pytest.mark.scenario(
+        "parallel-evidence-mutants/baseline-before-bounded-work/baseline-precedes-overlap")),
+    pytest.param(1, marks=pytest.mark.scenario(
+        "parallel-evidence-mutants/baseline-before-bounded-work/serial-and-oversized-limits")),
+    pytest.param(8, marks=pytest.mark.scenario(
+        "parallel-evidence-mutants/baseline-before-bounded-work/serial-and-oversized-limits")),
+])
+def test_mutant_dispatch_waits_for_baseline_and_obeys_limit(tmp_path, monkeypatch, parallel):
+    repo, _, head = project(tmp_path, STRONG)
+    out = tmp_path / "out"
+    before = CODE.splitlines()[1]
+    mutants = [evidence.Mutant("calc.py", 2, "comment", before, before + f" # {i}")
+               for i in range(3)]
+    baseline_started, baseline_release, baseline_finished = Event(), Event(), Event()
+    started = [Event() for _ in mutants]
+    release = [Event() for _ in mutants]
+    finished = [Event() for _ in mutants]
+    lock = Lock()
+    calls, completed = [], []
+    active = peak = 0
+
+    def run(src, sha, steps, m, run_out):
+        nonlocal active, peak
+        with lock:
+            calls.append(run_out)
+        if run_out == out:
+            baseline_started.set()
+            assert baseline_release.wait(10)
+            baseline_finished.set()
+            return [verify.Receipt("test", [], 0, 0, True, 0.1, "")]
+        assert baseline_finished.is_set()
+        index = int(run_out.name.split("-")[1]) - 1
+        assert (src / "calc.py").read_text() == CODE.replace(before, mutants[index].after)
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        started[index].set()
+        try:
+            assert release[index].wait(10)
+            return [verify.Receipt("test", [], 0, 0 if index == 1 else 1, index == 1, 0.1, "")]
+        finally:
+            with lock:
+                active -= 1
+                completed.append(index)
+            finished[index].set()
+
+    monkeypatch.setattr(verify, "run_extracted", run)
+    with ThreadPoolExecutor(max_workers=1) as coordinator:
+        future = coordinator.submit(evidence.mutate, repo, head, mutants,
+                                    replace(M, mutation_parallel=parallel), out)
+        try:
+            assert baseline_started.wait(10)
+            assert calls == [out] and not any(event.is_set() for event in started)
+            baseline_release.set()
+            capacity = min(parallel, len(mutants))
+            for event in started[:capacity]:
+                assert event.wait(10)
+            with lock:
+                assert active == peak == capacity
+            # Release later indices first to prove collection preserves selection
+            # order even when a queued job completes before the first worker.
+            order = [0, 1, 2] if parallel == 1 else [1, 2, 0]
+            for index in order:
+                assert started[index].wait(10)
+                release[index].set()
+                assert finished[index].wait(10)
+            assert future.result(timeout=10)
+        finally:
+            baseline_release.set()
+            for event in release:
+                event.set()
+    assert completed == order
+    assert peak == min(parallel, 3) and active == 0
+    assert len(calls) == 4 and set(calls) == {out, *(out / f"mutant-{i}" for i in range(1, 4))}
+    assert [mut.result for mut in mutants] == ["killed", "survived", "killed"]
+    for run_out in calls:
+        assert not (run_out / "src").exists()
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/baseline-before-bounded-work/failed-baseline-stops-mutants")
+@pytest.mark.parametrize("stage", ["prepare", "test"])
+@pytest.mark.parametrize("failure", ["exit", "timeout"])
+def test_failed_baseline_never_dispatches_mutants(tmp_path, monkeypatch, stage, failure):
+    repo, base, head = project(tmp_path, STRONG)
+    script = "raise SystemExit(3)" if failure == "exit" else "import time; time.sleep(60)"
+    bad = manifest.Step(stage, (sys.executable, "-c", script), timeout=0.2)
+    m = replace(M, prepare=(bad,) if stage == "prepare" else (),
+                verify=M.verify if stage == "prepare" else (bad,))
+    out = tmp_path / "out"
+    calls = []
+    real_run = verify.run_extracted
+
+    def run(src, sha, steps, run_m, run_out):
+        calls.append(run_out)
+        assert run_out == out
+        return real_run(src, sha, steps, run_m, run_out)
+
+    def unexpected_pool(*args, **kwargs):
+        pytest.fail("failed baseline must not create a worker pool")
+
+    monkeypatch.setattr(verify, "run_extracted", run)
+    monkeypatch.setattr(evidence, "ThreadPoolExecutor", unexpected_pool)
+    ev = evidence.gather(repo, base, head, ["covered"], {"covered"}, m, out, 1)
+    assert calls == [out]
+    assert ev.baseline_failed and ev.mutants
+    assert all(mut.result == "invalid" for mut in ev.mutants)
+    assert not ev.passed(0) and ev.score is None
+    assert not (out / "src").exists() and not (out / "build").exists()
+    receipts = json.loads((out / "receipts.json").read_text())
+    assert [(r["id"], r["exit"], r["passed"]) for r in receipts] == [
+        (stage, 3 if failure == "exit" else None, False)]
+    saved = json.loads((out / "evidence.json").read_text())
+    assert saved["baseline_failed"] and saved["covered"] == ["covered"]
+    assert all(mut["result"] == "invalid" for mut in saved["mutants"])
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/baseline-before-bounded-work/skipped-mutation-stays-skipped")
+@pytest.mark.parametrize("skip,reason", [
+    ("steps", "no mutation_steps in the manifest"),
+    ("base", "section started before evidence was recorded"),
+    ("mutants", "no mutable lines added under mutation_paths"),
+])
+@pytest.mark.parametrize("uncovered", [False, True])
+def test_skipped_mutation_preserves_coverage_without_starting_work(tmp_path, monkeypatch, skip, reason, uncovered):
+    repo, base, head = project(tmp_path, STRONG)
+    m = replace(M, mutation_steps=() if skip == "steps" else M.mutation_steps,
+                coverage_exempt={"human": "manual check"})
+    if skip == "base":
+        base = ""
+    elif skip == "mutants":
+        base = head
+
+    def unexpected_work(*args, **kwargs):
+        pytest.fail("skipped mutation must not start baseline or workers")
+
+    monkeypatch.setattr(verify, "run_steps", unexpected_work)
+    monkeypatch.setattr(evidence, "ThreadPoolExecutor", unexpected_work)
+    out = tmp_path / "out"
+    wanted = ["covered", "human"] + (["missing"] if uncovered else [])
+    ev = evidence.gather(repo, base, head, wanted, {"covered"}, m, out, 1)
+    assert ev.skipped == reason and not ev.baseline_failed and ev.mutants == []
+    assert ev.covered == ["covered"] and ev.uncovered == (["missing"] if uncovered else [])
+    assert ev.passed(0.8) is (not uncovered) and ev.score is None
+    saved = json.loads((out / "evidence.json").read_text())
+    assert saved["skipped"] == reason and saved["covered"] == ev.covered
+    assert saved["uncovered"] == ev.uncovered and saved["mutants"] == []
+
+
+def test_empty_mutants_do_not_create_a_pool(tmp_path, monkeypatch):
+    repo, _, head = project(tmp_path, STRONG)
+
+    def unexpected_pool(*args, **kwargs):
+        pytest.fail("empty selection must not create a worker pool")
+
+    monkeypatch.setattr(evidence, "ThreadPoolExecutor", unexpected_pool)
+    out = tmp_path / "out"
+    assert evidence.mutate(repo, head, [], M, out)
+    assert not (out / "src").exists() and not (out / "build").exists()
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/worker-cleanup/worker-exception-cannot-pass")
+def test_worker_exception_drains_active_worker_before_baseline_cleanup(tmp_path, monkeypatch):
+    repo, base, head = project(tmp_path, STRONG)
+    out = tmp_path / "out"
+    active, failed_cleaned, release, finished = Event(), Event(), Event(), Event()
+    error = OSError("unexpected worker I/O failure")
+    cleaned = []
+    real_run, real_cleanup = verify.run_extracted, verify.cleanup
+
+    def run(src, sha, steps, m, run_out):
+        if run_out == out:
+            return real_run(src, sha, steps, m, run_out)
+        artifacts = run_out / "build" / "artifacts"
+        artifacts.mkdir(parents=True)
+        (artifacts / "source.txt").write_text((src / "calc.py").read_text())
+        (run_out / "test.log").write_text("worker diagnostic")
+        if run_out.name == "mutant-1":
+            assert active.wait(10)
+            raise error
+        assert run_out.name == "mutant-2"
+        active.set()
+        assert release.wait(10)
+        assert (out / "src" / "calc.py").read_text() == CODE
+        assert (out / "build").exists()
+        finished.set()
+        return [verify.Receipt("test", [], 0, 0, True, 0.1, "")]
+
+    def cleanup(run_out):
+        if run_out == out:
+            assert finished.is_set()
+            assert cleaned == [out / "mutant-1", out / "mutant-2"]
+        else:
+            assert (out / "src" / "calc.py").read_text() == CODE
+            assert (out / "build").exists()
+        real_cleanup(run_out)
+        cleaned.append(run_out)
+        if run_out.name == "mutant-1":
+            failed_cleaned.set()
+
+    monkeypatch.setattr(verify, "run_extracted", run)
+    monkeypatch.setattr(verify, "cleanup", cleanup)
+    with ThreadPoolExecutor(max_workers=1) as coordinator:
+        future = coordinator.submit(evidence.gather, repo, base, head, [], set(),
+                                    replace(M, mutation_parallel=2), out, 1)
+        try:
+            assert failed_cleaned.wait(10)
+            assert not future.done() and not finished.is_set()
+            assert (out / "src").exists() and (out / "mutant-2" / "src").exists()
+            release.set()
+            with pytest.raises(OSError, match="unexpected worker I/O failure") as caught:
+                future.result(timeout=10)
+            assert caught.value is error
+        finally:
+            release.set()
+    assert cleaned == [out / "mutant-1", out / "mutant-2", out]
+    assert not (out / "evidence.json").exists()
+    for run_out in cleaned:
+        assert not (run_out / "src").exists() and not (run_out / "build").exists()
+    for number in (1, 2):
+        assert (out / f"mutant-{number}" / "artifacts" / "source.txt").exists()
+        assert (out / f"mutant-{number}" / "test.log").read_text() == "worker diagnostic"
+    assert (repo / "calc.py").read_text() == CODE
+
+
 @pytest.mark.parametrize("prepared", [
     pytest.param(False, marks=pytest.mark.scenario(
         "parallel-evidence-mutants/independent-mutant-workspaces/same-file-mutations-remain-separate")),
     pytest.param(True, marks=pytest.mark.scenario(
         "parallel-evidence-mutants/independent-mutant-workspaces/prepared-copies-remain-separate")),
 ])
-def test_serial_mutants_have_private_source_and_fresh_build(tmp_path, monkeypatch, prepared):
+@pytest.mark.parametrize("parallel", [1, 2])
+def test_mutants_have_private_source_and_fresh_build(tmp_path, monkeypatch, prepared, parallel):
     repo, _, head = project(tmp_path, STRONG)
     out = tmp_path / "out"
     mutants = [
@@ -493,9 +719,11 @@ print((src / "calc.py").read_text(), end="")
         m = replace(M, prepare=(inspect_step, copy_step), verify=(test_step,))
     else:
         m = replace(M, verify=(inspect_step,) + M.verify, mutation_steps=("inspect", "test"))
+    m = replace(m, mutation_parallel=parallel)
 
     real_run = verify.run_extracted
     runs = []
+    overlap = Barrier(2)
 
     def observe(src, sha, steps, m, run_out):
         if run_out != out:
@@ -505,15 +733,31 @@ print((src / "calc.py").read_text(), end="")
             for name in ("calc.py", "tests/test_calc.py"):
                 assert not (src / name).samefile(out / "src" / name)
             assert (out / "build" / "visited").exists()
+            if parallel > 1 and run_out.name in ("mutant-1", "mutant-2"):
+                overlap.wait(timeout=10)
         result = real_run(src, sha, steps, m, run_out)
         assert (out / "src" / "calc.py").read_text() == CODE
+        if run_out != out:
+            number = int(run_out.name.split("-")[1])
+            mut = mutants[number - 1]
+            expected = CODE.replace(mut.before, mut.after)
+            assert (src / "calc.py").read_text() == expected
+            if prepared:
+                assert (run_out / "build" / "project" / "calc.py").read_text() == expected
+            if parallel > 1 and number <= 2:
+                # Keep both prepared builds alive until each has been inspected.
+                overlap.wait(timeout=10)
         runs.append(run_out)
         return result
 
     monkeypatch.setattr(verify, "run_extracted", observe)
     assert evidence.mutate(repo, head, mutants, m, out)
     assert [mut.result for mut in mutants] == ["killed"] * 3
-    assert runs == [out] + [out / f"mutant-{i}" for i in range(1, 4)]
+    expected_runs = [out] + [out / f"mutant-{i}" for i in range(1, 4)]
+    assert runs[0] == out and len(runs) == len(expected_runs)
+    assert set(runs) == set(expected_runs)
+    if parallel == 1:
+        assert runs == expected_runs
     for number, mut in enumerate(mutants, 1):
         worker = out / f"mutant-{number}"
         expected = CODE.replace(mut.before, mut.after)
@@ -623,7 +867,8 @@ if "# timeout" in source:
 sys.exit(3 if "# failure" in source else 0)
 '''
     step = manifest.Step("test", (sys.executable, "-c", script), timeout=2)
-    m = replace(M, verify=(step,), prepare=(manifest.Step("prepare", ("/usr/bin/true",)),) if prepared else ())
+    m = replace(M, mutation_parallel=1, verify=(step,),
+                prepare=(manifest.Step("prepare", ("/usr/bin/true",)),) if prepared else ())
     out = tmp_path / "out"
     cleaned = []
     real_cleanup = verify.cleanup
