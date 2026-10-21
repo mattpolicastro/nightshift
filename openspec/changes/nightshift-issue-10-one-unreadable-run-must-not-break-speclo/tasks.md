@@ -1,7 +1,7 @@
 ## 1. Make existing state reads explicit
 
 - [x] 1.1 Add opt-in `require_existing` loading to `Run` construction, `for_change`, and reload behavior in `specloop/state.py`; keep admission defaults and unknown-field compatibility. Add unit tests for absent, malformed, and permission-denied state and unknown fields in a new file, `tests/test_specloop_state_reads.py`. Cover `specloop-interface/strict-existing-state-reads/strict-absence-preserves-admission-defaults` and `specloop-interface/strict-existing-state-reads/corruption-and-forward-compatibility`.
-- [ ] 1.2 Strengthen the tests so each of these single-line mutations of code added in section 1 makes a test fail; where a mutation genuinely cannot change behaviour, say why in a comment on the line above it starting `mutation-equivalent:` (the reviewer judges it): specloop/state.py:91 `"""One admitted change: its directory, state and log.` -> `"""One admitted change: its directory, state or log.`
+- [x] 1.2 Strengthen the tests so each of these single-line mutations of code added in section 1 makes a test fail; where a mutation genuinely cannot change behaviour, say why in a comment on the line above it starting `mutation-equivalent:` (the reviewer judges it): specloop/state.py:91 `"""One admitted change: its directory, state and log.` -> `"""One admitted change: its directory, state or log.`
 
 ## 2. Isolate JSON status failures
 
