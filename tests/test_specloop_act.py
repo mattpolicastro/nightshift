@@ -975,3 +975,62 @@ def test_act_refuses_a_pause_other_than_the_one_shown(paused, capfd, expect, out
     if outcome == "refused":
         assert "changed since it was shown" in document["detail"]
         assert Run.for_change("change").state.pause.reason == "stuck"
+
+
+def no_push(*args):
+    pytest.fail("publishing must not push to a remote it cannot vouch for")
+
+
+@pytest.mark.parametrize("admitted", [""], indirect=True)
+def test_publish_without_github_repository_is_refused_with_its_reason(admitted, monkeypatch, capfd):
+    run, source = admitted
+    git(source, "remote", "add", "origin", "https://github.com/example/repo.git")
+    run.pause("ready_to_publish")
+    before = asdict(run.state)
+    monkeypatch.setattr(cli, "_push", no_push)
+    detail = act(capfd, run, "publish", code=1)["detail"]
+    assert "names no GitHub repository" in detail and str(run.dir / "manifest.toml") in detail
+    assert asdict(run.state) == before
+
+
+@pytest.mark.parametrize("origin", ["https://github.com/upstream/repo.git", "git@github.com:upstream/repo.git",
+                                    "https://github.example.com/example/repo.git"])
+def test_publish_to_an_origin_of_another_repository_is_refused(admitted, monkeypatch, capfd, origin):
+    run, source = admitted
+    git(source, "remote", "add", "origin", origin)
+    run.pause("ready_to_publish")
+    before = asdict(run.state)
+    monkeypatch.setattr(cli, "_push", no_push)
+    monkeypatch.setattr(cli, "_gh", no_push)
+    detail = act(capfd, run, "publish", code=1)["detail"]
+    assert "repoint origin" in detail and "example/repo" in detail
+    assert asdict(run.state) == before
+    assert cli.main(["publish", CHANGE, "--json"]) == 1
+    document = json.loads(capfd.readouterr().out)
+    assert document["outcome"] == "refused" and document["reasons"] == [detail]
+    run.reload()
+    assert asdict(run.state) == before
+
+
+@pytest.mark.parametrize("origin", ["https://github.com/Example/Repo.git", "git@github.com:example/repo",
+                                    "ssh://git@github.com:22/example/repo.git/"])
+def test_publish_pushes_to_an_origin_matching_the_manifest(admitted, monkeypatch, capfd, origin):
+    run, source = admitted
+    git(source, "remote", "add", "origin", origin)
+    run.state.pr = "https://github.com/example/repo/pull/42"
+    run.pause("ready_to_publish")
+    pushes = []
+    monkeypatch.setattr(cli, "_push", lambda repo, url, ref: pushes.append(url))
+    act(capfd, run, "publish")
+    assert pushes == [origin] and run.state.pause.reason == "human_checks"
+
+
+@pytest.mark.parametrize("url, repository", [
+    ("https://github.com/o/r.git", "github.com/o/r"),
+    ("https://token@github.example.com/O/R/", "github.example.com/O/R"),
+    ("git@github.com:o/r.git", "github.com/o/r"),
+    ("ssh://git@github.com:22/o/r", "github.com/o/r"),
+    ("/tmp/remote.git", ""), ("file:///tmp/remote.git", ""), ("../remote.git", ""),
+])
+def test_remote_repository_is_parsed_from_hosted_urls_only(url, repository):
+    assert cli._repository(url) == repository

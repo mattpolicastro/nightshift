@@ -31,7 +31,10 @@ const workspace = {
 type Props = Record<string, any>;
 type Node = { type: unknown; props: Props; children: (Node | string)[] };
 type Hook = { value?: any; deps?: unknown[]; cleanup?: () => void };
-function view(options: { runs?: FactoryRun[]; client?: unknown; navigation?: unknown; getClient?: () => unknown } = {}) {
+function view(options: {
+  runs?: FactoryRun[]; client?: unknown; navigation?: unknown; getClient?: () => unknown;
+  act?: (input: unknown) => Promise<unknown>;
+} = {}) {
   const calls = { hosts: [] as string[], lists: 0, opened: [] as unknown[], links: [] as string[] };
   const client = 'client' in options ? options.client : { workspaces: { list: async () => {
     calls.lists++;
@@ -86,7 +89,7 @@ function view(options: { runs?: FactoryRun[]; client?: unknown; navigation?: unk
         Linking: { openURL: async (url: string) => { calls.links.push(url); } },
       };
       if (name === '@getpaseo/plugin/client') return {
-        useRpc: (rpc: unknown) => rpc === runsRpc ? read : async () => {},
+        useRpc: (rpc: unknown) => rpc === runsRpc ? read : options.act ?? (async () => {}),
         getPaseoClient: (id: string) => { calls.hosts.push(id); return options.getClient ? options.getClient() : client; },
       };
       if (name === '../shared/factory') return { factoryRuns: runsRpc, factoryAct: actRpc };
@@ -193,4 +196,33 @@ test('Factory Details works with absent or empty context and no unpublished chan
       assert.ok(!page.text().includes(absent));
     }
   }
+});
+
+test('An action result shows in the row it was sent from, and above the list once that run is gone', async t => {
+  const publishable = (change: string): FactoryRun => ({
+    ...run, change, context: undefined,
+    action: { kind: 'decision', headline: 'Ready to publish', why: '', command: '', actions: ['publish'], pause_id: 'ready_to_publish:' },
+  });
+  const runs = [publishable('first-change'), publishable('second-change')];
+  const sent: unknown[] = [];
+  const refusal = 'origin of ~/src is github.com/upstream/repo, but the manifest publishes to owner/repo; repoint origin before publishing';
+  const page = view({ runs, act: async input => {
+    sent.push(input);
+    return { version: 1, outcome: 'refused', verb: 'publish', detail: refusal };
+  } });
+  t.after(page.dispose);
+  await page.settle();
+  await page.press('Publish second-change');
+  assert.deepEqual(sent, []);
+  await page.press('Confirm publish second-change');
+  assert.deepEqual(sent, [{ change: 'second-change', verb: 'publish', expect: 'ready_to_publish:' }]);
+  const text = page.text();
+  assert.equal(text.split(refusal).length, 2, 'shown exactly once');
+  assert.ok(text.includes(`Refused · ${refusal}`));
+  assert.ok(text.indexOf(refusal) > text.indexOf('second-change'), 'inside the acted-on row');
+  assert.ok(!text.includes(`second-change: Refused`));
+  runs.splice(1, 1);
+  await page.press('Refresh Factory');
+  assert.ok(page.text().includes(`second-change: Refused · ${refusal}`));
+  assert.ok(page.text().indexOf(refusal) < page.text().indexOf('first-change'), 'above the list');
 });
