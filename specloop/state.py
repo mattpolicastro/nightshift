@@ -88,19 +88,24 @@ def _known(cls, data: dict):
 
 
 class Run:
-    """One admitted change: its directory, state and log."""
+    """One admitted change: its directory, state and log.
 
-    def __init__(self, directory: Path):
+    require_existing makes missing state an error, including on reload. By
+    default, missing state yields new in-memory state for admission.
+    """
+
+    def __init__(self, directory: Path, *, require_existing: bool = False):
         self.dir = directory
+        self.require_existing = require_existing
         self.state = self._load()
 
     @classmethod
-    def for_change(cls, change: str) -> "Run":
+    def for_change(cls, change: str, *, require_existing: bool = False) -> "Run":
         if not SAFE_CHANGE.fullmatch(change or "") or change in (".", ".."):
             # An empty or path-like name would resolve to the runs directory or
             # outside it, and admission clears a run's directory.
             raise ValueError(f"unsafe change name {change!r}: use letters, digits, '.', '_' or '-'")
-        return cls(runs_dir() / change)
+        return cls(runs_dir() / change, require_existing=require_existing)
 
     @property
     def manifest_path(self) -> Path:
@@ -113,10 +118,13 @@ class Run:
 
     def _load(self) -> RunState:
         p = self.dir / "state.json"
-        if not p.exists():
+        try:
+            raw = json.loads(p.read_text())
+        except FileNotFoundError:
+            if self.require_existing:
+                raise
             return RunState(change=self.dir.name)
-        raw = json.loads(p.read_text())
-        pause = _known(Pause, raw["pause"]) if raw.get("pause") else None
+        pause = _known(Pause, raw["pause"]) if raw.get("pause") is not None else None
         tasks = {k: _known(TaskState, v) for k, v in raw.get("tasks", {}).items()}
         return RunState(raw["change"], raw["status"], pause, tasks, raw.get("gates_passed", []), raw.get("created", 0),
                         raw.get("coverage_rounds", 0), raw.get("acceptance_rounds", 0), raw.get("pr", ""),
