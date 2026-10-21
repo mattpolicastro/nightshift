@@ -1,6 +1,7 @@
 import contextlib
 import json
 import os
+import subprocess
 from dataclasses import asdict
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from specloop import cli, seal, state, tasks
 from specloop.state import Run
 from test_specloop_command_json import BRANCH, CHANGE, TASKS, admission, git, template
+from test_specloop_status_json import assert_status_error, status_document
 
 
 @pytest.fixture
@@ -939,6 +941,131 @@ def test_finish_restarts_from_archive(admitted, tmp_path, monkeypatch, capfd, fa
     assert [e["head"] for e in events if e["event"] == "finished"] == [archived]
     act(capfd, run, "finish", code=1)
     assert len(pushes) == 3
+
+
+@pytest.mark.scenario("specloop-interface/status-after-partial-finish/archive-survives-failed-finish-push")
+@pytest.mark.scenario("specloop-interface/isolated-run-status-failures/read-failures-leave-run-data-untouched")
+@pytest.mark.parametrize("named", [False, True])
+def test_status_after_partial_finish(admitted, template, tmp_path, monkeypatch, capfd, named):
+    run, source = admitted
+    bare = run.dir / "repo.git"
+    completed = seal.commit_files(bare, git(bare, "rev-parse", BRANCH), {
+        f"openspec/changes/{CHANGE}/tasks.md": TASKS.replace("[ ]", "[x]"),
+    }, "complete task")
+    git(bare, "update-ref", f"refs/heads/{BRANCH}", completed)
+    run.state.pr = "https://github.com/example/repo/pull/42"
+    run.pause("human_checks", detail="Check the PR")
+    saved_state = (run.dir / "state.json").read_bytes()
+    archives, pushes = [], []
+
+    def archive(work, change, all_tasks_done):
+        assert all_tasks_done
+        archives.append(change)
+        directory = work / "openspec" / "changes" / change
+        target = directory.parent / "archive" / f"2026-10-20-{change}"
+        target.parent.mkdir()
+        directory.rename(target)
+
+    def fail_push(repo, url, ref):
+        pushes.append(git(repo, "rev-parse", ref))
+        raise RuntimeError("network unavailable")
+
+    def no_mutation(*args, **kwargs):
+        pytest.fail("status must not mutate run data, load credentials, or retry publication")
+
+    monkeypatch.setattr(cli.openspec, "archive", archive)
+    monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
+    monkeypatch.setattr(cli, "_push", fail_push)
+    monkeypatch.setattr(cli, "_gh", no_mutation)
+    assert "network unavailable" in act(capfd, run, "finish", code=1)["detail"]
+    archived = git(bare, "rev-parse", BRANCH)
+    assert archived != completed
+    assert git(bare, "rev-parse", f"{archived}^") == completed
+    archive_path = f"openspec/changes/archive/2026-10-20-{CHANGE}/tasks.md"
+    assert cli._tasks_path(bare, archived, CHANGE) == archive_path
+    assert f"openspec/changes/{CHANGE}/tasks.md" not in git(
+        bare, "ls-tree", "-r", "--name-only", archived
+    ).splitlines()
+    assert git(bare, "show", f"{archived}:{archive_path}") == TASKS.replace("[ ]", "[x]").strip()
+    assert (run.dir / "state.json").read_bytes() == saved_state
+    assert run.state.status == "paused" and run.state.pause.reason == "human_checks"
+
+    # Admit a second source repository so all-run status must retain its row.
+    healthy_change = "z-healthy"
+    healthy_branch = f"spec/{healthy_change}"
+    healthy_source = tmp_path / "healthy-source"
+    git(source, "clone", "-q", str(source), str(healthy_source))
+    healthy_head = seal.commit_files(healthy_source, git(healthy_source, "rev-parse", "HEAD"), {
+        f"openspec/changes/{healthy_change}/tasks.md": TASKS,
+    }, "healthy change")
+    git(healthy_source, "update-ref", f"refs/heads/{healthy_branch}", healthy_head)
+    healthy_template = tmp_path / "healthy.toml"
+    healthy_template.write_text(template[0].read_text().replace(str(source), str(healthy_source)))
+    assert cli.main(["admit", str(healthy_template), "--change", healthy_change,
+                     "--branch", healthy_branch, "--skip-feasibility"]) == 0
+    capfd.readouterr()
+    healthy = status_document(capfd, healthy_change)["runs"][0]
+    assert healthy["head"] == healthy_head
+    assert healthy["status"] == "running" and "error" not in healthy
+    assert healthy["tasks"] == {"done": 0, "total": 1}
+    assert healthy["context"]["repo"] == str(healthy_source)
+
+    def snapshot():
+        # Includes state/events, directory entries, refs and reflogs in both repos.
+        return {
+            path.relative_to(tmp_path): (path.stat().st_mtime_ns,
+                                         path.read_bytes() if path.is_file() else None)
+            for path in tmp_path.rglob("*")
+        }
+
+    before = snapshot()
+    repositories = (source, bare, healthy_source, Run.for_change(healthy_change).dir / "repo.git")
+    refs = [git(repo, "show-ref") for repo in repositories]
+    execute = subprocess.run
+    unreadable = False
+
+    def read_only_command(argv, *args, **kwargs):
+        assert argv[0] == "git" and "-C" in argv, f"unexpected status command: {argv}"
+        command = argv[argv.index("-C") + 2]
+        assert command in {"rev-parse", "ls-tree", "show"}, f"mutating status command: {argv}"
+        if unreadable and command == "show" and argv[-1] == f"{archived}:{archive_path}":
+            raise PermissionError("archive read denied")
+        return execute(argv, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        for method in ("save", "event", "lock", "pause"):
+            patch.setattr(Run, method, no_mutation)
+        for method in ("_ctx", "load_env", "_finish", "_push", "_remote"):
+            patch.setattr(cli, method, no_mutation)
+        patch.setattr(cli.openspec, "archive", no_mutation)
+        patch.setattr(seal, "credential_values", no_mutation)
+        patch.setattr(subprocess, "run", read_only_command)
+        for unreadable in (False, True):
+            entries = status_document(capfd, *([CHANGE] if named else []))["runs"]
+            assert [entry["change"] for entry in entries] == (
+                [CHANGE] if named else [CHANGE, healthy_change]
+            )
+            entry = entries[0]
+            if unreadable:
+                assert_status_error(entry, CHANGE, "PermissionError")
+                assert "archive read denied" in entry["error"]
+            else:
+                assert "error" not in entry
+                assert entry["head"] == archived and entry["tasks"] == {"done": 1, "total": 1}
+                assert entry["status"] == "paused" and entry["pr"] == run.state.pr
+                assert entry["pause"] == {
+                    "reason": "human_checks", "task": "", "detail": "Check the PR",
+                    "auto_resumes_remaining": 0,
+                }
+                assert entry["action"]["actions"] == ["finish", "abort"]
+                assert entry["action"]["pause_id"] == "human_checks:"
+                assert entry["context"]["github"] == (
+                    f"https://github.com/example/repo/tree/{BRANCH}/{archive_path.removesuffix('/tasks.md')}"
+                )
+            assert entries[1:] == ([] if named else [healthy])
+            assert snapshot() == before
+    assert [git(repo, "show-ref") for repo in repositories] == refs
+    assert archives == [CHANGE] and pushes == [archived]
 
 
 @pytest.mark.parametrize("archived", [False, True])
