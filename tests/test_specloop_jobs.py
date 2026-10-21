@@ -489,9 +489,12 @@ def test_refused_stop_does_not_accept_intent_and_retry_preserves_it(tmp_path):
 
 @pytest.mark.scenario("background-job-control/owned-process-group-termination/stop-wrapper-and-descendants")
 @pytest.mark.scenario("background-job-control/durable-cancellation/repeat-stop-safely")
-@pytest.mark.parametrize("ignoring_descendant", [False, pytest.param(True, marks=pytest.mark.scenario(
-    "background-job-control/owned-process-group-termination/escalate-unresponsive-group"))])
-def test_jobs_stop_terminates_process_group(tmp_path, monkeypatch, ignoring_descendant):
+@pytest.mark.parametrize("ignoring_descendant, fresh_cli", [
+    (False, False), pytest.param(True, False, marks=pytest.mark.scenario(
+        "background-job-control/owned-process-group-termination/escalate-unresponsive-group")),
+    (False, True),
+])
+def test_jobs_stop_terminates_process_group(tmp_path, monkeypatch, ignoring_descendant, fresh_cli):
     """Real groups and pipe EOF prove termination, even where ps is denied.
 
     When ps is forbidden, only process inspection is injected. Each group
@@ -514,6 +517,8 @@ def test_jobs_stop_terminates_process_group(tmp_path, monkeypatch, ignoring_desc
 import os, subprocess
 real_run = subprocess.run
 def inspect_self(args, **kwargs):
+    if "TEST_JOB_LIFELINE" not in os.environ:
+        return real_run(args, **kwargs)
     if os.environ["TEST_INJECT_INSPECTION"] == "1" and args == ["/bin/ps", "-p", str(os.getpid()), "-o", "lstart="]:
         return subprocess.CompletedProcess(args, 0, os.environ["TEST_JOB_IDENTITY"], "")
     kwargs["pass_fds"] = (*kwargs.get("pass_fds", ()), int(os.environ["TEST_JOB_LIFELINE"]))
@@ -650,10 +655,75 @@ time.sleep(20)
             finish_stop(path)
 
         started = time.monotonic()
-        with monkeypatch.context() as patch:
-            patch.setattr(os, "killpg", signal_group)
-            patch.setattr(jobs, "finish_stop", confirmed_stop)
-            assert jobs.stop_job(root, directory.name) == "stopped"
+        if fresh_cli:
+            # Only test process inspection crosses the boundary. The CLI
+            # resolves its target and ownership from the wrapper's durable
+            # records, with no daemon handles or in-memory Job objects.
+            inspection_file = tmp_path / "inspection.json"
+            inspection_file.write_text(json.dumps({str(pgid): {
+                key: list(value) if isinstance(value, set) else value
+                for key, value in record.items() if key != "wrapper"
+            } for pgid, record in inspections.items()}))
+            signal_file = tmp_path / "signals.json"
+            stopped = real_run([sys.executable, "-c", r'''
+import json, os, select, signal, subprocess, sys, time
+from pathlib import Path
+from nightshift import cli, config, daemon, specloop_job as jobs
+root, job_id, inspection_path, signal_path, inject = sys.argv[1:]
+daemon.STATE_DIR = Path(root)
+assert not jobs._children
+def forbidden(*args, **kwargs):
+    raise AssertionError("jobs must not load configuration or invoke services")
+config.load = config.load_env_file = jobs.specloop_client.call = forbidden
+records = {int(pgid): record for pgid, record in json.loads(Path(inspection_path).read_text()).items()}
+def executing(record):
+    return not select.select([record["reader"]], [], [], 0)[0]
+def inspect(args, **kwargs):
+    if args == ["/bin/ps", "-axo", "pid=,pgid=,stat="]:
+        rows = [f"{os.getpid()} {os.getpgrp()} S"]
+        for pgid, record in records.items():
+            if executing(record):
+                rows.extend(f"{pid} {pgid} S" for pid in record["members"])
+        output = "\n".join(rows)
+    else:
+        pid = int(args[args.index("-p") + 1])
+        pgid, record = next((pgid, record) for pgid, record in records.items() if pid in record["members"])
+        assert executing(record)
+        if args == ["/bin/ps", "-p", str(pid), "-o", "lstart="]:
+            output = record["identity"] + ("" if pid == pgid else f"-{pid}")
+        else:
+            assert args == ["/bin/ps", "-ww", "-p", str(pid), "-o", "args="]
+            output = record["command"]
+    return subprocess.CompletedProcess(args, 0, output, "")
+if inject == "1":
+    subprocess.run = inspect
+directory = next(job.directory for job in jobs.list_jobs(daemon.STATE_DIR)[0] if job.id == job_id)
+process = json.loads((directory / "process.json").read_text())
+killpg, finish = os.killpg, jobs.finish_stop
+signals = []
+def signal_group(pgid, sig):
+    assert pgid == process["pgid"] and pgid != os.getpgrp()
+    assert json.loads((directory / "stop.json").read_text())["state"] == "stopping"
+    signals.append((sig, time.monotonic()))
+    Path(signal_path).write_text(json.dumps(signals))
+    killpg(pgid, sig)
+def confirmed_stop(path):
+    assert not executing(records[process["pgid"]]), "descendants must exit before stopped"
+    finish(path)
+os.killpg, jobs.finish_stop = signal_group, confirmed_stop
+raise SystemExit(cli.main(["jobs", "stop", job_id, "--config", str(Path(root) / "missing.toml")]))
+''', str(root), directory.name, str(inspection_file), str(signal_file),
+                "1" if inject_inspection else "0"],
+                pass_fds=tuple(record["reader"] for record in inspections.values()),
+                capture_output=True, text=True, timeout=10)
+            assert stopped.returncode == 0, stopped.stderr
+            assert stopped.stdout.strip() == f"{directory.name}: stopped"
+            signals = json.loads(signal_file.read_text())
+        else:
+            with monkeypatch.context() as patch:
+                patch.setattr(os, "killpg", signal_group)
+                patch.setattr(jobs, "finish_stop", confirmed_stop)
+                assert jobs.stop_job(root, directory.name) == "stopped"
         assert time.monotonic() - started < 10
         if ignoring_descendant:
             assert [sig for sig, _ in signals] == [signal.SIGTERM, signal.SIGKILL]
@@ -682,19 +752,21 @@ time.sleep(20)
             patch.setattr(os, "killpg", lambda *a: pytest.fail("repeat stop must not signal"))
             assert jobs.stop_job(root, directory.name) == "stopped"
         terminal = (directory / "stop.json").read_bytes()
-        # Fresh command process exercises the durable API independently of
-        # daemon handles. The jobs CLI dispatch is implemented separately.
+        # Repeat through the CLI in another process, with signalling and
+        # identity inspection forbidden even if the old PID has been reused.
         repeated = real_run([sys.executable, "-c", '''
 import os, sys
 from pathlib import Path
-from nightshift.specloop_job import stop_job
-def forbidden(*args):
+from nightshift import cli, config, daemon
+def forbidden(*args, **kwargs):
     raise AssertionError("repeat stop must not signal or inspect a reused PID")
 os.killpg = os.getpgid = forbidden
-print(stop_job(Path(sys.argv[1]), sys.argv[2]))
+config.load = config.load_env_file = forbidden
+daemon.STATE_DIR = Path(sys.argv[1])
+raise SystemExit(cli.main(["jobs", "stop", sys.argv[2]]))
 ''', str(root), directory.name], capture_output=True, text=True, timeout=5)
         assert repeated.returncode == 0, repeated.stderr
-        assert repeated.stdout.strip() == "stopped"
+        assert repeated.stdout.strip() == f"{directory.name}: stopped"
         assert (directory / "stop.json").read_bytes() == terminal
     finally:
         try:

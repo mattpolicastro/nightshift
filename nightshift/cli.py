@@ -1,4 +1,4 @@
-"""nightshift status|pause|resume|run|reconcile|digest"""
+"""nightshift status|pause|resume|jobs|run|reconcile|digest"""
 
 from __future__ import annotations
 
@@ -6,11 +6,12 @@ import argparse
 import json
 import logging
 import os
+import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import outcomes, config, daemon, preflight, queue, specloop_attention, trace
+from . import outcomes, config, daemon, preflight, queue, specloop_attention, specloop_job, trace
 
 
 def _repo_dirs(cfg: config.Config) -> dict[str, Path]:
@@ -99,14 +100,42 @@ def _progress_of(repo: str, number: int) -> str:
         return ""
 
 
+def _jobs(action: str | None, job_id: str | None) -> int:
+    if action == "stop":
+        try:
+            state = specloop_job.stop_job(daemon.STATE_DIR, job_id)
+        except specloop_job.StopJobError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(f"{job_id}: {'already finished' if state == 'finished' else state}")
+        return 0
+
+    jobs, errors = specloop_job.list_jobs(daemon.STATE_DIR)
+    if not jobs and not errors:
+        print("No background jobs.")
+    for job in jobs:
+        identity = "" if job.identity_available else " (process identity unavailable)"
+        state = "finished (execution complete; delivery may be pending)" if job.state == "finished" else job.state
+        print(f"{job.id}  {job.stage}  {job.repository}#{job.number}  {state}")
+        print(f"  command: {shlex.join(job.command) if job.command else 'unavailable'}")
+        print(f"  PID={job.pid if job.pid is not None else '?'} "
+              f"PGID={job.pgid if job.pgid is not None else '?'}{identity}")
+        print(f"  log: {job.log_path}")
+    for error in errors:
+        print(f"unreadable job: {error}", file=sys.stderr)
+    return 1 if errors else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nightshift")
     parser.add_argument(
         "command",
         nargs="?",
         default="status",
-        choices=["status", "pause", "resume", "run", "reconcile", "preflight", "digest", "attention"],
+        choices=["status", "pause", "resume", "jobs", "run", "reconcile", "preflight", "digest", "attention"],
     )
+    parser.add_argument("action", nargs="?", help="jobs: stop")
+    parser.add_argument("job_id", nargs="?", help="jobs stop: exact full job ID")
     parser.add_argument("--json", action="store_true", help="attention: machine-readable tasks and specloop pauses")
     parser.add_argument("--offline", action="store_true", help="attention: use cached records without GitHub or specloop")
     parser.add_argument("--once", action="store_true", help="one task, then exit")
@@ -117,11 +146,21 @@ def main(argv: list[str] | None = None) -> int:
              "(slow — a cold model load is minutes, not seconds)",
     )
     parser.add_argument("--config", type=Path, default=None)
-    args = parser.parse_args(argv)
+    args = parser.parse_intermixed_args(argv)
+    if args.command == "jobs":
+        if not (args.action is None and args.job_id is None
+                or args.action == "stop" and args.job_id is not None):
+            parser.error("expected 'jobs' or 'jobs stop <id>'")
+    elif args.action is not None or args.job_id is not None:
+        parser.error(f"{args.command} does not accept positional arguments")
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
+
+    # Local job control must also work offline, without configuration or credentials.
+    if args.command == "jobs":
+        return _jobs(args.action, args.job_id)
 
     # The daemon gets its credentials from the launchd wrapper, which sources
     # the env file. A human at a terminal has not, so without this every
