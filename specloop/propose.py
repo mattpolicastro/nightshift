@@ -148,7 +148,8 @@ def _in_flight_section(planned: dict[str, list[str]]) -> str:
     lines = "\n".join(f"- `{p}` ({', '.join(c)})" for p, c in sorted(planned.items()))
     return ("\n## Work in flight\n\nOther changes to this repository are being built now. Their tasks change "
             "these files:\n" + lines + "\n\nPlan no edits to them unless this change cannot be done otherwise. "
-            "Put new tests in new test files rather than in any test file listed here.\n")
+            "Put new tests in new test files rather than in any test file listed here. "
+            "The implementer never sees this list: if the change must avoid a file, name it.\n")
 
 
 def overlaps(work: Path, change: str, planned: dict[str, list[str]]) -> list[str]:
