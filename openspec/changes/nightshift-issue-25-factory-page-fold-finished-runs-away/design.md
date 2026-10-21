@@ -10,8 +10,8 @@ server or schema change is necessary.
 The model test named `row ordering preserves source order within waiting and
 other runs, including empty lists` explicitly expects a done run before a
 running run when that was their input order. Changing the single-argument
-function's contract would fail that test. The issue requires existing tests to
-remain unchanged, so the grouped interface must be opt-in. No existing Factory
+function's contract would fail that test. Add a separate grouping helper and
+leave the existing function and tests untouched. No existing Factory
 view test asserts the count text.
 
 The existing view tests execute the actual TSX with a small React hook runner
@@ -33,22 +33,22 @@ implementation. This draft itself changes only its OpenSpec change directory.
 
 ## Decisions
 
-1. **Keep compatibility explicit in the model.** Add overloads in
+1. **Add a separate grouping helper.** Export this interface from
    `plugins/nightshift/client/factory-model.ts`:
 
    ```ts
-   orderFactoryRuns(runs: readonly FactoryRun[]): FactoryRun[];
-   orderFactoryRuns(
-     runs: readonly FactoryRun[], options: { groupFinished: true },
+   groupFactoryRuns(
+     runs: readonly FactoryRun[],
    ): { active: FactoryRun[]; finished: FactoryRun[] };
    ```
 
-   The one-argument overload keeps its exact current semantics. The grouped
-   overload returns paused entries followed by running entries in `active`,
+   Leave `orderFactoryRuns` unchanged; add no overload or options parameter.
+   `groupFactoryRuns` returns paused entries followed by running entries in `active`,
    preserving source order within each status, and done/aborted entries in
-   `finished`, preserving their combined source order. Both return new arrays,
-   retain the original run objects, and never mutate the input. Empty input
-   returns two empty groups in grouped mode. Factory uses the grouped overload.
+   `finished`, preserving their combined source order. The helper returns new
+   arrays, retains the original run objects, and never mutates the input. It
+   can reuse `orderFactoryRuns` on the filtered active list. Empty input returns
+   `{ active: [], finished: [] }`. Factory uses `groupFactoryRuns`.
 
 2. **Use one section-local disclosure.** In `FactorySection`, initialize
    `finishedOpen` with `useState(false)`. Render `active` using the existing
@@ -72,13 +72,21 @@ implementation. This draft itself changes only its OpenSpec change directory.
    `Loading Factory…` before a snapshot, and show `No Factory runs.` only
    when the entire loaded snapshot is empty, not when only active is empty.
 
-4. **Preserve row and snapshot behavior.** Leave action dispatch,
+4. **Keep action results visible while preserving snapshot behavior.** Leave action dispatch,
    confirmations, Details, lazy workspace lookup, and refresh logic intact.
-   Retain the section-level notice keyed by change. A notice remains attached
-   to its row even if that run becomes finished; expanding reveals it. A
-   collapsed row is still present in the snapshot, so it must not trigger the
-   existing above-list fallback, which is reserved for a run absent from the
-   entire snapshot. Do not clear the notice when toggling. A failed refresh
+   Retain the section-level notice keyed by change. In `FactorySection`, derive
+   whether its row is rendered from membership in `active`, or membership in
+   `finished` with `finishedOpen === true`. Only a rendered matching row receives
+   the notice. Otherwise render it in the existing above-list alert slot as
+   `${notice.change}: ${notice.text}`, including when its run remains in the
+   snapshot but is folded. Use this visibility predicate instead of the current
+   full-snapshot membership check. A Finish or Abort result therefore stays
+   visible when the refreshed run moves to done or aborted. Expanding moves the
+   notice into its row; collapsing moves it above the list; removing the run
+   keeps it above the list. Render exactly one copy in every state. This routing
+   applies to all existing notices, including refusals and transport errors,
+   without changing their text or lifetime. Do not clear the notice or expand
+   the fold automatically. A failed refresh
    retains both groups and the current disclosure choice, alongside the
    existing stale indicator and error. Polling, foreground refresh, manual
    refresh, action serialization, and post-action refresh stay unchanged.
@@ -86,11 +94,17 @@ implementation. This draft itself changes only its OpenSpec change directory.
 5. **Add tests beside each implementation step.** Append the exact top-level
    test names `orderFactoryRuns separates active from finished` in
    `factory-client.test.ts` and `finished runs are folded under a collapsed
-   toggle` in `factory-view.test.ts`. Use scenario IDs as nested subtest names
+   toggle` in `factory-view.test.ts`. The requested model test name is retained,
+   but its grouping assertions call `groupFactoryRuns`; existing
+   `orderFactoryRuns` tests remain untouched. Use scenario IDs as nested subtest names
    or in additional test names for evidence mapping. Test mixed statuses,
    stable order, immutability, empty groups, disclosure transitions, counts,
    and finished-row Details/links with the existing Node harness. Add focused
-   regression cases for snapshot updates, stale failures, and action notices.
+   regression cases for snapshot updates and stale failures. Test both Finish
+   and Abort through confirmation and post-action refresh, with finished rows
+   initially folded and expanded, checking exactly one visible result after
+   each expansion, collapse, and removal. Also retain coverage for a result in
+   an active row and for refusals/errors using the same notice routing.
    Optional harness inputs may be added for controlled read responses and
    failures, retaining existing defaults and leaving every existing test body
    and assertion unchanged. No count assertion currently needs replacement.
@@ -103,12 +117,12 @@ implementation. This draft itself changes only its OpenSpec change directory.
 
 ## Risks / Trade-offs
 
-- The overload retains a legacy ordering mode to honor the explicit
-  no-existing-test-edits constraint. Tests must exercise grouped mode directly;
-  the view must not accidentally keep calling the flat overload.
-- Finished rows and their action notices are hidden while collapsed. Keeping
-  the notice attached and revealing it on expansion preserves existing notice
-  ownership without inventing another notification channel.
+- Two small model helpers serve different callers. New grouping tests exercise
+  `groupFactoryRuns` directly; the view must use that helper while existing
+  `orderFactoryRuns` callers keep their behavior.
+- Notice placement depends on rendered rows, not full-snapshot membership.
+  Testing only whether the run exists would silently hide Finish and Abort
+  results; test both disclosure states and transitions to prevent regression.
 - Conditional rendering can reset a finished row's local Details state when
   it is collapsed and reopened. The existing Details behavior still starts
   collapsed on row mount; persistent per-row UI state is outside this change.
@@ -116,5 +130,6 @@ implementation. This draft itself changes only its OpenSpec change directory.
   but cannot prove that the fold reads well in native layouts. After deploy,
   Matt checks the Paseo desktop and phone layouts with mixed and finished-only
   lists: count legibility, toggle discoverability and touch target, spacing,
-  and expanded row/Details readability. Compact browser checks do not replace
+  expanded row/Details readability, and notice legibility above the list and
+  within an expanded finished row. Compact browser checks do not replace
   that phone check. Deployment and this human check are not automated tasks.

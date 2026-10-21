@@ -13,8 +13,11 @@ so finished runs accumulate after merges and obscure runs that need attention.
   Expanded finished runs use the existing rows, in source order.
 - Count active runs in the summary, appending ` · M finished` when applicable;
   preserve existing singular grammar and stale indication.
-- Add a grouped mode to `orderFactoryRuns` while retaining its existing
-  single-argument behavior so all existing tests remain unchanged.
+- Add `groupFactoryRuns(runs)` returning `{ active, finished }`, leaving
+  `orderFactoryRuns` and its existing tests untouched.
+- Keep action results visible exactly once: in their row while rendered, or
+  in the existing above-list slot identifying the change while the row is
+  folded or absent. Expanding moves the notice into its row without a duplicate.
 - Add model and view tests, including the two requested test names. Preserve
   action results, Details, confirmations, refresh, and stale handling.
 
