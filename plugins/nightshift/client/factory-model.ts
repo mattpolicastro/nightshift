@@ -50,6 +50,13 @@ export function orderFactoryRuns(runs: readonly FactoryRun[]): FactoryRun[] {
   return [...runs.filter(run => run.status === 'paused'), ...runs.filter(run => run.status !== 'paused')];
 }
 
+export function groupFactoryRuns(runs: readonly FactoryRun[]): { active: FactoryRun[]; finished: FactoryRun[] } {
+  return {
+    active: orderFactoryRuns(runs.filter(run => run.status === 'paused' || run.status === 'running')),
+    finished: runs.filter(run => run.status === 'done' || run.status === 'aborted'),
+  };
+}
+
 export function factoryButtons(run: FactoryRun) {
   return [...new Set(run.action?.actions ?? [])].map(verb => ({ verb, label: labels[verb] }));
 }
