@@ -9,11 +9,10 @@ from functools import partial
 from . import outcomes, specloop_client
 
 
-HUMAN_REASONS = {
-    "stuck", "blocked", "needs_human", "gate_evidence", "phase_gate",
-    "ready_to_publish", "human_checks", "coverage", "acceptance",
-    "violation_repeat", "review_invalid", "secret",
-}
+def _needs_attention(pause: dict) -> bool:
+    if "auto_resumes_remaining" not in pause:
+        return pause["reason"] != "usage_limit"
+    return pause["auto_resumes_remaining"] == 0
 
 
 def _entries(document: dict) -> list[dict]:
@@ -34,7 +33,11 @@ def _entries(document: dict) -> list[dict]:
         if pause is not None and (
                 not isinstance(pause, dict) or not isinstance(pause.get("reason"), str)):
             raise ValueError("specloop status has an invalid pause")
-        if run["status"] == "paused" and pause and pause["reason"] in HUMAN_REASONS:
+        if pause is not None:
+            allowance = pause.get("auto_resumes_remaining")
+            if allowance is not None and (type(allowance) is not int or allowance < 0):
+                raise ValueError("specloop status has an invalid auto_resumes_remaining")
+        if run["status"] == "paused" and pause is not None and _needs_attention(pause):
             entries.append({"change": run["change"], "reason": pause["reason"], "pr": run["pr"]})
     return entries
 

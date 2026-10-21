@@ -811,10 +811,18 @@ def _status_json(names: list[str]) -> int:
             task_path = _tasks_path(repo, head, m.change)
             text = git(repo, "show", f"{head}:{task_path}").decode()
             all_tasks = tasks.parse(text)
+            auto_resumes_remaining = 0
+            if st.pause and st.pause.resume_at and st.pause.reason in serve.AUTO_RESUME:
+                cap = serve.AUTO_RESUME[st.pause.reason]
+                ts = st.tasks.get(st.pause.task)
+                # Like lift_due, a missing task state leaves recovery uncapped.
+                auto_resumes_remaining = (max(0, cap - ts.auto_resumes)
+                                          if cap is not None and ts is not None else None)
             entry = {
                 "change": name,
                 "status": st.status,
-                "pause": {"reason": st.pause.reason, "task": st.pause.task, "detail": st.pause.detail}
+                "pause": {"reason": st.pause.reason, "task": st.pause.task, "detail": st.pause.detail,
+                          "auto_resumes_remaining": auto_resumes_remaining}
                          if st.pause else None,
                 "tasks": {"done": sum(t.done for t in all_tasks), "total": len(all_tasks)},
                 "head": head,
