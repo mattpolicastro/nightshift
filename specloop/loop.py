@@ -190,6 +190,10 @@ def section_evidence(ctx: Ctx, n: int, head: str, all_tasks: list[tasks.Task]) -
         ctx.run.save()
         ctx.notify(messages.fyi(m.change, messages.evidence_line(n, summary)))
         return True
+    if ev.unmeasured:
+        # A harness or manifest problem: strengthening tests cannot fix it.
+        ctx.pause("gate_evidence", detail=summary, key=f"section:{n}")
+        return False
     if st.strengthen_rounds.get(str(n), 0) >= 1 or not ok:
         why = summary if ok else "the harness's verification fails on the branch head:\n" + verify.summary(receipts)
         before = st.evidence_scores.get(str(n))

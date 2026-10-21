@@ -73,8 +73,18 @@ class Evidence:
         valid = [x for x in self.mutants if x.result in ("killed", "survived")]
         return sum(x.result == "killed" for x in valid) / len(valid) if valid else None
 
+    @property
+    def unmeasured(self) -> bool:
+        """Mutants were generated but none could be judged: no evidence, not a pass.
+
+        (2026-10-21: a prepare sandbox that could not read a mutant's source made
+        every mutant invalid, and two changes passed their gates on nothing.)
+        """
+        return bool(self.mutants) and not any(x.result in ("killed", "survived", "equivalent")
+                                                for x in self.mutants)
+
     def passed(self, minimum: float) -> bool:
-        if self.uncovered or self.baseline_failed:
+        if self.uncovered or self.baseline_failed or self.unmeasured:
             return False
         return self.score is None or self.score >= minimum
 
@@ -91,6 +101,9 @@ class Evidence:
                       for x in self.mutants if x.result == "survived"]
         elif self.baseline_failed:
             lines.append("mutation: the unmutated head fails mutation_steps, so nothing could be measured")
+        elif self.unmeasured:
+            lines.append(f"mutation: none of the {len(self.mutants)} mutants could be judged (every one was "
+                         "invalid), so nothing was measured; check mutation_steps and any prepare steps")
         elif self.skipped:
             lines.append(f"mutation: skipped ({self.skipped})")
         return "\n".join(lines)

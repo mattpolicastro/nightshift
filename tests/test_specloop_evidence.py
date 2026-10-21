@@ -221,3 +221,15 @@ def test_a_hanging_mutant_is_caught_by_a_scaled_timeout(tmp_path, monkeypatch):
     hung = [x for x in ev.mutants if x.after.strip() == "i += 2"]
     assert hung and hung[0].result == "killed"
     assert _time.monotonic() - started < 50  # not the 60 s step ceiling per hanging mutant
+
+
+def test_all_invalid_mutants_are_unmeasured_not_a_pass():
+    from specloop.evidence import Evidence, Mutant
+
+    ev = Evidence(1, covered=["c/r/s"])
+    ev.mutants = [Mutant("a.py", 1, "<", "a < b", "a <= b", "invalid") for _ in range(3)]
+    assert ev.unmeasured and ev.score is None and not ev.passed(0.8)
+    assert "none of the 3 mutants could be judged" in ev.summary()
+    ev.mutants[0].result = "killed"
+    assert not ev.unmeasured and ev.passed(0.3)
+    assert Evidence(1).passed(0.8)  # no mutants generated (e.g. no mutable lines) is still not a failure
