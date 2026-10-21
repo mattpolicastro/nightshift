@@ -1,6 +1,6 @@
 ## 1. Expose the automatic resume allowance
 
-- [ ] 1.1 Add `pause.auto_resumes_remaining` in `specloop/cli.py::_status_json` using `serve.AUTO_RESUME`, the pause schedule, and a non-mutating task lookup as specified in design.md. Extend `tests/test_specloop_status_json.py` with marked, parameterized tests for both query forms, counts around the cap, missing task state, unscheduled pauses, and read-only behavior; update exact JSON expectations and run that test module. Cover `specloop-interface/remaining-automatic-resumes/infrastructure-budget-reported`, `specloop-interface/remaining-automatic-resumes/unlimited-scheduled-recovery`, `specloop-interface/remaining-automatic-resumes/no-automatic-recovery`, and `specloop-interface/remaining-automatic-resumes/status-remains-read-only`.
+- [x] 1.1 Add `pause.auto_resumes_remaining` in `specloop/cli.py::_status_json` using `serve.AUTO_RESUME`, the pause schedule, and a non-mutating task lookup as specified in design.md. Extend `tests/test_specloop_status_json.py` with marked, parameterized tests for both query forms, counts around the cap, missing task state, unscheduled pauses, and read-only behavior; update exact JSON expectations and run that test module. Cover `specloop-interface/remaining-automatic-resumes/infrastructure-budget-reported`, `specloop-interface/remaining-automatic-resumes/unlimited-scheduled-recovery`, `specloop-interface/remaining-automatic-resumes/no-automatic-recovery`, and `specloop-interface/remaining-automatic-resumes/status-remains-read-only`.
 
 ## 2. Derive attention from the pause
 
