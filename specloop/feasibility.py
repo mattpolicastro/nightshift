@@ -44,7 +44,13 @@ for example:
 - what the task must produce is rejected by a frozen file or a verify command
   (read the frozen files and the scripts the commands run);
 - the task must change a file outside the allowed paths, or a frozen one;
-- the task contradicts the design or another task.
+- the task contradicts the design or another task;
+- the change removes, hides or breaks behaviour that a requirement in
+  openspec/specs/ guarantees, without a MODIFIED or REMOVED delta for that
+  requirement (cite the requirement);
+- a person, not an implementing agent working in this repository, would have
+  to do the task (a manual, visual, hardware or live-service check). Such a
+  check belongs in design.md, not tasks.md.
 Cite the file and line that proves it in `evidence`. Put anything that is
 merely risky, vague or likely to need a retry in `risks`.
 """
