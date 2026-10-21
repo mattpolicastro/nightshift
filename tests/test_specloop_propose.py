@@ -112,3 +112,11 @@ def test_contradictions_that_survive_every_round_are_reported(source, tmp_path):
     d = propose.draft(source, "main", "sign-helpers", "add sign", [], M, tmp_path / "out",
                       rounds=2, agent=drafter(GOOD, GOOD, feasible=False))
     assert d.contradictions and d.commit
+
+
+def test_drafting_prompt_keeps_human_checks_out_of_tasks(source, tmp_path):
+    # A human-only task would be dispatched to an agent and stall the build.
+    agent = drafter(GOOD)
+    propose.draft(source, "main", "sign-helpers", "add sign", [], M, tmp_path / "out", agent=agent)
+    prompt = [c for c in agent.calls if c.access == "write"][0].prompt
+    assert "is never a task" in prompt and "human checklist" in prompt

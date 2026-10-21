@@ -64,6 +64,10 @@ Also read AGENTS.md, README.md, and the code the change will touch.
     with every run of other characters replaced by `-`.
   - Every scenario must be covered by at least one task.
   - Order tasks so each builds on landed work. Put tests with the code they test.
+  - Every task goes to an implementing agent working in this repository. A check
+    only a person can make (real hardware, live services, how something looks)
+    is never a task: describe it in the design, where it becomes the pull
+    request's human checklist.
 - Prefer behaviour that can be tested without the host application. Say in the
   design where that is not possible, so a human checks it instead.
 {feedback}
