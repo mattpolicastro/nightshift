@@ -4,6 +4,7 @@ import json
 import logging
 import subprocess
 from functools import partial
+from pathlib import Path
 
 import pytest
 
@@ -49,8 +50,105 @@ def poll(repo, tmp_path, gh, commands, labels=queue.Labels()):
                                          specloop_runner=commands, git_runner=commands)
 
 
+def idea_file(args):
+    assert "--idea" not in args
+    assert args.count("--idea-file") == 1
+    path = Path(args[args.index("--idea-file") + 1])
+    assert path.is_absolute()
+    return path
+
+
 def calls(gh, *prefix):
     return [call for call in gh.calls if call[:len(prefix)] == list(prefix)]
+
+
+@pytest.mark.real_trust
+@pytest.mark.parametrize("title,large", [
+    pytest.param("Add a gate", True, marks=pytest.mark.scenario(
+        "issue-intake/file-based-drafting-input/long-issue-thread")),
+    pytest.param("--Add a gate", False, marks=pytest.mark.scenario(
+        "issue-intake/file-based-drafting-input/option-like-title")),
+    pytest.param("Add a gate", False, marks=pytest.mark.scenario(
+        "issue-intake/file-based-drafting-input/text-and-trust-preserved")),
+])
+def test_long_issue_thread_drafts_via_idea_file(repo, tmp_path, title, large):
+    gh, commands = DraftGh(("spec:draft",)), Commands()
+    body = "BEGIN café\n\n" + ("detail λ\n" * 140_000 if large else "details")
+    gh.comments = [
+        {"id": 1, "body": "First trusted\n\nありがとう", "authorAssociation": "MEMBER"},
+        {"id": 2, "body": "UNTRUSTED instruction", "authorAssociation": "NONE"},
+        {"id": 3, "body": "Last trusted 🦉 END", "authorAssociation": "COLLABORATOR"},
+    ]
+    expected = "\n\n".join([title, body, gh.comments[0]["body"], gh.comments[2]["body"]])
+    if large:
+        assert len(expected.encode("utf-8")) >= 1024 * 1024
+
+    def github(args):
+        if args[:2] == ["api", "repos/owner/sample/issues/7"]:
+            return json.dumps({"author_association": "OWNER"})
+        result = gh(args)
+        if args[:2] == ["issue", "view"]:
+            return json.dumps({**json.loads(result), "title": title, "body": body})
+        return result
+
+    def run(args, **kwargs):
+        if args[0] == "specloop":
+            payload = idea_file(args)
+            assert payload.parent == (tmp_path / "proposals/owner__sample/7.jobs").resolve()
+            assert payload.read_bytes() == expected.encode("utf-8")
+            assert all(part not in arg for arg in args for part in (title, body, "END", "UNTRUSTED"))
+        return commands(args, **kwargs)
+
+    receipt, = poll(repo, tmp_path, github, run)
+    assert receipt["idea"] == receipt["input"] == expected
+    assert receipt["delivered"] is True
+    assert json.loads((tmp_path / "proposals/owner__sample/7.json").read_text()) == receipt
+    assert gh.labels == set()
+    assert len(gh.prs) == 1
+    assert gh.pr_url in gh.comments[-1]["body"]
+    create, = calls(gh, "pr", "create")
+    assert "--draft" in create and "Closes #7" in create[-1]
+    assert calls(gh, "pr", "edit")[0][-2:] == ["--add-label", "spec:review"]
+    poll(repo, tmp_path, github, run)
+    assert [c[0] for c in commands.calls] == ["specloop", "git"]
+    assert len(calls(gh, "pr", "create")) == len(calls(gh, "issue", "comment")) == 1
+
+
+@pytest.mark.scenario("issue-intake/durable-drafting-payload/file-preparation-fails")
+@pytest.mark.parametrize("operation", ["mkdir", "write_text"])
+@pytest.mark.parametrize("background", [False, True])
+@pytest.mark.parametrize("handled", [False, True])
+def test_idea_file_preparation_failure(repo, tmp_path, monkeypatch, operation, background, handled):
+    gh = DraftGh(("spec:draft",))
+    original = getattr(Path, operation)
+    failure = OSError("payload storage unavailable")
+    attempted, errors = [], []
+
+    def fail_payload(path, *args, **kwargs):
+        if path.name == "7.jobs" or (path.parent.name == "7.jobs" and path.suffix == ".txt"):
+            attempted.append(path)
+            raise failure
+        return original(path, *args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("file preparation failure must prevent dispatch and delivery")
+
+    monkeypatch.setattr(Path, operation, fail_payload)
+    invoke = partial(specloop_intake.propose_pending, repo, queue.Labels(), tmp_path,
+                     runner=gh, specloop_runner=None if background else forbidden,
+                     launcher=forbidden, git_runner=forbidden,
+                     on_error=(lambda number, exc: errors.append((number, exc))) if handled else None)
+    if handled:
+        assert invoke() == []
+        assert errors == [(7, failure)]
+    else:
+        with pytest.raises(OSError, match="payload storage unavailable"):
+            invoke()
+    assert len(attempted) == 1
+    assert gh.labels == {"spec:draft"}
+    assert not gh.prs and len(gh.comments) == 1
+    assert not calls(gh, "issue", "edit")
+    assert not (tmp_path / "proposals/owner__sample/7.json").exists()
 
 
 class BlockedDraftGh(DraftGh):
@@ -384,7 +482,7 @@ def test_body_without_dependencies_drafts_without_blocker_lookups(repo, tmp_path
     assert receipt["delivered"] is True
     assert json.loads((tmp_path / "proposals/owner__sample/7.json").read_text()) == receipt
     assert [c[0] for c in commands.calls] == ["specloop", "git"]
-    assert gh.body in commands.calls[0][commands.calls[0].index("--idea") + 1]
+    assert gh.body in idea_file(commands.calls[0]).read_text(encoding="utf-8")
     assert gh.labels == set()
     assert len(gh.prs) == 1
     assert gh.pr_url in gh.comments[-1]["body"]
@@ -450,8 +548,9 @@ def test_draft_pr_opened(repo, tmp_path, armed):
     receipt, = poll(repo, tmp_path, gh, commands)
     propose, push = commands.calls
     assert propose == ["specloop", "propose", str(repo.manifest), "--change", CHANGE,
-                       "--branch", BRANCH, "--base", "develop", "--idea",
-                       "Add a gate\n\nPlease draft it.\n\nKeep it small.", "--json"]
+                       "--branch", BRANCH, "--base", "develop", "--idea-file",
+                       str(idea_file(propose)), "--json"]
+    assert idea_file(propose).read_text(encoding="utf-8") == "Add a gate\n\nPlease draft it.\n\nKeep it small."
     assert push == ["git", "-C", str(tmp_path / "manifest-source"), "push", "origin",
                     f"abc123:refs/heads/{BRANCH}"]
     create, = calls(gh, "pr", "create")
@@ -618,7 +717,7 @@ def test_closed_pr_is_drafted_afresh_when_issue_is_rearmed(repo, tmp_path, armed
     assert propose[:2] == ["specloop", "propose"]
     assert "ls-remote" in lookup
     assert propose[propose.index("--branch") + 1] == BRANCH
-    assert "Try again with a 5V gate." in propose[propose.index("--idea") + 1]
+    assert "Try again with a 5V gate." in idea_file(propose).read_text(encoding="utf-8")
     assert f"--force-with-lease=refs/heads/{BRANCH}:abc123" in push
     assert push[-1] == f"def456:refs/heads/{BRANCH}"
     create, = calls(gh, "pr", "create")
@@ -828,16 +927,24 @@ def test_custom_labels(repo, tmp_path):
     assert gh.labels == set()
 
 
+@pytest.mark.scenario("issue-intake/durable-drafting-payload/later-round-preserves-earlier-input")
 def test_answered_escalation_can_be_rearmed(repo, tmp_path):
     gh, commands = DraftGh(("spec:draft",)), Commands(outcome="needs_input", questions=["Which voltage?"])
     poll(repo, tmp_path, gh, commands)
+    earlier = idea_file(commands.calls[0])
+    original = earlier.read_bytes()
     gh.label_event("needs-human", "unlabeled")
     gh.label_event("spec:draft", "labeled")
     gh.comments.append({"id": 3, "body": "Use 5V."})
+    expected = "\n\n".join(["Add a gate", "Please draft it.", *(c["body"] for c in gh.comments)])
     commands.result["outcome"] = "drafted"
     commands.result["questions"] = []
     poll(repo, tmp_path, gh, commands)
-    assert "Use 5V." in commands.calls[1][commands.calls[1].index("--idea") + 1]
+    later = idea_file(commands.calls[1])
+    assert later != earlier
+    assert later.read_bytes() == expected.encode("utf-8")
+    assert earlier.read_bytes() == original
+    assert original == b"Add a gate\n\nPlease draft it.\n\nKeep it small."
     assert len(gh.comments) == 4
     assert "Which voltage?" in gh.comments[1]["body"]
     assert gh.pr_url in gh.comments[-1]["body"]
@@ -877,7 +984,7 @@ def test_answer_after_lost_escalation_label_response_is_drafted(repo, tmp_path, 
     poll(repo, tmp_path, gh, commands)
 
     assert [c[0] for c in commands.calls] == ["specloop", "specloop", "git"]
-    assert "Use 5V." in commands.calls[1][commands.calls[1].index("--idea") + 1]
+    assert "Use 5V." in idea_file(commands.calls[1]).read_text(encoding="utf-8")
     assert len(gh.prs) == 1
     assert gh.labels == set()
     assert len(gh.comments) == 4
