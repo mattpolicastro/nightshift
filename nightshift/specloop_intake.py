@@ -711,6 +711,64 @@ def _label_actor_association(repo: str, event: dict, *, runner) -> str | None:
     return association if association in queue.TRUSTED_ASSOCIATIONS else None
 
 
+def _authorize_label_events(repo: str, number: int, events: dict[str, dict], *, runner,
+                            kind="issue") -> bool:
+    """Authorize every selected application, explaining each definitive denial.
+
+    Resolve all actors before writing: a failed lookup leaves the item on the
+    retry path, rather than partially explaining an unconfirmed decision.
+    Recheck membership on each poll; neither receipts nor comments grant trust.
+    """
+    rejected = [
+        (label, event) for label, event in events.items()
+        if _label_actor_association(repo, event, runner=runner) not in queue.TRUSTED_ASSOCIATIONS
+    ]
+    for label, event in rejected:
+        _comment_label_rejection(repo, number, label, event, runner=runner, kind=kind)
+    return not rejected
+
+
+def _comment_label_rejection(repo: str, number: int, label: str, event: dict, *, runner,
+                             kind="issue") -> None:
+    """Create one explanation per application, without editing it on later polls.
+
+    The draft namespace opts into queue._gh's ambiguous-create reconciliation.
+    Only that transport retry may PATCH an existing comment with the same body.
+    """
+    marker = f"<!-- nightshift:draft:label-authorization-{number}:{event['id']} -->"
+    pages = json.loads(runner([
+        "api", f"repos/{repo}/issues/{number}/comments", "--paginate", "--slurp",
+    ]))
+    malformed = f"malformed comment history for #{number}; retry next poll"
+    if not isinstance(pages, list):
+        raise RuntimeError(malformed)
+    bodies = []
+    for page in pages:
+        if not isinstance(page, list):
+            raise RuntimeError(malformed)
+        for comment in page:
+            if (not isinstance(comment, dict)
+                    or (comment.get("body") is not None and not isinstance(comment["body"], str))):
+                raise RuntimeError(malformed)
+            bodies.append(comment.get("body") or "")
+    if any(marker in body for body in bodies):
+        return
+
+    actor = event.get("actor")
+    login = actor.get("login") if isinstance(actor, dict) else None
+    identity = f"`{login}`" if _valid_actor_login(login) else "an unavailable actor identity"
+    body = (
+        f"{queue.SELF_COMMENT_PREFIX} Ignoring the `{label}` label applied by {identity}. "
+        "Only label actors with an OWNER, MEMBER, or COLLABORATOR relationship to this "
+        "repository may trigger this work.\n\n"
+        f"To retry, a trusted actor must remove and reapply `{label}`. "
+        "If both intake labels are present, remove the unauthorized alias or have a trusted "
+        "actor remove and reapply it; both remaining labels must be authorized.\n\n"
+        f"{marker}"
+    )
+    runner([kind, "comment", str(number), "--repo", repo, "--body", body])
+
+
 _save = specloop_job.save
 
 
