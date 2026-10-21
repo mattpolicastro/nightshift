@@ -1,6 +1,6 @@
 ## 1. Durable job discovery
 
-- [ ] 1.1 Add atomic process identity metadata at wrapper startup and `list_jobs(state_dir)` in `nightshift/specloop_job.py`; test restart discovery, stable ordering, all three stage directories, historical attempts, empty state, legacy metadata and malformed records in focused job tests. Keep lifetime-lock and receipt formats compatible. Covers `background-job-control/local-job-inventory/list-jobs-after-daemon-restart`, `background-job-control/local-job-inventory/empty-inventory`, `background-job-control/local-job-inventory/legacy-and-unreadable-records`.
+- [x] 1.1 Add atomic process identity metadata at wrapper startup and `list_jobs(state_dir)` in `nightshift/specloop_job.py`; test restart discovery, stable ordering, all three stage directories, historical attempts, empty state, legacy metadata and malformed records in focused job tests. Keep lifetime-lock and receipt formats compatible. Covers `background-job-control/local-job-inventory/list-jobs-after-daemon-restart`, `background-job-control/local-job-inventory/empty-inventory`, `background-job-control/local-job-inventory/legacy-and-unreadable-records`.
 
 ## 2. Cancellation state and completion ordering
 
