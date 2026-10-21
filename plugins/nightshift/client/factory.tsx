@@ -41,6 +41,10 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
   const workspace = matchWorkspace(run.context?.repo ?? '', workspaces);
   const confirmStyles = actionStyles(colors, confirmation?.request.verb === 'abort' ? 'destructive' : 'primary');
   const cancelStyles = actionStyles(colors, 'outlined');
+  const statusColor = {
+    paused: colors.statusWarning, running: colors.accent,
+    done: colors.statusSuccess, aborted: colors.foregroundMuted,
+  }[run.status];
 
   function choose(verb: FactoryActInput['verb'], confirmed = false) {
     if (disabled) return;
@@ -58,7 +62,11 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
 
   return <View style={{ padding: 16, gap: 8, borderWidth: 1, borderColor: colors.border, borderRadius: 12, backgroundColor: colors.surface1 }}>
     <Text style={{ color: colors.foreground, fontSize: 17, fontWeight: '600' }}>{run.change}</Text>
-    <Text style={{ color: colors.foregroundMuted }}>{run.status} · {run.tasks.done}/{run.tasks.total} tasks done</Text>
+    <Text style={{ color: colors.foregroundMuted }}>
+      <Text style={{ color: statusColor, backgroundColor: colors.surface2, borderRadius: 6,
+        paddingHorizontal: 6, paddingVertical: 2, fontWeight: '600' }}>{run.status}</Text>
+      {' · '}{run.tasks.done}/{run.tasks.total} tasks done
+    </Text>
     {run.action ? <>
       <Text style={{ color: colors.foreground, fontWeight: '600' }}>{run.action.headline}</Text>
       <Text style={{ color: colors.foreground }}>{run.action.why}</Text>

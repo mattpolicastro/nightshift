@@ -3,6 +3,74 @@ import { test } from 'node:test';
 import type { FactoryActInput, FactoryRun, FactorySnapshot } from '../shared/factory';
 import { colors, styleView } from './factory-style-harness';
 
+test('status chip colour follows the run status', async t => {
+  await t.test('paseo-runs-page/status-chip-presentation/chip-follows-all-run-statuses', async t => {
+    const runs: FactoryRun[] = (['done', 'running', 'aborted', 'paused'] as const).map(status => ({
+      change: `chip-${status}`, status, tasks: { done: 1, total: 3 }, pr: '',
+    }));
+    const page = styleView(runs);
+    t.after(page.dispose);
+    await page.settle();
+
+    function assertRows(expanded: boolean, tokens = colors) {
+      const visible = [runs[3], runs[1], ...(expanded ? [runs[0], runs[2]] : [])];
+      const controls = page.nodes().filter(node => node.type === 'Pressable' &&
+        (node.props.accessibilityLabel?.startsWith('Details for ') || node.props.accessibilityLabel === 'Finished (2)'));
+      assert.deepEqual(controls.map(node => node.props.accessibilityLabel), [
+        'Details for chip-paused', 'Details for chip-running', 'Finished (2)',
+        ...(expanded ? ['Details for chip-done', 'Details for chip-aborted'] : []),
+      ], 'paused rows precede running rows; finished rows preserve snapshot order after the disclosure');
+      const toggle = page.find('Finished (2)')!;
+      assert.equal(toggle.props.accessibilityRole, 'button');
+      assert.equal(toggle.props.accessibilityState.expanded, expanded);
+      assert.equal(page.text(toggle.children), 'Finished (2)');
+      for (const run of [runs[0], runs[2]]) {
+        assert.equal(page.text().includes(run.change), expanded, 'finished titles are absent while folded');
+        assert.equal(page.text().includes(`${run.status} · 1/3 tasks done`), expanded);
+      }
+      for (const run of visible) {
+        const title = page.nodes().filter(node => node.type === 'Text' && page.text(node.children) === run.change);
+        assert.equal(title.length, 1, 'each change title appears once');
+        const card = page.nodes().find(node => node.type === 'View' && node.children.includes(title[0]));
+        assert.ok(card, 'the change title remains a direct card child');
+        assert.equal(card.children[0], title[0]);
+        const sentence = card.children[1];
+        assert.ok(sentence && typeof sentence !== 'string');
+        assert.equal(sentence.type, 'Text', 'the status sentence immediately follows the title');
+        const expected = `${run.status} · 1/3 tasks done`;
+        assert.equal(page.text(sentence.children), expected);
+        assert.deepEqual({ ...sentence.props.style }, { color: tokens.foregroundMuted });
+        const chip = sentence.children[0];
+        assert.ok(chip && typeof chip !== 'string');
+        assert.equal(chip.type, 'Text');
+        assert.deepEqual(chip.children, [run.status]);
+        assert.ok(sentence.children.slice(1).every(child => typeof child === 'string'));
+        assert.equal(page.text(sentence.children.slice(1)), ' · 1/3 tasks done', 'adjacent progress inherits the muted parent color');
+        const statusColors = {
+          paused: tokens.statusWarning, running: tokens.accent,
+          done: tokens.statusSuccess, aborted: tokens.foregroundMuted,
+        };
+        assert.deepEqual({ ...chip.props.style }, {
+          color: statusColors[run.status], backgroundColor: tokens.surface2,
+          borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2, fontWeight: '600',
+        });
+        assert.equal(page.text(card.children), `${run.change}${expected}Details ▾`, 'no duplicate or hidden substitute text');
+        assert.equal(page.nodes().filter(node => node.type === 'Text' && page.text(node.children) === expected).length, 1);
+      }
+    }
+
+    assertRows(false);
+    await page.press('Finished (2)');
+    assertRows(true);
+    const nextColors = Object.fromEntries(Object.entries(colors).map(([key, value]) => [key, `next-${value}`])) as typeof colors;
+    page.setColors(nextColors);
+    assertRows(true, nextColors);
+    await page.press('Finished (2)');
+    assertRows(false, nextColors);
+    assert.deepEqual(page.actions, []);
+  });
+});
+
 type Verb = FactoryActInput['verb'];
 type Role = 'primary' | 'destructive' | 'outlined';
 const labels = { resume: 'Resume', accept: 'Accept', publish: 'Publish', finish: 'Finish', abort: 'Abort' };
