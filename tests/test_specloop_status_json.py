@@ -1,5 +1,6 @@
 import json
 import subprocess
+from dataclasses import asdict
 from datetime import datetime, timezone
 
 import pytest
@@ -95,7 +96,8 @@ def test_paused_run_reported(admitted, capsys, named):
         "runs": [{
             "change": "paused-change",
             "status": "paused",
-            "pause": {"reason": "stuck", "task": key, "detail": detail},
+            "pause": {"reason": "stuck", "task": key, "detail": detail,
+                      "auto_resumes_remaining": 0},
             "tasks": {"done": 1, "total": 3},
             "head": head,
             "pr": "https://github.com/example/repo/pull/7",
@@ -123,6 +125,151 @@ def test_paused_run_reported(admitted, capsys, named):
             },
         }],
     }
+
+
+@pytest.mark.scenario("specloop-interface/remaining-automatic-resumes/infrastructure-budget-reported")
+@pytest.mark.parametrize("named", [False, True])
+@pytest.mark.parametrize("resume_at", [1, 4102444800], ids=["past", "future"])
+@pytest.mark.parametrize("consumed, remaining", [(0, 2), (1, 1), (2, 0), (3, 0)])
+def test_infrastructure_resume_budget(admitted, capsys, named, resume_at, consumed, remaining):
+    run, _ = admitted("infra")
+    key = tasks.parse(TASKS)[1].key
+    run.state.task(key).auto_resumes = consumed
+    run.pause("infra", key, "Worker unavailable", resume_at=resume_at)
+
+    assert cli.main(["status", "--json", *(["infra"] if named else [])]) == 0
+    pause = json.loads(capsys.readouterr().out)["runs"][0]["pause"]
+    assert pause == {
+        "reason": "infra", "task": key, "detail": "Worker unavailable",
+        "auto_resumes_remaining": remaining,
+    }
+
+
+@pytest.mark.scenario("specloop-interface/remaining-automatic-resumes/infrastructure-budget-reported")
+@pytest.mark.parametrize("named", [False, True])
+def test_resume_budget_uses_supervisor_policy(admitted, monkeypatch, capsys, named):
+    run, _ = admitted("infra")
+    key = tasks.parse(TASKS)[1].key
+    run.state.task(key).auto_resumes = 1
+    run.pause("infra", key, resume_at=1)
+    monkeypatch.setitem(serve.AUTO_RESUME, "infra", 5)
+
+    assert cli.main(["status", "--json", *(["infra"] if named else [])]) == 0
+    assert json.loads(capsys.readouterr().out)["runs"][0]["pause"]["auto_resumes_remaining"] == 4
+
+
+@pytest.mark.scenario("specloop-interface/remaining-automatic-resumes/unlimited-scheduled-recovery")
+@pytest.mark.parametrize("named", [False, True])
+@pytest.mark.parametrize("resume_at", [1, 4102444800], ids=["past", "future"])
+@pytest.mark.parametrize("reason, has_task", [
+    ("usage_limit", True), ("usage_limit", False), ("infra", False),
+])
+def test_unlimited_scheduled_recovery(admitted, capsys, named, resume_at, reason, has_task):
+    run, _ = admitted("unlimited")
+    key = tasks.parse(TASKS)[1].key
+    if has_task:
+        run.state.task(key).auto_resumes = 3
+    else:
+        # An unrelated task must not supply a budget for the paused task.
+        run.state.task(tasks.parse(TASKS)[0].key).auto_resumes = 3
+    run.pause(reason, key, resume_at=resume_at)
+
+    assert cli.main(["status", "--json", *(["unlimited"] if named else [])]) == 0
+    assert json.loads(capsys.readouterr().out)["runs"][0]["pause"]["auto_resumes_remaining"] is None
+
+
+@pytest.mark.scenario("specloop-interface/remaining-automatic-resumes/no-automatic-recovery")
+@pytest.mark.parametrize("named", [False, True])
+@pytest.mark.parametrize("has_task", [False, True])
+@pytest.mark.parametrize("reason, resume_at", [
+    ("requested", 0), ("requested", 1),
+    ("unknown_reason", 0), ("unknown_reason", 1),
+    ("infra", 0), ("usage_limit", 0),
+    ("infra", None), ("usage_limit", None),
+])
+def test_no_automatic_recovery(admitted, capsys, named, has_task, reason, resume_at):
+    run, _ = admitted("human")
+    key = tasks.parse(TASKS)[1].key
+    if has_task:
+        run.state.task(key).auto_resumes = 0
+    run.pause(reason, key, resume_at=resume_at or 0)
+    if resume_at is None:
+        persisted = json.loads((run.dir / "state.json").read_text())
+        del persisted["pause"]["resume_at"]
+        (run.dir / "state.json").write_text(json.dumps(persisted))
+
+    assert cli.main(["status", "--json", *(["human"] if named else [])]) == 0
+    assert json.loads(capsys.readouterr().out)["runs"][0]["pause"]["auto_resumes_remaining"] == 0
+
+
+@pytest.mark.scenario("specloop-interface/remaining-automatic-resumes/status-remains-read-only")
+@pytest.mark.parametrize("named", [False, True])
+def test_resume_allowance_status_is_read_only(admitted, monkeypatch, capsys, named):
+    runs = {}
+    key = tasks.parse(TASKS)[1].key
+    for change in ["budget", "missing-task", "unpaused"]:
+        run, head = admitted(change)
+        run.state.pr = "https://github.com/example/repo/pull/7"
+        if change == "budget":
+            run.state.task(key).auto_resumes = 1
+        if change != "unpaused":
+            run.pause("infra", key, "Worker unavailable", resume_at=1)
+        else:
+            run.save()
+        runs[change] = (run, head)
+
+    def file_snapshot():
+        return {
+            path: (path.read_bytes(), path.stat().st_mtime_ns) if path.exists() else None
+            for run, _ in runs.values()
+            for path in [run.dir / "state.json", run.dir / "events.jsonl"]
+        }
+
+    before = file_snapshot()
+    loaded = []
+    original_for_change = Run.for_change
+
+    def track_load(cls, change):
+        run = original_for_change(change)
+        loaded.append((run, asdict(run.state)))
+        return run
+
+    def no_mutation(*args, **kwargs):
+        pytest.fail("status tried to mutate run or task state")
+
+    monkeypatch.setattr(Run, "for_change", classmethod(track_load))
+    monkeypatch.setattr(Run, "save", no_mutation)
+    monkeypatch.setattr(Run, "event", no_mutation)
+    monkeypatch.setattr(state.RunState, "task", no_mutation)
+
+    for names in ([[change] for change in runs] if named else [[]]):
+        assert cli.main(["status", "--json", *names]) == 0
+        output = capsys.readouterr()
+        assert output.err == ""
+        document = json.loads(output.out)
+        assert document["version"] == 1
+        assert document["supervisor"] == {"state": "not running"}
+        assert [entry["change"] for entry in document["runs"]] == (names or list(runs))
+        for entry in document["runs"]:
+            run, head = runs[entry["change"]]
+            assert entry["status"] == run.state.status
+            assert entry["head"] == head
+            assert entry["pr"] == run.state.pr
+            assert entry["tasks"] == {"done": 1, "total": 3}
+            assert entry["context"]["branch"] == f"spec/{entry['change']}"
+            if entry["change"] == "unpaused":
+                assert entry["pause"] is None
+                assert "action" not in entry
+            else:
+                assert entry["pause"] == {
+                    "reason": "infra", "task": key, "detail": "Worker unavailable",
+                    "auto_resumes_remaining": 1 if entry["change"] == "budget" else None,
+                }
+                assert entry["action"]["pause_id"] == f"infra:{key}"
+
+    assert len(loaded) == len(runs)
+    assert all(asdict(run.state) == before_state for run, before_state in loaded)
+    assert file_snapshot() == before
 
 
 @pytest.mark.scenario("run-actions/actions-in-status/gate-action-described")
