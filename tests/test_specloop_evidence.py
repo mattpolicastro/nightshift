@@ -209,7 +209,7 @@ def test_mutant_prepare_failure_is_invalid_and_does_not_run_tests(tmp_path):
     mut = evidence.Mutant("calc.py", 2, "<=", "    return lo <= x and x <= hi",
                           "    return lo < x and x <= hi")
     m = replace(M, prepare=(manifest.Step("prepare", (
-        "/usr/bin/grep", "-Fq", mut.before, "{src}/calc.py",
+        "/bin/sh", "-c", 'grep -Fq "$1" "$2"', "sh", mut.before, "{src}/calc.py",
     )),))
     out = tmp_path / "out"
     assert evidence.mutate(src, head, [mut], m, out)  # the baseline passed
@@ -276,7 +276,7 @@ def test_mutant_timeout_overrides_are_exact_and_immutable(tmp_path, monkeypatch,
     expected = (30.0, 36.375, 75, 80, 40, 5)
 
     def make_steps(prefix):
-        return tuple(manifest.Step(f"{prefix}-{i}", ("/usr/bin/true",), timeout=ceiling)
+        return tuple(manifest.Step(f"{prefix}-{i}", ("/bin/sh", "-c", "true"), timeout=ceiling)
                      for i, ceiling in enumerate(ceilings))
 
     selected = make_steps("verify")
@@ -343,6 +343,24 @@ sys.exit(3 if "# failure" in source else 0)
 '''
 
 
+# Prepare cannot read a Python interpreter installed under the host's HOME.
+# Keep the same process-tree, artifact, and exit behavior using system tools.
+PREPARE_PROCESS_TREE_STEP = '''set -eu
+sleep 60 &
+child=$!
+mkdir -p artifacts
+printf '[%s, %s]\\n' "$$" "$child" > artifacts/pids.json
+cp "{src}/calc.py" artifacts/source.txt
+printf 'diagnostic\\n'
+if grep -Fq '# timeout' "{src}/calc.py"; then
+    sleep 60
+fi
+if grep -Fq '# failure' "{src}/calc.py"; then
+    exit 3
+fi
+'''
+
+
 def assert_worker_resources_released(run_out, expected_exit, expected_source):
     assert not (run_out / "src").exists()
     assert not (run_out / "build").exists()
@@ -371,7 +389,9 @@ def test_real_mutant_step_timeout_stops_its_process_group(tmp_path, monkeypatch,
     repo, _, head = project(tmp_path, STRONG)
     out = tmp_path / "out"
     monkeypatch.setattr(evidence, "MIN_MUTANT_SECONDS", 1.0)
-    target = manifest.Step(stage, (sys.executable, "-c", PROCESS_TREE_STEP), timeout=10)
+    command = (("/bin/sh", "-c", PREPARE_PROCESS_TREE_STEP) if stage == "dependencies"
+               else (sys.executable, "-c", PROCESS_TREE_STEP))
+    target = manifest.Step(stage, command, timeout=10)
     later = manifest.Step("later", ("/usr/bin/true",), timeout=10)
     m = replace(M, prepare=(target,) if stage == "dependencies" else (),
                 verify=(later,) if stage == "dependencies" else (target, later),
@@ -412,7 +432,9 @@ def test_real_mutant_step_timeout_stops_its_process_group(tmp_path, monkeypatch,
 def test_concurrent_private_workers_release_processes_and_trees(tmp_path, monkeypatch, prepared):
     repo, _, head = project(tmp_path, STRONG)
     out = tmp_path / "out"
-    target = manifest.Step("exercise", (sys.executable, "-c", PROCESS_TREE_STEP), timeout=1)
+    command = (("/bin/sh", "-c", PREPARE_PROCESS_TREE_STEP) if prepared
+               else (sys.executable, "-c", PROCESS_TREE_STEP))
+    target = manifest.Step("exercise", command, timeout=1)
     m = replace(M, prepare=(target,) if prepared else (), verify=() if prepared else (target,))
     verify.extract(repo, head, out / "src")
     before = CODE.splitlines()[1]
@@ -488,15 +510,24 @@ def test_parallel_mutants_match_serial_results(tmp_path, monkeypatch, prepared, 
     monkeypatch.setattr(evidence, "generate", generate)
 
     def stage_step(stage):
+        if stage == "prepare":
+            return manifest.Step(stage, ("/bin/sh", "-c", '''set -eu
+mkdir -p artifacts
+cp "{src}/calc.py" artifacts/source.txt
+chmod u+w artifacts/source.txt
+cat "{src}/calc.py"
+cp -R "{src}" project
+if grep -Fq 'fail-prepare' "{src}/calc.py"; then
+    exit 3
+fi
+'''), timeout=10)
         script = '''from pathlib import Path
-import shutil, sys
+import sys
 source = Path("{src}/calc.py").read_text()
 Path("artifacts").mkdir(exist_ok=True)
 Path("artifacts/source.txt").write_text(source)
 print(source, end="")
 '''
-        if stage == "prepare":
-            script += 'shutil.copytree("{src}", "project")\n'
         script += f'sys.exit(3 if "fail-{stage}" in source else 0)\n'
         return manifest.Step(stage, (sys.executable, "-c", script), timeout=10)
 
@@ -616,7 +647,7 @@ def test_parallel_mutants_respect_time_box(tmp_path, monkeypatch, prepared):
     expected = (1.0, 1.125, 4, 5, 2, 0.5)
 
     def steps(prefix):
-        return tuple(manifest.Step(f"{prefix}-{i}", ("/usr/bin/true",), timeout=ceiling)
+        return tuple(manifest.Step(f"{prefix}-{i}", ("/bin/sh", "-c", "true"), timeout=ceiling)
                      for i, ceiling in enumerate(ceilings))
 
     preparation = steps("prepare") if prepared else ()
@@ -782,8 +813,8 @@ def test_mutant_dispatch_waits_for_baseline_and_obeys_limit(tmp_path, monkeypatc
 @pytest.mark.parametrize("failure", ["exit", "timeout"])
 def test_failed_baseline_never_dispatches_mutants(tmp_path, monkeypatch, stage, failure):
     repo, base, head = project(tmp_path, STRONG)
-    script = "raise SystemExit(3)" if failure == "exit" else "import time; time.sleep(60)"
-    bad = manifest.Step(stage, (sys.executable, "-c", script), timeout=0.2)
+    script = "exit 3" if failure == "exit" else "sleep 60"
+    bad = manifest.Step(stage, ("/bin/sh", "-c", script), timeout=0.2)
     m = replace(M, prepare=(bad,) if stage == "prepare" else (),
                 verify=M.verify if stage == "prepare" else (bad,))
     out = tmp_path / "out"
@@ -937,24 +968,21 @@ def test_mutants_have_private_source_and_fresh_build(tmp_path, monkeypatch, prep
         evidence.Mutant("calc.py", 6, "+", CODE.splitlines()[5], "    return x * k - 1"),
         evidence.Mutant("calc.py", 2, "and", CODE.splitlines()[1], "    return lo <= x or x <= hi"),
     ]
-    inspect = '''import json, os
-from pathlib import Path
-src, build = Path("{src}"), Path("{build}")
-assert not (src / "calc.py").stat().st_mode & 0o222
-assert Path.cwd() == build
-assert Path(os.environ["HOME"]) == build / "home"
-assert Path(os.environ["TMPDIR"]) == build / "tmp"
-assert not (build / "visited").exists()
-assert not list((build / "home").iterdir())
-assert not list((build / "tmp").iterdir())
-(build / "visited").write_text("used")
-(build / "home" / "used").touch()
-(build / "tmp" / "used").touch()
-(build / "artifacts").mkdir()
-(build / "artifacts" / "source.txt").write_text((src / "calc.py").read_text())
-print((src / "calc.py").read_text(), end="")
+    inspect = '''set -eu
+test ! -w "{src}/calc.py"
+test "$(pwd -P)" = "{build}"
+test "$HOME" = "{build}/home"
+test "$TMPDIR" = "{build}/tmp"
+test ! -e visited
+test -z "$(ls -A home)"
+test -z "$(ls -A tmp)"
+printf used > visited
+touch home/used tmp/used
+mkdir artifacts
+cp "{src}/calc.py" artifacts/source.txt
+cat "{src}/calc.py"
 '''
-    inspect_step = manifest.Step("inspect", (sys.executable, "-c", inspect))
+    inspect_step = manifest.Step("inspect", ("/bin/sh", "-c", inspect))
     if prepared:
         copy_step = manifest.Step("copy", ("/bin/sh", "-c",
             'test ! -e project && cp -R "{src}/." project && chmod -R u+w project'))
@@ -970,6 +998,7 @@ print((src / "calc.py").read_text(), end="")
     overlap = Barrier(2)
 
     def observe(src, sha, steps, m, run_out):
+        assert not (src / "calc.py").stat().st_mode & 0o222
         if run_out != out:
             assert src == run_out / "src"
             assert (out / "src" / "calc.py").read_text() == CODE
@@ -1032,10 +1061,9 @@ def test_mutant_classifications_and_nonexecuting_annotations(tmp_path, prepared)
     sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "annotations")
     head = sh(repo, "git", "rev-parse", "HEAD")
     stages = (["prepare"] if prepared else []) + ["configure", "build", "test"]
-    steps = tuple(manifest.Step(stage, (sys.executable, "-c",
-        'from pathlib import Path; import sys; '
-        f'print("{stage}"); sys.exit(9 if "fail-{stage}" in '
-        'Path("{src}/calc.py").read_text() else 7)'), expect=7) for stage in stages)
+    steps = tuple(manifest.Step(stage, ("/bin/sh", "-c",
+        f'echo "{stage}"; if grep -Fq "fail-{stage}" "{{src}}/calc.py"; '
+        'then exit 9; else exit 7; fi'), expect=7) for stage in stages)
     m = replace(M, prepare=steps[:1] if prepared else (),
                 verify=steps[1:] if prepared else steps, mutation_steps=("configure", "build", "test"))
     before = CODE.splitlines()[1]
@@ -1071,9 +1099,8 @@ def test_mutant_classifications_and_nonexecuting_annotations(tmp_path, prepared)
 @pytest.mark.parametrize("parallel", [1, 2, 8])
 def test_generated_all_invalid_mutants_fail_the_gate(tmp_path, prepared, parallel):
     repo, base, head = project(tmp_path, STRONG)
-    baseline_only = manifest.Step("prepare" if prepared else "build", (sys.executable, "-c",
-        'from pathlib import Path; import sys; '
-        f'sys.exit(0 if Path("{{src}}/calc.py").read_text() == {CODE!r} else 1)'))
+    baseline_only = manifest.Step("prepare" if prepared else "build", ("/bin/sh", "-c",
+        f'cmp -s "{{src}}/calc.py" - <<\'BASELINE\'\n{CODE}BASELINE\n'))
     m = replace(M, mutation_parallel=parallel,
                 prepare=(baseline_only,) if prepared else (),
                 verify=M.verify if prepared else (baseline_only,) + M.verify,
@@ -1112,7 +1139,7 @@ sys.exit(3 if "# failure" in source else 0)
 '''
     step = manifest.Step("test", (sys.executable, "-c", script), timeout=2)
     m = replace(M, mutation_parallel=1, verify=(step,),
-                prepare=(manifest.Step("prepare", ("/usr/bin/true",)),) if prepared else ())
+                prepare=(manifest.Step("prepare", ("/bin/sh", "-c", "true")),) if prepared else ())
     out = tmp_path / "out"
     cleaned = []
     real_cleanup = verify.cleanup
