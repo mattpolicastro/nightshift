@@ -518,35 +518,60 @@ def test_status_reports_broken_run_and_keeps_others(admitted, monkeypatch, capsy
 
 
 @pytest.mark.scenario("specloop-interface/isolated-run-status-failures/error-rows-remain-compatible-and-non-actionable")
+@pytest.mark.scenario("specloop-interface/isolated-run-status-failures/broken-run-keeps-other-repositories-visible")
 @pytest.mark.parametrize("message", ["", 'private path: /repo\n"failed"', "x" * 1000])
 def test_error_row_shape_and_diagnostic(admitted, monkeypatch, capsys, message):
-    from nightshift import specloop_attention, specloop_client
+    from nightshift import outcomes, specloop_attention, specloop_client
 
-    admitted("broken")
-    healthy, _ = admitted("healthy")
-    healthy.pause("human_checks", detail="Ready for review")
-    healthy_entry = status_document(capsys, "healthy")["runs"][0]
+    for change in ("z-healthy", "m-broken", "a-healthy"):
+        run, _ = admitted(change)
+        run.state.pr = f"https://github.com/example/{change}/pull/7"
+        run.pause("human_checks", detail="Ready for review")
+    document = status_document(capsys)
+    before = document["runs"]
+    assert before[0]["context"]["repo"] != before[2]["context"]["repo"]
+
+    def runner(argv, **kwargs):
+        assert argv == ["specloop", "status", "--json"]
+        assert kwargs == {"capture_output": True, "text": True, "check": False}
+        return subprocess.CompletedProcess(argv, 0, json.dumps(document), "")
+
+    monkeypatch.setattr(outcomes, "now", lambda: "2026-10-21T12:00:00+00:00")
+    cached = specloop_attention.snapshot(runner=runner)
+    assert cached["error"] is None
+    assert len(cached["entries"]) == 3
     real_manifest = cli._manifest
 
     def fail_manifest(run):
-        if run.dir.name == "broken":
+        if run.dir.name == "m-broken":
             raise RuntimeError(message)
         return real_manifest(run)
 
     monkeypatch.setattr(cli, "_manifest", fail_manifest)
     document = status_document(capsys)
-    error = document["runs"][0]
-    assert_status_error(error, "broken", "RuntimeError")
+    error = document["runs"][1]
+    assert_status_error(error, "m-broken", "RuntimeError")
     assert error["error"] == f"RuntimeError: {message}"[:500]
-    assert document["runs"][1] == healthy_entry
-    accepted = specloop_client.call(["status"], runner=lambda *a, **kw: subprocess.CompletedProcess(
-        a[0], 0, json.dumps(document), ""
-    ))
+    assert document["runs"][0] == before[0]
+    assert document["runs"][2] == before[2]
+    accepted = specloop_client.call(["status"], runner=runner)
     assert accepted == document
-    assert specloop_attention._entries(accepted) == [
-        {"change": "broken", "reason": "status_error", "pr": ""},
-        {"change": "healthy", "reason": "human_checks", "pr": ""},
+    expected = [
+        {"change": "a-healthy", "reason": "human_checks", "pr": before[0]["pr"]},
+        {"change": "m-broken", "reason": "status_error", "pr": ""},
+        {"change": "z-healthy", "reason": "human_checks", "pr": before[2]["pr"]},
     ]
+    assert specloop_attention._entries(accepted) == expected
+    checked_at = "2026-10-21T13:00:00+00:00"
+    monkeypatch.setattr(outcomes, "now", lambda: checked_at)
+    refreshed = specloop_attention.snapshot(runner=runner)
+    assert refreshed == {
+        "entries": [{**entry, "checked_at": checked_at, "error": None, "stale": False}
+                    for entry in expected],
+        "checked_at": checked_at, "error": None,
+    }
+    assert "action" not in refreshed["entries"][1]
+    assert specloop_attention.snapshot(offline=True) == refreshed
 
 
 @pytest.mark.scenario("specloop-interface/isolated-run-status-failures/named-and-entirely-broken-collections")
