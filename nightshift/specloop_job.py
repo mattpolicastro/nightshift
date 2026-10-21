@@ -351,6 +351,7 @@ def _group_identities(process: dict, members: set[int]) -> dict[int, str]:
     """Remember live witnesses while the wrapper still proves ownership.
 
     SIGTERM may kill the wrapper before an ignoring descendant. A surviving
+    # mutation-equivalent: This docstring wording is not used by the ownership checks.
     member with the same start identity and group/session proves continuity
     for escalation within this call; a later stop still requires the leader.
     """

@@ -736,6 +736,20 @@ def owned_job(tmp_path, monkeypatch):
     return directory, process
 
 
+def test_wrapper_command_inspection_uses_five_second_timeout(monkeypatch, owned_job):
+    directory, process = owned_job
+    command_ps = subprocess.run
+    calls = []
+
+    def ps(args, **kwargs):
+        calls.append(kwargs)
+        return command_ps(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", ps)
+    assert jobs._verify_process(directory) == process
+    assert calls == [{"capture_output": True, "text": True, "timeout": 5, "check": True}]
+
+
 @pytest.mark.scenario("background-job-control/owned-process-group-termination/refuse-unsafe-identity")
 @pytest.mark.parametrize("problem", [
     "unknown", "legacy", "unavailable", "reused", "missing-leader", "wrong-group",
@@ -1042,6 +1056,36 @@ def test_escalation_checks_surviving_descendant_identity(
         assert stop["state"] == "stopping" and "stopped_at" not in stop
 
 
+@pytest.mark.parametrize("returncode,diagnostic", [
+    (1, "cannot verify surviving group ownership"),
+    (2, "returned non-zero exit status 2"),
+])
+def test_escalation_distinguishes_exited_witness_from_inspection_failure(
+        tmp_path, monkeypatch, owned_job, stop_clock, returncode, diagnostic):
+    directory, process = owned_job
+    signals = []
+
+    def start_identity(pid):
+        if signals:
+            assert pid == 2345  # The wrapper exited after SIGTERM.
+            raise subprocess.CalledProcessError(returncode, ["/bin/ps", "-p", str(pid)])
+        return process["start_identity"]
+
+    monkeypatch.setattr(jobs, "process_start_identity", start_identity)
+    monkeypatch.setattr(jobs, "_executing_group",
+                        lambda *a, **kw: {2345} if signals else {1234, 2345})
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: signals.append((pgid, sig)))
+
+    # Exit status 1 means the last witness vanished; other ps failures must
+    # retain their inspection diagnostic rather than masquerading as an exit.
+    with pytest.raises(jobs.StopJobError, match=diagnostic):
+        jobs.stop_job(tmp_path, directory.name)
+    assert signals == [(process["pgid"], signal.SIGTERM)]
+    stop = json.loads((directory / "stop.json").read_text())
+    assert stop["state"] == "stopping" and "stopped_at" not in stop
+    assert stop["process"] == process
+
+
 @pytest.mark.scenario("background-job-control/owned-process-group-termination/refuse-unsafe-identity")
 @pytest.mark.parametrize("inspection", ["start", "command", "members"])
 @pytest.mark.parametrize("failure", [PermissionError("inspection denied"),
@@ -1129,6 +1173,26 @@ def test_group_wait_is_bounded_and_observes_descendants(monkeypatch, seconds):
     assert probes == sorted(probes, reverse=True)
     monkeypatch.setattr(jobs, "_executing_group", lambda *a, **kw: set())
     assert jobs._wait_group({"pid": 1234, "pgid": 1234}, seconds) is True
+
+
+@pytest.mark.parametrize("seconds", [5, 1])
+@pytest.mark.parametrize("offset,confirmed", [(-.01, True), (0, True), (.01, False)])
+def test_group_wait_confirmation_deadline_is_inclusive(monkeypatch, stop_clock, seconds,
+                                                       offset, confirmed):
+    stop_clock[0] = 100.0
+    deadline = stop_clock[0] + seconds
+    probes = []
+
+    def probe(pgid, *, timeout):
+        probes.append((pgid, timeout))
+        # Model a probe that starts within budget and reports an empty group
+        # just before, exactly at, or just after the confirmation deadline.
+        stop_clock[0] = deadline + offset
+        return set()
+
+    monkeypatch.setattr(jobs, "_executing_group", probe)
+    assert jobs._wait_group({"pid": 1234, "pgid": 1234}, seconds) is confirmed
+    assert probes == [(1234, seconds)]
 
 
 def test_retry_stop_preserves_intent_and_late_result(tmp_path, monkeypatch, owned_job):
