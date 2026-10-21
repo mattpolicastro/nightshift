@@ -212,3 +212,20 @@ def test_feasibility_review_checks_existing_specs_and_human_tasks():
     assert "requirement in\n  openspec/specs/ guarantees" in feasibility.PROMPT
     assert "a person, not an implementing agent" in feasibility.PROMPT
     assert "requirements in openspec/specs/ for each capability it touches" in propose.PROMPT
+
+
+def test_a_test_file_the_task_says_to_leave_alone_is_not_an_overlap(source, tmp_path, monkeypatch):
+    other_run(source, tmp_path, monkeypatch)
+    hands_off = SEPARATE.replace(" covering", "; do not edit `tests/test_calc.py`, covering")
+    agent = drafter(hands_off)
+    d = propose.draft(source, "main", "sign-helpers", "add sign", [], M, tmp_path / "out", agent=agent)
+    assert len([c for c in agent.calls if c.access == "write"]) == 1
+    assert not d.problems and not d.risks
+    assert propose.edited_paths("Extend `tests/a.py` and `c/e.py`. Never modify `tests/b.py`; "
+                                "leave `c/d.py` as is.") == {"tests/a.py", "c/e.py"}
+
+
+def test_the_drafter_gets_four_rounds_by_default(source, tmp_path):
+    agent = drafter(PARTIAL, PARTIAL, PARTIAL, GOOD)
+    d = propose.draft(source, "main", "sign-helpers", "add sign", [], M, tmp_path / "out", agent=agent)
+    assert len([c for c in agent.calls if c.access == "write"]) == 4 and not d.problems and d.commit
