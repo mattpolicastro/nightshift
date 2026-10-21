@@ -1,5 +1,31 @@
 # Validation and scope
 
+## Parallel mutant regression tests — 2026-10-21
+
+Task 3.2 adds `test_parallel_mutants_match_serial_results` and
+`test_parallel_mutants_respect_time_box` in `tests/test_specloop_evidence.py`.
+Prepared and unprepared fixtures compare ordered evidence JSON, score, summary
+and gate decisions at concurrency 1, 2 and above the mutant count, forcing
+out-of-order completion. They cover mixed classifications, weak/strong tests,
+all-invalid evidence, exact step budgets, queued subprocess timeouts and worker
+cleanup, including retained diagnostics and terminated child processes.
+
+Local macOS validation used the preinstalled development virtual environment
+through `UV_PROJECT_ENVIRONMENT`, with `UV_OFFLINE=1`, `UV_NO_SYNC=1`,
+`UV_CACHE_DIR=build/uv-cache`, `PYTHONDONTWRITEBYTECODE=1` and `PYTHONPATH=.`.
+The latter ensures imports come from this checkout.
+
+- Focused run of the two new tests: **8 passed**.
+- `uv run pytest -p no:cacheprovider`: **1,141 passed, 5 skipped, 2 failed**
+  in 199.57 seconds (exit 1). All **63 evidence tests passed** in this run.
+- `test_a_write_outside_the_worktree_is_still_a_breach` failed because the
+  enclosing sandbox denied writing `/tmp/verdict.txt`.
+- `test_a_step_leaves_no_background_processes` failed because `pgrep` could
+  not access the process list (`sysmond service not found`, exit 3).
+
+Those two existing tests were left unchanged. These are local results;
+the harness independently reruns its acceptance checks.
+
 ## Current public snapshot
 
 On 2026-09-08, the sanitized public snapshot passed 358 Python tests with one

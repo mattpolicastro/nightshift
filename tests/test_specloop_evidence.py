@@ -4,7 +4,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import asdict, replace
 from threading import Barrier, Event, Lock
 
 import pytest
@@ -451,6 +451,250 @@ def test_all_invalid_mutants_are_unmeasured_not_a_pass():
     ev.mutants[0].result = "killed"
     assert not ev.unmeasured and ev.passed(0.3)
     assert Evidence(1).passed(0.8)  # no mutants generated (e.g. no mutable lines) is still not a failure
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/stable-evidence-results/parallel-results-match-serial")
+@pytest.mark.scenario("parallel-evidence-mutants/stable-evidence-results/classification-rules-retained")
+@pytest.mark.parametrize("prepared", [False, True])
+@pytest.mark.parametrize("case", ["weak", "strong", pytest.param("all-invalid", marks=pytest.mark.scenario(
+    "parallel-evidence-mutants/stable-evidence-results/all-invalid-remains-unmeasured"))])
+def test_parallel_mutants_match_serial_results(tmp_path, monkeypatch, prepared, case):
+    repo, base, _ = project(tmp_path, WEAK if case == "weak" else STRONG)
+    code = CODE + "unused = True  # mutation-equivalent: unused value\n"
+    (repo / "calc.py").write_text(code)
+    sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "equivalent")
+    head = sh(repo, "git", "rev-parse", "HEAD")
+    before = CODE.splitlines()[1]
+    selected = [
+        evidence.Mutant("calc.py", 2, "<=", before, "    return lo < x and x <= hi"),
+        evidence.Mutant("calc.py", 6, "+", CODE.splitlines()[5], "    return x * k - 1"),
+    ]
+    stages = (["prepare"] if prepared else []) + ["configure", "build"]
+    invalid = [evidence.Mutant("calc.py", 2, "comment", before, before + f" # fail-{stage}")
+               for stage in stages]
+    mismatch = evidence.Mutant("calc.py", 2, "mismatch", "wrong original", "unused")
+    if case == "all-invalid":
+        selected = invalid + [mismatch]
+    else:
+        selected += invalid + [mismatch, evidence.Mutant(
+            "calc.py", 7, "True", code.splitlines()[6], "unused = False")]
+
+    # Fix selection to include failures and nonexecuting mutants, but exercise
+    # gather, the real dispatcher, private workers, and real command receipts.
+    def generate(lines, count, seed):
+        assert ("calc.py", 2, before) in lines and seed == 1
+        return [replace(mut) for mut in selected]
+
+    monkeypatch.setattr(evidence, "generate", generate)
+
+    def stage_step(stage):
+        script = '''from pathlib import Path
+import shutil, sys
+source = Path("{src}/calc.py").read_text()
+Path("artifacts").mkdir(exist_ok=True)
+Path("artifacts/source.txt").write_text(source)
+print(source, end="")
+'''
+        if stage == "prepare":
+            script += 'shutil.copytree("{src}", "project")\n'
+        script += f'sys.exit(3 if "fail-{stage}" in source else 0)\n'
+        return manifest.Step(stage, (sys.executable, "-c", script), timeout=10)
+
+    test = M.verify[0]
+    if prepared:
+        test = replace(test, run=tuple(arg.replace("{src}", "{build}/project") for arg in test.run))
+    m = replace(M, prepare=(stage_step("prepare"),) if prepared else (),
+                verify=(stage_step("configure"), stage_step("build"), test),
+                mutation_steps=("configure", "build", "test"), coverage_exempt={"human": "manual"})
+    real_run, real_cleanup = verify.run_extracted, verify.cleanup
+    snapshots = []
+    for parallel in (1, 2, len(selected) + 2):
+        out = tmp_path / f"parallel-{parallel}"
+        second_cleaned = Event()
+        first_pair = Barrier(2)
+        lock = Lock()
+        executed, completed, cleaned = [], [], []
+        active = peak = 0
+
+        def run(src, sha, steps, run_m, run_out):
+            nonlocal active, peak
+            if run_out == out:
+                return real_run(src, sha, steps, run_m, run_out)
+            number = int(run_out.name.split("-")[1])
+            with lock:
+                executed.append(number)
+                active += 1
+                peak = max(peak, active)
+            try:
+                # The second worker must finish before the first, even when
+                # queued work and nonexecuting mutants finish in between.
+                if parallel > 1 and number <= 2:
+                    first_pair.wait(timeout=20)
+                if parallel > 1 and number == 1:
+                    assert second_cleaned.wait(20)
+                expected = code.replace(selected[number - 1].before, selected[number - 1].after)
+                assert (src / "calc.py").read_text() == expected
+                receipts = real_run(src, sha, steps, run_m, run_out)
+                if prepared:
+                    assert (run_out / "build/project/calc.py").read_text() == expected
+                return receipts
+            finally:
+                with lock:
+                    active -= 1
+                    completed.append(number)
+
+        def cleanup(run_out):
+            if run_out == out:
+                assert active == 0 and len(cleaned) == len(selected)
+            else:
+                assert (out / "src/calc.py").read_text() == code
+            real_cleanup(run_out)
+            with lock:
+                cleaned.append(run_out)
+            if run_out == out / "mutant-2":
+                second_cleaned.set()
+
+        monkeypatch.setattr(verify, "run_extracted", run)
+        monkeypatch.setattr(verify, "cleanup", cleanup)
+        ev = evidence.gather(repo, base, head, ["covered", "human"], {"covered"},
+                             replace(m, mutation_parallel=parallel), out, 1)
+        executable_count = len(selected) - (1 if case == "all-invalid" else 2)
+        assert sorted(executed) == list(range(1, executable_count + 1))
+        assert 1 <= peak <= min(parallel, executable_count)
+        if parallel == 1:
+            assert completed == executed and peak == 1
+        else:
+            assert peak >= 2 and completed.index(2) < completed.index(1)
+        assert cleaned[-1] == out
+        assert ev.covered == ["covered"] and not ev.uncovered and not ev.baseline_failed
+        if case == "all-invalid":
+            expected_results = ["invalid"] * len(selected)
+            assert ev.score is None and ev.unmeasured
+            assert not any(ev.passed(limit) for limit in (0, 0.5, 0.8, 1))
+            assert f"none of the {len(selected)} mutants could be judged" in ev.summary()
+        else:
+            expected_results = (["survived" if case == "weak" else "killed", "killed"]
+                                + ["invalid"] * (len(invalid) + 1) + ["equivalent"])
+            assert ev.score == (0.5 if case == "weak" else 1.0) and not ev.unmeasured
+            assert ev.passed(0.8) is (case == "strong")
+            assert "1 marked equivalent" in ev.summary()
+        assert [mut.result for mut in ev.mutants] == expected_results
+        assert [replace(mut, result="") for mut in ev.mutants] == selected
+        saved = json.loads((out / "evidence.json").read_text())
+        assert saved == {**asdict(ev), "score": ev.score}
+        snapshots.append((saved, ev.score, ev.summary(), [ev.passed(n) for n in (0, 0.5, 0.8, 1)]))
+        for number, mut in enumerate(ev.mutants, 1):
+            worker = out / f"mutant-{number}"
+            assert not (worker / "src").exists() and not (worker / "build").exists()
+            if number > executable_count:
+                assert not worker.exists()  # mismatch/equivalent executed no commands
+                continue
+            assert (worker / "artifacts/source.txt").read_text() == code.replace(mut.before, mut.after)
+            receipts = json.loads((worker / "receipts.json").read_text())
+            failed_stage = next((stage for stage in stages if f"fail-{stage}" in mut.after), None)
+            expected_steps = stages[:stages.index(failed_stage) + 1] if failed_stage else stages + ["test"]
+            assert [r["id"] for r in receipts] == expected_steps
+            assert receipts[-1]["passed"] is (mut.result == "survived")
+            assert all((worker / f"{step}.log").exists() is (step in expected_steps)
+                       for step in stages + ["test"])
+        assert not (out / "src").exists() and not (out / "build").exists()
+    assert snapshots[0] == snapshots[1] == snapshots[2]
+    assert (repo / "calc.py").read_text() == code
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/baseline-step-time-boxes/parallel-mutants-respect-time-box")
+@pytest.mark.scenario("parallel-evidence-mutants/worker-cleanup/completed-workers-release-resources")
+@pytest.mark.parametrize("prepared", [False, True])
+def test_parallel_mutants_respect_time_box(tmp_path, monkeypatch, prepared):
+    repo, _, head = project(tmp_path, STRONG)
+    out = tmp_path / "out"
+    # Keep real subprocess timeouts short; test every branch of the budget
+    # formula in both preparation and verification with controlled receipts.
+    monkeypatch.setattr(evidence, "MIN_MUTANT_SECONDS", 1.0)
+    durations = (0.01, 0.375, 0, None, 2, 0.01)
+    ceilings = (10, 10, 4, 5, 2, 0.5)
+    expected = (1.0, 1.125, 4, 5, 2, 0.5)
+
+    def steps(prefix):
+        return tuple(manifest.Step(f"{prefix}-{i}", ("/usr/bin/true",), timeout=ceiling)
+                     for i, ceiling in enumerate(ceilings))
+
+    preparation = steps("prepare") if prepared else ()
+    checks = steps("verify") + (manifest.Step("test", (sys.executable, "-c", PROCESS_TREE_STEP), timeout=10),)
+    m = replace(M, mutation_parallel=2, prepare=preparation, verify=checks,
+                mutation_steps=tuple(s.id for s in checks))
+    original = replace(m)
+    baseline_seconds = {s.id: seconds for group in (preparation, checks[:-1])
+                        for s, seconds in zip(group, durations)}
+    baseline_seconds["test"] = 0.01
+    before = CODE.splitlines()[1]
+    outcomes = ("timeout", "timeout", "timeout", "failure", "success")
+    mutants = [evidence.Mutant("calc.py", 2, "comment", before, before + f" # {outcome}-{i}")
+               for i, outcome in enumerate(outcomes)]
+    real_run, real_cleanup = verify.run_extracted, verify.cleanup
+    overlap = Barrier(2)
+    lock = Lock()
+    started, finished, cleaned = {}, [], []
+    active = peak = 0
+    baseline_calls = []
+
+    def run(src, sha, selected_steps, run_m, run_out):
+        nonlocal active, peak
+        assert m == original
+        if run_out == out:
+            baseline_calls.append(run_out)
+            assert selected_steps == checks and run_m.prepare == preparation
+            receipts = real_run(src, sha, selected_steps, run_m, run_out)
+            for receipt in receipts:
+                receipt.seconds = baseline_seconds[receipt.id]
+            return receipts
+        assert tuple(s.timeout for s in selected_steps) == expected + (1.0,)
+        assert tuple(s.timeout for s in run_m.prepare) == (expected if prepared else ())
+        number = int(run_out.name.split("-")[1])
+        with lock:
+            if number > 2:
+                assert finished  # work was queued behind a completed worker
+            started[number] = time.monotonic()
+            active += 1
+            peak = max(peak, active)
+        try:
+            if number <= 2:
+                overlap.wait(timeout=10)
+            return real_run(src, sha, selected_steps, run_m, run_out)
+        finally:
+            with lock:
+                active -= 1
+                finished.append(number)
+
+    def cleanup(run_out):
+        if run_out == out:
+            assert active == 0 and sorted(finished) == list(range(1, 6))
+            assert set(cleaned) == {out / f"mutant-{i}" for i in range(1, 6)}
+        else:
+            assert (out / "src/calc.py").read_text() == CODE
+            assert (out / "build").exists()
+        real_cleanup(run_out)
+        with lock:
+            cleaned.append(run_out)
+
+    monkeypatch.setattr(verify, "run_extracted", run)
+    monkeypatch.setattr(verify, "cleanup", cleanup)
+    assert evidence.mutate(repo, head, mutants, m, out)
+    assert baseline_calls == [out] and peak == 2 and active == 0
+    # The third mutant waited longer than its test budget but still receives a
+    # full second to execute. Queue dwell must never be deducted from a step.
+    assert started[3] - min(started[1], started[2]) >= 1.0
+    assert [mut.result for mut in mutants] == ["killed"] * 4 + ["survived"]
+    assert cleaned[-1] == out and m == original
+    for number, (mut, exit_code) in enumerate(zip(mutants, (None, None, None, 3, 0)), 1):
+        receipts = assert_worker_resources_released(
+            out / f"mutant-{number}", exit_code, CODE.replace(before, mut.after))
+        assert [r["id"] for r in receipts] == [s.id for s in preparation + checks]
+        assert all(r["passed"] for r in receipts[:-1])
+        if exit_code is None:
+            assert receipts[-1]["seconds"] >= 1.0
+    assert_worker_resources_released(out, 0, CODE)
+    assert (repo / "calc.py").read_text() == CODE
 
 
 @pytest.mark.parametrize("parallel", [
