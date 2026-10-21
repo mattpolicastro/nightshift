@@ -1,10 +1,13 @@
 import json
+import os
 import subprocess
+import sys
+import time
 from dataclasses import replace
 
 import pytest
 
-from specloop import evidence, manifest, tasks
+from specloop import evidence, manifest, tasks, verify
 
 # Every mutant of this code is observable: boundaries of `within` and both
 # terms of `scale`. (A clamp written with early returns has equivalent mutants:
@@ -233,3 +236,214 @@ def test_all_invalid_mutants_are_unmeasured_not_a_pass():
     ev.mutants[0].result = "killed"
     assert not ev.unmeasured and ev.passed(0.3)
     assert Evidence(1).passed(0.8)  # no mutants generated (e.g. no mutable lines) is still not a failure
+
+
+@pytest.mark.parametrize("prepared", [
+    pytest.param(False, marks=pytest.mark.scenario(
+        "parallel-evidence-mutants/independent-mutant-workspaces/same-file-mutations-remain-separate")),
+    pytest.param(True, marks=pytest.mark.scenario(
+        "parallel-evidence-mutants/independent-mutant-workspaces/prepared-copies-remain-separate")),
+])
+def test_serial_mutants_have_private_source_and_fresh_build(tmp_path, monkeypatch, prepared):
+    repo, _, head = project(tmp_path, STRONG)
+    out = tmp_path / "out"
+    mutants = [
+        evidence.Mutant("calc.py", 2, "<=", CODE.splitlines()[1], "    return lo < x and x <= hi"),
+        evidence.Mutant("calc.py", 6, "+", CODE.splitlines()[5], "    return x * k - 1"),
+        evidence.Mutant("calc.py", 2, "and", CODE.splitlines()[1], "    return lo <= x or x <= hi"),
+    ]
+    inspect = '''import json, os
+from pathlib import Path
+src, build = Path("{src}"), Path("{build}")
+assert not (src / "calc.py").stat().st_mode & 0o222
+assert Path.cwd() == build
+assert Path(os.environ["HOME"]) == build / "home"
+assert Path(os.environ["TMPDIR"]) == build / "tmp"
+assert not (build / "visited").exists()
+assert not list((build / "home").iterdir())
+assert not list((build / "tmp").iterdir())
+(build / "visited").write_text("used")
+(build / "home" / "used").touch()
+(build / "tmp" / "used").touch()
+(build / "artifacts").mkdir()
+(build / "artifacts" / "source.txt").write_text((src / "calc.py").read_text())
+print((src / "calc.py").read_text(), end="")
+'''
+    inspect_step = manifest.Step("inspect", (sys.executable, "-c", inspect))
+    if prepared:
+        copy_step = manifest.Step("copy", ("/bin/sh", "-c",
+            'test ! -e project && cp -R "{src}/." project && chmod -R u+w project'))
+        test_step = replace(M.verify[0], run=tuple(
+            arg.replace("{src}", "{build}/project") for arg in M.verify[0].run))
+        m = replace(M, prepare=(inspect_step, copy_step), verify=(test_step,))
+    else:
+        m = replace(M, verify=(inspect_step,) + M.verify, mutation_steps=("inspect", "test"))
+
+    real_run = verify.run_extracted
+    runs = []
+
+    def observe(src, sha, steps, m, run_out):
+        if run_out != out:
+            assert src == run_out / "src"
+            assert (out / "src" / "calc.py").read_text() == CODE
+            assert not (out / "src" / "calc.py").stat().st_mode & 0o222
+            for name in ("calc.py", "tests/test_calc.py"):
+                assert not (src / name).samefile(out / "src" / name)
+            assert (out / "build" / "visited").exists()
+        result = real_run(src, sha, steps, m, run_out)
+        assert (out / "src" / "calc.py").read_text() == CODE
+        runs.append(run_out)
+        return result
+
+    monkeypatch.setattr(verify, "run_extracted", observe)
+    assert evidence.mutate(repo, head, mutants, m, out)
+    assert [mut.result for mut in mutants] == ["killed"] * 3
+    assert runs == [out] + [out / f"mutant-{i}" for i in range(1, 4)]
+    for number, mut in enumerate(mutants, 1):
+        worker = out / f"mutant-{number}"
+        expected = CODE.replace(mut.before, mut.after)
+        assert (worker / "artifacts" / "source.txt").read_text() == expected
+        assert (worker / "inspect.log").read_text() == expected
+        receipts = json.loads((worker / "receipts.json").read_text())
+        assert [r["id"] for r in receipts] == (["inspect", "copy", "test"] if prepared else ["inspect", "test"])
+        assert receipts[0]["tail"] == expected
+        assert receipts[-1]["passed"] is False
+        assert str(worker / "build") in (worker / "verify.sb").read_text()
+        if prepared:
+            assert str(worker / "src") in (worker / "prepare.sb").read_text()
+    for run_out in runs:
+        assert not (run_out / "src").exists()
+        assert not (run_out / "build").exists()
+    assert (out / "artifacts" / "source.txt").read_text() == CODE
+    assert (repo / "calc.py").read_text() == CODE
+    assert sh(repo, "git", "status", "--porcelain") == ""
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/stable-evidence-results/classification-rules-retained")
+@pytest.mark.parametrize("prepared", [False, True])
+def test_mutant_classifications_and_nonexecuting_annotations(tmp_path, prepared):
+    repo, _, _ = project(tmp_path, STRONG)
+    code = CODE + ("inline = True  # mutation-equivalent: unused\n"
+                   "# mutation-equivalent: unused\npreceding = True\n")
+    (repo / "calc.py").write_text(code)
+    sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "annotations")
+    head = sh(repo, "git", "rev-parse", "HEAD")
+    stages = (["prepare"] if prepared else []) + ["configure", "build", "test"]
+    steps = tuple(manifest.Step(stage, (sys.executable, "-c",
+        'from pathlib import Path; import sys; '
+        f'print("{stage}"); sys.exit(9 if "fail-{stage}" in '
+        'Path("{src}/calc.py").read_text() else 7)'), expect=7) for stage in stages)
+    m = replace(M, prepare=steps[:1] if prepared else (),
+                verify=steps[1:] if prepared else steps, mutation_steps=("configure", "build", "test"))
+    before = CODE.splitlines()[1]
+    mutants = [evidence.Mutant("calc.py", 2, "comment", before, before + " # survive")]
+    mutants += [evidence.Mutant("calc.py", 2, "comment", before, before + f" # fail-{s}") for s in stages]
+    mutants += [
+        evidence.Mutant("calc.py", 2, "mismatch", "wrong original", "unused"),
+        evidence.Mutant("calc.py", 99, "mismatch", "past EOF", "unused"),
+        evidence.Mutant("calc.py", 7, "True", code.splitlines()[6], "inline = False"),
+        evidence.Mutant("calc.py", 9, "True", code.splitlines()[8], "preceding = False"),
+    ]
+    out = tmp_path / "out"
+    assert evidence.mutate(repo, head, mutants, m, out)
+    expected = ["survived"] + ["killed" if s == "test" else "invalid" for s in stages]
+    assert [mut.result for mut in mutants] == expected + ["invalid", "invalid", "equivalent", "equivalent"]
+    for number, failed_stage in enumerate(stages, 2):
+        worker = out / f"mutant-{number}"
+        receipts = json.loads((worker / "receipts.json").read_text())
+        assert [r["id"] for r in receipts] == stages[:stages.index(failed_stage) + 1]
+        assert receipts[-1]["exit"] == 9 and not receipts[-1]["passed"]
+        for skipped in stages[stages.index(failed_stage) + 1:]:
+            assert not (worker / f"{skipped}.log").exists()
+    for number in range(len(expected) + 1, len(mutants) + 1):
+        assert not (out / f"mutant-{number}").exists()  # no commands or copies
+    ev = evidence.Evidence(1, mutants=mutants)
+    assert ev.score == 0.5 and not ev.unmeasured
+    assert ev.passed(0.5) and not ev.passed(0.8)
+    assert "1/2 caught (2 marked equivalent)" in ev.summary()
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/stable-evidence-results/all-invalid-remains-unmeasured")
+@pytest.mark.parametrize("prepared", [False, True])
+@pytest.mark.parametrize("parallel", [1, 2, 8])
+def test_generated_all_invalid_mutants_fail_the_gate(tmp_path, prepared, parallel):
+    repo, base, head = project(tmp_path, STRONG)
+    baseline_only = manifest.Step("prepare" if prepared else "build", (sys.executable, "-c",
+        'from pathlib import Path; import sys; '
+        f'sys.exit(0 if Path("{{src}}/calc.py").read_text() == {CODE!r} else 1)'))
+    m = replace(M, mutation_parallel=parallel,
+                prepare=(baseline_only,) if prepared else (),
+                verify=M.verify if prepared else (baseline_only,) + M.verify,
+                mutation_steps=("test",) if prepared else ("build", "test"))
+    out = tmp_path / "out"
+    ev = evidence.gather(repo, base, head, ["covered"], {"covered"}, m, out, 1)
+    assert ev.mutants and all(mut.result == "invalid" for mut in ev.mutants)
+    assert not ev.baseline_failed and ev.covered == ["covered"]
+    assert ev.unmeasured and ev.score is None
+    assert not ev.passed(0) and not ev.passed(0.8)
+    assert "nothing was measured" in ev.summary()
+    saved = json.loads((out / "evidence.json").read_text())
+    assert saved["score"] is None and not saved["baseline_failed"]
+    assert all(mut["result"] == "invalid" for mut in saved["mutants"])
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/worker-cleanup/completed-workers-release-resources")
+@pytest.mark.parametrize("prepared", [False, True])
+def test_serial_workers_clean_up_and_retain_diagnostics(tmp_path, monkeypatch, prepared):
+    repo, _, head = project(tmp_path, STRONG)
+    before = CODE.splitlines()[1]
+    mutants = [evidence.Mutant("calc.py", 2, "comment", before, before + f" # {outcome}")
+               for outcome in ("success", "failure", "timeout")]
+    script = '''from pathlib import Path
+import subprocess, sys, time
+source = Path("{src}/calc.py").read_text()
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+artifacts = Path("artifacts")
+artifacts.mkdir()
+(artifacts / "child.pid").write_text(str(child.pid))
+(artifacts / "source.txt").write_text(source)
+print("diagnostic", flush=True)
+if "# timeout" in source:
+    time.sleep(60)
+sys.exit(3 if "# failure" in source else 0)
+'''
+    step = manifest.Step("test", (sys.executable, "-c", script), timeout=2)
+    m = replace(M, verify=(step,), prepare=(manifest.Step("prepare", ("/usr/bin/true",)),) if prepared else ())
+    out = tmp_path / "out"
+    cleaned = []
+    real_cleanup = verify.cleanup
+
+    def observe_cleanup(run_out):
+        if run_out != out:
+            assert (out / "src" / "calc.py").read_text() == CODE
+            assert (out / "build").exists()
+        else:
+            assert cleaned == [out / f"mutant-{n}" for n in range(1, 4)]
+        real_cleanup(run_out)
+        cleaned.append(run_out)
+
+    monkeypatch.setattr(verify, "cleanup", observe_cleanup)
+    assert evidence.mutate(repo, head, mutants, m, out)
+    assert [mut.result for mut in mutants] == ["survived", "killed", "killed"]
+    assert cleaned == [out / f"mutant-{n}" for n in range(1, 4)] + [out]
+    for run_out, code in zip(cleaned, [0, 3, None, 0]):
+        assert not (run_out / "src").exists()
+        assert not (run_out / "build").exists()
+        assert (run_out / "test.log").read_text() == "diagnostic\n"
+        receipts = json.loads((run_out / "receipts.json").read_text())
+        assert receipts[-1]["exit"] == code
+        assert receipts[-1]["tail"] == "diagnostic\n"
+        expected = CODE if run_out == out else CODE.replace(
+            before, mutants[int(run_out.name.split("-")[1]) - 1].after)
+        assert (run_out / "artifacts" / "source.txt").read_text() == expected
+        pid = int((run_out / "artifacts" / "child.pid").read_text())
+        # Allow the OS to reap the terminated orphan without invoking ps,
+        # which is unavailable inside the verification sandbox.
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            assert time.monotonic() < deadline, f"step child {pid} still running"
+            time.sleep(0.05)
