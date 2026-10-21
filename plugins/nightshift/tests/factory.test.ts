@@ -19,6 +19,65 @@ const response = (value: unknown, code = 0) => ({ code, stdout: JSON.stringify(v
 const status = (runs: unknown[] = [run]) => response({ version: 1, runs, internal: '/private/config' });
 const done = () => response({ version: 1, outcome: 'done', verb: 'resume', detail: 'Resumed' });
 
+test('run-context/details-in-the-factory-section/context-redacted-and-links-checked', async () => {
+  const diagnostic = `${home}/one and ${home}/two`;
+  const context = {
+    summary: diagnostic, repo: `${home}/Projects/nightshift`, branch: diagnostic,
+    task: { label: diagnostic, section: diagnostic, text: diagnostic, internal: '/private/task' },
+    detail: diagnostic,
+    recent: [{ at: diagnostic, text: diagnostic, internal: '/private/event' }],
+    github: 'file:///private/change', internal: '/private/context',
+  };
+  const factory = createFactory(async () => status([{ ...run, context }]), () => 0, home);
+  const snapshot = await factory.read();
+  assert.equal(snapshot.stale, false);
+  assert.deepEqual(snapshot.runs[0].context, {
+    summary: '~/one and ~/two', repo: '~/Projects/nightshift', branch: '~/one and ~/two',
+    task: { label: '~/one and ~/two', section: '~/one and ~/two', text: '~/one and ~/two' },
+    detail: '~/one and ~/two', recent: [{ at: '~/one and ~/two', text: '~/one and ~/two' }],
+    github: '',
+  });
+  assert.ok(!JSON.stringify(snapshot).includes(home));
+  assert.ok(!JSON.stringify(snapshot).includes('/private'));
+
+  const published = 'https://github.com/owner/repo/tree/factory-context/openspec/changes/factory-context';
+  for (const [github, expected] of [
+    [published, published],
+    [`https://github.com/owner/repo/tree/main${home}/change`, 'https://github.com/owner/repo/tree/main~/change'],
+    ['', ''], ['not a URL', ''], ['javascript:alert(1)', ''],
+    ['http://github.com/owner/repo', ''], ['https://github.com.evil.test/owner/repo', ''],
+    ['https://github.com@evil.test/owner/repo', ''], ['https://user:pass@github.com/owner/repo', ''],
+    ['https://example.com/owner/repo', ''], ['//github.com/owner/repo', ''],
+  ]) {
+    const service = createFactory(async () => status([{ ...run, context: { ...context, task: null, recent: [], github } }]), () => 0, home);
+    const projected = (await service.read()).runs[0].context!;
+    assert.equal(projected.github, expected, github);
+    assert.equal(projected.task, null);
+    assert.deepEqual(projected.recent, []);
+  }
+});
+
+test('context validates nested display fields and retains the last good snapshot on malformed input', async () => {
+  const context = { summary: '', repo: '', branch: '', task: null, detail: '', recent: [], github: '' };
+  for (const invalid of [
+    null, {}, ...['summary', 'repo', 'branch', 'detail', 'github'].map(key => ({ ...context, [key]: 42 })),
+    { ...context, task: { label: '2.1', section: 'Plugin', text: false } },
+    { ...context, task: { label: '2.1' } },
+    { ...context, recent: [{ at: '2026-10-21T12:00:00Z', text: 42 }] },
+    { ...context, recent: [{ at: null, text: 'resumed' }] },
+    { ...context, recent: {} },
+  ]) {
+    let time = 0;
+    const factory = createFactory(async () => status([{ ...run, context: time ? invalid : context }]), () => time);
+    const before = await factory.read();
+    assert.deepEqual(before.runs[0].context, context);
+    time = 15_000;
+    const after = await factory.read();
+    assert.equal(after.stale, true);
+    assert.deepEqual(after.runs, before.runs);
+  }
+});
+
 test('paseo-runs-page/server-checks-before-acting/unknown-change-refused', async () => {
   const calls: string[][] = [];
   const factory = createFactory(async args => { calls.push(args); return status(); });

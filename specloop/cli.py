@@ -10,7 +10,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from specloop import feasibility, loop, manifest, messages, openspec, tasks, verify
 from specloop.seal import git
@@ -653,6 +656,111 @@ def serve_cmd(args) -> int:
     return serve.serve(args.poll, notifier(load_env(None)), once=args.once)
 
 
+def _context_summary(repo: Path, head: str, task_path: str) -> str:
+    proposal = str(Path(task_path).with_name("proposal.md"))
+    if not git(repo, "ls-tree", "--name-only", head, "--", proposal).strip():
+        return ""
+    text = git(repo, "show", f"{head}:{proposal}").decode()
+    why = re.search(r"^##[ \t]+Why[ \t]*\r?$", text, re.MULTILINE)
+    if not why:
+        return ""
+    section = re.split(r"^#{1,6}[ \t]+", text[why.end():], maxsplit=1, flags=re.MULTILINE)[0].strip()
+    paragraph = re.split(r"\n[ \t\r]*\n", section, maxsplit=1)[0]
+    summary = " ".join(paragraph.split())
+    return summary if len(summary) <= 400 else summary[:399].rstrip() + "…"
+
+
+#: Pause reasons as a person coming in cold would say them.
+PAUSE_WORDS = {
+    "stuck": "stuck", "blocked": "blocked", "needs_human": "needs a human answer",
+    "phase_gate": "waiting at a phase gate", "gate_evidence": "evidence gate fell short",
+    "ready_to_publish": "ready to publish", "human_checks": "waiting for human checks",
+    "requested": "paused on request", "infra": "provider trouble", "usage_limit": "waiting on usage limits",
+    "coverage": "untested scenarios", "acceptance": "final checks failing",
+    "violation_repeat": "repeatedly changing files it may not", "review_invalid": "reviewer output invalid",
+    "secret": "credential value found",
+}
+
+
+def _context_recent(run: Run, all_tasks: list[tasks.Task]) -> list[dict]:
+    path = run.dir / "events.jsonl"
+    if not path.exists():
+        return []
+    labels = {t.key: t.label for t in all_tasks}
+    recent = deque(maxlen=5)
+    for line in path.read_text().splitlines():
+        # Skip a damaged or half-written line (the log is appended while read).
+        try:
+            event = json.loads(line)
+            kind = event["event"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        # Implement events retain labels after a split removes the task key.
+        # Replay in order so later renumbering cannot relabel earlier events.
+        if event.get("task") and event.get("label"):
+            labels[event["task"]] = event["label"]
+        label = event.get("label") or labels.get(event.get("task"))
+        # Infrastructure failures legitimately have no structured output.
+        output = event.get("output") or {}
+        if kind == "landed" and label:
+            text = f"task {label} landed"
+        elif kind == "attempt_failed" and label:
+            text = f"task {label} attempt {event['attempt']} failed"
+        elif kind == "gate_reviewed" and output.get("verdict") in ("PASS", "FAIL"):
+            text = f"section {event['section']} gate review: {output['verdict']}"
+        elif kind == "arbitrated" and label and output.get("decision"):
+            text = f"arbiter ruled {output['decision']} on task {label}"
+        elif kind == "pause":
+            reason = event.get("reason", "")
+            text = f"paused: {PAUSE_WORDS.get(reason, reason.replace('_', ' '))}"
+        elif kind == "resumed":
+            text = "resumed"
+        elif kind == "human_accept" and label:
+            text = f"task {label} accepted by a human"
+        elif kind == "published":
+            text = "published to its pull request"
+        elif kind == "finished":
+            text = "finished"
+        elif kind == "aborted":
+            text = "aborted"
+        else:
+            continue
+        at = datetime.fromtimestamp(event["at"], timezone.utc).isoformat().replace("+00:00", "Z")
+        recent.append({"at": at, "text": text})
+    return list(reversed(recent))
+
+
+def _status_context(run: Run, m: manifest.Manifest, head: str, task_path: str,
+                    all_tasks: list[tasks.Task]) -> dict:
+    try:
+        pause = run.state.pause if run.state.status == "paused" else None
+        task = next((t for t in all_tasks if pause and t.key == pause.task), None)
+        if task is None:
+            task = next((t for t in all_tasks if not t.done), None)
+        # Publication accepts [HOST/]OWNER/REPO; display links support github.com only.
+        parts = m.github.rstrip("/").split("/")
+        host = parts.pop(0).lower() if len(parts) == 3 else "github.com"
+        github = ""
+        if run.state.pr and host == "github.com" and len(parts) == 2 and all(parts):
+            github = (f"https://github.com/{quote('/'.join(parts), safe='/')}"
+                      f"/tree/{quote(m.branch, safe='/')}"
+                      f"/{quote(Path(task_path).parent.as_posix(), safe='/')}")
+        return {
+            "summary": _context_summary(run.dir / "repo.git", head, task_path),
+            "repo": str(m.repo.absolute()),
+            "branch": m.branch,
+            "task": {"label": task.label, "section": task.section_title, "text": task.text[:300]}
+                    if task else None,
+            "detail": pause.detail[:1500] if pause else "",
+            "recent": _context_recent(run, all_tasks),
+            "github": github,
+        }
+    except Exception:
+        # Display context is best effort; one damaged run must not hide status.
+        return {"summary": "", "repo": "", "branch": "", "task": None,
+                "detail": "", "recent": [], "github": ""}
+
+
 def _status_json(names: list[str]) -> int:
     from specloop import serve
 
@@ -679,6 +787,7 @@ def _status_json(names: list[str]) -> int:
                 "tasks": {"done": sum(t.done for t in all_tasks), "total": len(all_tasks)},
                 "head": head,
                 "pr": st.pr,
+                "context": _status_context(run, m, head, task_path, all_tasks),
             }
             if st.status == "paused" and st.pause:
                 pause = st.pause

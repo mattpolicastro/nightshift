@@ -19,6 +19,17 @@ export function createFactory(execute: FactoryExecute, clock = () => Date.now(),
   let disposed = false;
   const display = (text: string) => home ? text.split(home).join('~') : text;
 
+  function githubLink(text: string): string {
+    const link = display(text);
+    if (!link.startsWith('https://github.com/')) return '';
+    try {
+      const url = new URL(link);
+      return url.origin === 'https://github.com' && !url.username && !url.password ? link : '';
+    } catch {
+      return '';
+    }
+  }
+
   function project(run: FactoryRun): FactoryRun {
     if (run.pr) {
       const url = new URL(run.pr);
@@ -29,6 +40,16 @@ export function createFactory(execute: FactoryExecute, clock = () => Date.now(),
     }
     return {
       change: display(run.change), status: run.status, tasks: run.tasks, pr: display(run.pr),
+      ...(run.context ? { context: {
+        summary: display(run.context.summary), repo: display(run.context.repo),
+        branch: display(run.context.branch), detail: display(run.context.detail),
+        task: run.context.task ? {
+          label: display(run.context.task.label), section: display(run.context.task.section),
+          text: display(run.context.task.text),
+        } : null,
+        recent: run.context.recent.map(event => ({ at: display(event.at), text: display(event.text) })),
+        github: githubLink(run.context.github),
+      } } : {}),
       ...(run.action ? { action: {
         kind: display(run.action.kind), headline: display(run.action.headline),
         why: display(run.action.why), command: display(run.action.command),

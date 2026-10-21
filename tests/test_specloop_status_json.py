@@ -1,5 +1,6 @@
 import json
 import subprocess
+from datetime import datetime, timezone
 
 import pytest
 
@@ -30,11 +31,13 @@ def home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def admitted(home, tmp_path):
-    def make(change):
+    def make(change, proposal=None, task_text=TASKS, github=""):
         source = tmp_path / change
         task_file = source / "openspec" / "changes" / change / "tasks.md"
         task_file.parent.mkdir(parents=True)
-        task_file.write_text(TASKS)
+        task_file.write_text(task_text)
+        if proposal is not None:
+            task_file.with_name("proposal.md").write_text(proposal)
 
         def git(*args):
             return subprocess.run(
@@ -52,6 +55,7 @@ def admitted(home, tmp_path):
 repo = {json.dumps(str(source))}
 change = "{change}"
 branch = "spec/{change}"
+github = {json.dumps(github)}
 [roles]
 implement = "test"
 review = "test"
@@ -95,6 +99,20 @@ def test_paused_run_reported(admitted, capsys, named):
             "tasks": {"done": 1, "total": 3},
             "head": head,
             "pr": "https://github.com/example/repo/pull/7",
+            "context": {
+                "summary": "",
+                "repo": str(cli._manifest(run).repo),
+                "branch": "spec/paused-change",
+                "task": {"label": "1.2", "section": "Core", "text": "Stuck task"},
+                "detail": detail,
+                "recent": [{
+                    "at": datetime.fromtimestamp(
+                        json.loads((run.dir / "events.jsonl").read_text())["at"], timezone.utc
+                    ).isoformat().replace("+00:00", "Z"),
+                    "text": "paused: stuck",
+                }],
+                "github": "",
+            },
             "action": {
                 "kind": "action",
                 "headline": "Decide how to unstick task 1.2 (3 attempts failed)",
@@ -265,3 +283,243 @@ def test_text_status_is_unchanged(home, capsys):
         "supervisor: not running\n"
         "never-admitted: no such change (not admitted, or admission was refused)\n"
     )
+
+
+@pytest.mark.scenario("run-context/context-in-status/paused-run-has-context")
+@pytest.mark.parametrize("named", [False, True])
+def test_paused_run_context_comes_from_branch(admitted, tmp_path, capsys, named):
+    # An earlier unfinished task must not take precedence over the paused task.
+    run, _ = admitted("context", proposal="## Why\n\nThe page needs links.\n\nMore rationale.\n",
+                      task_text=TASKS.replace("[x]", "[ ]"))
+    run.pause("stuck", tasks.parse(TASKS)[1].key, "Failed twice: x")
+    # Neither a dirty source checkout nor a candidate is the run's branch head.
+    source = tmp_path / "context"
+    change_dir = source / "openspec" / "changes" / "context"
+    (change_dir / "proposal.md").write_text("## Why\n\nWrong summary.\n")
+    (change_dir / "tasks.md").write_text(TASKS.replace("Stuck task", "Wrong task"))
+
+    assert cli.main(["status", "--json", *(["context"] if named else [])]) == 0
+    output = capsys.readouterr()
+    assert output.err == ""
+    context = json.loads(output.out)["runs"][0]["context"]
+    assert context["summary"] == "The page needs links."
+    assert context["repo"] == str(source)
+    assert context["branch"] == "spec/context"
+    assert context["task"] == {"label": "1.2", "section": "Core", "text": "Stuck task"}
+    assert context["detail"] == "Failed twice: x"
+
+
+@pytest.mark.scenario("run-context/context-in-status/recent-events-in-plain-words")
+def test_context_recent_events(admitted, capsys):
+    run, _ = admitted("events")
+    first, second, _ = tasks.parse(TASKS)
+    events = [
+        ("resumed", {}),
+        ("pause", {"reason": "stuck"}),
+        ("arbitrated", {"task": second.key, "output": {"decision": "retry"}}),
+        ("gate_reviewed", {"section": 1, "disposition": "ok", "output": {"verdict": "FAIL"}}),
+        ("landed", {"task": first.key, "label": first.label}),
+        ("attempt_failed", {"task": second.key, "attempt": 1}),
+        ("agent_started", {"task": second.key}),
+    ]
+    for i, (kind, data) in enumerate(events):
+        run.event(kind, at=1800000000 + i, **data)
+
+    assert cli.main(["status", "--json"]) == 0
+    recent = json.loads(capsys.readouterr().out)["runs"][0]["context"]["recent"]
+    assert [e["text"] for e in recent] == [
+        "task 1.2 attempt 1 failed", "task 1.1 landed", "section 1 gate review: FAIL",
+        "arbiter ruled retry on task 1.2", "paused: stuck",
+    ]
+    assert [e["at"] for e in recent] == [
+        datetime.fromtimestamp(1800000000 + i, timezone.utc).isoformat().replace("+00:00", "Z")
+        for i in range(5, 0, -1)
+    ]
+    run.event("gate_reviewed", at=1800000007, section=1, output={"verdict": "PASS"})
+    run.event("resumed", at=1800000008)
+    assert cli.main(["status", "--json"]) == 0
+    recent = json.loads(capsys.readouterr().out)["runs"][0]["context"]["recent"]
+    assert len(recent) == 5
+    assert [e["text"] for e in recent[:2]] == ["resumed", "section 1 gate review: PASS"]
+
+
+@pytest.mark.scenario("run-context/context-in-status/github-link-only-when-published")
+@pytest.mark.parametrize("repository", ["owner/repo", "github.com/owner/repo"])
+def test_context_github_requires_pr_and_manifest_repository(admitted, capsys, repository):
+    for change, pr, github in [
+        ("published", "https://github.com/elsewhere/repo/pull/7", repository),
+        ("unpublished", "", repository),
+        ("no-github", "https://github.com/owner/repo/pull/8", ""),
+    ]:
+        run, _ = admitted(change, github=github)
+        run.state.pr = pr
+        run.save()
+    assert cli.main(["status", "--json"]) == 0
+    links = {r["change"]: r["context"]["github"] for r in json.loads(capsys.readouterr().out)["runs"]}
+    assert links == {
+        "published": "https://github.com/owner/repo/tree/spec/published/openspec/changes/published",
+        "unpublished": "", "no-github": "",
+    }
+
+
+@pytest.mark.scenario("run-context/context-in-status/github-link-only-when-published")
+@pytest.mark.parametrize("host", ["github.com", "GitHub.COM", "github.example.com"])
+def test_context_github_normalizes_explicit_manifest_host(admitted, capsys, host):
+    run, _ = admitted("published", proposal="## Why\n\nThe page needs links.\n",
+                      github=f"{host}/Example/Repo")
+    run.state.pr = f"https://{host}/Example/Repo/pull/7"
+    run.save()
+
+    assert cli.main(["status", "--json", "published"]) == 0
+    context = json.loads(capsys.readouterr().out)["runs"][0]["context"]
+    assert context["github"] == (
+        "https://github.com/Example/Repo/tree/spec/published/openspec/changes/published"
+        if host.lower() == "github.com" else ""
+    )
+    assert context["summary"] == "The page needs links."
+    assert context["branch"] == "spec/published"
+
+
+@pytest.mark.scenario("run-context/context-in-status/recent-events-in-plain-words")
+@pytest.mark.parametrize("rewrite", ["split", "renumber"])
+def test_recent_failure_keeps_historical_label_after_task_rewrite(admitted, capsys, rewrite):
+    run, head = admitted("history")
+    first, second, _ = tasks.parse(TASKS)
+    run.event("landed", task=first.key, label=first.label)
+    run.event("implement", task=second.key, label=second.label, session=1, attempt=1)
+    run.event("attempt_failed", task=second.key, attempt=1)
+    run.event("arbitrated", task=second.key, output={"decision": "retry"})
+
+    assert cli.main(["status", "--json"]) == 0
+    before = json.loads(capsys.readouterr().out)["runs"][0]["context"]["recent"]
+    assert [e["text"] for e in before] == [
+        "arbiter ruled retry on task 1.2", "task 1.2 attempt 1 failed", "task 1.1 landed",
+    ]
+
+    if rewrite == "split":
+        subtasks = ["First part", "Second part"]
+        run.event("implement", task=second.key, label=second.label, session=2, attempt=2)
+        run.event("implemented", task=second.key, disposition="ok",
+                  output={"status": "too_big", "summary": "", "subtasks": subtasks})
+        text = tasks.split(TASKS, second, subtasks)
+        assert second.key not in {t.key for t in tasks.parse(text)}
+        next_label = "1.2.1"
+    else:
+        text = TASKS.replace("1.2 Stuck task", "1.9 Stuck task")
+        next_label = "1.9"
+    repo = run.dir / "repo.git"
+    rewritten = seal.commit_files(repo, head, {"openspec/changes/history/tasks.md": text}, "rewrite tasks")
+    seal.git(repo, "update-ref", "refs/heads/spec/history", rewritten, head)
+    # Later implementation events must not relabel older failures, either.
+    current = tasks.parse(text)[1]
+    run.event("implement", task=current.key, label=current.label, session=3, attempt=2)
+
+    assert cli.main(["status", "--json"]) == 0
+    entry = json.loads(capsys.readouterr().out)["runs"][0]
+    assert entry["head"] == rewritten
+    assert entry["context"]["task"]["label"] == next_label
+    assert entry["context"]["recent"] == before
+
+
+@pytest.mark.scenario("run-context/context-in-status/recent-events-in-plain-words")
+@pytest.mark.scenario("run-context/context-in-status/broken-context-does-not-break-status")
+@pytest.mark.parametrize("kind", ["gate_reviewed", "arbitrated"])
+@pytest.mark.parametrize("output_fields", [{}, {"output": None}, {"output": {}}])
+def test_review_without_structured_output_preserves_context(admitted, capsys, kind, output_fields):
+    run, _ = admitted("review-timeout", proposal="## Why\n\nThe page needs links.\n",
+                      github="owner/repo")
+    first, second, _ = tasks.parse(TASKS)
+    run.event("landed", task=first.key, label=first.label)
+    run.pause("stuck", second.key, "Failed twice: x")
+    run.state.pr = "https://github.com/owner/repo/pull/7"
+    run.save()
+
+    assert cli.main(["status", "--json"]) == 0
+    before = json.loads(capsys.readouterr().out)["runs"][0]["context"]
+    assert before["summary"] == "The page needs links."
+    assert before["repo"] == str(cli._manifest(run).repo)
+    assert before["task"]["label"] == "1.2"
+    assert before["detail"] == "Failed twice: x"
+    assert [e["text"] for e in before["recent"]] == ["paused: stuck", "task 1.1 landed"]
+
+    # Infrastructure failures can emit reviews without a structured result.
+    run.event(kind, section=1, task=second.key, disposition="timeout", **output_fields)
+    assert cli.main(["status", "--json"]) == 0
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert json.loads(output.out)["runs"][0]["context"] == before
+
+
+@pytest.mark.scenario("run-context/context-in-status/broken-context-does-not-break-status")
+def test_missing_proposal_does_not_break_context(admitted, capsys):
+    admitted("missing-proposal")
+    admitted("healthy", proposal="## Why\n\nThe page needs links.\n")
+    assert cli.main(["status", "--json"]) == 0
+    output = capsys.readouterr()
+    assert output.err == ""
+    contexts = {r["change"]: r["context"] for r in json.loads(output.out)["runs"]}
+    assert contexts["missing-proposal"]["summary"] == ""
+    assert contexts["missing-proposal"]["branch"] == "spec/missing-proposal"
+    assert contexts["healthy"]["summary"] == "The page needs links."
+
+
+@pytest.mark.scenario("run-context/context-in-status/broken-context-does-not-break-status")
+@pytest.mark.parametrize("failure", ["events", "git"])
+def test_context_failure_is_isolated_to_one_run(admitted, monkeypatch, capsys, failure):
+    broken, _ = admitted("broken", proposal="## Why\n\nBroken run.\n")
+    admitted("healthy", proposal="## Why\n\nHealthy run.\n")
+    if failure == "events":
+        (broken.dir / "events.jsonl").write_text('{"incomplete":')
+    else:
+        real_git = cli.git
+
+        def fail_proposal(repo, *args):
+            if repo == broken.dir / "repo.git" and args[0] == "show" and args[1].endswith("proposal.md"):
+                raise subprocess.TimeoutExpired("git", 60)
+            return real_git(repo, *args)
+
+        monkeypatch.setattr(cli, "git", fail_proposal)
+    assert cli.main(["status", "--json"]) == 0
+    output = capsys.readouterr()
+    assert output.err == ""
+    entries = {r["change"]: r for r in json.loads(output.out)["runs"]}
+    if failure == "events":
+        # A damaged event line is skipped; the rest of the context survives.
+        assert entries["broken"]["context"]["summary"] == "Broken run."
+        assert entries["broken"]["context"]["recent"] == []
+    else:
+        assert entries["broken"]["context"] == {
+            "summary": "", "repo": "", "branch": "", "task": None,
+            "detail": "", "recent": [], "github": "",
+        }
+    assert entries["broken"]["tasks"] == {"done": 1, "total": 3}
+    assert entries["healthy"]["context"]["summary"] == "Healthy run."
+
+
+@pytest.mark.parametrize("proposal, expected", [
+    ("## What\n\nNo Why section.\n", ""),
+    ("## Why\n\n## What\n\nOther section.\n", ""),
+    ("## Why\n\nFirst line\ncontinued.\n\nSecond paragraph.\n", "First line continued."),
+    ("## Why\n\n" + "x" * 500, "x" * 399 + "…"),
+])
+def test_context_summary_paragraph_and_limit(admitted, capsys, proposal, expected):
+    admitted("summary", proposal=proposal)
+    assert cli.main(["status", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["runs"][0]["context"]["summary"] == expected
+
+
+@pytest.mark.parametrize("status", ["running", "paused", "done", "aborted"])
+def test_context_task_fallback_and_detail_limit(admitted, capsys, status):
+    task_text = TASKS.replace("Stuck task", "x" * 350)
+    if status == "done":
+        task_text = task_text.replace("[ ]", "[x]")
+    run, _ = admitted("task", task_text=task_text)
+    run.pause("phase_gate", "section:1", "First line\n" + "d" * 1600)
+    run.state.status = status
+    run.save()
+    assert cli.main(["status", "--json"]) == 0
+    context = json.loads(capsys.readouterr().out)["runs"][0]["context"]
+    assert context["task"] == (None if status == "done" else {
+        "label": "1.2", "section": "Core", "text": "x" * 300,
+    })
+    assert context["detail"] == (("First line\n" + "d" * 1600)[:1500] if status == "paused" else "")
