@@ -49,6 +49,8 @@ Rules:
 - You may build and test in `build/` (gitignored). The harness's checks are:
 {recipe}
   Your own results are not acceptance evidence; the harness reruns its checks.
+  Report them in `summary`, never in a repository file: a task saying "record
+  the result" means `summary`, not a doc or log in the change.
 - Change only: {allowed}
   Never change: {frozen}
   (tasks.md included — the harness ticks tasks). Other changes are reverted.
