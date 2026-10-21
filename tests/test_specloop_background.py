@@ -5,8 +5,10 @@ import os
 import subprocess
 import sys
 import time
+from copy import deepcopy
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -452,17 +454,22 @@ def test_failed_background_job_reports_health_before_retry(background, monkeypat
     assert "job" not in receipt and "result" not in receipt
 
 
-@pytest.mark.parametrize("command", ["propose", "admit"])
+@pytest.mark.scenario("paused-job-delivery/pause-gates-launches-and-delivery/pause-before-launch")
+@pytest.mark.parametrize("command", ["propose", "admit", "revise"])
 def test_pause_immediately_before_launch_stops_new_job(background, monkeypatch, command):
     root, repo, _ = background
-    gh = DraftGh(("spec:draft",)) if command == "propose" else ApprovalGh()
+    gh = (DraftGh(("spec:draft",)) if command == "propose" else
+          ApprovalGh() if command == "admit" else RevisionGh())
+    labels = set(gh.labels)
     original_run = subprocess.run
 
-    def github(args):
-        result = gh(args)
-        if command == "propose" and args[0] == "api" and args[1].endswith("/events"):
+    def trusted_author(*args):
+        # Pause after intake reads, so the launch guard itself must stop Popen.
+        if command == "propose":
             daemon.PAUSE_FILE.touch()
-        return result
+        return True
+
+    monkeypatch.setattr(daemon.specloop_intake, "_issue_author_trusted", trusted_author)
 
     def run(args, **kwargs):
         if args[0] == "git":
@@ -473,15 +480,280 @@ def test_pause_immediately_before_launch_stops_new_job(background, monkeypatch, 
 
     monkeypatch.setattr(subprocess, "run", run)
     health = daemon.RepoHealth()
-    daemon.poll_specloop(Config(repos=[repo]), health, runner=github)
+    daemon.poll_specloop(Config(repos=[repo]), health, runner=gh)
     assert daemon.PAUSE_FILE.exists()
     assert not (root / "started").exists()
     assert not specloop_job._children
-    assert not health.failures
-    path = daemon.STATE_DIR / ("proposals/owner__sample/7.json" if command == "propose"
-                               else "admissions/owner__sample/8.json")
+    assert not health.failures and not health.item_failures and not health.announced
+    stage = {"propose": "proposals", "admit": "admissions", "revise": "revisions"}[command]
+    path = daemon.STATE_DIR / stage / "owner__sample" / ("7.json" if command == "propose" else "8.json")
     assert "job" not in json.loads(path.read_text())
-    assert not any("--remove-label" in call for call in gh.calls)
+    assert gh.labels == labels
+    assert not any("--remove-label" in call or "--add-label" in call for call in gh.calls)
+
+
+@pytest.mark.scenario("paused-job-delivery/pause-gates-launches-and-delivery/pause-before-launch")
+@pytest.mark.parametrize("stage", ["draft", "admit", "revise"])
+def test_pause_at_poll_entry_stops_new_job(background, monkeypatch, stage):
+    root, repo, children = background
+    gh = (DraftGh(("spec:draft",)) if stage == "draft" else
+          ApprovalGh() if stage == "admit" else RevisionGh())
+    labels = set(gh.labels)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("paused poll dispatched an external operation")
+
+    monkeypatch.setattr(subprocess, "run", unexpected)
+    monkeypatch.setattr(subprocess, "Popen", unexpected)
+    daemon.PAUSE_FILE.touch()
+    health = daemon.RepoHealth()
+    daemon.poll_specloop(Config(repos=[repo]), health, runner=gh)
+    assert not gh.calls and gh.labels == labels
+    assert not children and not (root / "started").exists()
+    assert not list(daemon.STATE_DIR.rglob("*.json"))
+    assert not health.failures and not health.item_failures and not health.announced
+
+
+@pytest.fixture
+def delivery_job(background, monkeypatch):
+    """A real blocked job with recorded, entirely local delivery boundaries."""
+    root, repo, children = background
+    original_run = subprocess.run
+
+    def unexpected_stop(*args, **kwargs):
+        pytest.fail("pause implicitly terminated a background job")
+
+    monkeypatch.setattr(os, "kill", unexpected_stop)
+    monkeypatch.setattr(os, "killpg", unexpected_stop)
+
+    def start(stage):
+        gh = (DraftGh(("spec:draft",)) if stage == "draft" else
+              ApprovalGh() if stage == "admit" else RevisionGh())
+        change = "sample-issue-7-add-a-gate"
+        result = {"version": 1, "outcome": "admitted" if stage == "admit" else "drafted",
+                  "branch": f"spec/{change}", "commit": HEAD, "head": HEAD}
+        runs = []
+        if stage == "build_revision":
+            result["outcome"] = "revised"
+            runs = [{"change": change, "pr": gh.pr_url, "status": "running"}]
+        (root / "cli-result.json").write_text(json.dumps(result))
+        job = SimpleNamespace(root=root, gh=gh, children=children, result=result,
+                              health=daemon.RepoHealth(), calls=[], runs=runs,
+                              after_call=lambda args: None)
+
+        def github(args):
+            job.calls.append(["gh", *args])
+            response = gh(args)
+            job.after_call(job.calls[-1])
+            return response
+
+        def run(args, **kwargs):
+            if args[0] == "gh":
+                return subprocess.CompletedProcess(args, 0, github(args[1:]), "")
+            if args[0] == "git" or args[:2] == ["specloop", "status"]:
+                job.calls.append(args)
+                output = HEAD if args[0] == "git" else json.dumps({"version": 1, "runs": job.runs})
+                job.after_call(args)
+                return subprocess.CompletedProcess(args, 0, output, "")
+            return original_run(args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", run)
+        job.runner = github
+        job.poll = lambda: daemon.poll_specloop(Config(repos=[repo]), job.health, runner=job.runner)
+        job.poll()
+        eventually(lambda: (root / "started").exists())
+        directory = {"draft": "proposals", "admit": "admissions"}.get(stage, "revisions")
+        number = 7 if stage == "draft" else 8
+        job.path = daemon.STATE_DIR / directory / "owner__sample" / f"{number}.json"
+        receipt = json.loads(job.path.read_text())
+        job.directory = job.path.parent / f"{number}.jobs" / receipt["job"]
+        job.result_path = job.directory / "result.json"
+        assert len(children) == 1 and children[0].poll() is None
+        assert not job.result_path.exists()
+        return job
+
+    return start
+
+
+def _finish_delivery_job(job):
+    (job.root / "release").touch()
+    assert job.children[0].wait(timeout=5) == 0
+    assert (job.root / "finished").exists()
+    assert not (job.root / "timed-out").exists()
+    assert json.loads(job.result_path.read_text())["result"] == job.result
+
+
+def _assert_paused_delivery_held(job):
+    assert daemon.PAUSE_FILE.exists()
+    saved = job.path.read_bytes()
+    result = job.result_path.read_bytes()
+    effects = deepcopy((job.gh.labels, job.gh.comments, job.gh.prs))
+    calls = list(job.calls)
+    for _ in range(2):
+        job.poll()
+        assert job.path.read_bytes() == saved
+        assert job.result_path.read_bytes() == result
+        assert not json.loads(saved).get("delivered")
+        assert (job.gh.labels, job.gh.comments, job.gh.prs) == effects
+        assert job.calls == calls  # Includes git, CLI publication and GitHub.
+        assert not job.health.failures and not job.health.item_failures and not job.health.announced
+        assert not (job.directory / "stop.json").exists()
+        assert len(job.children) == 1
+        assert len((job.root / "started").read_text().splitlines()) == 1
+
+
+def _finish_while_paused(job):
+    saved = job.path.read_bytes()
+    calls = list(job.calls)
+    daemon.PAUSE_FILE.touch()
+    job.poll()  # Pausing a still-running job must leave it at its barrier.
+    assert job.children[0].poll() is None
+    assert not job.result_path.exists()
+    _finish_delivery_job(job)
+    assert job.path.read_bytes() == saved and job.calls == calls
+    _assert_paused_delivery_held(job)
+
+
+@pytest.mark.scenario("paused-job-delivery/pause-gates-launches-and-delivery/admission-finishes-while-paused")
+def test_paused_daemon_does_not_deliver_finished_admission(delivery_job):
+    _finish_while_paused(delivery_job("admit"))
+
+
+@pytest.mark.scenario("paused-job-delivery/pause-gates-launches-and-delivery/draft-or-revision-finishes-while-paused")
+@pytest.mark.parametrize("stage", ["draft", "spec_revision", "build_revision"])
+def test_paused_daemon_does_not_deliver_finished_draft_or_revision(delivery_job, stage):
+    _finish_while_paused(delivery_job(stage))
+
+
+@pytest.mark.scenario("paused-job-delivery/pause-gates-launches-and-delivery/pause-during-delivery")
+@pytest.mark.parametrize("stage,operation", [
+    ("draft", "list"), ("draft", "push"), ("draft", "create"), ("draft", "view"),
+    ("draft", "edit"), ("draft", "comments"), ("draft", "comment"),
+    ("admit", "status"), ("admit", "comments"), ("admit", "comment"),
+    ("spec_revision", "events"), ("spec_revision", "push"),
+    ("spec_revision", "comments"), ("spec_revision", "comment"),
+    ("build_revision", "comments"), ("build_revision", "comment"),
+])
+def test_pause_between_delivery_calls_holds_remaining_operations(delivery_job, stage, operation):
+    job = delivery_job(stage)
+    _finish_delivery_job(job)
+    paused_after = []
+
+    def pause_after(args):
+        matched = (args[0] == "git" and args[3] == operation
+                   or args[:2] == ["specloop", operation]
+                   or args[:3] == ["gh", "pr", operation]
+                   or args[:3] == ["gh", "issue", "comment"] and operation == "comment"
+                   or args[:2] == ["gh", "api"] and args[2].endswith("/" + operation))
+        if matched:
+            paused_after.append(args)
+            daemon.PAUSE_FILE.touch()
+
+    job.after_call = pause_after
+    job.poll()
+    assert len(paused_after) == 1
+    assert job.calls[-1] == paused_after[0]  # Even the next read must wait.
+    assert json.loads(job.path.read_text())["result"] == job.result
+    _assert_paused_delivery_held(job)
+
+
+@pytest.mark.scenario("paused-job-delivery/pause-gates-launches-and-delivery/pause-during-delivery")
+@pytest.mark.parametrize("stage", ["draft", "admit", "spec_revision", "build_revision"])
+@pytest.mark.parametrize("cached_retry", [False, True])
+def test_pause_during_successful_final_label_update_holds_delivery(delivery_job, stage, cached_retry):
+    job = delivery_job(stage)
+    _finish_delivery_job(job)
+    kind = "issue" if stage == "draft" else "pr"
+    label = {"draft": "spec:draft", "admit": "spec:approved"}.get(stage, "agent:revise")
+
+    if cached_retry:
+        def pause_after_comment(args):
+            if args[:3] == ["gh", kind, "comment"]:
+                daemon.PAUSE_FILE.touch()
+
+        job.after_call = pause_after_comment
+        job.poll()
+        _assert_paused_delivery_held(job)
+        assert label in job.gh.labels
+        daemon.PAUSE_FILE.unlink()
+        specloop_job._children.clear()
+
+    completed = []
+
+    def pause_after_final_update(args):
+        if args[:3] == ["gh", kind, "edit"] and "--remove-label" in args:
+            # The dispatched write succeeds before pause is observed by the daemon.
+            assert label not in job.gh.labels
+            completed.append(args)
+            daemon.PAUSE_FILE.touch()
+
+    job.after_call = pause_after_final_update
+    job.poll()
+    assert len(completed) == 1 and job.calls[-1] == completed[0]
+    assert json.loads(job.path.read_text())["result"] == job.result
+    _assert_paused_delivery_held(job)
+
+
+@pytest.mark.scenario("paused-job-delivery/pause-gates-launches-and-delivery/pause-during-delivery")
+def test_pause_during_cached_delivery_retry(delivery_job):
+    job = delivery_job("admit")
+    _finish_delivery_job(job)
+
+    def pause_after_comment(args):
+        if args[:3] == ["gh", "pr", "comment"]:
+            daemon.PAUSE_FILE.touch()
+
+    job.after_call = pause_after_comment
+    job.poll()
+    _assert_paused_delivery_held(job)
+    assert len(job.gh.comments) == 1
+    labels = set(job.gh.labels)
+    daemon.PAUSE_FILE.unlink()
+    specloop_job._children.clear()  # Retry from the receipt, as after restart.
+
+    def pause_after_patch(args):
+        if args[:2] == ["gh", "api"] and "PATCH" in args:
+            daemon.PAUSE_FILE.touch()
+
+    job.after_call = pause_after_patch
+    job.poll()
+    assert "PATCH" in job.calls[-1]
+    assert len(job.gh.comments) == 1 and job.gh.labels == labels
+    _assert_paused_delivery_held(job)
+
+
+@pytest.mark.scenario("paused-job-delivery/pause-gates-launches-and-delivery/pause-during-delivery")
+@pytest.mark.parametrize("operation", ["comment", "edit"])
+@pytest.mark.parametrize("write_landed", [False, True])
+def test_pause_during_github_delivery_retry(delivery_job, monkeypatch, operation, write_landed):
+    job = delivery_job("admit")
+    _finish_delivery_job(job)
+    run = subprocess.run
+    attempts, waits = [], []
+
+    def lose_response(args, **kwargs):
+        if args[:3] == ["gh", "pr", operation]:
+            attempts.append(args)
+            if write_landed:
+                run(args, **kwargs)
+            else:
+                job.calls.append(args)
+            return subprocess.CompletedProcess(args, 1, "", "HTTP 502: Bad Gateway")
+        return run(args, **kwargs)
+
+    def pause_during_backoff(seconds):
+        waits.append(seconds)
+        daemon.PAUSE_FILE.touch()
+
+    monkeypatch.setattr(subprocess, "run", lose_response)
+    job.runner = partial(queue._gh, sleep=pause_during_backoff)
+    job.poll()
+    assert len(attempts) == len(waits) == 1
+    assert job.calls[-1] == attempts[0]  # No reconciliation read or retry dispatch.
+    assert len(job.gh.comments) == (int(write_landed) if operation == "comment" else 1)
+    assert (not job.gh.labels) == (operation == "edit" and write_landed)
+    assert json.loads(job.path.read_text())["result"] == job.result
+    _assert_paused_delivery_held(job)
 
 
 def test_spawn_failure_can_retry_on_next_poll(background, monkeypatch):
