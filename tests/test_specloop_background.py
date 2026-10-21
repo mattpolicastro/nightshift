@@ -18,6 +18,7 @@ from test_queue import FakeGh
 from test_specloop_approval import ApprovalGh, HEAD
 from test_specloop_command_json import BRANCH, CHANGE, git, template
 from test_specloop_isolation import Pipeline, CHECKS
+from test_specloop_spec_revision import RevisionGh
 
 
 # Keep tests bounded even if a regression waits synchronously for the CLI.
@@ -331,6 +332,92 @@ def test_jobs_survive_polls_and_restart_then_deliver_once(background, monkeypatc
         assert gh.labels == ({"needs-human", "spec:review"} if outcome == "refused" else set())
         assert len(gh.comments) == 1
         assert ("Admission refused" if outcome == "refused" else "build has started") in gh.comments[0]["body"]
+
+
+@pytest.mark.scenario("background-job-control/durable-cancellation/stopped-job-stays-stopped")
+@pytest.mark.scenario("background-job-control/durable-cancellation/stop-wins-completion-race")
+@pytest.mark.parametrize("stage", ["proposals", "admissions", "revisions"])
+@pytest.mark.parametrize("late_result", ["success", "error", "missing"])
+def test_cancelled_jobs_remain_pending_after_restart_and_resume(
+    background, monkeypatch, stage, late_result,
+):
+    root, repo, children = background
+    gh = (DraftGh(("spec:draft",)) if stage == "proposals" else
+          ApprovalGh() if stage == "admissions" else RevisionGh())
+    result = {"version": 1, "outcome": "admitted" if stage == "admissions" else "drafted",
+              "branch": BRANCH, "commit": HEAD, "head": HEAD}
+    if late_result == "error":
+        result = {"version": 1, "error": "late CLI failure"}
+    (root / "cli-result.json").write_text(json.dumps(result))
+    original_run = subprocess.run
+
+    def run(args, **kwargs):
+        if args[0] == "git":
+            return subprocess.CompletedProcess(args, 0, HEAD, "")
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    notifications = []
+    monkeypatch.setattr(daemon.notify, "send", lambda *args: notifications.append(args))
+    cfg, health = Config(repos=[repo]), daemon.RepoHealth()
+
+    def poll():
+        daemon.poll_specloop(cfg, health, runner=gh)
+
+    poll()
+    eventually(lambda: (root / "started").exists())
+    number = 7 if stage == "proposals" else 8
+    path = daemon.STATE_DIR / stage / "owner__sample" / f"{number}.json"
+    saved = path.read_bytes()
+    receipt = json.loads(saved)
+    directory = path.parent / f"{number}.jobs" / receipt["job"]
+    process = json.loads((directory / "process.json").read_text())
+    # The subprocess is held behind the fixture's release-file barrier.
+    # Signalling is a later task: let it finish to exercise a late result
+    # from the real wrapper after accepted intent, even if termination fails.
+    assert specloop_job.request_stop(directory, verify_identity=lambda: process) == "stopping"
+    intent = (directory / "stop.json").read_bytes()
+    labels, comments, prs = set(gh.labels), list(gh.comments), list(gh.prs)
+
+    def assert_held(expected_state):
+        assert path.read_bytes() == saved
+        assert gh.labels == labels and gh.comments == comments and gh.prs == prs
+        assert not health.failures and not health.item_failures and not health.announced
+        assert not notifications
+        assert len((root / "started").read_text().splitlines()) == 1
+        assert len(list(directory.parent.iterdir())) == 1
+        assert not (directory / "collected.json").exists()
+        rows, errors = specloop_job.list_jobs(daemon.STATE_DIR)
+        assert not errors and len(rows) == 1 and rows[0].state == expected_state
+
+    for _ in range(4):
+        poll()
+        assert_held("stopping")
+    specloop_job._children.clear()
+    health = daemon.RepoHealth()
+    poll()
+    assert_held("stopping")
+    daemon.PAUSE_FILE.touch()
+    (root / "release").touch()
+    for child in children:
+        child.wait(timeout=5)
+    assert (directory / "result.json").exists()
+    assert (directory / "stop.json").read_bytes() == intent
+    if late_result == "missing":
+        (directory / "result.json").unlink()
+    poll()
+    assert_held("stopping")
+    # Confirmation is recorded only after the real wrapper and CLI exited.
+    specloop_job.finish_stop(directory)
+    stopped = (directory / "stop.json").read_bytes()
+    assert json.loads(stopped)["stopped_at"]
+    daemon.PAUSE_FILE.unlink()
+    specloop_job._children.clear()
+    health = daemon.RepoHealth()
+    for _ in range(5):
+        poll()
+        assert_held("stopped")
+        assert (directory / "stop.json").read_bytes() == stopped
 
 
 @pytest.mark.parametrize("failure", ["invalid_result", "dead_child", "missing_executable"])

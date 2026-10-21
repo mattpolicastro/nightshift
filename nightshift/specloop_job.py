@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
@@ -125,13 +126,8 @@ def _job_state(directory: Path, process: dict | None) -> str:
             live = False
         except BlockingIOError:
             live = True
-        try:
-            stop = _read_object(directory / "stop.json")
-        except FileNotFoundError:
-            stop = None
+        stop = _read_stop(directory)
         if stop is not None:
-            if stop.get("state") not in ("stopping", "stopped"):
-                raise ValueError(f"{directory / 'stop.json'}: invalid stop state")
             return stop["state"]
         try:
             outcome = _read_object(directory / "result.json")
@@ -217,6 +213,72 @@ def save(path: Path, data: dict) -> None:
     temp.replace(path)
 
 
+@contextmanager
+def control_lock(directory: Path):
+    """Serialize stop admission, finalization and collection across processes.
+
+    This is separate from the inherited lifetime lock. Never wait for that
+    lock or for process termination while holding this short-lived lock.
+    """
+    with (directory / "control.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def _read_stop(directory: Path) -> dict | None:
+    try:
+        stop = _read_object(directory / "stop.json")
+    except FileNotFoundError:
+        return None
+    if stop.get("state") not in ("stopping", "stopped"):
+        raise ValueError(f"{directory / 'stop.json'}: invalid stop state")
+    return stop
+
+
+def request_stop(directory: Path, *, verify_identity) -> str:
+    """Admit stop intent, returning stopping, stopped, or finished.
+
+    The control caller must resolve the job directory and supply an ownership
+    verifier returning the verified process identity (or raising on refusal).
+    Verification runs under the lock, before accepting intent. Only a stopping
+    return permits the caller to proceed to signalling/termination checks;
+    those happen after this lock is released. A retry re-verifies ownership
+    without replacing the original accepted intent.
+    """
+    with control_lock(directory):
+        stop = _read_stop(directory)
+        if stop is not None and stop["state"] == "stopped":
+            return "stopped"
+        if stop is None and ((directory / "result.json").exists()
+                             or (directory / "collected.json").exists()):
+            return "finished"
+        process = verify_identity()
+        if stop is None:
+            save(directory / "stop.json", {
+                "state": "stopping", "requested_at": datetime.now(timezone.utc).isoformat(),
+                "process": process,
+            })
+        return "stopping"
+
+
+def finish_stop(directory: Path) -> None:
+    """Record stopped only after the caller confirms group termination."""
+    with control_lock(directory):
+        stop = _read_stop(directory)
+        if stop is None:
+            raise ValueError(f"{directory}: no accepted stop request")
+        if stop["state"] != "stopped":
+            save(directory / "stop.json", {
+                **stop, "state": "stopped", "stopped_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+
+def finalize(directory: Path, outcome: dict) -> None:
+    """Keep execution evidence even after stop; never clear accepted intent."""
+    with control_lock(directory):
+        save(directory / "result.json", outcome)
+
+
 def reap() -> None:
     """Reap even children whose issue/PR is no longer armed."""
     for key, child in list(_children.items()):
@@ -252,26 +314,37 @@ def start(path: Path, receipt: dict, args: list[str], *, launcher=None) -> None:
 
 
 def collect(path: Path, receipt: dict) -> dict | None:
-    """Return a completed result, or None immediately while the job is live.
+    """Return a completed result, or None while the job is live or cancelled.
 
     A dead/failed job is reported through RepoHealth before a later poll may
-    retry (after the usual GitHub and specloop state checks).
+    retry (after the usual GitHub and specloop state checks). Intentional stop
+    keeps the parent's job reference pending, without failure or automatic retry.
     """
     reap()
     directory = path.parent / f"{path.stem}.jobs" / receipt["job"]
-    with (directory / "lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+    with control_lock(directory):
+        if _read_stop(directory) is not None:
             return None
-        result_path = directory / "result.json"
-        outcome = (json.loads(result_path.read_text()) if result_path.exists()
-                   else {"error": f"specloop job exited without a result; see {directory / 'log'}"})
-    if "error" in outcome:
-        receipt.pop("job")
-        save(path, receipt)
-        raise specloop_client.SpecloopError(outcome["error"])
-    return outcome["result"]
+        with (directory / "lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return None
+            result_path = directory / "result.json"
+            outcome = (json.loads(result_path.read_text()) if result_path.exists()
+                       else {"error": f"specloop job exited without a result; see {directory / 'log'}"})
+        if "error" in outcome:
+            receipt.pop("job")
+            save(path, receipt)
+            raise specloop_client.SpecloopError(outcome["error"])
+        result = outcome["result"]
+        # Persist acceptance before returning to intake, whose cached result
+        # bypasses collect on delivery retries. Stop must respect that interval.
+        if not (directory / "collected.json").exists():
+            save(directory / "collected.json", {
+                "collected_at": datetime.now(timezone.utc).isoformat(),
+            })
+        return result
 
 
 def main() -> None:
@@ -284,8 +357,10 @@ def main() -> None:
         outcome = {"result": result}
     except Exception as exc:
         outcome = {"error": str(exc)}
-    save(directory / "result.json", outcome)
-    os.close(fd)
+    try:
+        finalize(directory, outcome)
+    finally:
+        os.close(fd)
 
 
 if __name__ == "__main__":

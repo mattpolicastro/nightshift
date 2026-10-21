@@ -280,6 +280,11 @@ def test_wrapper_atomically_records_identity_before_cli(tmp_path, monkeypatch):
             assert not target.exists()
             assert json.loads(path.read_text())["start_identity"] == "stable identity"
             replacements.append(target)
+        elif target.name == "result.json":
+            # The production wrapper must use the control protocol, too.
+            with (directory / "control.lock").open("r") as probe:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return replace(path, target)
 
     monkeypatch.setattr(Path, "replace", observe_replace)
@@ -339,3 +344,142 @@ def test_process_lookup_failure_is_explicit_without_preventing_execution(tmp_pat
     assert called and not errors and rows[0].state == "finished"
     assert rows[0].pid == os.getpid() and not rows[0].identity_available
     assert rows[0].process["identity_error"] == "process inspection denied"
+
+
+@pytest.fixture
+def control_race(monkeypatch):
+    """Hold one operation at its commit and observe the other's lock attempt."""
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from threading import Event, current_thread
+
+    @contextmanager
+    def race(directory, record, first, second):
+        at_commit, release, contending = Event(), Event(), Event()
+        save, lock = jobs.save, jobs.control_lock
+        owner = []
+
+        def gated_save(path, data):
+            if path == directory / record and current_thread() == owner[0]:
+                at_commit.set()
+                assert release.wait(5), "commit barrier was not released"
+            save(path, data)
+
+        @contextmanager
+        def observed_lock(path):
+            if owner and current_thread() != owner[0]:
+                contending.set()
+            with lock(path):
+                yield
+
+        def run_first():
+            owner.append(current_thread())
+            return first()
+
+        with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=2) as pool:
+            patch.setattr(jobs, "save", gated_save)
+            patch.setattr(jobs, "control_lock", observed_lock)
+            winner = pool.submit(run_first)
+            try:
+                assert at_commit.wait(5), "first operation did not reach commit"
+                with (directory / "control.lock").open("r") as probe:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                loser = pool.submit(second)
+                assert contending.wait(5), "second operation did not contend"
+                assert not loser.done()
+            finally:
+                release.set()
+            yield winner.result(timeout=5), loser.result(timeout=5)
+
+    return race
+
+
+@pytest.mark.scenario("background-job-control/durable-cancellation/stop-wins-completion-race")
+@pytest.mark.parametrize("competitor", ["finalize", "collect"])
+def test_stop_commit_precedes_concurrent_result(tmp_path, control_race, competitor):
+    directory = attempt(tmp_path)
+    path = directory.parent.parent / "7.json"
+    receipt = {"job": directory.name}
+    jobs.save(path, receipt)
+    outcome = {"result": {"version": 1, "outcome": "drafted"}}
+
+    def late_result():
+        if competitor == "finalize":
+            jobs.finalize(directory, outcome)
+        else:
+            # An older wrapper may write without the control protocol. Even
+            # this late result must not beat accepted stop intent.
+            jobs.save(directory / "result.json", outcome)
+            return jobs.collect(path, receipt)
+
+    with control_race(directory, "stop.json",
+                      lambda: jobs.request_stop(directory, verify_identity=lambda: identity(directory)),
+                      late_result) as (stopped, result):
+        assert stopped == "stopping" and result is None
+    stop = json.loads((directory / "stop.json").read_text())
+    assert stop["requested_at"] and stop["process"] == identity(directory)
+    assert json.loads((directory / "result.json").read_text()) == outcome
+    assert jobs.collect(path, receipt) is None
+    assert json.loads(path.read_text()) == receipt == {"job": directory.name}
+    assert not (directory / "collected.json").exists()
+    assert jobs.list_jobs(tmp_path)[0][0].state == "stopping"
+    jobs.finish_stop(directory)
+    assert jobs.collect(path, receipt) is None
+    assert jobs.list_jobs(tmp_path)[0][0].state == "stopped"
+
+
+@pytest.mark.scenario("background-job-control/durable-cancellation/completion-wins-stop-race")
+@pytest.mark.parametrize("completion", ["finalize", "collect", "error"])
+def test_completion_commit_precedes_stop(tmp_path, control_race, completion, monkeypatch):
+    directory = attempt(tmp_path)
+    path = directory.parent.parent / "7.json"
+    receipt = {"job": directory.name}
+    jobs.save(path, receipt)
+    outcome = {"error": "CLI failed"} if completion == "error" else {"result": {"outcome": "drafted"}}
+
+    def forbidden(*args):
+        pytest.fail("completed jobs must not verify or signal a process")
+
+    monkeypatch.setattr(os, "killpg", forbidden)
+    if completion == "collect":
+        jobs.finalize(directory, outcome)
+        record = "collected.json"
+        first = lambda: jobs.collect(path, receipt)
+    else:
+        record = "result.json"
+        first = lambda: jobs.finalize(directory, outcome)
+    with control_race(directory, record, first,
+                      lambda: jobs.request_stop(directory, verify_identity=forbidden)) as (_, stopped):
+        assert stopped == "finished"
+    assert not (directory / "stop.json").exists()
+    assert json.loads((directory / "result.json").read_text()) == outcome
+    assert jobs.list_jobs(tmp_path)[0][0].state == ("failed" if completion == "error" else "finished")
+    if "result" in outcome:
+        assert jobs.collect(path, receipt) == outcome["result"]
+        assert json.loads(path.read_text()) == {"job": directory.name}
+        marker = (directory / "collected.json").read_text()
+        # Acceptance remains durable independently of the original result
+        # and before intake has cached it in the parent receipt.
+        (directory / "result.json").unlink()
+        jobs._children.clear()
+        assert jobs.request_stop(directory, verify_identity=forbidden) == "finished"
+        assert (directory / "collected.json").read_text() == marker
+
+
+def test_refused_stop_does_not_accept_intent_and_retry_preserves_it(tmp_path):
+    directory = attempt(tmp_path)
+
+    def refuse():
+        raise ValueError("ownership unavailable")
+
+    with pytest.raises(ValueError, match="ownership unavailable"):
+        jobs.request_stop(directory, verify_identity=refuse)
+    assert not (directory / "stop.json").exists()
+    assert jobs.request_stop(directory, verify_identity=lambda: identity(directory)) == "stopping"
+    intent = (directory / "stop.json").read_bytes()
+    with pytest.raises(ValueError, match="ownership unavailable"):
+        jobs.request_stop(directory, verify_identity=refuse)
+    assert (directory / "stop.json").read_bytes() == intent
+    assert jobs.request_stop(directory, verify_identity=lambda: identity(directory)) == "stopping"
+    assert (directory / "stop.json").read_bytes() == intent
