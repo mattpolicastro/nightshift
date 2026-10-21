@@ -264,6 +264,185 @@ def test_finished_draft_is_delivered_even_if_a_blocker_reopens(repo, tmp_path, c
     assert caplog.records == []
 
 
+@pytest.mark.scenario("issue-intake/draft-lifecycle-independent-of-blockers/running-job-is-preserved")
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+def test_running_draft_is_collected_and_delivered_after_blocker_reopens(
+    repo, tmp_path, monkeypatch, caplog, armed,
+):
+    gh, commands = BlockedDraftGh(armed, {6: "CLOSED"}), Commands()
+    path = tmp_path / "proposals/owner__sample/7.json"
+    starts, collections, pending = [], [], []
+    completed = False
+    caplog.set_level(logging.INFO, logger=specloop_intake.__name__)
+
+    def start(receipt_path, receipt, args, *, launcher):
+        assert receipt_path == path
+        assert args[:2] == ["propose", str(repo.manifest)]
+        assert args[args.index("--branch") + 1] == BRANCH
+        starts.append(args)
+        receipt["job"] = "running-draft-job"
+        specloop_intake.specloop_job.save(receipt_path, receipt)
+
+    def collect(receipt_path, receipt):
+        assert receipt_path == path
+        assert receipt["job"] == "running-draft-job"
+        collections.append(receipt.copy())
+        return commands.result.copy() if completed else None
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("background drafting must not launch a real process or report an error")
+
+    monkeypatch.setattr(specloop_intake.specloop_job, "start", start)
+    monkeypatch.setattr(specloop_intake.specloop_job, "collect", collect)
+
+    def background_poll():
+        return specloop_intake.propose_pending(
+            repo, queue.Labels(), tmp_path, runner=gh, git_runner=commands,
+            launcher=forbidden, on_pending=pending.append, on_error=forbidden,
+        )
+
+    assert background_poll() == []
+    saved_bytes = path.read_bytes()
+    saved = json.loads(saved_bytes)
+    assert saved["job"] == "running-draft-job"
+    assert "result" not in saved
+    assert pending == [7]
+    assert collections == []
+    assert gh.blocker_reads == [6]
+
+    gh.states[6] = "OPEN"
+    assert background_poll() == []
+    assert path.read_bytes() == saved_bytes
+    assert collections == [saved]
+    assert pending == [7, 7]
+    assert len(starts) == 1
+    assert gh.blocker_reads == [6]
+    assert commands.calls == []
+    assert gh.labels == {armed}
+    assert not gh.prs
+    assert not calls(gh, "issue", "edit")
+    assert not calls(gh, "issue", "comment")
+
+    completed = True
+    receipt, = background_poll()
+    assert receipt == {**saved, "result": commands.result, "delivered": True}
+    assert json.loads(path.read_text()) == receipt
+    assert collections == [saved, saved]
+    assert pending == [7, 7]
+    assert len(starts) == 1
+    assert gh.states[6] == "OPEN"
+    assert gh.blocker_reads == [6]
+    assert [c[0] for c in commands.calls] == ["git"]
+    assert commands.calls[0][-1] == f"abc123:refs/heads/{BRANCH}"
+    assert gh.labels == set()
+    assert len(gh.prs) == 1
+    assert gh.pr_url in gh.comments[-1]["body"]
+    assert len(calls(gh, "pr", "create")) == len(calls(gh, "issue", "comment")) == 1
+    assert caplog.records == []
+
+
+@pytest.mark.scenario("issue-intake/draft-lifecycle-independent-of-blockers/existing-pr-recovery-continues")
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+def test_open_pr_without_receipt_is_delivered_while_blocker_is_open(repo, tmp_path, caplog, armed):
+    gh, commands = BlockedDraftGh(armed, {6: "OPEN"}), Commands()
+    gh.prs = [{"number": 8, "state": "OPEN", "isDraft": True}]
+    original_prs = [pr.copy() for pr in gh.prs]
+    caplog.set_level(logging.INFO, logger=specloop_intake.__name__)
+    assert not (tmp_path / "proposals").exists()
+
+    assert poll(repo, tmp_path, gh, commands) == []
+
+    assert gh.body_reads == [gh.body]
+    assert gh.blocker_reads == []
+    assert commands.calls == []
+    assert not (tmp_path / "proposals").exists()
+    assert gh.prs == original_prs
+    assert not calls(gh, "pr", "create")
+    assert calls(gh, "pr", "edit") == [
+        ["pr", "edit", gh.pr_url, "--repo", repo.name, "--add-label", "spec:review"],
+    ]
+    assert gh.pr_url in gh.comments[-1]["body"]
+    assert f"<!-- nightshift:draft:{CHANGE}:pr-8 -->" in gh.comments[-1]["body"]
+    assert len(calls(gh, "issue", "comment")) == len(calls(gh, "issue", "edit")) == 1
+    assert gh.labels == set()
+    assert caplog.records == []
+
+
+@pytest.mark.scenario("issue-intake/dependency-gated-drafting/no-dependencies-allows-round")
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+def test_body_without_dependencies_drafts_without_blocker_lookups(repo, tmp_path, caplog, armed):
+    gh, commands = BlockedDraftGh(armed, {6: "OPEN"}), Commands()
+    gh.body = "Please draft it. Related discussion: #6."
+    caplog.set_level(logging.INFO, logger=specloop_intake.__name__)
+
+    receipt, = poll(repo, tmp_path, gh, commands)
+
+    assert gh.body_reads == [gh.body]
+    assert gh.blocker_reads == []
+    assert gh.body in receipt["idea"]
+    assert receipt["result"] == commands.result
+    assert receipt["delivered"] is True
+    assert json.loads((tmp_path / "proposals/owner__sample/7.json").read_text()) == receipt
+    assert [c[0] for c in commands.calls] == ["specloop", "git"]
+    assert gh.body in commands.calls[0][commands.calls[0].index("--idea") + 1]
+    assert gh.labels == set()
+    assert len(gh.prs) == 1
+    assert gh.pr_url in gh.comments[-1]["body"]
+    assert len(calls(gh, "pr", "create")) == len(calls(gh, "issue", "comment")) == 1
+    assert caplog.records == []
+
+
+@pytest.mark.scenario("issue-intake/dependency-gated-drafting/open-blocker-defers-round")
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+def test_blocked_skip_allows_another_eligible_issue_to_draft(repo, tmp_path, caplog, armed):
+    gh = BlockedDraftGh(armed, {6: "OPEN"})
+    neighbor = DraftGh((armed,))
+    neighbor_branch = "spec/sample-issue-9-add-a-gate"
+    commands = Commands(branch=neighbor_branch)
+    caplog.set_level(logging.INFO, logger=specloop_intake.__name__)
+    blocked_state = json.dumps([sorted(gh.labels), gh.comments, gh.prs, gh.events])
+
+    def with_neighbor(args):
+        if args[:2] == ["issue", "list"]:
+            listed = json.loads(gh(args))
+            listed.extend({**item, "number": 9} for item in json.loads(neighbor(args)))
+            return json.dumps(listed)
+        if (args[:3] in (["issue", "view", "9"], ["issue", "edit", "9"],
+                        ["issue", "comment", "9"])
+                or (args[0] == "api" and "/issues/9/" in args[1])
+                or (args[:2] == ["pr", "list"] and neighbor_branch in args)
+                or args[:2] in (["pr", "create"], ["pr", "view"], ["pr", "edit"])):
+            return neighbor(args)
+        return gh(args)
+
+    receipt, = poll(repo, tmp_path, with_neighbor, commands)
+    assert receipt["issue"] == 9
+    assert receipt["result"]["branch"] == neighbor_branch
+    assert receipt["delivered"] is True
+    assert json.loads((tmp_path / "proposals/owner__sample/9.json").read_text()) == receipt
+    assert [c[0] for c in commands.calls] == ["specloop", "git"]
+    assert commands.calls[0][commands.calls[0].index("--branch") + 1] == neighbor_branch
+    assert commands.calls[1][-1] == f"abc123:refs/heads/{neighbor_branch}"
+    assert neighbor.labels == set()
+    assert len(neighbor.prs) == 1
+    assert neighbor.pr_url in neighbor.comments[-1]["body"]
+    assert "Closes #9" in calls(neighbor, "pr", "create")[0][-1]
+
+    assert poll(repo, tmp_path, with_neighbor, commands) == []
+    assert gh.blocker_reads == [6, 6]
+    assert gh.body_reads == [gh.body, gh.body]
+    assert json.dumps([sorted(gh.labels), gh.comments, gh.prs, gh.events]) == blocked_state
+    assert not (tmp_path / "proposals/owner__sample/7.json").exists()
+    assert not calls(gh, "pr", "create")
+    assert not calls(gh, "issue", "edit")
+    assert not calls(gh, "issue", "comment")
+    assert len(commands.calls) == 2
+    assert len(calls(neighbor, "pr", "create")) == len(calls(neighbor, "issue", "comment")) == 1
+    assert caplog.record_tuples == [
+        (specloop_intake.__name__, logging.INFO, "#7 is blocked by #6 — not drafting"),
+    ] * 2
+
+
 @pytest.mark.scenario("issue-intake/drafting-from-an-issue/draft-pr-opened")
 @pytest.mark.parametrize("armed", [("spec:draft",), ("agent:ready",), ("spec:draft", "agent:ready")])
 def test_draft_pr_opened(repo, tmp_path, armed):
