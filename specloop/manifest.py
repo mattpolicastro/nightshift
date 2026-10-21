@@ -66,6 +66,7 @@ class Manifest:
     stuck: str = "human"  # "agent": an arbiter rules once on a stuck task before a human is asked
     drills: tuple[dict, ...] = ()  # seeded defects for `specloop drill`
     prepare: tuple[Step, ...] = ()
+    mutation_parallel: int = 2
 
 
 def _path(s: str) -> Path:
@@ -164,6 +165,9 @@ def parse(data: dict, roles_override: dict[str, str] | None = None) -> Manifest:
 
 
 def _gates(g: dict, verify: tuple[Step, ...]) -> dict:
+    parallel = g.get("mutation_parallel", 2)
+    if type(parallel) is not int or parallel <= 0:
+        raise ValueError(f"gates.mutation_parallel must be a positive integer, not {parallel!r}")
     steps = tuple(g.get("mutation_steps", []))
     unknown = set(steps) - {s.id for s in verify}
     if unknown:
@@ -172,6 +176,7 @@ def _gates(g: dict, verify: tuple[Step, ...]) -> dict:
         if g.get(key, "human") not in ("human", "agent"):
             raise ValueError(f"gates.{key} must be \"human\" or \"agent\", not {g[key]!r}")
     return {"evidence": bool(g.get("evidence", False)), "mutation_steps": steps,
+            "mutation_parallel": parallel,
             "gate_review": g.get("review", "human"), "stuck": g.get("stuck", "human"),
             "mutation_paths": tuple(_pattern(p) for p in g.get("mutation_paths", [])),
             "mutation_count": int(g.get("mutation_count", 12)), "mutation_min": float(g.get("mutation_min", 0.8))}

@@ -68,6 +68,49 @@ def test_manifest_parses_and_overrides_roles():
     assert m2.roles["implement"].name == "b" and m2.roles["review"].name == "b"
 
 
+@pytest.mark.scenario("parallel-evidence-mutants/configurable-concurrency/default-and-explicit-limits")
+@pytest.mark.parametrize("gates, expected", [
+    (None, 2), ({}, 2), ({"mutation_parallel": 1}, 1),
+    ({"mutation_parallel": 2}, 2), ({"mutation_parallel": 4}, 4),
+])
+def test_manifest_mutation_parallel_limits(gates, expected):
+    data = MANIFEST if gates is None else {**MANIFEST, "gates": gates}
+    assert manifest.parse(data).mutation_parallel == expected
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/configurable-concurrency/default-and-explicit-limits")
+def test_manifest_mutation_parallel_constructor_default():
+    m = manifest.parse(MANIFEST)
+    direct = manifest.Manifest(m.repo, m.change, m.branch, m.pr_base, m.github,
+                               m.roles, m.allowed, m.frozen, m.verify)
+    assert direct.mutation_parallel == 2
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/configurable-concurrency/default-and-explicit-limits")
+@pytest.mark.parametrize("limit, expected", [(None, 2), (1, 1), (4, 4)])
+@pytest.mark.parametrize("overrides", [{}, {"change": "another", "branch": "spec/another"}])
+def test_manifest_mutation_parallel_template_round_trip(tmp_path, limit, expected, overrides):
+    path = tmp_path / "template.toml"
+    text = "\n".join(f"{manifest._toml_value(k)} = {manifest._toml_value(v)}"
+                     for k, v in MANIFEST.items()) + "\n"
+    if limit is not None:
+        text += f"[gates]\nmutation_parallel = {limit}\n"
+    path.write_text(text)
+    assert manifest.load(path).mutation_parallel == expected
+    effective, stored = manifest.template(path, **overrides)
+    assert effective.mutation_parallel == expected
+    saved = tmp_path / "saved.toml"
+    saved.write_text(stored)
+    assert manifest.load(saved) == effective
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/configurable-concurrency/invalid-limit-rejected")
+@pytest.mark.parametrize("limit", [0, -1, True, False, 1.0, 1.5, "1", "4", "", None, [], {}])
+def test_manifest_rejects_invalid_mutation_parallel(limit):
+    with pytest.raises(ValueError, match=r"gates\.mutation_parallel"):
+        manifest.parse({**MANIFEST, "gates": {"mutation_parallel": limit}})
+
+
 def test_manifest_loads_prepare_tables(tmp_path):
     path = tmp_path / "manifest.toml"
     path.write_text("\n".join(f"{manifest._toml_value(k)} = {manifest._toml_value(v)}"
