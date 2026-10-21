@@ -7,6 +7,7 @@ without spending another drafting session or duplicating a PR or comment.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import tomllib
@@ -16,6 +17,9 @@ from pathlib import Path
 
 from . import queue, specloop_client, specloop_job
 from .config import Repo
+
+
+log = logging.getLogger(__name__)
 
 
 class Paused(RuntimeError):
@@ -172,6 +176,11 @@ look like an absent label or an empty set of comments.
             receipt["delivered"] = True
             _save(path, receipt)
             return receipt
+        blocked = queue.open_blockers(repo.name, queue.blockers(raw["body"]), runner=gh)
+        if blocked:
+            log.info("#%s is blocked by %s — not drafting", number,
+                     ", ".join(f"#{blocker}" for blocker in blocked))
+            return None
         if drafting_events is None:
             drafting_events = _label_events(repo.name, number, drafting_labels, runner=gh)
         receipt = {"repo": repo.name, "issue": number, "change": change,
