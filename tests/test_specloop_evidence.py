@@ -262,8 +262,173 @@ def test_a_hanging_mutant_is_caught_by_a_scaled_timeout(tmp_path, monkeypatch):
     started = _time.monotonic()
     ev = evidence.gather(src, base, head, [], set(), replace(M, mutation_count=20), tmp_path / "out", 1)
     hung = [x for x in ev.mutants if x.after.strip() == "i += 2"]
-    assert hung and hung[0].result == "killed"
+    assert hung and hung[0].result == "timeout"
     assert _time.monotonic() - started < 50  # not the 60 s step ceiling per hanging mutant
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/timeout-reporting/persist-timeout-results")
+@pytest.mark.scenario("parallel-evidence-mutants/test-timeout-classification/other-outcomes-retain-classification")
+@pytest.mark.scenario("parallel-evidence-mutants/stable-evidence-results/classification-rules-retained")
+@pytest.mark.scenario("parallel-evidence-mutants/baseline-step-time-boxes/preparation-timeout-is-invalid")
+@pytest.mark.parametrize("prepared", [
+    pytest.param(False, marks=pytest.mark.scenario(
+        "parallel-evidence-mutants/test-timeout-classification/unprepared-test-times-out")),
+    pytest.param(True, marks=pytest.mark.scenario(
+        "parallel-evidence-mutants/test-timeout-classification/prepared-test-times-out")),
+])
+@pytest.mark.parametrize("parallel", [1, 2])
+def test_mutant_timeout_is_recorded_not_killed(tmp_path, monkeypatch, prepared, parallel):
+    repo, base, _ = project(tmp_path, STRONG)
+    code = CODE + "unused = True  # mutation-equivalent: unused value\n"
+    (repo / "calc.py").write_text(code)
+    sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "equivalent")
+    head = sh(repo, "git", "rev-parse", "HEAD")
+    before = CODE.splitlines()[1]
+    outcomes = ["timeout-check-1", "success", "failure", "signal", "timeout-check-2",
+                "timeout-configure", "timeout-build"]
+    if prepared:
+        outcomes.append("timeout-dependencies")
+    selected = [evidence.Mutant("calc.py", 2, "comment", before, before + f" # {outcome}")
+                for outcome in outcomes]
+    selected += [evidence.Mutant("calc.py", 2, "mismatch", "wrong original", "unused"),
+                 evidence.Mutant("calc.py", 7, "True", code.splitlines()[6], "unused = False")]
+
+    def generate(lines, count, seed):
+        assert ("calc.py", 2, before) in lines and seed == 1
+        return [replace(mut) for mut in selected]
+
+    monkeypatch.setattr(evidence, "generate", generate)
+
+    def step(stage):
+        # Prepared checks read the actual prepared copy. All preparation uses
+        # system tools, which remain readable under the prepare sandbox.
+        source = "{build}/project/calc.py" if prepared and stage != "dependencies" else "{src}/calc.py"
+        script = f'''set -eu
+cat "{source}"
+if grep -Fq '# timeout-{stage}' "{source}"; then sleep 60; fi
+'''
+        if stage == "dependencies":
+            script += 'cp -R "{src}" project\n'
+        if stage == "check":
+            script += f'''if grep -Fq '# failure' "{source}"; then exit 9; fi
+if grep -Fq '# signal' "{source}"; then kill -TERM $$; fi
+'''
+        return manifest.Step(stage, ("/bin/sh", "-c", script + "exit 7\n"), expect=7, timeout=1)
+
+    stages = (["dependencies"] if prepared else []) + ["configure", "build", "check", "later"]
+    m = replace(M, prepare=(step("dependencies"),) if prepared else (),
+                verify=tuple(step(s) for s in stages if s != "dependencies"),
+                mutation_steps=("configure", "build", "check", "later"), mutation_parallel=parallel)
+    out = tmp_path / "out"
+    real_run = verify.run_extracted
+    overlap = Barrier(2)
+    lock = Lock()
+    active = peak = 0
+
+    def run(src, sha, steps, run_m, run_out):
+        nonlocal active, peak
+        if run_out == out:
+            return real_run(src, sha, steps, run_m, run_out)
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            if parallel == 2 and run_out.name in ("mutant-1", "mutant-2"):
+                overlap.wait(timeout=10)
+            return real_run(src, sha, steps, run_m, run_out)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(verify, "run_extracted", run)
+    ev = evidence.gather(repo, base, head, ["covered"], {"covered"}, m, out, 1)
+    expected = ["timeout", "survived", "killed", "killed", "timeout", "invalid", "invalid"]
+    expected += (["invalid"] if prepared else []) + ["invalid", "equivalent"]
+    assert [mut.result for mut in ev.mutants] == expected
+    assert [replace(mut, result="") for mut in ev.mutants] == selected
+    assert peak == parallel and active == 0
+    assert not ev.baseline_failed and not ev.unmeasured and ev.covered == ["covered"]
+    assert ev.score == 2 / 3 and ev.passed(0.5) and not ev.passed(0.8)
+    saved = json.loads((out / "evidence.json").read_text())
+    assert saved == {**asdict(ev), "score": 2 / 3}
+    baseline = json.loads((out / "receipts.json").read_text())
+    assert [r["id"] for r in baseline] == stages and all(r["passed"] for r in baseline)
+    for number, outcome in enumerate(outcomes, 1):
+        worker = out / f"mutant-{number}"
+        receipts = json.loads((worker / "receipts.json").read_text())
+        failed_stage = outcome.split("-")[1] if outcome.startswith("timeout-") else "check"
+        executed = stages if outcome == "success" else stages[:stages.index(failed_stage) + 1]
+        assert [r["id"] for r in receipts] == executed
+        assert all(r["passed"] and r["exit"] == 7 for r in receipts[:-1])
+        assert receipts[-1]["passed"] is (outcome == "success")
+        if outcome.startswith("timeout-"):
+            assert receipts[-1]["exit"] is None
+        elif outcome == "signal":
+            assert receipts[-1]["exit"] == -15
+        else:
+            assert receipts[-1]["exit"] == (7 if outcome == "success" else 9)
+        assert all((worker / f"{s}.log").exists() is (s in executed) for s in stages)
+        assert not (worker / "src").exists() and not (worker / "build").exists()
+    for number in (len(outcomes) + 1, len(outcomes) + 2):
+        assert not (out / f"mutant-{number}").exists()
+    assert not (out / "src").exists() and not (out / "build").exists()
+    assert (repo / "calc.py").read_text() == code
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/test-timeout-classification/other-outcomes-retain-classification")
+@pytest.mark.parametrize("stage", ["dependencies", "configure", "build", "check"])
+def test_baseline_timeout_is_invalid_without_dispatch(tmp_path, monkeypatch, stage):
+    step = manifest.Step(stage, ("/bin/sh", "-c", "true"))
+    m = replace(M, prepare=(step,) if stage == "dependencies" else (),
+                verify=() if stage == "dependencies" else (step,), mutation_steps=(stage,))
+    mutants = [evidence.Mutant("calc.py", 1, "int", "x = 1", "x = 2")]
+
+    def baseline(*args):
+        return [verify.Receipt(stage, list(step.run), 0, None, False, 1, "")]
+
+    def unexpected_pool(*args, **kwargs):
+        pytest.fail("baseline timeout must not dispatch mutants")
+
+    monkeypatch.setattr(verify, "run_steps", baseline)
+    monkeypatch.setattr(evidence, "ThreadPoolExecutor", unexpected_pool)
+    assert not evidence.mutate(tmp_path, "head", mutants, m, tmp_path / "out")
+    assert [mut.result for mut in mutants] == ["invalid"]
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/baseline-step-time-boxes/missing-duration-uses-manifest-ceiling")
+@pytest.mark.scenario("parallel-evidence-mutants/test-timeout-classification/other-outcomes-retain-classification")
+@pytest.mark.parametrize("seconds", [None, 0, 20])
+@pytest.mark.parametrize("stage", ["dependencies", "configure", "build", "check"])
+def test_timeout_at_manifest_ceiling_keeps_invalid_step_precedence(tmp_path, monkeypatch, seconds, stage):
+    step = manifest.Step(stage, ("/bin/sh", "-c", "true"), timeout=5)
+    m = replace(M, prepare=(step,) if stage == "dependencies" else (),
+                verify=() if stage == "dependencies" else (step,), mutation_steps=(stage,))
+    original = asdict(m)
+    out = tmp_path / "out"
+    baseline_receipt = verify.Receipt(stage, list(step.run), 0, 0, True, seconds, "")
+    before = CODE.splitlines()[1]
+    mutants = [evidence.Mutant("calc.py", 2, "comment", before, before + " # mutant")]
+
+    def baseline(repo, head, steps, run_m, run_out):
+        assert run_m is m and run_m.prepare + steps == (step,)
+        (run_out / "src").mkdir(parents=True)
+        (run_out / "src/calc.py").write_text(CODE)
+        return [baseline_receipt]
+
+    def run(src, head, steps, run_m, run_out):
+        assert run_m.prepare + steps == (step,)  # fallback or cap, never the 30/60-second budget
+        # Only the first failure determines classification, even if a caller
+        # supplies later failures with a different step kind or exit status.
+        return [verify.Receipt("earlier", [], 0, 0, True, 0.1, ""),
+                verify.Receipt(stage, [], 0, None, False, 5, ""),
+                verify.Receipt("build" if stage == "check" else "check", [], 0, 9, False, 0.1, "")]
+
+    monkeypatch.setattr(verify, "run_steps", baseline)
+    monkeypatch.setattr(verify, "run_extracted", run)
+    assert evidence.mutate(tmp_path, "head", mutants, m, out)
+    assert mutants[0].result == ("timeout" if stage == "check" else "invalid")
+    assert asdict(m) == original and baseline_receipt.seconds == seconds
+    assert not (out / "src").exists() and not (out / "mutant-1/src").exists()
 
 
 @pytest.mark.scenario("parallel-evidence-mutants/baseline-step-time-boxes/missing-duration-uses-manifest-ceiling")
@@ -416,7 +581,8 @@ def test_real_mutant_step_timeout_stops_its_process_group(tmp_path, monkeypatch,
                for outcome in ("timeout", "failure", "success")]
     assert evidence.mutate(repo, head, mutants, m, out)
     failure = "killed" if stage == "test" else "invalid"
-    assert [mut.result for mut in mutants] == [failure, failure, "survived"]
+    timeout = "timeout" if stage == "test" else "invalid"
+    assert [mut.result for mut in mutants] == [timeout, failure, "survived"]
     assert len(observed) == 4 and observed[0] == out
     for number, (mut, code) in enumerate(zip(mutants, (None, 3, 0)), 1):
         worker = out / f"mutant-{number}"
@@ -455,7 +621,8 @@ def test_concurrent_private_workers_release_processes_and_trees(tmp_path, monkey
                        for i, mut in enumerate(mutants, 1)]
             results = [future.result() for future in futures]
         failure = "invalid" if prepared else "killed"
-        assert results == [failure, failure, "survived"]
+        timeout = "invalid" if prepared else "timeout"
+        assert results == [timeout, failure, "survived"]
         assert (out / "src" / "calc.py").read_text() == CODE
         for i, (mut, code) in enumerate(zip(mutants, (None, 3, 0)), 1):
             assert_worker_resources_released(out / f"mutant-{i}", code, CODE.replace(before, mut.after))
@@ -715,7 +882,7 @@ def test_parallel_mutants_respect_time_box(tmp_path, monkeypatch, prepared):
     # The third mutant waited longer than its test budget but still receives a
     # full second to execute. Queue dwell must never be deducted from a step.
     assert started[3] - min(started[1], started[2]) >= 1.0
-    assert [mut.result for mut in mutants] == ["killed"] * 4 + ["survived"]
+    assert [mut.result for mut in mutants] == ["timeout"] * 3 + ["killed", "survived"]
     assert cleaned[-1] == out and m == original
     for number, (mut, exit_code) in enumerate(zip(mutants, (None, None, None, 3, 0)), 1):
         receipts = assert_worker_resources_released(
@@ -1155,7 +1322,7 @@ sys.exit(3 if "# failure" in source else 0)
 
     monkeypatch.setattr(verify, "cleanup", observe_cleanup)
     assert evidence.mutate(repo, head, mutants, m, out)
-    assert [mut.result for mut in mutants] == ["survived", "killed", "killed"]
+    assert [mut.result for mut in mutants] == ["survived", "killed", "timeout"]
     assert cleaned == [out / f"mutant-{n}" for n in range(1, 4)] + [out]
     for run_out, code in zip(cleaned, [0, 3, None, 0]):
         assert not (run_out / "src").exists()

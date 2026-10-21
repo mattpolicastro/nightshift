@@ -54,7 +54,7 @@ class Mutant:
     op: str
     before: str
     after: str
-    result: str = ""  # killed | survived | invalid | equivalent
+    result: str = ""  # killed | survived | timeout | invalid | equivalent
 
 
 @dataclass
@@ -178,9 +178,13 @@ def _mutate_one(number: int, mut: Mutant, baseline_src: Path, head: str,
         f.write_text("".join(lines))
         f.chmod(mode)
         receipts = verify.run_extracted(src, head, steps, m, mutant_out)
-        failed = next((r.id for r in receipts if not r.passed), None)
+        failed = next((r for r in receipts if not r.passed), None)
         invalid_steps = set(BUILD_STEPS) | {s.id for s in m.prepare}
-        return "survived" if failed is None else "invalid" if failed in invalid_steps else "killed"
+        if failed is None:
+            return "survived"
+        if failed.id in invalid_steps:
+            return "invalid"
+        return "timeout" if failed.exit is None else "killed"
     finally:
         verify.cleanup(mutant_out)
 
