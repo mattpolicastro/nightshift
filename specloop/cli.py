@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 from specloop import feasibility, loop, manifest, messages, openspec, tasks, verify
 from specloop.seal import git
-from specloop.state import Busy, Run, TaskState, runs_dir
+from specloop.state import SAFE_CHANGE, Busy, Run, TaskState, runs_dir
 
 DEFAULT_ENV = Path.home() / ".config" / "specloop" / "env"
 
@@ -793,64 +793,100 @@ def _status_context(run: Run, m: manifest.Manifest, head: str, task_path: str,
                 "detail": "", "recent": [], "github": ""}
 
 
-def _status_json(names: list[str]) -> int:
+def _status_entry(name: str) -> dict:
+    from specloop import serve
+
+    run = Run.for_change(name, require_existing=True)
+    st = run.state
+    # Status needs only the trusted manifest and git, not credentials
+    # or the notification machinery of an execution context.
+    m = _manifest(run)
+    repo = run.dir / "repo.git"
+    head = git(repo, "rev-parse", f"refs/heads/{m.branch}").decode().strip()
+    task_path = _tasks_path(repo, head, m.change)
+    text = git(repo, "show", f"{head}:{task_path}").decode()
+    all_tasks = tasks.parse(text)
+    auto_resumes_remaining = 0
+    if st.pause and st.pause.resume_at and st.pause.reason in serve.AUTO_RESUME:
+        cap = serve.AUTO_RESUME[st.pause.reason]
+        ts = st.tasks.get(st.pause.task)
+        # Like lift_due, a missing task state leaves recovery uncapped.
+        auto_resumes_remaining = (max(0, cap - ts.auto_resumes)
+                                  if cap is not None and ts is not None else None)
+    entry = {
+        "change": name,
+        "status": st.status,
+        "pause": {"reason": st.pause.reason, "task": st.pause.task, "detail": st.pause.detail,
+                  "auto_resumes_remaining": auto_resumes_remaining}
+                 if st.pause else None,
+        "tasks": {"done": sum(t.done for t in all_tasks), "total": len(all_tasks)},
+        "head": head,
+        "pr": st.pr,
+        "context": _status_context(run, m, head, task_path, all_tasks),
+    }
+    if st.status == "paused" and st.pause:
+        pause = st.pause
+        task = next((t for t in all_tasks if t.key == pause.task), None)
+        ts = st.tasks.get(pause.task)
+        message = messages.for_pause(
+            m.change, pause.reason, label=task.label if task else "", key=pause.task,
+            detail=pause.detail, attempts=ts.attempts if ts else 0,
+            done=entry["tasks"]["done"], pr=st.pr, resume_at=pause.resume_at,
+        )
+        entry["action"] = {
+            "kind": message.kind,
+            "headline": message.headline,
+            "why": message.why,
+            "command": message.command,
+            "actions": messages.actions_for_pause(pause.reason),
+            # Names this pause, so an action can refuse to land on a later one.
+            "pause_id": f"{pause.reason}:{pause.task}",
+        }
+    return entry
+
+
+def _status_error_entry(name: str, error: Exception) -> dict:
+    summary = "Run status could not be read."
+    detail = f"{summary} Inspect specloop status --json for details."
+    # Compatibility placeholders only: never persist this pause or offer actions.
+    return {
+        "change": name,
+        "status": "paused",
+        "pause": {"reason": "status_error", "task": "", "detail": detail,
+                  "auto_resumes_remaining": 0},
+        "tasks": {"done": 0, "total": 0},
+        "head": "",
+        "pr": "",
+        "context": {"summary": summary, "repo": "", "branch": "", "task": None,
+                    "detail": detail, "recent": [], "github": ""},
+        "error": f"{type(error).__name__}: {error}"[:500],
+    }
+
+
+def _status_json(change: str | None) -> int:
     from specloop import serve
 
     try:
+        if change is not None:
+            # Admission is checked before collection; disappearance after this
+            # check is a per-run read failure, not an unknown named change.
+            if not SAFE_CHANGE.fullmatch(change) or change in (".", ".."):
+                raise ValueError(f"unsafe change name {change!r}: use letters, digits, '.', '_' or '-'")
+            if not (runs_dir() / change / "state.json").exists():
+                raise ValueError(f"{change}: no such change (not admitted, or admission was refused)")
+            names = [change]
+        else:
+            names = sorted(p.name for p in runs_dir().glob("*") if (p / "state.json").exists())
         entries = []
         for name in names:
-            run = Run.for_change(name)
-            if not (run.dir / "state.json").exists():
-                raise ValueError(f"{name}: no such change (not admitted, or admission was refused)")
-            st = run.state
-            # Status needs only the trusted manifest and git, not credentials
-            # or the notification machinery of an execution context.
-            m = _manifest(run)
-            repo = run.dir / "repo.git"
-            head = git(repo, "rev-parse", f"refs/heads/{m.branch}").decode().strip()
-            task_path = _tasks_path(repo, head, m.change)
-            text = git(repo, "show", f"{head}:{task_path}").decode()
-            all_tasks = tasks.parse(text)
-            auto_resumes_remaining = 0
-            if st.pause and st.pause.resume_at and st.pause.reason in serve.AUTO_RESUME:
-                cap = serve.AUTO_RESUME[st.pause.reason]
-                ts = st.tasks.get(st.pause.task)
-                # Like lift_due, a missing task state leaves recovery uncapped.
-                auto_resumes_remaining = (max(0, cap - ts.auto_resumes)
-                                          if cap is not None and ts is not None else None)
-            entry = {
-                "change": name,
-                "status": st.status,
-                "pause": {"reason": st.pause.reason, "task": st.pause.task, "detail": st.pause.detail,
-                          "auto_resumes_remaining": auto_resumes_remaining}
-                         if st.pause else None,
-                "tasks": {"done": sum(t.done for t in all_tasks), "total": len(all_tasks)},
-                "head": head,
-                "pr": st.pr,
-                "context": _status_context(run, m, head, task_path, all_tasks),
-            }
-            if st.status == "paused" and st.pause:
-                pause = st.pause
-                task = next((t for t in all_tasks if t.key == pause.task), None)
-                ts = st.tasks.get(pause.task)
-                message = messages.for_pause(
-                    m.change, pause.reason, label=task.label if task else "", key=pause.task,
-                    detail=pause.detail, attempts=ts.attempts if ts else 0,
-                    done=entry["tasks"]["done"], pr=st.pr, resume_at=pause.resume_at,
-                )
-                entry["action"] = {
-                    "kind": message.kind,
-                    "headline": message.headline,
-                    "why": message.why,
-                    "command": message.command,
-                    "actions": messages.actions_for_pause(pause.reason),
-                    # Names this pause, so an action can refuse to land on a later one.
-                    "pause_id": f"{pause.reason}:{pause.task}",
-                }
+            try:
+                entry = _status_entry(name)
+            except Exception as e:
+                entry = _status_error_entry(name, e)
             entries.append(entry)
         document = {"version": 1, "supervisor": {"state": serve.liveness()}, "runs": entries}
-    except (OSError, ValueError, KeyError, RuntimeError) as e:
-        print(json.dumps({"version": 1, "error": str(e)}))
+    except Exception as e:
+        print(json.dumps({"version": 1, "error": str(e) or type(e).__name__}))
         return 1
     print(json.dumps(document))
     return 0
@@ -859,9 +895,9 @@ def _status_json(names: list[str]) -> int:
 def status(args) -> int:
     from specloop import serve
 
-    names = [args.change] if args.change else sorted(p.name for p in runs_dir().glob("*") if (p / "state.json").exists())
     if args.json:
-        return _status_json(names)
+        return _status_json(args.change)
+    names = [args.change] if args.change else sorted(p.name for p in runs_dir().glob("*") if (p / "state.json").exists())
     print(f"supervisor: {serve.liveness()}")
     for name in names:
         run = Run.for_change(name)
