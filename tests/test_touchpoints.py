@@ -1065,3 +1065,212 @@ def test_corrupt_json_preserves_healthy_rounds(tmp_path, relative, payload):
     assert error["path"] == str(bad) and error["line"] is None
     assert report["totals"]["drafter_questions"] == 1
     assert not any("Pending intake request" in warning for warning in report["changes"][0]["warnings"])
+
+
+def snapshot_local_tree(root):
+    """Include empty directories and bytes; ignore read-induced access times."""
+    return {
+        str(path.relative_to(root)): (
+            path.stat().st_mode, path.stat().st_mtime_ns,
+            None if path.is_dir() else path.read_bytes(),
+        )
+        for path in [root, *sorted(root.rglob("*"))]
+    }
+
+
+def offline_module_cli(home, *args, denied=()):
+    # Install the guard before importing the report, in its own interpreter.
+    # Audit hooks also catch calls through aliases and low-level socket APIs.
+    script = """
+import json, os, runpy, sys
+denied = set(json.loads(sys.argv.pop(1)))
+violations = []
+mutations = {'os.mkdir', 'os.remove', 'os.rename', 'os.rmdir', 'os.chmod',
+             'os.chown', 'os.truncate', 'os.utime', 'os.link', 'os.symlink'}
+def guard(event, args):
+    forbidden = (event.startswith(('socket.', 'subprocess.', 'os.exec',
+                                  'os.spawn', 'os.posix_spawn', 'os.fork'))
+                 or event in mutations | {'os.system', 'pty.spawn'})
+    if event == 'open':
+        path, mode, flags = args
+        forbidden |= bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT |
+                                    os.O_TRUNC | os.O_APPEND))
+        if not forbidden and str(path) in denied:
+            raise PermissionError('fixture access denied')
+    if forbidden:
+        violations.append(event)
+        raise AssertionError('report attempted forbidden operation: ' + event)
+sys.addaudithook(guard)
+try:
+    runpy.run_module('nightshift.touchpoints', run_name='__main__')
+finally:
+    assert not violations, violations
+"""
+    repo = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, HOME=str(home), PYTHONPATH=str(repo), PYTHONDONTWRITEBYTECODE="1")
+    return subprocess.run(
+        [sys.executable, "-B", "-c", script, json.dumps([str(path) for path in denied]), *args],
+        cwd=repo, env=env, capture_output=True, text=True, timeout=30,
+    )
+
+
+def assert_offline_output_pair(home, *, exit_code=0, denied=()):
+    before = snapshot_local_tree(home)
+    outputs = {}
+    for args in ((), ("--json",)):
+        for _ in range(2):
+            result = offline_module_cli(home, *args, denied=denied)
+            assert result.returncode == exit_code, result.stderr
+            assert result.stderr == ""
+            assert result.stdout == outputs.setdefault(args, result.stdout)
+            assert snapshot_local_tree(home) == before
+    report = json.loads(outputs[("--json",)])  # Reject extra documents or logging.
+    table = outputs[()]
+    scalar = ("drafter_questions", "spec_revisions", "build_revisions", "human_pauses",
+              "manual_resumes", "human_accepts", "admission_refusals", "total")
+    assert set(report) == {"version", "since", "coverage", "merge_boundary", "limitations",
+                           "changes", "totals", "errors"}
+    assert type(report["version"]) is int and report["version"] == 1
+    assert report["since"] is None
+    assert report["coverage"] == "observed_local_history" and report["merge_boundary"] == "unknown"
+    assert report["limitations"] and all(item in table for item in report["limitations"])
+    rows, totals = report["changes"], report["totals"]
+    assert totals["changes"] == len(rows)
+    assert set(totals) == {"changes", *scalar, "pauses_by_reason", "resumes_by_reason"}
+    assert rows == sorted(rows, key=lambda row: (row["repo"], row["issue"], row["change"]))
+    lines = table.splitlines()
+    assert re.split(r"  +", lines[0]) == [
+        "Repository", "Issue", "Change", "Questions", "Spec revisions", "Build revisions",
+        "Pauses", "Resumes", "Accepts", "Refusals", "Total",
+    ]
+    for index, row in enumerate(rows, 2):
+        assert set(row) == {"repo", "issue", "change", "drafted_at", "drafted_at_source",
+                            "counts", "warnings"}
+        assert set(row["counts"]) == {*scalar, "pauses_by_reason", "resumes_by_reason"}
+        cells = re.split(r"  +", lines[index])
+        assert cells[:3] == [row["repo"], str(row["issue"]), row["change"]]
+        assert list(map(int, cells[3:])) == [row["counts"][field] for field in scalar]
+        assert isinstance(row["warnings"], list)
+        assert all(warning in table for warning in row["warnings"])
+    cells = re.split(r"  +", lines[2 + len(rows)])
+    assert cells[:3] == ["TOTAL", "-", f"{len(rows)} changes"]
+    assert list(map(int, cells[3:])) == [totals[field] for field in scalar]
+    for field in scalar:
+        assert totals[field] == sum(row["counts"][field] for row in rows)
+    labelled = [(f"{row['repo']} #{row['issue']} {row['change']}", row["counts"]) for row in rows]
+    for label, counts in [*labelled, ("TOTAL", totals)]:
+        assert all(type(counts[field]) is int for field in scalar)
+        assert counts["total"] == sum(counts[field] for field in scalar[:-1])
+        reason_line = next(line for line in lines if line.startswith(f"  {label}: pauses="))
+        pauses, resumes = reason_line.split(": pauses=", 1)[1].split("; resumes=")
+        for field, counter, encoded in (("pauses_by_reason", "human_pauses", pauses),
+                                         ("resumes_by_reason", "manual_resumes", resumes)):
+            assert json.loads(encoded) == counts[field]
+            assert list(counts[field]) == sorted(counts[field])
+            assert sum(counts[field].values()) == counts[counter]
+    for field in ("pauses_by_reason", "resumes_by_reason"):
+        expected = {}
+        for row in rows:
+            for reason, count in row["counts"][field].items():
+                expected[reason] = expected.get(reason, 0) + count
+        assert totals[field] == expected
+    assert report["errors"] == sorted(report["errors"], key=lambda e: (e["path"], e["line"] or 0, e["message"]))
+    for error in report["errors"]:
+        assert set(error) == {"path", "line", "message"} and error["message"]
+        location = error["path"] + (f":{error['line']}" if error["line"] is not None else "")
+        assert f"{location}: {error['message']}" in table
+    return report
+
+
+@pytest.mark.scenario("touchpoint-report/local-report-entry-point/offline-read-leaves-state-unchanged")
+@pytest.mark.scenario("touchpoint-report/versioned-report-output/table-and-json-agree")
+def test_offline_module_preserves_multi_change_history(tmp_path):
+    state = tmp_path / ".nightshift"
+    for issue in (10, 2):
+        dated_put(state, f"proposals/o__r/{issue}.json",
+                  dict(change=f"r-issue-{issue}-feature", result=dict(outcome="needs_input")),
+                  "2026-10-21T00:00:00+00:00")
+        path = put(tmp_path, f".specloop/runs/r-issue-{issue}-feature/events.jsonl", {})
+        events = [dict(event="pause", at=1, reason="requested"), dict(event="resumed", at=2)]
+        if issue == 10:
+            events += [dict(event="human_accept", at=3), dict(event="revised", at=4, commit="abc")]
+            put(state, "admissions/o__r/28.json",
+                dict(change=f"r-issue-{issue}-feature", result=dict(outcome="refused")))
+            put(state, "revisions/o__r/28.json",
+                dict(change=f"r-issue-{issue}-feature", command="propose", result=dict(outcome="needs_input")))
+        path.write_text("".join(json.dumps(event) + "\n" for event in events))
+    # Include ignored files and empty directories in the invariant, too.
+    put(state, "proposals/o__r/2.feedback.json", {"feedback": "untouched"})
+    (tmp_path / ".specloop/runs/empty").mkdir()
+    report = assert_offline_output_pair(tmp_path)
+    assert report["errors"] == []
+    first, second = report["changes"]
+    assert [first["issue"], second["issue"]] == [2, 10]
+    for row in (first, second):
+        assert row["drafted_at"] == "2026-10-21T00:00:00+00:00"
+        assert row["drafted_at_source"] == "receipt_mtime"
+    assert first["counts"] == dict(drafter_questions=1, spec_revisions=0, build_revisions=0,
+                                    human_pauses=1, manual_resumes=1, human_accepts=0,
+                                    admission_refusals=0, total=3,
+                                    pauses_by_reason={"requested": 1}, resumes_by_reason={"requested": 1})
+    assert second["counts"] == dict(drafter_questions=2, spec_revisions=1, build_revisions=1,
+                                     human_pauses=1, manual_resumes=1, human_accepts=1,
+                                     admission_refusals=1, total=8,
+                                     pauses_by_reason={"requested": 1}, resumes_by_reason={"requested": 1})
+
+
+@pytest.mark.scenario("touchpoint-report/local-report-entry-point/empty-local-history")
+@pytest.mark.parametrize("existing_roots", [False, True])
+def test_offline_empty_module_never_creates_state(tmp_path, existing_roots):
+    if existing_roots:
+        for kind in ("proposals", "admissions", "revisions"):
+            (tmp_path / ".nightshift" / kind).mkdir(parents=True)
+        (tmp_path / ".specloop/runs").mkdir(parents=True)
+    report = assert_offline_output_pair(tmp_path)
+    assert report["changes"] == report["errors"] == []
+    assert report["totals"] == dict(changes=0, drafter_questions=0, spec_revisions=0,
+                                     build_revisions=0, human_pauses=0, manual_resumes=0,
+                                     human_accepts=0, admission_refusals=0, total=0,
+                                     pauses_by_reason={}, resumes_by_reason={})
+
+
+@pytest.mark.scenario("touchpoint-report/partial-failure-isolation/unreadable-records-are-not-fatal")
+def test_offline_partial_module_preserves_damaged_history(tmp_path):
+    state, runs = tmp_path / ".nightshift", tmp_path / ".specloop/runs"
+    receipt = intake_job(state, "proposals", "draft", "propose", "needs_input")
+    request = state / "proposals/o__r/8.jobs/draft/request.json"
+    os.utime(request, (0, 0))
+    put(state, "proposals/o__r/8.json", receipt)
+    malformed = put(state, "proposals/o__r/9.json", {})
+    malformed.write_bytes(b'{"private": "do not echo",')
+    invalid = put(state, "proposals/o__r/10.json", dict(change="invalid", issue=True))
+    denied_receipt = put(state, "proposals/o__r/11.json", dict(change="denied"))
+    for job in ("request_denied", "result_denied"):
+        intake_job(state, "admissions", job, "admit", "refused")
+    jobs = state / "admissions/o__r/28.jobs"
+    denied_request = jobs / "request_denied/request.json"
+    denied_result = jobs / "result_denied/result.json"
+    put(state, "admissions/o__r/30.json",
+        dict(change="r-issue-13-denied", result=dict(outcome="admitted")))
+    denied_events = put(runs, "r-issue-13-denied/events.jsonl", dict(event="human_accept", at=1))
+    denied = (denied_receipt, denied_request, denied_result, denied_events)
+    put(state, "admissions/o__r/29.json",
+        dict(change="r-issue-12-missing", result=dict(outcome="admitted")))
+    missing = runs / "r-issue-12-missing/events.jsonl"
+    events = put(runs, "r-issue-8-feature/events.jsonl", {})
+    events.write_bytes(b'{"event":"human_accept","at":1}\nBAD\n'
+                       b'{"event":"human_accept","at":2}\n'
+                       b'{"event":"pause","reason":"blocked","at":true}\n'
+                       b'\xff\n{"event":"human_accept","at":3}\n{"event":')
+    report = assert_offline_output_pair(tmp_path, exit_code=1, denied=denied)
+    assert report["totals"]["drafter_questions"] == 1
+    assert report["totals"]["human_accepts"] == 3 and report["totals"]["total"] == 4
+    expected = {(str(path), None) for path in (malformed, invalid, *denied, missing)}
+    expected |= {(str(events), line) for line in (2, 4, 5, 7)}
+    assert {(error["path"], error["line"]) for error in report["errors"]} == expected
+    assert len(report["errors"]) == len(expected)
+    assert all(error["message"].startswith("PermissionError:") for error in report["errors"]
+               if Path(error["path"]) in denied)
+    assert not any("Pending intake request" in warning
+                   for row in report["changes"] for warning in row["warnings"])
+    assert "do not echo" not in json.dumps(report)
