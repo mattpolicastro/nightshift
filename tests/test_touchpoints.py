@@ -546,6 +546,7 @@ def test_unpaired_resume_warns_with_unknown_reason(tmp_path, clearing):
 
 @pytest.mark.scenario("touchpoint-report/event-reason-attribution/broken-attribution-stays-explicit")
 @pytest.mark.parametrize("bad", [b'{"event":', b'\xff',
+                                  b'{"extra":' + b'[' * 2000 + b'0' + b']' * 2000 + b'}',
                                   b'{"event":"pause","at":true,"reason":"infra"}'])
 def test_broken_history_invalidates_infra_allowance_but_manual_resolution_counts(tmp_path, bad):
     intake_job(tmp_path, "proposals", "draft", "propose", "drafted")
@@ -919,3 +920,148 @@ def test_partial_report_module_exit_and_diagnostics_in_both_formats(tmp_path):
     assert "do not echo" not in encoded.stdout + table.stdout
     assert before == {path: (path.read_bytes(), path.stat().st_mtime_ns)
                       for path in tmp_path.rglob("*") if path.is_file()}
+
+
+@pytest.mark.scenario("touchpoint-report/partial-failure-isolation/unreadable-records-are-not-fatal")
+def test_unreadable_records_are_reported_not_fatal(tmp_path, monkeypatch, capsys):
+    state, runs = tmp_path / ".nightshift", tmp_path / ".specloop/runs"
+    change = "r-issue-8-feature"
+    put(state, "proposals/o__r/8.json", dict(change=change, result=dict(outcome="needs_input")))
+    malformed = put(state, "proposals/o__r/9.json", {})
+    malformed.write_text('{"private": "do not echo",')
+    invalid = put(state, "proposals/o__r/10.json", dict(change="invalid", issue=True))
+    denied_receipt = put(state, "proposals/o__r/11.json", dict(change="denied"))
+    for job in ("request_denied", "result_denied", "bad_head"):
+        intake_job(state, "admissions", job, "admit", "refused", head=" " if job == "bad_head" else "abc")
+    base = state / "admissions/o__r/28.jobs"
+    denied_request, denied_result = base / "request_denied/request.json", base / "result_denied/result.json"
+    bad_head = base / "bad_head/request.json"
+    put(state, "admissions/o__r/29.json", dict(change="r-issue-12-missing", result=dict(outcome="admitted")))
+    missing = runs / "r-issue-12-missing/events.jsonl"
+    put(state, "proposals/o__r/13.json", dict(change="r-issue-13-denied", result=dict(outcome="drafted")))
+    denied_events = put(runs, "r-issue-13-denied/events.jsonl", dict(event="human_accept", at=1))
+    events = put(runs, f"{change}/events.jsonl", {})
+    events.write_bytes(
+        b'{"event":"human_accept","at":1}\nBAD\n'
+        b'{"event":"human_accept","at":2}\n'
+        b'{"event":"pause","reason":"blocked","at":true}\n'
+        b'\xff\n{"event":"human_accept","at":3}\n{"event":')
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+              for path in tmp_path.rglob("*") if path.is_file()}
+    entries = sorted(tmp_path.rglob("*"))
+    original = Path.open
+    denied = {denied_receipt, denied_request, denied_result, denied_events}
+
+    def guarded(path, *args, **kwargs):
+        if path in denied:
+            raise PermissionError("fixture access denied")
+        return original(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setenv("HOME", str(tmp_path))
+        patch.setattr(Path, "open", guarded)
+        assert main(["--json"]) == 1
+        encoded = capsys.readouterr()
+        report = json.loads(encoded.out)
+        assert main([]) == 1
+        table = capsys.readouterr()
+        assert encoded.err == table.err == ""
+        assert table.out == render_table(report) + "\n"
+        assert report["totals"]["drafter_questions"] == 1
+        assert report["totals"]["human_accepts"] == 3
+        assert report["totals"]["total"] == 4
+        expected = {(str(path), None) for path in (*denied, malformed, invalid, bad_head, missing)}
+        expected |= {(str(events), line) for line in (2, 4, 5, 7)}
+        assert {(error["path"], error["line"]) for error in report["errors"]} == expected
+        assert len(report["errors"]) == len(expected)
+        for error in report["errors"]:
+            location = error["path"] + (f":{error['line']}" if error["line"] else "")
+            assert error["message"] and f"{location}: {error['message']}" in table.out
+        assert all(error["message"].startswith("PermissionError:") for error in report["errors"]
+                   if Path(error["path"]) in denied)
+        assert "do not echo" not in encoded.out + table.out
+        assert not any("Pending intake request" in warning
+                       for row in report["changes"] for warning in row["warnings"])
+    assert sorted(tmp_path.rglob("*")) == entries
+    assert before == {path: (path.read_bytes(), path.stat().st_mtime_ns)
+                      for path in entries if path.is_file()}
+
+
+@pytest.mark.scenario("touchpoint-report/partial-failure-isolation/discovery-and-compatibility")
+@pytest.mark.parametrize("failure", ["permission", "partial", "disappeared"])
+def test_discovery_failures_and_forward_compatible_records(tmp_path, monkeypatch, failure):
+    change = "r-issue-8-feature"
+    put(tmp_path, "proposals/o__r/8.json", dict(change=change, future_field={"nested": [True]},
+                                             result=dict(outcome="needs_input", future_result=42)))
+    receipt = intake_job(tmp_path, "admissions", "refused", "admit", "refused", future_result=[])
+    put(tmp_path, "admissions/o__r/28.json", dict(receipt, future_receipt=False))
+    event_log(tmp_path, [dict(event="pause", reason="requested", future_pause=[]),
+                         dict(event="future_kind", future_event={"new": True}), dict(event="resumed")])
+    blocked = tmp_path / ("proposals/o__r" if failure == "disappeared" else "proposals")
+    original = Path.iterdir
+
+    def guarded(path):
+        if path == blocked:
+            if failure == "partial":
+                yield from original(path)
+            if failure == "disappeared":
+                raise FileNotFoundError("fixture directory disappeared")
+            raise PermissionError("fixture discovery denied")
+        else:
+            yield from original(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "iterdir", guarded)
+        report = collect_report(tmp_path, tmp_path / "runs")
+    error, = report["errors"]
+    assert error["path"] == str(blocked) and error["line"] is None
+    assert error["message"].startswith("FileNotFoundError:" if failure == "disappeared" else "PermissionError:")
+    row, = report["changes"]
+    assert row["counts"]["admission_refusals"] == 1
+    assert row["counts"]["human_pauses"] == row["counts"]["manual_resumes"] == 1
+    assert row["counts"]["resumes_by_reason"] == {"requested": 1}
+    assert row["counts"]["total"] == 3 + (failure == "partial")
+    healthy = collect_report(tmp_path, tmp_path / "runs")
+    assert not healthy["errors"] and healthy["totals"]["total"] == 4
+
+
+@pytest.mark.scenario("touchpoint-report/partial-failure-isolation/discovery-and-compatibility")
+@pytest.mark.parametrize("exception", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("operation,relative", [
+    ("iterdir", "proposals"), ("stat", "proposals/o__r"),
+    ("open", "proposals/o__r/8.json"), ("open", "proposals/o__r/8.jobs/draft/result.json"),
+    ("open", "runs/r-issue-8-feature/events.jsonl"),
+])
+def test_process_control_exceptions_propagate(tmp_path, monkeypatch, exception, operation, relative):
+    receipt = intake_job(tmp_path, "proposals", "draft", "propose", "drafted")
+    put(tmp_path, "proposals/o__r/8.json", receipt)
+    event_log(tmp_path, [dict(event="human_accept")])
+    original = getattr(Path, operation)
+
+    def guarded(path, *args, **kwargs):
+        if path == tmp_path / relative:
+            raise exception("fixture interruption")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, operation, guarded)
+    with pytest.raises(exception, match="fixture interruption"):
+        collect_report(tmp_path, tmp_path / "runs")
+
+
+@pytest.mark.scenario("touchpoint-report/partial-failure-isolation/unreadable-records-are-not-fatal")
+@pytest.mark.parametrize("relative", ["proposals/o__r/9.json", "proposals/o__r/8.jobs/bad/result.json"])
+@pytest.mark.parametrize("payload", [b'\xff', b'{"private":"do not echo",',
+                                     b'{"extra":' + b'[' * 2000 + b'0' + b']' * 2000 + b'}'])
+def test_corrupt_json_preserves_healthy_rounds(tmp_path, relative, payload):
+    receipt = intake_job(tmp_path, "proposals", "bad", "propose", "needs_input")
+    # An embedded request result must never substitute for an unreadable result.json.
+    put(tmp_path, "proposals/o__r/8.jobs/bad/request.json",
+        dict(args=["propose", "m", "--change", receipt["change"]], result=receipt["result"]))
+    put(tmp_path, "proposals/o__r/8.json", dict(change=receipt["change"], result=dict(outcome="needs_input")))
+    bad = put(tmp_path, relative, {})
+    bad.write_bytes(payload)
+    report = collect_report(tmp_path, tmp_path / "runs")
+    error, = report["errors"]
+    assert error["path"] == str(bad) and error["line"] is None
+    assert report["totals"]["drafter_questions"] == 1
+    assert not any("Pending intake request" in warning for warning in report["changes"][0]["warnings"])

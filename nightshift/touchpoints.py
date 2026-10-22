@@ -36,14 +36,18 @@ class _Reader:
     def error(self, path, exc, line=None):
         self.errors.append(dict(path=str(path), line=line, message=f"{type(exc).__name__}: {exc}"))
 
-    def children(self, path):
+    def children(self, path, *, missing_ok=False):
+        children = []
         try:
-            return sorted(path.iterdir())
-        except FileNotFoundError:
-            return []
+            # Keep entries already discovered if enumeration fails partway.
+            for child in path.iterdir():
+                children.append(child)
+        except FileNotFoundError as exc:
+            if not missing_ok:
+                self.error(path, exc)
         except OSError as exc:
             self.error(path, exc)
-            return []
+        return sorted(children)
 
     def read(self, path):
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -67,7 +71,9 @@ class _Reader:
             head = data.get("head")
             change = data.get("change")
             result, wrapper_error = data.get("result"), None
+            result_unreadable = False
             if job is not None:
+                result = None  # Only result.json can complete a retained request.
                 args = data.get("args")
                 if not isinstance(args, list) or not args or not all(isinstance(a, str) for a in args):
                     raise ValueError("request args must be a nonempty string array")
@@ -88,7 +94,8 @@ class _Reader:
                         raise ValueError("job wrapper needs result or error")
                 except FileNotFoundError:
                     pass  # Retain pending requests for identity and draft-date provenance.
-                except (OSError, ValueError) as exc:
+                except (OSError, ValueError, RecursionError) as exc:
+                    result_unreadable = True
                     self.error(result_path, exc)
             if not isinstance(command, str):
                 raise ValueError("command must be a string")
@@ -109,14 +116,15 @@ class _Reader:
                         change=change, command=command, head=head, result=result,
                         job=job if job is not None else data.get("job"),
                         retained=job is not None, wrapper_error=wrapper_error,
+                        result_unreadable=result_unreadable,
                         mtime=path.stat().st_mtime)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             self.error(path, exc)
             return None
 
     def records(self, root):
         for kind in ("proposals", "admissions", "revisions"):
-            for directory in self.children(root / kind):
+            for directory in self.children(root / kind, missing_ok=True):
                 if not self.is_directory(directory):
                     continue
                 for path in self.children(directory):
@@ -194,12 +202,16 @@ def _intake_counts(row, reader):
     counts.update(pauses_by_reason={}, resumes_by_reason={})
     completed = []
     for record in row["records"]:
-        path = record["path"].with_name("result.json") if record["retained"] else record["path"]
+        path = record["path"]
         try:
             for field in ("job", "head"):
                 value = record[field]
                 if value is not None and (not isinstance(value, str) or not value.strip()):
                     raise ValueError(f"{field} must be a nonempty string")
+            if record["result_unreadable"]:
+                continue  # Already diagnosed; an unreadable result is not pending.
+            if record["retained"]:
+                path = path.with_name("result.json")
             if record["wrapper_error"] is not None:
                 raise ValueError("intake job wrapper reported an error; no completed round")
             result = record["result"]
@@ -350,7 +362,7 @@ def _event_counts(row, reader):
                 try:
                     event = json.loads(raw.decode("utf-8"))
                     validate(event)
-                except (ValueError, OverflowError) as exc:
+                except (ValueError, OverflowError, RecursionError) as exc:
                     # Invalidate before resolving: even an exhausted allowance
                     # cannot be inferred through a gap in the recorded history.
                     recovery_certain = False
