@@ -477,3 +477,153 @@ def test_prepare_publish_cas_mismatch_preserves_intent_without_verifying(base_en
     assert ctx.run.state.pause.reason == "infra" and ctx.run.state.pause.resume_at == 0
     assert "specloop resume c" in ctx.run.state.pause.detail
     assert (Path(sync["receipts"][-1]) / "diagnostic.txt").is_file()
+
+
+def track_base_fetches(monkeypatch):
+    real_run, fetches = subprocess.run, []
+
+    def runner(args, **kwargs):
+        if "fetch" in args and args[-1].endswith(":refs/specloop/publish-base"):
+            assert kwargs["timeout"] == 300
+            fetches.append(args)
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(loop.subprocess, "run", runner)
+    return fetches
+
+
+@pytest.mark.scenario("publish-base-sync/fetch-current-base/readiness-uses-origin")
+@pytest.mark.scenario("publish-base-sync/verify-integrated-head/merged-head-passes")
+def test_driver_checks_merged_head_before_readiness(base_env, monkeypatch):
+    env, ctx = base_env, base_env.ctx
+    old, base = ctx.head(), advance_base(env)
+    before = snapshot(env.src)
+    assert sh(env.src, "git", "rev-parse", "release/stable") == env.initial != base
+    checks = {"cap/req/manual": "inspect the result", "cap/req/other": "check the UI"}
+    ctx.m = replace(ctx.m, prepare=(manifest.Step("prepare", ("prepare",)),),
+                    coverage_step="ok", coverage_exempt=checks,
+                    acceptance=(manifest.Step("accept", ("accept",)),))
+    fetches = track_base_fetches(monkeypatch)
+    forbid_publication(monkeypatch)
+    stages = []
+
+    def verify(repo, head, steps, m, out):
+        assert len(fetches) == 1
+        assert head == ctx.head() != old and repo == ctx.repo
+        assert sh(repo, "git", "show", "-s", "--format=%P", head).split() == [old, base]
+        assert sh(repo, "git", "show", f"{head}:base.txt") == "upstream change"
+        saved = state.Run(ctx.run.dir, require_existing=True).state
+        assert saved.status == "running" and saved.pause is None
+        stage = "integration" if out.parent.name == "base-sync" else out.name
+        if stage == "integration":
+            assert not saved.base_sync["verified_head"] and saved.base_sync["retry_verify"]
+        else:
+            assert saved.base_sync["verified_head"] == head and not saved.base_sync["retry_verify"]
+        stages.append(stage)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "ok.log").write_text("cap/req/automated\n")
+        return [loop.verify.Receipt(s.id, list(s.run), s.expect, s.expect, True, 0.1, "")
+                for s in m.prepare + steps]
+
+    def scenarios(current, head):
+        assert current is ctx and head == ctx.head() != old
+        return {"cap/req/automated": "automated", **checks}
+
+    def notify(message):
+        assert stages == ["integration", "coverage-0", "acceptance-0"]
+        assert ctx.run.state.pause.reason == "ready_to_publish"
+        stages.append("ready")
+
+    monkeypatch.setattr(loop.verify, "run_steps", verify)
+    monkeypatch.setattr(loop, "_scenarios_at", scenarios)
+    ctx.notify = notify
+    assert loop.run(ctx) == "paused"
+    ctx.run.reload()
+    assert stages == ["integration", "coverage-0", "acceptance-0", "ready"]
+    assert len(fetches) == 1 and snapshot(env.src) == before
+    assert ctx.run.state.base_sync["verified_head"] == ctx.head()
+    pause = ctx.run.state.pause
+    assert pause.reason == "ready_to_publish" and ctx.head()[:12] in pause.detail
+    assert old[:12] not in pause.detail
+    for sid, why in checks.items():
+        assert f"- [ ] `{sid}`: {why}" in pause.detail
+    assert pause.detail.endswith("Next: `specloop publish c`")
+
+
+@pytest.mark.scenario("publish-base-sync/verify-integrated-head/unmoved-base")
+@pytest.mark.parametrize("previously_integrated", [False, True])
+def test_driver_unmoved_base_fetches_once_without_merge_or_extra_verify(base_env, monkeypatch,
+                                                                     previously_integrated):
+    ctx = base_env.ctx
+    if previously_integrated:
+        advance_base(base_env)
+        controlled_verify(monkeypatch, ctx)
+        assert loop.prepare_publish(ctx)
+        ctx.run.reload()
+    head = ctx.head()
+    sync = json.dumps(ctx.run.state.base_sync, sort_keys=True)
+    fetches = track_base_fetches(monkeypatch)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("an incorporated, verified base needs neither merge nor extra verification")
+
+    monkeypatch.setattr(loop, "_merge_publish_base", unexpected)
+    monkeypatch.setattr(loop.verify, "run_steps", unexpected)
+    assert loop.run(ctx) == "paused"
+    ctx.run.reload()
+    assert len(fetches) == 1 and ctx.head() == head
+    assert json.dumps(ctx.run.state.base_sync, sort_keys=True) == sync
+    assert ctx.run.state.pause.reason == "ready_to_publish"
+    assert head[:12] in ctx.run.state.pause.detail
+
+
+@pytest.mark.scenario("publish-base-sync/fetch-current-base/fetch-cannot-establish-base")
+@pytest.mark.parametrize("failure", ["missing-base", "transport", "timeout"])
+def test_driver_fetch_failure_blocks_final_checks_and_readiness(base_env, monkeypatch, failure):
+    env, ctx = base_env, base_env.ctx
+    stale = loop._fetch_publish_base(ctx, timeout=300)
+    head = ctx.head()
+    ctx.m = replace(ctx.m, coverage_step="ok", acceptance=(manifest.Step("accept", ("accept",)),))
+    ctx.run.state.base_sync = {"base": stale, "retry_verify": True, "receipts": ["previous attempt"]}
+    ctx.run.state.pr = "https://example.test/pull/17"
+    ctx.run.save()
+    if failure == "missing-base":
+        sh(env.origin, "git", "update-ref", "-d", "refs/heads/release/stable")
+    before = snapshot(env.src)
+    real_run, fetches, notes = subprocess.run, [], []
+
+    def runner(args, **kwargs):
+        if "fetch" in args:
+            fetches.append(args)
+            assert kwargs["timeout"] == 300
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(args, 300, stderr=b"transport stalled")
+            if failure == "transport":
+                raise subprocess.CalledProcessError(1, args, stderr="transport unavailable")
+        return real_run(args, **kwargs)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("fetch failure must stop before merging, final checks or readiness")
+
+    monkeypatch.setattr(loop.subprocess, "run", runner)
+    for owner, name in ((loop, "_merge_publish_base"), (loop, "_seen_scenarios"),
+                        (loop.verify, "run_steps")):
+        monkeypatch.setattr(owner, name, unexpected)
+    forbid_publication(monkeypatch)
+    ctx.notify = notes.append
+    assert loop.run(ctx) == "paused"
+    ctx.run.reload()
+    pause = ctx.run.state.pause
+    assert pause.reason == "base_fetch" and pause.resume_at == 0
+    assert "refs/heads/release/stable" in pause.detail and "specloop resume c" in pause.detail
+    diagnostic = {"missing-base": "couldn't find remote ref", "transport": "transport unavailable",
+                  "timeout": "timed out after 300s"}[failure]
+    assert diagnostic in pause.detail
+    assert len(fetches) == len(notes) == 1
+    assert "Publish:" not in notes[0].text()
+    assert ctx.head() == head and snapshot(env.src) == before
+    assert sh(ctx.repo, "git", "rev-parse", "refs/specloop/publish-base") == stale
+    assert ctx.run.state.base_sync == {"base": stale, "retry_verify": True, "receipts": ["previous attempt"]}
+    assert ctx.run.state.pr == "https://example.test/pull/17"
+    assert ctx.run.state.coverage_rounds == ctx.run.state.acceptance_rounds == 0
+    assert not (ctx.run.dir / "final").exists()

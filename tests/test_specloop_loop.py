@@ -38,6 +38,10 @@ def env(tmp_path, monkeypatch):
     sh(tmp_path, "git", "init", "-q", "-b", "spec/c", str(src))
     sh(src, "git", "add", "-A")
     sh(src, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+    origin = tmp_path / "origin.git"
+    sh(tmp_path, "git", "init", "-q", "--bare", str(origin))
+    sh(src, "git", "remote", "add", "origin", str(origin))
+    sh(src, "git", "push", "-q", "origin", "HEAD:refs/heads/main")
     data = {
         "run": {"repo": str(src), "change": "c", "branch": "spec/c"},
         "roles": {"implement": "p", "review": "p"},

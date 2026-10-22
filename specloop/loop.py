@@ -272,12 +272,15 @@ def run(ctx: Ctx) -> str:
 
 
 def finals(ctx: Ctx, head: str) -> bool:
-    """Coverage, then acceptance, once every task has landed.
+    """Prepare the current base, then coverage and acceptance after tasks land.
 
     Returns True when it appended tasks (the loop continues), False when the
     run paused or finished. Each stage gets one round of appended tasks; a
     second failure pauses rather than churning.
     """
+    if not prepare_publish(ctx):
+        return False
+    head = ctx.head()
     st, m = ctx.run.state, ctx.m
     if m.coverage_step:
         ok, seen, receipts = _seen_scenarios(ctx, head, ctx.run.dir / "final" / f"coverage-{st.coverage_rounds}")
