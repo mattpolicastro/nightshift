@@ -22,7 +22,7 @@ instructions (including AGENTS.md when present).
 Implementers may change only: {allowed}
 They may never change: {frozen}
 
-Work through all five checklist items:
+Work through all eight checklist items:
 1. Over-engineering: a mechanism substantially heavier than the demonstrated
    problem (for example, a JS lexer for a Python docstring problem). A blocker
    must identify the mismatch and a sufficient simpler approach; preference
@@ -43,6 +43,15 @@ Work through all five checklist items:
    another in-flight change lands (for example, a package-wide marker
    assertion). Explain the concrete incompatible assumption; a file map alone
    does not prove another change's behavior.
+6. Unplanned migrations: existing tests or fixtures that encode behavior the
+   change replaces, where no task says to update them. Cite the assertion and
+   the task that will break it; the fix is naming the migration in that task.
+7. Retry and idempotency gaps: an external write the change adds or alters (a
+   GitHub comment, label, push or PR edit) that a lost response or retried
+   call could duplicate or drop. Cite the write and the retry path.
+8. Stale operator docs and manual steps: documentation the change makes false
+   (README, operator guides) with no task updating it, and rollout steps that
+   need a person when they could be automated. Cite the doc line or step.
 
 Return contradictions and risks using the supplied schema. Each blocking
 contradiction must name the task, describe the problem, and cite file/line or
