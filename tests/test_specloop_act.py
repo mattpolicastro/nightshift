@@ -331,6 +331,8 @@ def test_direct_push_holds_lock_against_act_abort(admitted, monkeypatch, capfd, 
 
     monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
     monkeypatch.setattr(cli, "_push", push)
+    # The fake transport supplies an unchanged base before publication.
+    monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
     monkeypatch.setattr(cli, "_gh", lambda *args: "")
     assert cli.main([command, CHANGE]) == 0
     capfd.readouterr()
@@ -712,6 +714,8 @@ def test_publish_failure_returns_refused_json(admitted, monkeypatch, capfd):
     run.pause("ready_to_publish")
     before = asdict(run.state)
     monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
+    # The fake transport supplies an unchanged base before the failing push.
+    monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
 
     def fail(*args):
         raise RuntimeError("push failed")
@@ -839,6 +843,8 @@ def test_publish_ignores_unrelated_pr(admitted, monkeypatch, capfd, repository, 
     monkeypatch.setattr(cli, "_gh", gh)
     monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
     monkeypatch.setattr(cli, "_push", lambda *args: None)
+    # PR matching uses a fake transport with an unchanged base.
+    monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
     act(capfd, run, "publish")
     assert calls == [("api", "repos/example/repo/pulls")] + ([] if existing else [("pr", "create")])
     assert run.state.pr == url and run.state.pause.reason == "human_checks"
@@ -1146,6 +1152,8 @@ def test_publish_pushes_to_an_origin_matching_the_manifest(admitted, monkeypatch
     git(source, "remote", "add", "origin", origin)
     run.state.pr = "https://github.com/example/repo/pull/42"
     run.pause("ready_to_publish")
+    # Validate hosted URLs without contacting them; the fetched base is unchanged.
+    monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
     pushes = []
     monkeypatch.setattr(cli, "_push", lambda repo, url, ref: pushes.append(url))
     act(capfd, run, "publish")
