@@ -39,6 +39,8 @@ def drafter(*bodies, stray=False, feasible=True):
 
     def agent(call):
         calls.append(call)
+        if call.prompt.startswith("# Spec critic of an OpenSpec change"):
+            return agents.Result("ok", {"contradictions": [], "risks": []})
         if call.access == "read":
             found = [] if feasible else [{"task": "1.1", "problem": "frozen", "evidence": "x:1"}]
             return agents.Result("ok", {"contradictions": found, "risks": []})
@@ -93,6 +95,8 @@ def test_feasibility_contradictions_go_back_to_the_drafter(source, tmp_path):
 
     def agent(call):
         calls.append(call)
+        if call.prompt.startswith("# Spec critic of an OpenSpec change"):
+            return agents.Result("ok", {"contradictions": [], "risks": []})
         if call.access == "read":
             ok = verdicts.pop(0)
             found = [] if ok else [{"task": "1.1", "problem": "tests are not importable", "evidence": "design.md:28"}]
@@ -174,12 +178,13 @@ def test_human_task_is_fed_back_until_moved_to_the_design(source, tmp_path):
 
 def test_drafter_is_told_about_work_in_flight_and_moves_shared_tests(source, tmp_path, monkeypatch):
     other_run(source, tmp_path, monkeypatch)
+    (source / "calc.py").unlink()
     agent = drafter(SHARED, SEPARATE)
     d = propose.draft(source, "main", "sign-helpers", "add sign", [], M, tmp_path / "out", agent=agent)
     writes = [c for c in agent.calls if c.access == "write"]
     assert "## Work in flight" in writes[0].prompt
     assert "- `tests/test_calc.py` (other-change)" in writes[0].prompt
-    assert "- `calc.py`" not in writes[0].prompt  # only paths with a directory are named
+    assert "- `calc.py`" not in writes[0].prompt  # bare files absent from the source checkout are excluded
     assert "task 1.1: `tests/test_calc.py` is also being changed by other-change" in writes[1].prompt
     assert not d.problems and d.commit and not d.risks
 

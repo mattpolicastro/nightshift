@@ -31,7 +31,7 @@ class ApprovalGh(DraftGh):
         for label in labels:
             self.label_event(label, "labeled")
 
-    def label_event(self, label, event):
+    def label_event(self, label, event, actor="maintainer"):
         if event == "labeled":
             if label in self.labels:
                 return
@@ -40,9 +40,19 @@ class ApprovalGh(DraftGh):
             if label not in self.labels:
                 return
             self.labels.remove(label)
-        self.events.append({"id": len(self.events) + 1, "event": event, "label": {"name": label}})
+        self.events.append({"id": len(self.events) + 1, "event": event, "label": {"name": label},
+                            "actor": {"login": actor}})
 
     def __call__(self, args):
+        repository = self.pr_url.split("github.com/", 1)[1].split("/pull/", 1)[0]
+        if args == ["api", f"repos/{repository}"]:
+            self.calls.append(args)
+            return json.dumps({"owner": {"login": "owner", "type": "User"}})
+        if args[0] == "api" and args[1].startswith(f"repos/{repository}/collaborators/"):
+            self.calls.append(args)
+            assert args[2:] == ["--include"]
+            status = 204 if args[1].rsplit("/", 1)[1] == "maintainer" else 404
+            return f"HTTP/2.0 {status} Status\r\n\r\n"
         if args[0] == "api" and args[1].endswith("/issues/8/events"):
             self.calls.append(args)
             assert args[-2:] == ["--paginate", "--slurp"]
@@ -126,6 +136,7 @@ def poll(repo, tmp_path, gh, commands, labels=queue.Labels()):
 
 
 @pytest.mark.scenario("issue-intake/approval-admits/approved-spec-admitted")
+@pytest.mark.real_trust
 def test_approved_spec_admitted_through_daemon(repo, tmp_path, monkeypatch):
     gh, commands = ApprovalGh(), Commands()
     monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
@@ -151,6 +162,7 @@ def test_approved_spec_admitted_through_daemon(repo, tmp_path, monkeypatch):
 
 
 @pytest.mark.scenario("issue-intake/approval-admits/refused-admission-explained")
+@pytest.mark.real_trust
 @pytest.mark.parametrize("reason", [CONTRADICTION, {
     "problem": "Task 1.2 contradicts the frozen checker.",
     "evidence": "tools/check.py:63 rejects gates.",

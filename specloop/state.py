@@ -91,7 +91,6 @@ def _known(cls, data: dict):
 
 
 class Run:
-    # mutation-equivalent: Changing "and" to "or" only alters documentation; no application code reads Run.__doc__.
     """One admitted change: its directory, state and log.
 
     require_existing makes missing state an error, including on reload. By

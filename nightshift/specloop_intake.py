@@ -14,6 +14,7 @@ import tomllib
 import uuid
 from functools import partial
 from pathlib import Path
+from urllib.parse import quote
 
 from . import queue, specloop_client, specloop_job
 from .config import Repo
@@ -126,6 +127,24 @@ look like an absent label or an empty set of comments.
         slug = re.sub(r"[^a-z0-9]+", "-", raw["title"].lower()).strip("-")[:40].rstrip("-")
         change = f"{repo.name.split('/')[-1]}-issue-{number}-{slug or 'issue'}"
         receipt = json.loads(path.read_text()) if path.exists() else None
+        drafting_labels = current.intersection((labels.ready, labels.spec_draft))
+        selected_events = None
+        drafting_events = None
+        authorized = False
+
+        def authorize():
+            nonlocal selected_events, drafting_events, authorized
+            if selected_events is None:
+                selected_events = _latest_label_events(repo.name, number, drafting_labels, runner=gh)
+                drafting_events = {label: event["id"] for label, event in selected_events.items()}
+            if not authorized:
+                authorized = _authorize_label_events(repo.name, number, selected_events, runner=gh)
+            return authorized
+
+        # Collection can write the receipt and job records. Hold both intact
+        # on denial, without cancelling the worker or consulting blockers.
+        if receipt and "job" in receipt and "result" not in receipt and not authorize():
+            return None
         if receipt and not _collect(path, receipt, "propose"):
             return _PENDING
         if receipt and "result" not in receipt:
@@ -138,13 +157,13 @@ look like an absent label or an empty set of comments.
         issue_input = "\n\n".join([
             *idea_parts, *(body for body in comments if not body.startswith(queue.SELF_COMMENT_PREFIX)),
         ])
-        drafting_labels = current.intersection((labels.ready, labels.spec_draft))
-        drafting_events = None
         if receipt and receipt["result"]["outcome"] != "drafted":
             # A label write may succeed even when its response is lost. A new
             # label application then starts a new round without an input edit
             # or a locally recorded `delivered` flag.
-            drafting_events = _label_events(repo.name, number, drafting_labels, runner=gh)
+            if selected_events is None:
+                selected_events = _latest_label_events(repo.name, number, drafting_labels, runner=gh)
+                drafting_events = {label: event["id"] for label, event in selected_events.items()}
             if (receipt.get("delivered") or issue_input != receipt.get("input", receipt["idea"])
                     or drafting_events != receipt.get("drafting_events", drafting_events)):
                 receipt = None
@@ -168,6 +187,10 @@ look like an absent label or an empty set of comments.
                 pr = None
             elif previous["state"] != "OPEN":
                 return None  # A merged change must not be drafted again.
+        # Receipts (including legacy ID-only records) and open PRs establish
+        # recoverable work, never trust. Recovery still bypasses blockers.
+        if (pr is not None or receipt) and not authorize():
+            return None
         if pr is not None:
             _deliver(repo, labels, number, change, None, current, pr=pr, runner=gh)
             return receipt
@@ -181,8 +204,10 @@ look like an absent label or an empty set of comments.
             log.info("#%s is blocked by %s — not drafting", number,
                      ", ".join(f"#{blocker}" for blocker in blocked))
             return None
-        if drafting_events is None:
-            drafting_events = _label_events(repo.name, number, drafting_labels, runner=gh)
+        # New rounds stay silent while blocked. Once eligible, authorize the
+        # same applications used for rearming before replacing any receipt.
+        if not authorize():
+            return None
         receipt = {"repo": repo.name, "issue": number, "change": change,
                    "title": raw["title"], "idea": idea, "input": issue_input,
                    "round_id": uuid.uuid4().hex, "drafting_events": drafting_events}
@@ -252,7 +277,11 @@ def admit_pending(
         if (not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*", change)
                 or ".." in change or change.endswith((".", ".lock"))):
             return None
-        approval_event = _approval_event(repo.name, number, labels.spec_approved, runner=gh)
+        events = _latest_label_events(repo.name, number, {labels.spec_approved}, runner=gh)
+        if not _authorize_label_events(repo.name, number, events, runner=gh, kind="pr"):
+            return None
+        # Bind the receipt and reviewed head to the same authorized application.
+        approval_event = events[labels.spec_approved]["id"]
         # Checked before the revise/needs-human skip, so an approval applied
         # alongside agent:revise records the head the human actually saw.
         if not _approval_covers_head(state_dir, repo, number, change, approval_event, pr, labels, gh):
@@ -363,12 +392,17 @@ def revise_pending(
         if (not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*", change)
                 or ".." in change or change.endswith((".", ".lock"))):
             return None
+        events = _latest_label_events(repo.name, number, {labels.revise}, runner=gh)
+        if not _authorize_label_events(repo.name, number, events, runner=gh, kind="pr"):
+            return None
+        # Authorization and receipt identity use the same current application.
+        # Even collecting a finished job must wait until its trigger is trusted.
+        event = events[labels.revise]["id"]
         directory = repo.name.replace("/", "__")
         path = state_dir / "revisions" / directory / f"{number}.json"
         receipt = json.loads(path.read_text()) if path.exists() else None
         if receipt and not _collect(path, receipt, receipt.get("command", "propose")):
             return _PENDING
-        event = _label_events(repo.name, number, {labels.revise}, runner=gh)[labels.revise]
         if receipt and (receipt["change"] != change or receipt["event"] != event
                         or "result" not in receipt
                         or (receipt.get("delivered")
@@ -613,18 +647,159 @@ def _approval_event(repo: str, number: int, label: str, *, runner) -> int:
 
 
 def _label_events(repo: str, number: int, labels: set[str], *, runner) -> dict[str, int]:
-    """Confirm the current label applications, including across paginated history."""
+    """Retain the ID-only receipt interface for current label applications."""
+    return {label: event["id"] for label, event in
+            _latest_label_events(repo, number, labels, runner=runner).items()}
+
+
+def _latest_label_events(repo: str, number: int, labels: set[str], *, runner) -> dict[str, dict]:
+    """Confirm current applications and retain their actor evidence.
+
+    GitHub returns events in chronological page order. Select the final event
+    before validating it, so an older application cannot authorize a newer one.
+    """
     pages = json.loads(runner([
         "api", f"repos/{repo}/issues/{number}/events", "--paginate", "--slurp",
     ]))
-    latest = {event["label"]["name"]: event for page in pages for event in page
-              if event.get("event") in ("labeled", "unlabeled")
-              and event.get("label", {}).get("name") in labels}
+    malformed = f"malformed label event history for #{number}; retry next poll"
+    if not isinstance(pages, list):
+        raise RuntimeError(malformed)
+    latest = {}
+    for page in pages:
+        if not isinstance(page, list):
+            raise RuntimeError(malformed)
+        for event in page:
+            if not isinstance(event, dict):
+                raise RuntimeError(malformed)
+            if event.get("event") not in ("labeled", "unlabeled"):
+                continue
+            label = event.get("label")
+            if not isinstance(label, dict) or not isinstance(label.get("name"), str):
+                raise RuntimeError(malformed)
+            if label["name"] in labels:
+                latest[label["name"]] = event
     for label in labels:
         event = latest.get(label, {})
-        if event.get("event") != "labeled" or not event.get("id"):
+        event_id = event.get("id")
+        if (event.get("event") != "labeled" or not isinstance(event_id, int)
+                or isinstance(event_id, bool) or event_id <= 0):
             raise RuntimeError(f"could not confirm {label} event for #{number}; retry next poll")
-    return {label: latest[label]["id"] for label in labels}
+    return latest
+
+
+def _valid_actor_login(login) -> bool:
+    # GitHub usernames, including enterprise managed users (alice_acme) and
+    # app bot logins. Never accept URL syntax, whitespace, or the placeholder
+    # GitHub uses for deleted accounts.
+    return (isinstance(login, str) and login.lower() != "ghost"
+            and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9]|[-_](?=[A-Za-z0-9])){0,38}(?:\[bot\])?",
+                             login) is not None)
+
+
+def _membership_status(endpoint: str, *, runner) -> int:
+    """Read a membership endpoint, preserving failures other than HTTP 404.
+
+    queue._gh returns stdout on success but puts only stderr in GhError on
+    failure. gh reports a negative membership check as `gh: ... (HTTP 404)`.
+    A missing status or an unexpected response must remain a lookup failure.
+    """
+    try:
+        response = runner(["api", endpoint, "--include"])
+    except queue.GhError as exc:
+        error = str(exc).rsplit(" failed: ", 1)[-1].strip()
+        if not exc.transient and re.search(r"(?:^HTTP 404:|\(HTTP 404\)$)", error):
+            return 404
+        raise
+    if isinstance(response, str):
+        response = response.replace("\r\n", "\n")
+        match = re.match(r"HTTP/(?:1\.[01]|2(?:\.0)?) (\d{3})(?: [^\n]*)?\n", response)
+        if match and "\n\n" in response:
+            status = int(match[1])
+            if status in (204, 404):
+                return status
+    raise RuntimeError(f"unconfirmed membership response from {endpoint}; retry next poll")
+
+
+def _label_actor_association(repo: str, event: dict, *, runner) -> str | None:
+    """Resolve only the label actor using current positive membership evidence."""
+    actor = event.get("actor")
+    login = actor.get("login") if isinstance(actor, dict) else None
+    if not _valid_actor_login(login):
+        return None
+
+    repository = json.loads(runner(["api", f"repos/{repo}"]))
+    owner = repository.get("owner") if isinstance(repository, dict) else None
+    if (not isinstance(owner, dict) or not _valid_actor_login(owner.get("login"))
+            or owner.get("type") not in ("User", "Organization")):
+        raise RuntimeError(f"unconfirmed repository owner for {repo}; retry next poll")
+
+    association = None
+    if owner["type"] == "User" and owner["login"].lower() == login.lower():
+        association = "OWNER"
+    elif _membership_status(f"repos/{repo}/collaborators/{quote(login, safe='')}", runner=runner) == 204:
+        association = "COLLABORATOR"
+    elif owner["type"] == "Organization" and _membership_status(
+            f"orgs/{quote(owner['login'], safe='')}/members/{quote(login, safe='')}", runner=runner) == 204:
+        association = "MEMBER"
+    return association if association in queue.TRUSTED_ASSOCIATIONS else None
+
+
+def _authorize_label_events(repo: str, number: int, events: dict[str, dict], *, runner,
+                            kind="issue") -> bool:
+    """Authorize every selected application, explaining each definitive denial.
+
+    Resolve all actors before writing: a failed lookup leaves the item on the
+    retry path, rather than partially explaining an unconfirmed decision.
+    Recheck membership on each poll; neither receipts nor comments grant trust.
+    """
+    rejected = [
+        (label, event) for label, event in events.items()
+        if _label_actor_association(repo, event, runner=runner) not in queue.TRUSTED_ASSOCIATIONS
+    ]
+    for label, event in rejected:
+        _comment_label_rejection(repo, number, label, event, runner=runner, kind=kind)
+    return not rejected
+
+
+def _comment_label_rejection(repo: str, number: int, label: str, event: dict, *, runner,
+                             kind="issue") -> None:
+    """Create one explanation per application, without editing it on later polls.
+
+    The draft namespace opts into queue._gh's ambiguous-create reconciliation.
+    Only that transport retry may PATCH an existing comment with the same body.
+    """
+    marker = f"<!-- nightshift:draft:label-authorization-{number}:{event['id']} -->"
+    pages = json.loads(runner([
+        "api", f"repos/{repo}/issues/{number}/comments", "--paginate", "--slurp",
+    ]))
+    malformed = f"malformed comment history for #{number}; retry next poll"
+    if not isinstance(pages, list):
+        raise RuntimeError(malformed)
+    bodies = []
+    for page in pages:
+        if not isinstance(page, list):
+            raise RuntimeError(malformed)
+        for comment in page:
+            if (not isinstance(comment, dict)
+                    or (comment.get("body") is not None and not isinstance(comment["body"], str))):
+                raise RuntimeError(malformed)
+            bodies.append(comment.get("body") or "")
+    if any(marker in body for body in bodies):
+        return
+
+    actor = event.get("actor")
+    login = actor.get("login") if isinstance(actor, dict) else None
+    identity = f"`{login}`" if _valid_actor_login(login) else "an unavailable actor identity"
+    body = (
+        f"{queue.SELF_COMMENT_PREFIX} Ignoring the `{label}` label applied by {identity}. "
+        "Only label actors with an OWNER, MEMBER, or COLLABORATOR relationship to this "
+        "repository may trigger this work.\n\n"
+        f"To retry, a trusted actor must remove and reapply `{label}`. "
+        "If both intake labels are present, remove the unauthorized alias or have a trusted "
+        "actor remove and reapply it; both remaining labels must be authorized.\n\n"
+        f"{marker}"
+    )
+    runner([kind, "comment", str(number), "--repo", repo, "--body", body])
 
 
 _save = specloop_job.save

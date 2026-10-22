@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from specloop import agents, cli, openspec, seal, state, tasks
+from specloop import agents, cli, critic, openspec, seal, state, tasks
 from specloop.state import Run
 
 
@@ -23,6 +23,7 @@ def git(repo, *args):
 
 @pytest.fixture
 def template(tmp_path, monkeypatch):
+    monkeypatch.setattr(critic, "open_pr_files", lambda github, branch: ({}, []))
     monkeypatch.setattr(state, "ROOT", tmp_path / "home")
     monkeypatch.setattr(cli, "load_env", lambda path: {})
     monkeypatch.setattr(seal, "credential_values", lambda secrets: [])
@@ -332,6 +333,8 @@ def test_propose_drafts_to_effective_branch(template, monkeypatch, capfd, argume
     def agent(call):
         if call.access == "read":
             assert f"openspec/changes/{change}/" in call.prompt
+            if call.prompt.startswith("# Spec critic of an OpenSpec change"):
+                return agents.Result("ok", {"contradictions": [], "risks": []})
             return agents.Result("ok", {"contradictions": [], "risks": [RISK]})
         task_file = call.cwd / "openspec" / "changes" / change / "tasks.md"
         task_file.parent.mkdir(parents=True, exist_ok=True)

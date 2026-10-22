@@ -99,6 +99,7 @@ def test_worker_repository_still_claims_ready_issue(isolated, monkeypatch, engin
     assert queue.claim_path("owner/worker", 7).is_file()
     assert any("--add-label" in edit and "agent:working" in edit
                and "--remove-label" in edit and "agent:ready" in edit for edit in gh.edits())
+    assert not any(call[0] == "api" for call in gh.calls)
 
 
 class DraftGh:
@@ -109,10 +110,10 @@ class DraftGh:
             self.label_event(label, "labeled")
         self.calls = []
         self.prs = []
-        self.comments = [{"id": 1, "body": "Keep it small."}]
+        self.comments = [{"id": 1, "body": "Keep it small.", "authorAssociation": "COLLABORATOR"}]
         self.pr_url = "https://github.com/owner/sample/pull/8"
 
-    def label_event(self, label, event):
+    def label_event(self, label, event, actor="maintainer"):
         if event == "labeled":
             if label in self.labels:
                 return
@@ -121,10 +122,19 @@ class DraftGh:
             if label not in self.labels:
                 return
             self.labels.remove(label)
-        self.events.append({"id": len(self.events) + 1, "event": event, "label": {"name": label}})
+        self.events.append({"id": len(self.events) + 1, "event": event, "label": {"name": label},
+                            "actor": {"login": actor}})
 
     def __call__(self, args):
         self.calls.append(args)
+        if args == ["api", "repos/owner/sample"]:
+            return json.dumps({"owner": {"login": "owner", "type": "User"}})
+        if args[:2] == ["api", "repos/owner/sample/issues/7"]:
+            return json.dumps({"author_association": "OWNER"})
+        if args[0] == "api" and args[1].startswith("repos/owner/sample/collaborators/"):
+            assert args[2:] == ["--include"]
+            status = 204 if args[1].rsplit("/", 1)[1] == "maintainer" else 404
+            return f"HTTP/2.0 {status} Status\r\n\r\n"
         if args[:2] == ["issue", "list"]:
             armed = args[args.index("--label") + 1] in self.labels
             return json.dumps([{"number": 7, "title": "Add a gate", "body": "Please draft it."}] if armed else [])
@@ -171,6 +181,7 @@ class DraftGh:
 
 
 @pytest.mark.scenario("issue-intake/engine-per-repository/specloop-repository-skips-worker-claims")
+@pytest.mark.real_trust
 @pytest.mark.parametrize("labels", [("agent:ready",), ("spec:draft",), ("agent:ready", "spec:draft")])
 def test_specloop_repository_drafts_without_worker_claims(isolated, monkeypatch, manifest, labels):
     cfg = Config(repos=[Repo("owner/sample", engine="specloop", manifest=manifest)])

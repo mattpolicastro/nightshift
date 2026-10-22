@@ -38,9 +38,12 @@ class Pipeline:
     def gh(self, args):
         self.calls.append(args)
         if args[0] == "api":
+            if args == ["api", f"repos/{self.repo.name}"]:
+                return json.dumps({"owner": {"login": "owner", "type": "User"}})
             parts = args[1].split("/")
             if parts[-1] == "events":
-                return json.dumps([[{"id": 1, "event": "labeled", "label": {"name": label}}
+                return json.dumps([[{"id": 1, "event": "labeled", "label": {"name": label},
+                                     "actor": {"login": "owner"}}
                                     for label in ("spec:draft", "spec:approved")]])
             if parts[-1] == "comments":
                 number = int(parts[-2])
