@@ -6,6 +6,8 @@ fatal. The run only stops at a defined pause, and every pause says why.
 """
 
 import json
+import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -43,6 +45,49 @@ class Ctx:
         self.notify(messages.for_pause(self.m.change, reason, label=task.label if task else "", key=key,
                                        detail=detail, attempts=ts.attempts if ts else 0, done=done,
                                        pr=self.run.state.pr, resume_at=resume_at))
+
+
+def _fetch_publish_base(ctx: Ctx, remote: str | None = None, *, timeout: float) -> str:
+    """Fetch the source origin's base, never falling back to a previous fetch.
+
+    Publish can supply its already validated origin URL; driver preparation
+    resolves it here without requiring a GitHub target. Callers own pause/retry
+    policy. Only the run repository is written, and transport keeps the user's
+    credential-helper configuration (unlike seal.git).
+    """
+    requested = f"refs/heads/{ctx.m.pr_base}"
+    destination = "refs/specloop/publish-base"
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        if remote is None:
+            remote = subprocess.run(
+                ["git", "-C", str(ctx.m.repo), "remote", "get-url", "origin"],
+                capture_output=True, text=True, check=True, timeout=timeout, env=env,
+            ).stdout.strip()
+        if not remote:
+            raise RuntimeError("source clone has no origin URL")
+        # Git's URL schemes and scp-style host:path syntax are not local paths.
+        # Relative filesystem origins are relative to the source, not repo.git.
+        if not re.match(r"^[^/]+:", remote):
+            remote = str((ctx.m.repo / remote).resolve())
+        subprocess.run(
+            ["git", *seal.SAFE_FLAGS, "-C", str(ctx.repo), "fetch", "--no-tags",
+             "--no-recurse-submodules", "--", remote, f"+{requested}:{destination}"],
+            capture_output=True, text=True, check=True, timeout=timeout, env=env,
+        )
+        return git(ctx.repo, "rev-parse", "--verify", f"{destination}^{{commit}}").decode().strip()
+    except subprocess.TimeoutExpired as exc:
+        diagnostic = exc.stderr or exc.stdout or ""
+        if isinstance(diagnostic, bytes):
+            diagnostic = diagnostic.decode(errors="replace")
+        raise RuntimeError(f"fetch {requested} from source origin timed out after {timeout:g}s: "
+                           f"{diagnostic.strip()[:400]}") from exc
+    except (subprocess.CalledProcessError, OSError, RuntimeError) as exc:
+        diagnostic = (exc.stderr or exc.stdout or f"git exited {exc.returncode}") \
+            if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        if isinstance(diagnostic, bytes):
+            diagnostic = diagnostic.decode(errors="replace")
+        raise RuntimeError(f"fetch {requested} from source origin failed: {diagnostic.strip()[:400]}") from exc
 
 
 def run(ctx: Ctx) -> str:
