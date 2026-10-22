@@ -183,6 +183,7 @@ def section_evidence(ctx: Ctx, n: int, head: str, all_tasks: list[tasks.Task]) -
     ev = evidence.gather(ctx.repo, st.section_base.get(str(n), ""), head, cited, seen, m, out, n)
     summary = ev.summary()
     ctx.run.event("evidence", section=n, passed=ev.passed(m.mutation_min), score=ev.score,
+                  timeouts=sum(x.result == "timeout" for x in ev.mutants),
                   uncovered=ev.uncovered, survived=[f"{x.path}:{x.line}" for x in ev.mutants if x.result == "survived"])
     if ok and ev.passed(m.mutation_min):
         st.evidenced.append(n)
