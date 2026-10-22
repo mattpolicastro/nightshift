@@ -30,7 +30,8 @@ def tick(stage, state, *, module=intake, background=False, **kwargs):
     return module.revise_pending(repo, queue.Labels(), state,
                                  runner=kwargs.pop("runner", gh), git_runner=commands,
                                  status_runner=commands,
-                                 specloop_runner=None if background else commands, **kwargs)
+                                 specloop_runner=kwargs.pop(
+                                     "specloop_runner", None if background else commands), **kwargs)
 
 
 def dispatches(commands):
@@ -47,8 +48,12 @@ def later_feedback(gh):
 
 
 @pytest.mark.scenario("pr-revision/durable-round-snapshot/snapshot-is-fixed-before-dispatch")
+@pytest.mark.scenario("pr-revision/durable-round-snapshot/new-label-preserves-completed-round")
+@pytest.mark.parametrize("replace_event", [False, True])
 @pytest.mark.parametrize("save_failure", [None, "result", "acknowledgement"])
-def test_background_reader_retains_snapshot_across_restart(stage_setup, tmp_path, monkeypatch, save_failure):
+def test_background_reader_retains_snapshot_across_restart(
+    stage_setup, tmp_path, monkeypatch, save_failure, replace_event,
+):
     _, gh, commands = stage_setup
     consumed = read(tmp_path)["consumed_feedback_ids"]
     jobs = []
@@ -67,6 +72,9 @@ def test_background_reader_retains_snapshot_across_restart(stage_setup, tmp_path
     tick(stage_setup, tmp_path, background=True, launcher=launch)
     saved = read(tmp_path)
     later_feedback(gh)
+    if replace_event:
+        gh.label_event("agent:revise", "unlabeled")
+        gh.label_event("agent:revise", "labeled")
     module = restart()
     try:
         for _ in range(2):
@@ -102,10 +110,87 @@ def test_background_reader_retains_snapshot_across_restart(stage_setup, tmp_path
     assert len(jobs) == 1 and not dispatches(commands)
     assert fixed(read(tmp_path)) == fixed(saved)
     assert read(tmp_path)["consumed_feedback_ids"] == sorted([*consumed, "conversation:102"])
-    gh.label_event("agent:revise", "labeled")
+    assert ("agent:revise" in gh.labels) == replace_event
+    assert len(gh.comments) == 1
+    assert gh.comments[0]["body"].endswith(
+        f"<!-- nightshift:revise:{saved['change']}:{saved['round_id']} -->")
+    if not replace_event:
+        gh.label_event("agent:revise", "labeled")
     commands.fetch_head = gh.head
     tick(stage_setup, tmp_path, module=module)
     assert read(tmp_path)["feedback_ids"] == ["conversation:104"]
+    assert read(tmp_path)["feedback"] == ["**reviewer:**\n\nLater feedback"]
+    assert len(dispatches(commands)) == 1
+
+
+@pytest.mark.scenario("pr-revision/durable-round-snapshot/new-label-preserves-completed-round")
+@pytest.mark.scenario("pr-revision/consumption-based-eligibility/relabel-does-not-requeue-consumed-feedback")
+@pytest.mark.parametrize("replacement", ["execution", "notification", "recovery"])
+def test_new_application_finishes_original_round_before_remaining_ids(stage_setup, tmp_path, replacement):
+    _, gh, commands = stage_setup
+    initial_head = gh.head
+    saved = None
+
+    def reapply():
+        nonlocal saved
+        saved = read(tmp_path)
+        later_feedback(gh)
+        gh.label_event("agent:revise", "unlabeled")
+        gh.label_event("agent:revise", "labeled")
+
+    def run(args, **kwargs):
+        if replacement == "execution" and args[:2] in (
+                ["specloop", "propose"], ["specloop", "revise"]):
+            reapply()
+        return commands(args, **kwargs)
+
+    def github(args):
+        response = gh(args)
+        if args[:2] == ["pr", "comment"]:
+            if replacement == "notification":
+                reapply()  # After intake's event read, immediately before removal.
+            elif replacement == "recovery":
+                raise RuntimeError("comment response lost")
+        return response
+
+    if replacement == "recovery":
+        with pytest.raises(RuntimeError, match="comment response lost"):
+            tick(stage_setup, tmp_path, runner=github, specloop_runner=run)
+        reapply()
+        tick(stage_setup, tmp_path, module=restart())
+    else:
+        tick(stage_setup, tmp_path, runner=github, specloop_runner=run)
+    completed = read(tmp_path)
+    assert completed["delivered"] and fixed(completed) == fixed(saved)
+    assert completed["consumed_feedback_ids"] == sorted(
+        {*saved["consumed_feedback_ids"], "conversation:102"})
+    assert len(dispatches(commands)) == len(gh.comments) == 1
+    original_comment = gh.comments[0].copy()
+    assert original_comment["body"].endswith(
+        f"<!-- nightshift:revise:{saved['change']}:{saved['round_id']} -->")
+    assert "agent:revise" in gh.labels
+    newer_event = gh.events[-1]["id"]
+    assert newer_event != saved["event"]
+    if commands.result["outcome"] == "revised":
+        assert gh.head == initial_head  # Build publication has not happened.
+
+    commands.fetch_head = gh.head
+    tick(stage_setup, tmp_path, module=restart())  # Use the retained application.
+    remaining = read(tmp_path)
+    assert remaining["event"] == newer_event and remaining["round_id"] == str(newer_event)
+    assert remaining["feedback_ids"] == ["conversation:104"]
+    assert remaining["feedback"] == ["**reviewer:**\n\nLater feedback"]
+    assert remaining["consumed_feedback_ids"] == sorted(
+        [*completed["consumed_feedback_ids"], "conversation:104"])
+    assert remaining["delivered"] and "agent:revise" not in gh.labels
+    assert len(dispatches(commands)) == len(gh.comments) == 2
+    assert gh.comments[0] == original_comment
+    for _ in range(2):
+        gh.label_event("agent:revise", "labeled")
+        assert tick(stage_setup, tmp_path, module=restart()) == [{"outcome": "empty"}]
+        assert read(tmp_path)["consumed_feedback_ids"] == remaining["consumed_feedback_ids"]
+        assert "agent:revise" not in gh.labels
+    assert len(dispatches(commands)) == 2
 
 
 @pytest.mark.scenario("pr-revision/durable-round-snapshot/completion-delivery-retries-preserve-consumption")

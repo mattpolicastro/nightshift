@@ -525,9 +525,12 @@ def revise_pending(
         receipt = json.loads(path.read_text()) if path.exists() else None
         receipt = _initialize_revision_feedback(
             path, receipt, repo.name, number, pr["headRefOid"], runner=gh)
+        # A newer authorized event cannot replace a running job's snapshot.
         if receipt and not _collect(path, receipt, receipt.get("command", "propose")):
             return _PENDING
         previous = receipt
+        # Finish successful work under its original event and marker first;
+        # the newer application selects remaining IDs on a later poll.
         awaiting_success = (receipt and not receipt.get("delivered")
                             and receipt.get("result", {}).get("outcome") in ("drafted", "revised"))
         if receipt and not awaiting_success and (
@@ -638,6 +641,7 @@ def revise_pending(
                  round_id=receipt.get("round_id"))
         edit = ["pr", "edit", str(number), "--repo", repo.name]
         if result["outcome"] in ("drafted", "revised", "empty"):
+            # Execution or comment delivery may have outlived the application.
             latest = _latest_label_events(repo.name, number, {labels.revise}, runner=gh)
             if latest.get(labels.revise, {}).get("id") == receipt["event"]:
                 edit += ["--remove-label", labels.revise]
