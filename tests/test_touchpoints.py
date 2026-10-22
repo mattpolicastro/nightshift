@@ -1,10 +1,12 @@
 import json
+import os
 from contextlib import contextmanager
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
 
-from nightshift.touchpoints import collect_events, collect_history, collect_intake
+from nightshift.touchpoints import collect_events, collect_history, collect_intake, collect_report
 
 
 def put(root, relative, data):
@@ -569,3 +571,178 @@ def test_broken_history_invalidates_infra_allowance_but_manual_resolution_counts
     assert any(f"{path}:5;" in warning for warning in uncertain)
     assert any(f"{path}:16;" in warning for warning in uncertain)
     assert any("Unpaired manual resume; reason unknown" in warning for warning in row["warnings"])
+
+
+def dated_put(root, relative, data, timestamp):
+    path = put(root, relative, data)
+    stamp = datetime.fromisoformat(timestamp).timestamp()
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+@pytest.mark.scenario("touchpoint-report/draft-date-selection/inclusive-cutoff-selects-whole-changes")
+def test_since_uses_earliest_proposal_request_and_keeps_whole_history(tmp_path):
+    times = ["2026-10-20T23:59:59+00:00", "2026-10-21T00:00:00+00:00", "2026-10-21T00:00:01+00:00"]
+    for issue, timestamp in enumerate(times, 1):
+        change = f"r-issue-{issue}-feature"
+        # Lexical job order and current receipt dates must not select the latest attempt.
+        for job, stamp, outcome in (("z-first", timestamp, "needs_input"),
+                                     ("a-latest", "2026-10-25T00:00:00+00:00", "drafted")):
+            base = f"proposals/o__r/{issue}.jobs/{job}"
+            dated_put(tmp_path, f"{base}/request.json",
+                      dict(args=["propose", "manifest", "--change", change]), stamp)
+            put(tmp_path, f"{base}/result.json", dict(result=dict(outcome=outcome)))
+        dated_put(tmp_path, f"proposals/o__r/{issue}.json",
+                  dict(change=change, job="a-latest", result=dict(outcome="drafted")),
+                  "2026-10-26T00:00:00+00:00")
+        dated_put(tmp_path, f"revisions/o__r/{issue + 20}.json",
+                  dict(change=change, command="propose", result=dict(outcome="needs_input")),
+                  "2026-10-27T00:00:00+00:00")
+        path = put(tmp_path, f"runs/{change}/events.jsonl", dict(event="human_accept", at=1))
+        # Errors belonging to excluded changes remain visible.
+        if issue == 1:
+            path.write_text(path.read_text() + '\n{"event":')
+    report = collect_report(tmp_path, tmp_path / "runs", since=date(2026, 10, 21))
+    assert report["since"] == "2026-10-21"
+    assert [row["issue"] for row in report["changes"]] == [2, 3]
+    assert [row["drafted_at"] for row in report["changes"]] == times[1:]
+    for row in report["changes"]:
+        assert row["drafted_at_source"] == "request_mtime"
+        assert any("approximate" in warning and "request_mtime" in warning for warning in row["warnings"])
+        assert row["counts"]["drafter_questions"] == 2
+        assert row["counts"]["spec_revisions"] == row["counts"]["human_accepts"] == 1
+        assert row["counts"]["total"] == 4
+    assert report["totals"]["changes"] == 2 and report["totals"]["total"] == 8
+    error, = report["errors"]
+    assert error["path"].endswith("r-issue-1-feature/events.jsonl") and error["line"] == 2
+    unfiltered = collect_report(tmp_path, tmp_path / "runs")
+    assert unfiltered["totals"]["total"] == 12
+    assert unfiltered["changes"][0]["drafted_at"] == times[0]
+
+
+@pytest.mark.scenario("touchpoint-report/draft-date-selection/inclusive-cutoff-selects-whole-changes")
+@pytest.mark.parametrize("bad_result", [[], False, "invalid", {"outcome": "invalid"}])
+@pytest.mark.parametrize("has_receipt", [False, True])
+def test_malformed_result_preserves_initial_draft_attempt(tmp_path, bad_result, has_receipt):
+    change = "r-issue-8-feature"
+    dated_put(tmp_path, "proposals/o__r/8.jobs/first/request.json",
+              dict(args=["propose", "manifest", "--change", change]),
+              "2026-10-20T00:00:00+00:00")
+    result_path = put(tmp_path, "proposals/o__r/8.jobs/first/result.json",
+                      dict(result=bad_result))
+    if has_receipt:
+        dated_put(tmp_path, "proposals/o__r/8.json",
+                  dict(change=change, result=dict(outcome="needs_input")),
+                  "2026-10-22T00:00:00+00:00")
+    report = collect_report(tmp_path, tmp_path / "runs")
+    row, = report["changes"]
+    assert row["drafted_at"] == "2026-10-20T00:00:00+00:00"
+    assert row["drafted_at_source"] == "request_mtime"
+    assert row["counts"]["total"] == row["counts"]["drafter_questions"] == int(has_receipt)
+    error, = report["errors"]
+    assert error["path"] == str(result_path) and error["line"] is None
+    assert error["message"].startswith("ValueError:")
+    filtered = collect_report(tmp_path, tmp_path / "runs", since=date(2026, 10, 21))
+    assert filtered["changes"] == []
+    assert filtered["totals"]["changes"] == filtered["totals"]["total"] == 0
+    assert filtered["errors"] == report["errors"]
+
+
+@pytest.mark.scenario("touchpoint-report/draft-date-selection/approximate-missing-and-invalid-dates")
+def test_receipt_date_estimate_and_unknown_date_filtering(tmp_path):
+    # Argument rejection belongs to the command tests in task 3.2.
+    dated_put(tmp_path, "proposals/o__r/8.json",
+              dict(change="r-issue-8-feature", result=dict(outcome="needs_input")),
+              "2026-10-20T19:00:00-05:00")
+    missing = dated_put(tmp_path, "admissions/o__r/29.json",
+                        dict(change="r-issue-9-feature", result=dict(outcome="refused")),
+                        "2026-10-30T00:00:00+00:00")
+    put(tmp_path, "runs/r-issue-9-feature/events.jsonl", dict(event="human_accept", at=2_000_000_000))
+    report = collect_report(tmp_path, tmp_path / "runs")
+    estimated, unknown = report["changes"]
+    assert estimated["drafted_at"] == "2026-10-21T00:00:00+00:00"
+    assert estimated["drafted_at_source"] == "receipt_mtime"
+    assert any("approximate" in warning and "receipt_mtime" in warning for warning in estimated["warnings"])
+    assert unknown["drafted_at"] is unknown["drafted_at_source"] is None
+    assert any("draft date unknown" in warning.lower() for warning in unknown["warnings"])
+    assert not report["errors"] and report["totals"]["total"] == 3
+    filtered = collect_report(tmp_path, tmp_path / "runs", since=date(2026, 10, 21))
+    assert filtered["changes"] == [estimated]
+    assert filtered["totals"]["changes"] == filtered["totals"]["total"] == 1
+    error, = filtered["errors"]
+    assert error["path"] == str(missing) and error["line"] is None
+    assert all(text in error["message"] for text in ("--since", "draft date unknown", "excluded"))
+
+
+@pytest.mark.parametrize("outcome", [None, "needs_input"])
+def test_draft_attempt_date_survives_without_success_or_current_receipt(tmp_path, outcome):
+    intake_job(tmp_path, "proposals", "first", "propose", outcome)
+    request = tmp_path / "proposals/o__r/8.jobs/first/request.json"
+    os.utime(request, (0, 0))
+    report = collect_report(tmp_path, tmp_path / "runs", since=date(1970, 1, 1))
+    row, = report["changes"]
+    assert row["drafted_at"] == "1970-01-01T00:00:00+00:00"
+    assert row["drafted_at_source"] == "request_mtime"
+    assert row["counts"]["total"] == (outcome == "needs_input")
+    assert not report["errors"]
+
+
+@pytest.mark.scenario("touchpoint-report/versioned-report-output/table-and-json-agree")
+@pytest.mark.scenario("touchpoint-report/versioned-report-output/observed-history-does-not-claim-merge")
+def test_touchpoints_json_document(tmp_path):
+    # The document is shared by both renderers; command assertions follow in task 3.2.
+    fixtures = [("z/r", 8, "aborted"), ("a/r", 10, "active"), ("a/r", 2, "finished")]
+    for repo, issue, state in fixtures:
+        change = f"r-issue-{issue}-{state}"
+        dated_put(tmp_path, f"proposals/{repo.replace('/', '__')}/{issue}.json",
+                  dict(change=change, result=dict(outcome="needs_input")), "2026-10-21T00:00:00+00:00")
+        events = [dict(event=state, at=1)]
+        if state == "finished":
+            put(tmp_path, "revisions/a__r/22.json",
+                dict(change=change, command="propose", result=dict(outcome="needs_input")))
+            events += [dict(event="human_accept", at=2), dict(event="revised", at=3, commit="post-finish")]
+        else:
+            for reason in (["zebra", "alpha"] if state == "active" else ["zebra"]):
+                events += [dict(event="pause", reason=reason, at=2), dict(event="resumed", at=3)]
+        path = put(tmp_path, f"runs/{change}/events.jsonl", {})
+        path.write_text("".join(json.dumps(event) + "\n" for event in events))
+    report = collect_report(tmp_path, tmp_path / "runs")
+    encoded = json.dumps(report)
+    assert encoded == json.dumps(collect_report(tmp_path, tmp_path / "runs"))
+    assert json.loads(encoded) == report
+    assert set(report) == {"version", "since", "coverage", "merge_boundary", "limitations", "changes", "totals", "errors"}
+    assert type(report["version"]) is int and report["version"] == 1
+    assert report["since"] is None and not report["errors"]
+    assert report["coverage"] == "observed_local_history" and report["merge_boundary"] == "unknown"
+    limits = " ".join(report["limitations"])
+    assert all(term in limits for term in ("approximate", "overwritten or removed", "merge time is unavailable",
+                                          "sum of category observations", "both categories"))
+    assert [(row["repo"], row["issue"]) for row in report["changes"]] == [("a/r", 2), ("a/r", 10), ("z/r", 8)]
+    scalar = ("drafter_questions", "spec_revisions", "build_revisions", "human_pauses",
+              "manual_resumes", "human_accepts", "admission_refusals")
+    expected = [(2, 1, 1, 0, 0, 1, 0), (1, 0, 0, 2, 2, 0, 0), (1, 0, 0, 1, 1, 0, 0)]
+    for row, values in zip(report["changes"], expected):
+        assert set(row) == {"repo", "issue", "change", "drafted_at", "drafted_at_source", "counts", "warnings"}
+        assert set(row["counts"]) == {*scalar, "total", "pauses_by_reason", "resumes_by_reason"}
+        assert tuple(row["counts"][field] for field in scalar) == values
+        assert row["counts"]["total"] == sum(values)
+        assert row["drafted_at"] == "2026-10-21T00:00:00+00:00" and row["warnings"]
+    totals = report["totals"]
+    assert set(totals) == {"changes", *report["changes"][0]["counts"]}
+    assert totals["changes"] == 3 and totals["total"] == 13
+    assert tuple(totals[field] for field in scalar) == (4, 1, 1, 3, 3, 1, 0)
+    assert totals["pauses_by_reason"] == totals["resumes_by_reason"] == {"alpha": 1, "zebra": 2}
+    for counts in [totals, *(row["counts"] for row in report["changes"])]:
+        assert all(type(counts[field]) is int for field in (*scalar, "total"))
+        for field, counter in (("pauses_by_reason", "human_pauses"), ("resumes_by_reason", "manual_resumes")):
+            assert list(counts[field]) == sorted(counts[field])
+            assert sum(counts[field].values()) == counts[counter]
+
+
+def test_empty_report_has_all_zero_totals(tmp_path):
+    report = collect_report(tmp_path / "absent", tmp_path / "runs")
+    assert not report["changes"] and not report["errors"]
+    assert report["totals"] == dict(changes=0, drafter_questions=0, spec_revisions=0, build_revisions=0,
+                                     human_pauses=0, manual_resumes=0, human_accepts=0, admission_refusals=0,
+                                     pauses_by_reason={}, resumes_by_reason={}, total=0)
+    assert not list(tmp_path.iterdir())

@@ -6,6 +6,7 @@ import json
 import math
 import re
 import stat
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 
 
@@ -99,7 +100,9 @@ class _Reader:
                 raise ValueError("issue must be a positive integer")
             if kind == "proposals" and issue != number:
                 raise ValueError("issue conflicts with proposal filename")
-            if result is not None and not isinstance(result, dict):
+            # A valid request establishes a draft attempt even if its result is
+            # malformed. Validate retained results during counting instead.
+            if job is None and result is not None and not isinstance(result, dict):
                 raise ValueError("result must be an object")
             return dict(path=path, kind=kind, repo=repo, number=number, issue=issue,
                         change=change, command=command, head=head, result=result,
@@ -208,6 +211,8 @@ def _intake_counts(row, reader):
                 if not linked:
                     row["warnings"].append(f"Pending intake request: {record['path']}")
                 continue
+            if not isinstance(result, dict):
+                raise ValueError("result must be an object")
             outcomes = {"propose": ("drafted", "needs_input", "rejected"),
                         "admit": ("admitted", "refused"), "revise": ("revised", "refused")}
             outcome = result.get("outcome")
@@ -374,7 +379,7 @@ def _event_counts(row, reader):
                             auto_resumes[task] = auto_resumes.get(task, 0) + 1
                     resolve(kind)
     except FileNotFoundError as exc:
-        if any(record["kind"] == "admissions" and record["result"] is not None and
+        if any(record["kind"] == "admissions" and isinstance(record["result"], dict) and
                record["result"].get("outcome") == "admitted" for record in row["records"]):
             reader.error(path, exc)
     except OSError as exc:
@@ -395,3 +400,67 @@ def collect_events(nightshift_root: Path, runs_root: Path) -> dict:
     history["errors"] = sorted(history["errors"] + reader.errors,
                                key=lambda error: (error["path"], error["line"] or 0, error["message"]))
     return history
+
+
+def collect_report(nightshift_root: Path, runs_root: Path, *, since: date | None = None) -> dict:
+    """Select whole changes by estimated initial draft time and return a JSON document.
+
+    Events are never cut off at a lifecycle marker or filtered by event date.
+    Keep errors from all discovered history, even when its row is excluded.
+    """
+    cutoff = datetime.combine(since, time.min, tzinfo=timezone.utc) if since is not None else None
+    history = collect_events(nightshift_root, runs_root)
+    reader, changes = _Reader(), []
+    reason_fields = ("pauses_by_reason", "resumes_by_reason")
+    totals = dict(changes=0, **dict.fromkeys((*_SCALAR_COUNTS, "total"), 0))
+    totals.update({field: {} for field in reason_fields})
+    for row in history["changes"]:
+        proposals = [record for record in row["records"] if record["kind"] == "proposals"]
+        requests = [record for record in proposals if record["retained"]]
+        candidates = requests or proposals
+        drafted_at, source = None, None
+        warnings = list(row["warnings"])
+        if candidates:
+            earliest = min(candidates, key=lambda record: record["mtime"])
+            try:
+                drafted_at = datetime.fromtimestamp(earliest["mtime"], timezone.utc)
+                source = "request_mtime" if requests else "receipt_mtime"
+                warnings.append(f"Draft date is approximate; using earliest proposal {source}: {earliest['path']}")
+            except (OSError, OverflowError, ValueError) as exc:
+                reader.error(earliest["path"], exc)
+        if drafted_at is None:
+            warnings.append("Draft date unknown; no usable proposal timestamp is available.")
+            if cutoff is not None:
+                reader.error(row["records"][0]["path"], ValueError(
+                    f"Cannot apply --since {since.isoformat()} to {row['change']}: draft date unknown; change excluded"))
+                continue
+        elif cutoff is not None and drafted_at < cutoff:
+            continue
+        counts = dict(row["counts"])
+        counts["total"] = sum(counts[field] for field in _SCALAR_COUNTS)
+        for field in reason_fields:
+            counts[field] = dict(sorted(counts[field].items()))
+            for reason, count in counts[field].items():
+                totals[field][reason] = totals[field].get(reason, 0) + count
+        for field in (*_SCALAR_COUNTS, "total"):
+            totals[field] += counts[field]
+        changes.append(dict(repo=row["repo"], issue=row["issue"], change=row["change"],
+                            drafted_at=drafted_at.isoformat() if drafted_at is not None else None,
+                            drafted_at_source=source, counts=counts, warnings=sorted(warnings)))
+    totals["changes"] = len(changes)
+    for field in reason_fields:
+        totals[field] = dict(sorted(totals[field].items()))
+    return dict(
+        version=1, since=since.isoformat() if since is not None else None,
+        coverage="observed_local_history", merge_boundary="unknown",
+        limitations=[
+            "Draft dates use approximate filesystem timestamps; counts may be lower bounds when "
+            "retained local history was overwritten or removed; actual merge time is unavailable.",
+            "Total is the sum of category observations, not unique interventions: a question during "
+            "spec revision counts in both categories, and a pause and its resume count separately.",
+        ],
+        changes=sorted(changes, key=lambda row: (row["repo"], row["issue"], row["change"])),
+        totals=totals,
+        errors=sorted(history["errors"] + reader.errors,
+                      key=lambda error: (error["path"], error["line"] or 0, error["message"])),
+    )
