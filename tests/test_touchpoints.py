@@ -1,4 +1,5 @@
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -376,6 +377,40 @@ def test_bad_event_preserves_siblings_without_stale_reason(tmp_path, bad):
     assert row["counts"]["resumes_by_reason"] == dict(unknown=1)
     assert len(history["errors"]) == 1
     assert history["errors"][0]["path"] == str(path) and history["errors"][0]["line"] == 2
+
+
+@pytest.mark.scenario("touchpoint-report/partial-failure-isolation/unreadable-records-are-not-fatal")
+def test_file_error_sorts_before_first_line_error_and_preserves_read_events(tmp_path, monkeypatch):
+    intake_job(tmp_path, "proposals", "draft", "propose", "drafted")
+    path = event_log(tmp_path, [dict(event="human_accept")])
+    path.write_bytes(b'{"event":\n' + path.read_bytes())
+    original_open = Path.open
+
+    @contextmanager
+    def interrupted_read():
+        with original_open(path, "rb") as stream:
+            def lines():
+                yield from stream
+                raise OSError("fixture event log read interrupted")
+
+            yield lines()
+
+    def guarded_open(source, *args, **kwargs):
+        if source == path:
+            return interrupted_read()
+        return original_open(source, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    history = collect_events(tmp_path, tmp_path / "runs")
+    row, = history["changes"]
+    assert row["counts"]["human_accepts"] == row["counts"]["total"] == 1
+    file_error, line_error = history["errors"]
+    assert file_error == dict(path=str(path), line=None,
+                              message="OSError: fixture event log read interrupted")
+    assert line_error["path"] == str(path) and line_error["line"] == 1
+    assert line_error["message"].startswith("JSONDecodeError:")
+    # File-level errors precede line 1 even when message order would reverse them.
+    assert line_error["message"] < file_error["message"]
 
 
 def test_identical_events_are_distinct_and_unknown_events_do_not_clear_pause(tmp_path):

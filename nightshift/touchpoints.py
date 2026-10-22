@@ -308,6 +308,7 @@ def _event_counts(row, reader):
         elif not recovery_certain:
             uncertainty = "broken event history; recovery allowance is uncertain"
         elif reason == "infra":
+            # mutation-equivalent: For absent keys, 0 and 1 are both < 2; existing counts are unchanged.
             human = auto_resumes.get(task, 0) >= 2
         elif reason != "usage_limit":
             uncertainty = "unknown scheduling policy"
@@ -323,6 +324,7 @@ def _event_counts(row, reader):
         if not isinstance(event, dict) or not isinstance(event.get("event"), str):
             raise ValueError("event must be an object with a string event kind")
         for field in ("at", "resume_at"):
+            # mutation-equivalent: Defaults 0 and 1 both pass numeric validation; neither is stored in event.
             value = event.get(field, 0) if field == "resume_at" else event.get(field)
             if type(value) not in (int, float) or not math.isfinite(value):
                 raise ValueError(f"event {field} must be a finite number")
