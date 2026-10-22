@@ -1,21 +1,8 @@
 ## Purpose
 
-Make proposal outcomes, runtime scenario references, and argument errors accurately describe specloop behavior while preserving its existing version-1 contracts.
+Make runtime scenario references and argument errors accurately describe specloop behavior while preserving its existing version-1 contracts.
 
 ## ADDED Requirements
-
-### Requirement: Actual proposal ref
-
-A successful `specloop propose --json` SHALL report in `branch` the ref returned by local proposal publication, retaining short names for ordinary branches and full names for private refs. That ref SHALL resolve to the reported `commit`.
-
-#### Scenario: Checked out branch fallback
-- **WHEN** a proposal's destination branch is checked out in the source repository or a linked worktree
-- **THEN** the successful document reports `refs/specloop/proposals/<change>` and its retained commit
-- **THEN** the checked-out branch, HEAD, index, staged and unstaged edits, and untracked files remain unchanged
-
-#### Scenario: Ordinary and custom branches
-- **WHEN** a proposal is published to a destination branch that is not checked out, using either the default or an explicit branch override
-- **THEN** its successful document reports that actual short branch name and the commit to which it resolves
 
 ### Requirement: Known runtime scenario references
 

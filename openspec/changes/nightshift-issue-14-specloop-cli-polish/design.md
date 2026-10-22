@@ -1,7 +1,5 @@
 ## Context
 
-`specloop.cli.propose` initially places the effective manifest branch in the outcome document. `specloop.propose.publish_branch` already returns either the short branch name or `refs/specloop/proposals/<change>` when a source worktree has that branch checked out, but the CLI does not copy that result into JSON.
-
 `specloop.tasks.Task.scenarios` extracts any backticked three-component slug. Revision feedback is preserved verbatim inside generated task text, so an ordinary path such as `a/b/c` becomes a candidate scenario. `loop.section_evidence` currently sends those candidates straight to `evidence.gather`; missing coverage then creates tasks for nonexistent scenarios. Implementation and gate-review context also display these candidates as unknown scenarios.
 
 Both `loop._implement_prompt` and `feasibility.check` enumerate only `m.verify`, although the harness executes `m.prepare` first. `cli.main` calls `parse_args` before entering its JSON handling; argparse therefore exits without a document.
@@ -10,17 +8,13 @@ The dependency is issue #10, whose archived change and current `specloop-interfa
 
 ## Goals / Non-Goals
 
-Correct all four observable defects with small changes in `specloop/cli.py`, `specloop/tasks.py`, `specloop/loop.py`, and `specloop/feasibility.py`, using the existing `specloop/propose.py` publication interface. Preserve successful CLI output shapes and strict validation of authored spec tasks. Keep all existing requirements, including status read isolation, revision block preservation, and preparation sandbox semantics.
+Reporting the retained proposal ref is deferred to [issue #47](https://github.com/mattpolicastro/nightshift/issues/47) after #13 because it also requires the proposal validator in `nightshift/specloop_intake.py` to change. The intake chain (#5 → #6 → #13) owns that file now. This change leaves proposal publication and its JSON branch value unchanged; no edits to `specloop/propose.py` or the existing proposal-ref test assertions are planned.
+
+Correct all three observable defects with small changes in `specloop/cli.py`, `specloop/tasks.py`, `specloop/loop.py`, and `specloop/feasibility.py`. Preserve successful CLI output shapes and strict validation of authored spec tasks. Keep all existing requirements, including status read isolation, revision block preservation, and preparation sandbox semantics.
 
 Do not redesign CLI parsing, invent a new branch field, rewrite feedback or persisted tasks, alter evidence scoring, change `specloop/revise.py`, run preparation from prompt generation, or grant agents network access. No live application, provider session, GitHub service, or visual check is needed to prove these changes. The human checklist has no additional checks beyond the tests.
 
 ## Decisions
-
-### Proposal JSON uses the retained ref
-
-Keep `publish_branch(d, source) -> str` as the authority. Its existing convention is a short name for `refs/heads/*`, otherwise a full private ref. After successful publication, set the CLI outcome's `branch` to that returned string alongside `outcome="drafted"`. Do not infer the ref again or change the requested branch in the manifest or `Draft` object. Preserve the commit and all other outcome fields and notifications. Failure and needs-input documents keep their existing semantics.
-
-Use real temporary Git repositories to cover ordinary publication, an explicit custom branch, and checked-out destinations in both the main checkout and a linked worktree. Assert that the JSON ref resolves to its reported commit and that fallback preserves the reviewer's HEAD, index, staged/unstaged changes, and untracked files. Stub drafting/provider work and notifications, not ref publication. Add `test_propose_json_reports_real_ref` in new `tests/test_specloop_proposal_ref_json.py`. Update only the stale branch assertion in `tests/test_specloop_command_json.py::test_propose_from_checked_out_spec_preserves_review_checkout`; its other safety assertions stay intact.
 
 ### Separate candidate syntax from known runtime references
 
@@ -52,13 +46,12 @@ Add `test_argparse_errors_emit_json` in new `tests/test_specloop_argparse_json.p
 
 ### Validation and concurrent work
 
-Each implementation task includes its named regression test and scenario markers (`pytest.mark.scenario`) for all scenarios it covers. Run the focused new file after each task; run `uv run pytest` after the final task. Keep every existing test except the one explicitly outdated branch-value assertion. New tests should have local fixtures rather than importing fixtures from concurrently changing files.
+Each implementation task includes its named regression test and scenario markers (`pytest.mark.scenario`) for all scenarios it covers. Run the focused new file after each task; run `uv run pytest` after the final task. Keep every existing test. New tests should have local fixtures rather than importing fixtures from concurrently changing files.
 
-Do not edit these files reserved by other changes: `nightshift/cli.py`, `nightshift/daemon.py`, `nightshift/specloop_intake.py`, `nightshift/specloop_job.py`, `plugins/nightshift/client/factory.tsx`, `plugins/nightshift/tests/factory-style-harness.ts`, `plugins/nightshift/tests/factory-style.test.ts`, `plugins/nightshift/tests/factory.test.ts`, `specloop/evidence.py`, `tests/test_engine_routing.py`, `tests/test_specloop_act.py`, `tests/test_specloop_approval.py`, `tests/test_specloop_background.py`, `tests/test_specloop_evidence.py`, `tests/test_specloop_label_authorization.py`, `tests/test_specloop_label_authorization_recovery.py`, `tests/test_specloop_state_reads.py`, and `tests/test_specloop_status_json.py`. No item requires changes to those files.
+Do not edit these files reserved by other changes: `docs/validation.md`, `nightshift/cli.py`, `nightshift/daemon.py`, `nightshift/specloop_intake.py`, `nightshift/specloop_job.py`, `plugins/nightshift/client/factory.tsx`, `plugins/nightshift/tests/factory-style-harness.ts`, `plugins/nightshift/tests/factory-style.test.ts`, `plugins/nightshift/tests/factory.test.ts`, `specloop/evidence.py`, `tests/test_engine_routing.py`, `tests/test_specloop_act.py`, `tests/test_specloop_approval.py`, `tests/test_specloop_background.py`, `tests/test_specloop_evidence.py`, `tests/test_specloop_label_authorization.py`, `tests/test_specloop_label_authorization_recovery.py`, `tests/test_specloop_state_reads.py`, and `tests/test_specloop_status_json.py`. No item requires changes to those files.
 
 ## Risks / Trade-offs
 
-- Consumers may have assumed `branch` always names a branch. Returning the existing publisher's ref accurately describes local retention; the commit remains the delivery handle. No daemon changes are needed.
 - Filtering unknown runtime citations could mask a typo introduced after admission. Strict drafting/admission validation remains unchanged; runtime filtering is deliberately about membership and prevents impossible recovery tasks. Lookup failures must remain failures.
 - Resolving the current scenario map adds a read/extraction to section evidence. Reuse one map within that gate, and never cache it across commits.
 - JSON parse errors and drafting questions both use exit code 2. Their documents distinguish them: top-level `error` versus `outcome="needs_input"`.
