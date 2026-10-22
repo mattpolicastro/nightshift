@@ -62,8 +62,17 @@ def check(repo: Path, rev: str, m: Manifest, out: Path, agent=None) -> dict:
     verify.extract(repo, rev, checkout)
     subprocess.run(["chmod", "-R", "u+w", str(checkout)], check=False)
     values = {**m.vars, "src": ".", "build": "<build dir>", "sha": rev}
-    steps = "\n".join(f"- {s.id}: {shlex.join(verify.expand(a, values) for a in s.run)} (must exit {s.expect})"
-                      for s in m.verify)
+    steps = (
+        "Trusted preparation runs under the harness with network access before offline verification.\n"
+        "Steps run from the build directory with read-only extracted source.\n"
+        "Source, build, and revision values below illustrate the recipe, not actual sandbox paths.\n"
+    )
+    steps += "\n".join(
+        f"{label}:\n" + ("\n".join(
+            f"- {s.id}: {shlex.join(verify.expand(a, values) for a in s.run)} (must exit {s.expect})"
+            for s in group) or "(none)")
+        for label, group in (("Prepare", m.prepare), ("Verify", m.verify))
+    )
     prompt = PROMPT.format(change=m.change, allowed=", ".join(m.allowed), frozen=", ".join(m.frozen), steps=steps)
     profile = (m.chains.get("feasibility") or m.chains.get("review") or (m.roles["review"],))[0]
     call = agents.Call(profile, "read", prompt, checkout, SCHEMA, out / "feasibility.jsonl", 20 * 60,

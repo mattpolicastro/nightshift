@@ -6,6 +6,7 @@ fatal. The run only stops at a defined pause, and every pause says why.
 """
 
 import json
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -703,8 +704,17 @@ def _review_context(ctx: Ctx, task: tasks.Task, ts: TaskState, head: str, sha: s
 
 def _implement_prompt(ctx: Ctx, task: tasks.Task, has_feedback: bool, context: Path) -> str:
     values = {**ctx.m.vars, "src": ".", "build": "build", "sha": "HEAD"}
-    recipe = "\n".join(f"    {s.id}: {' '.join(verify.expand(a, values) for a in s.run)}  (expect exit {s.expect})"
-                       for s in ctx.m.verify)
+    recipe = (
+        "  Trusted preparation runs under the harness with network access before offline verification.\n"
+        "  Steps run from the build directory with read-only extracted source.\n"
+        "  Source, build, and revision values below illustrate the recipe, not actual sandbox paths.\n"
+    )
+    recipe += "\n".join(
+        f"  {label}:\n" + ("\n".join(
+            f"    {s.id}: {shlex.join(verify.expand(a, values) for a in s.run)}  (expect exit {s.expect})"
+            for s in steps) or "    (none)")
+        for label, steps in (("Prepare", ctx.m.prepare), ("Verify", ctx.m.verify))
+    )
     return prompts.IMPLEMENT.format(
         label=task.label, text=task.text, recipe=recipe,
         allowed=", ".join(ctx.m.allowed), frozen=", ".join(ctx.m.frozen),
