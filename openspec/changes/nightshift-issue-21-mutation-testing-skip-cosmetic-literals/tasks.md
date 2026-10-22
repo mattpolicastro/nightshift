@@ -1,6 +1,6 @@
 ## 1. Manifest exclusions
 
-- [ ] 1.1 Add and validate `Manifest.mutation_skip` in `specloop/manifest.py`, apply literal whole-line exclusions before sampling in `specloop/evidence.py`, and add `tests/test_mutation_skip.py` with parsing/template round trips and `test_mutation_skip_patterns_exclude_matching_lines`. Cover `mutation-selection/configurable-line-exclusions/defaults-and-explicit-patterns`, `mutation-selection/configurable-line-exclusions/invalid-patterns-rejected`, and `mutation-selection/configurable-line-exclusions/matching-lines-excluded-before-sampling`. Run the new focused tests.
+- [x] 1.1 Add and validate `Manifest.mutation_skip` in `specloop/manifest.py`, apply literal whole-line exclusions before sampling in `specloop/evidence.py`, and add `tests/test_mutation_skip.py` with parsing/template round trips and `test_mutation_skip_patterns_exclude_matching_lines`. Cover `mutation-selection/configurable-line-exclusions/defaults-and-explicit-patterns`, `mutation-selection/configurable-line-exclusions/invalid-patterns-rejected`, and `mutation-selection/configurable-line-exclusions/matching-lines-excluded-before-sampling`. Run the new focused tests.
 
 ## 2. Committed source and prose filtering
 
