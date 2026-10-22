@@ -97,10 +97,11 @@ BACKTICKED = re.compile(r"`([^`\s]+)`")
 
 
 def paths(text: str) -> set[str]:
-    """Repository file paths named in backticks, such as `tests/test_x.py` or `src/a.py::f`."""
+    """Repository file paths in backticks, optionally qualified by `:f` or `::f`."""
     found = set()
     for token in BACKTICKED.findall(text):
         path = token.split("::")[0].rstrip(":,.")
+        path = re.sub(r":[A-Za-z_][A-Za-z0-9_]*$", "", path)
         if ("/" in path and not path.startswith(("openspec/", "/", "~", "http"))
                 and re.search(r"\.\w+$|\*$", path)):
             found.add(path)
