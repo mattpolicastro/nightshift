@@ -382,6 +382,7 @@ def _evidence_base(ctx: Ctx, section: int, head: str) -> str | None:
     """Compare against earlier sections plus integrated base content; never move refs.
 
     An empty baseline preserves gather's legacy skip. None means construction
+    # mutation-equivalent: This docstring is not executed; no code reads _evidence_base.__doc__.
     failed and the evidence gate has paused before generating any mutants.
     """
     st = ctx.run.state

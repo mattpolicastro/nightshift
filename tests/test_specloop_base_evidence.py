@@ -97,7 +97,10 @@ def test_base_merge_lines_are_not_mutated(section_history, monkeypatch):
     saved = json.loads((out / "evidence.json").read_text())
     assert saved["covered"] == [cited] and saved["uncovered"] == []
     assert saved["score"] == 1.0
-    diagnostic = json.loads((out / "comparison-base.json").read_text())
+    diagnostic_text = (out / "comparison-base.json").read_text()
+    # Keep the retained diagnostic readable with two-space field indentation.
+    assert '\n  "section_base": ' in diagnostic_text
+    diagnostic = json.loads(diagnostic_text)
     comparison = diagnostic.pop("comparison_base")
     assert diagnostic == {"section_base": h.start, "integrated_base": h.base, "head": h.head}
     assert seal.git(ctx.repo, "show", f"{comparison}:calc.py").decode() == (
@@ -202,7 +205,8 @@ def test_reloaded_revision_measures_only_its_own_changes(section_history, monkey
 
 
 @pytest.mark.scenario("publish-base-sync/exclude-integrated-base-lines-from-evidence/comparison-baseline-conflicts")
-def test_comparison_conflict_pauses_before_generating_mutants(base_env, monkeypatch):
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_comparison_conflict_pauses_before_generating_mutants(base_env, monkeypatch, existing_output):
     ctx = base_env.ctx
     paths = ["a conflict.py", "z.py"]
     original = {path: "value = 1\n" for path in paths}
@@ -235,6 +239,12 @@ def test_comparison_conflict_pauses_before_generating_mutants(base_env, monkeypa
     monkeypatch.setattr(evidence, "generate", unexpected)
     monkeypatch.setattr(loop, "_rewrite_tasks", unexpected)
     section_tasks = tasks.parse("## 2. Current section\n\n- [x] 2.1 Done\n")
+    out = ctx.run.dir / "gates/section-2-0"
+    if existing_output:
+        # Coverage verification or an earlier attempt may have created this directory.
+        out.mkdir(parents=True)
+        (out / "ok.log").write_text("retained verification output\n")
+        (out / "comparison-base.json").write_text('{"stale": true}')
     assert not loop.section_evidence(ctx, 2, head, section_tasks)
     ctx.run.reload()
     pause = ctx.run.state.pause
@@ -242,7 +252,11 @@ def test_comparison_conflict_pauses_before_generating_mutants(base_env, monkeypa
     assert pause.resume_at == 0
     assert asdict(ctx.run.state) == {**before, "status": "paused", "pause": asdict(pause)}
     out = ctx.run.dir / "gates/section-2-0"
-    diagnostic = json.loads((out / "comparison-base.json").read_text())
+    if existing_output:
+        assert (out / "ok.log").read_text() == "retained verification output\n"
+    diagnostic_text = (out / "comparison-base.json").read_text()
+    assert '\n  "section_base": ' in diagnostic_text
+    diagnostic = json.loads(diagnostic_text)
     assert diagnostic["paths"] == paths
     assert diagnostic["section_base"] == start
     assert diagnostic["integrated_base"] == base
