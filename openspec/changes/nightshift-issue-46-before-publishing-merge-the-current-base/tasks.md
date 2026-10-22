@@ -1,6 +1,6 @@
 ## 1. Fetch and integrate the base
 
-- [ ] 1.1 Add the bounded source-origin fetch helper in `specloop/loop.py`, with local-path resolution, explicit base refspec, diagnostic handling and no source mutations; add local bare-origin fixtures and focused fetch tests in new `tests/test_specloop_base_sync.py`. Cover `publish-base-sync/fetch-current-base/readiness-uses-origin` and `publish-base-sync/fetch-current-base/fetch-cannot-establish-base`.
+- [x] 1.1 Add the bounded source-origin fetch helper in `specloop/loop.py`, with local-path resolution, explicit base refspec, diagnostic handling and no source mutations; add local bare-origin fixtures and focused fetch tests in new `tests/test_specloop_base_sync.py`. Cover `publish-base-sync/fetch-current-base/readiness-uses-origin` and `publish-base-sync/fetch-current-base/fetch-cannot-establish-base`.
 - [ ] 1.2 Add disposable clean/conflicting merge construction in `specloop/loop.py` using harness identity and two-parent history, plus additive `base_sync` intent loading in `specloop/state.py`; test real Git parents, identity and unchanged conflict refs in new test files, including `test_base_conflict_pauses_without_publishing`. Cover `publish-base-sync/preserve-run-history/clean-moved-base`, `publish-base-sync/preserve-run-history/fast-forward-shaped-base`, `publish-base-sync/preserve-run-history/conflicting-files` and `publish-base-sync/recover-pending-verification/legacy-state`.
 
 ## 2. Verify and retain integration results
