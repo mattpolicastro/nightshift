@@ -9,16 +9,23 @@ with a null score, despite demonstrating no test sensitivity.
 
 blocked-by: #31
 
+Admission also follows #8's merge so its `nightshift/specloop_job.py` docstring
+annotations are included in the cleanup base.
+
 ## What Changes
 
 - Add trusted `[gates] mutation_skip`, an optional list of case-sensitive line
   substrings, defaulting to an empty list. Matching lines produce no mutants.
-- Use full committed source context to exclude Python docstrings and comment
-  spans, including inline and multiline comments, before sampling mutants.
+- Use full committed source context and Python `ast`/`tokenize` to exclude
+  docstrings and comments, including trailing comments, before sampling mutants.
+  For non-Python files retain today's comment-prefix exclusion and add only
+  line-level tracking for block comments with comment-only boundary lines.
 - Automatically exclude integer-literal mutations inside JSX inline `style`
   object expressions, including multiline objects and quoted numeric values.
+  Use brace counting that ignores single, double and backtick-quoted strings.
 - Remove prose-only equivalence annotations from `nightshift/` and `specloop/`,
-  preserving annotations that justify real code.
+  including #8's annotations in `nightshift/specloop_job.py`, preserving
+  annotations that justify real code.
 - Require at least one killed or survived mutant for generated evidence to be
   measured. Preserve no-mutable-lines skips, coverage checks, baseline failure,
   timeout classification and the killed/survived scoring denominator.
@@ -28,8 +35,11 @@ blocked-by: #31
 Out of scope: new mutation operators, regex configuration, automatic judgment
 of semantic equivalence, style rendering tests, excluding every style-related
 variable by name, changing trusted manifests outside this repository, changing
-the worker pool or sandbox, and daemon/plugin behavior. The implementation
-must avoid the concurrent-work files listed in the design.
+the worker pool or sandbox, and daemon/plugin behavior. A general C-style or
+JS/TS lexer, regex-versus-division detection, template interpolation parsing,
+and non-Python inline comment parsing are also out of scope. The implementation
+must avoid the concurrent-work files listed in the design; `specloop_job.py`
+is explicitly allowed for prose cleanup after #8 merges.
 
 ## Capabilities
 

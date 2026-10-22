@@ -1,7 +1,8 @@
 ## Purpose
 
 Select behavioral mutation candidates without spending the sample on configured
-cosmetic lines, docstrings, comments or inline JSX style integers.
+cosmetic lines, Python docstrings and comments, supported non-Python comment
+lines or inline JSX style integers.
 
 ## ADDED Requirements
 
@@ -41,7 +42,7 @@ failure SHALL propagate without successful partial evidence.
 - **THEN** the selected mutants and their order are identical, at most one mutant is selected per physical line, original line numbers and before text are preserved, and after text differs only at an eligible operator match
 
 #### Scenario: Analysis failure cannot become a skip
-- **WHEN** required committed source cannot be read, Python source cannot be parsed or tokenized, or the lexical scan encounters an unterminated construct
+- **WHEN** required committed source cannot be read or Python source cannot be parsed or tokenized
 - **THEN** the operation raises an error naming the path and does not write successful partial evidence or label the analysis failure as no mutable lines
 
 #### Scenario: Exclusions leave no mutable lines
@@ -50,41 +51,48 @@ failure SHALL propagate without successful partial evidence.
 
 ### Requirement: Prose is never mutated
 
-The generator SHALL exclude Python docstring spans and comment spans from
-mutation. It SHALL recognize Python comments and docstrings using full-source
-syntax, and `//` and `/* ... */` comments in JS/TS/JSX/TSX and C-family source
-using lexical context. Other extensions SHALL retain generic `#`, `//` and
-`/* ... */` comment conventions outside quoted text. Comment-only lines SHALL
-produce no mutants; executable portions of mixed lines SHALL remain eligible.
+The generator SHALL protect Python docstring and comment spans using full-source
+`ast` and `tokenize`, retaining adjacent code eligibility. Non-Python filtering
+SHALL retain existing comment-prefix exclusions and add only line-level tracking
+of `/* ... */` blocks with comment-only boundary lines. It SHALL NOT add a general
+C-style or JS/TS lexer, regex-versus-division detection, template interpolation
+parsing or non-Python inline comment parsing.
 
 #### Scenario: Python docstrings and comments excluded
 - **WHEN** module, class, function or async-function docstrings contain mutable prose or numbers, including both triple-quote forms, prefixes, escaped delimiters and multiline bodies, alongside comment-only and trailing-comment text
 - **THEN** no mutation overlaps a docstring or comment, while executable code before a comment or after a closing docstring remains eligible and its adjacent prose is preserved exactly
 
-#### Scenario: C style and JSX comments excluded
-- **WHEN** JS, TS, JSX, TSX or C-family source contains line comments, multiline block comments and code on either side of a block comment, including JSX comment expressions
-- **THEN** no comment span is mutated, block-comment state spans unchanged lines, and executable spans outside comments remain eligible
+#### Scenario: Non Python comment lines excluded
+- **WHEN** a non-Python file contains lines matching existing `#`, `//`, `/*` or `*` prefixes and a block beginning with `/*` on a comment-only line and ending with `*/` on a comment-only line, with bare prose between those lines
+- **THEN** the prefix-matching lines and the complete block produce no mutants, block tracking spans unchanged lines and diff hunks, and eligible lines after the closing boundary remain candidates
 
-#### Scenario: Delimiters in runtime strings retain their meaning
-- **WHEN** Python runtime strings, JS strings or regexes contain apparent comment delimiters, or a JS template includes comment-like text and an interpolation containing executable code and a real comment
-- **THEN** quoted or regex delimiters do not start comments, interpolation comments are protected, and eligible executable expressions outside those comments remain available for mutation
+#### Scenario: Python runtime strings retain their meaning
+- **WHEN** Python runtime strings contain apparent comment delimiters or an assigned triple-quoted string contains mutable text
+- **THEN** they are not classified as comments or docstrings, and their existing mutation eligibility is preserved
+
+#### Scenario: Non Python tracking stays line level
+- **WHEN** a non-Python file has inline or trailing comments, a block opener after executable code, or an opener without a matching comment-only closing line
+- **THEN** the new block filter adds no protected range for those forms, existing prefix exclusions remain in effect, eligible code outside supported blocks remains available, and no lexical parsing error is raised
 
 ### Requirement: JSX style integers excluded by default
 
-Without manifest configuration, the generator SHALL suppress integer-literal
-mutations inside JSX `style` attributes containing object expressions in `.jsx`
-and `.tsx` files. Recognition SHALL tolerate whitespace and multiline nested
-objects and distinguish actual attributes from strings and ordinary properties.
-This default SHALL NOT suppress other mutation operators or numbers outside
-the style object.
+By default, the generator SHALL suppress integer mutants within confirmed JSX
+`style` object spans in `.jsx` and `.tsx`, using brace counting that ignores
+single, double and backtick-quoted strings and honors escapes. It SHALL leave
+uncertain candidates eligible without modeling regex or template interpolation.
+It SHALL NOT suppress other operators or numbers outside the style object.
 
 #### Scenario: Inline and multiline styles excluded
-- **WHEN** JSX or TSX has `style={{ fontWeight: '600', paddingVertical: 12 }}` or a whitespace-separated multiline equivalent containing nested objects and numeric expressions
+- **WHEN** JSX or TSX has `style={{ fontWeight: '600', paddingVertical: 12 }}` or an equivalent with whitespace around `=` and between braces, multiline nested objects and supported numeric expressions
 - **THEN** no integer mutant is produced within the style object, including quoted digits, irrespective of whether its opening line was changed
 
 #### Scenario: Style boundaries preserve behavioral candidates
-- **WHEN** a line contains a style object and numeric code outside it, or the source contains ordinary objects named `style`, `lifestyle` identifiers, strings containing `style={{`, braces inside strings/comments, or non-integer operators inside an actual style object
-- **THEN** only integer matches inside the actual style object are suppressed, its closing boundary is recognized correctly, and the other eligible matches remain candidates
+- **WHEN** a line contains a style object and numeric code outside it, or the source contains ordinary objects named `style`, `lifestyle` identifiers, strings containing `style={{`, braces inside single, double or backtick-quoted strings including escaped quotes, or non-integer operators inside an actual style object
+- **THEN** only integer matches inside the actual style object are suppressed, its closing boundary is recognized correctly with backtick contents treated as opaque including `${...}` text, and the other eligible matches remain candidates
+
+#### Scenario: Uncertain style spans remain eligible
+- **WHEN** a candidate style object has no confirmed closing boundary or contains an unquoted slash that could be division, a regex or an inline comment
+- **THEN** that candidate adds no integer exclusions and causes no parsing error, numeric candidates outside it remain eligible, and the filter does not distinguish regex from division or parse template interpolation
 
 ### Requirement: Prose equivalence annotations removed
 
@@ -95,8 +103,8 @@ that justify executable code and ordinary documentation or strings explaining
 the annotation mechanism.
 
 #### Scenario: Prose markers removed
-- **WHEN** the package sources are scanned after cleanup
-- **THEN** no docstring contains the marker and known annotations preceding prose-only docstrings or comments are removed without deleting the surrounding documentation
+- **WHEN** the package sources are scanned after cleanup on a base that includes #8's merged `nightshift/specloop_job.py`
+- **THEN** no docstring in either package, including `nightshift/specloop_job.py`, contains the marker and known annotations preceding prose-only docstrings or comments are removed without deleting the surrounding documentation
 
 #### Scenario: Real code annotations retained
 - **WHEN** a valid inline or immediately preceding comment annotation justifies an executable line
