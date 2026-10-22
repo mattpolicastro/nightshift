@@ -157,6 +157,35 @@ def test_fetch_failure_never_returns_stale_base(base_env, monkeypatch, failure, 
     assert sh(ctx.repo, "git", "rev-parse", "refs/specloop/publish-base") == stale
 
 
+@pytest.mark.scenario("publish-base-sync/fetch-current-base/fetch-cannot-establish-base")
+@pytest.mark.parametrize("failure", ["timeout", "error"])
+@pytest.mark.parametrize("stream", ["stderr", "stdout"])
+@pytest.mark.parametrize("as_bytes", [False, True])
+def test_fetch_failure_diagnostic_is_stripped_and_capped_at_400(
+        base_env, monkeypatch, failure, stream, as_bytes):
+    diagnostic = " \n" + "d" * 400 + "MUST BE TRUNCATED\n "
+    output = diagnostic.encode() if as_bytes else diagnostic
+    error_type = subprocess.TimeoutExpired if failure == "timeout" else subprocess.CalledProcessError
+    # Both exception classes expose stdout via their output constructor argument.
+    output_arg = "stderr" if stream == "stderr" else "output"
+    if failure == "timeout":
+        error = error_type(["git", "fetch"], 20, **{output_arg: output})
+    else:
+        error = error_type(1, ["git", "fetch"], **{output_arg: output})
+
+    def fail_fetch(args, **kwargs):
+        assert "fetch" in args
+        raise error
+
+    monkeypatch.setattr(loop.subprocess, "run", fail_fetch)
+    with pytest.raises(RuntimeError) as caught:
+        loop._fetch_publish_base(base_env.ctx, str(base_env.origin), timeout=20)
+
+    reason = "timed out after 20s" if failure == "timeout" else "failed"
+    assert str(caught.value) == f"fetch refs/heads/release/stable from source origin {reason}: " + "d" * 400
+    assert caught.value.__cause__ is error
+
+
 @pytest.mark.parametrize("remote", ["https://example.test/owner/repo.git", "git@example.test:owner/repo.git",
                                      "example.test:owner/repo.git", "ssh://git@example.test/owner/repo.git"])
 def test_hosted_origin_is_passed_as_an_unchanged_argument(base_env, monkeypatch, remote):

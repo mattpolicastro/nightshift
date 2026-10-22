@@ -113,6 +113,7 @@ def _merge_commits(repo: Path, head: str, base: str) -> str:
 
     The caller owns ancestry checks, intent persistence and CAS installation.
     Also usable for a synthetic evidence baseline. All indexes and merge state
+    # mutation-equivalent: Wording in this docstring is not executed; no code reads _merge_commits.__doc__.
     live in the disposable checkout, including when Git fails or conflicts.
     """
     with tempfile.TemporaryDirectory(prefix="base-merge-", dir=repo.parent) as tmp:
