@@ -1,0 +1,136 @@
+## Purpose
+
+Select and consume specloop PR revision feedback by stable GitHub identity so comments posted during a revision remain available and successful rounds cannot be queued again merely by relabelling.
+
+## ADDED Requirements
+
+### Requirement: Identified feedback
+
+Specloop revision feedback SHALL carry a stable source-qualified GitHub ID for each eligible conversation comment, review body, and inline comment. Intake SHALL read all pages of all three sources, retain existing trusted-author and instruction filters and rendered context, and distinguish IDs even when bodies match. Missing or invalid identities on eligible feedback, conflicting duplicate records, malformed pages, and read failures SHALL fail the read without a partial or empty-success result.
+
+#### Scenario: All feedback sources retain identity
+- **WHEN** a PR has eligible conversation, review, and inline feedback spanning multiple pages, with an overlapping numeric ID across sources and equal bodies on different IDs
+- **THEN** each source-qualified ID appears once with its complete block, review-state suffix where applicable, and inline path and current or original line
+- **THEN** identical repeated records are deduplicated by ID while distinct IDs with equal bodies remain distinct
+
+#### Scenario: Feedback read failure preserves request
+- **WHEN** any feedback source fails or contains a malformed page, an eligible record with no valid ID, or conflicting records for one ID
+- **THEN** no revision or empty-feedback delivery occurs and no IDs are consumed
+- **THEN** the existing item failure path receives the error without replacing the current revision snapshot
+
+### Requirement: Consumption based eligibility
+
+For each repository and PR, revision intake SHALL select eligible IDs absent from its durable consumed set without comparing comment creation or edit timestamps to a branch tip. A PR with no revision receipt SHALL start with an empty consumed set. Consumption SHALL survive new label events, head changes, spec-to-build transitions, and restart, and SHALL remain isolated from other PRs and repositories. Editing a consumed ID SHALL NOT make it eligible again.
+
+#### Scenario: Comments during revision feed the next round
+- **WHEN** feedback A is selected, comment B is posted during that spec-stage or build-stage revision, the round succeeds, and a trusted actor requests another round after a newer tip is published
+- **THEN** the next round receives B once even though B predates the new tip, and it does not receive A
+
+#### Scenario: Relabel does not requeue consumed feedback
+- **WHEN** a build revision successfully queues feedback A, the remote tip is unchanged because publication has not happened, and a trusted actor reapplies the revision label
+- **THEN** A is excluded and no second revision command runs in the absence of other eligible IDs
+- **THEN** this remains true after restart and across further label applications
+
+#### Scenario: Edited consumed comment stays consumed
+- **WHEN** a consumed comment or review is edited while retaining its ID and a new comment with a different ID is posted, including one with the same body
+- **THEN** only the new ID is eligible for the next round regardless of either item's timestamps
+
+#### Scenario: First selection and state isolation
+- **WHEN** a PR has no revision receipt and has trusted actionable comments before, at, and after its branch tip time, including IDs consumed in another repository or PR
+- **THEN** all those comments are eligible for that PR without a commit-date lookup
+- **THEN** consumed IDs from other PRs or repositories do not suppress them
+
+#### Scenario: Spec consumption survives admission
+- **WHEN** feedback is consumed by a successful spec revision, the same PR's change is admitted, and another revision is requested with both old and new IDs present
+- **THEN** only unconsumed IDs reach the build revision command
+
+### Requirement: Durable round snapshot
+
+Intake SHALL atomically save selected IDs, rendered blocks, and consumed history before dispatch and retain that snapshot through edits and restart. It SHALL durably consume only selected IDs after a validated build revision result with a landed commit or a successful spec push, before notifications or label removal and without waiting for publication. Unsuccessful attempts SHALL consume nothing.
+
+#### Scenario: Snapshot is fixed before dispatch
+- **WHEN** either revision stage starts, then a selected comment is edited and another comment appears while its job runs across a daemon restart
+- **THEN** the runner reads the originally persisted blocks and IDs, and intervening polls start no replacement job
+- **THEN** success consumes only the saved IDs, leaving the later comment for another round
+
+#### Scenario: Unsuccessful work keeps feedback eligible
+- **WHEN** a revision attempt fails to launch, returns refused, rejected, needs-input, or an invalid result, or its spec push fails
+- **THEN** it adds no IDs to the consumed set and preserves previously consumed IDs
+- **THEN** after normal failure resolution, the unconsumed feedback remains available; a saved successful draft retries delivery without drafting again
+
+#### Scenario: Completion delivery retries preserve consumption
+- **WHEN** a successful spec push or validated build revision is followed by a lost completion-comment response, failed label removal, or restart before delivery completes
+- **THEN** the selected IDs are already durably consumed and retries use the saved result and original comment marker without invoking another revision
+- **THEN** a later request selects only remaining IDs, including when the label removal succeeded remotely but its response was lost
+
+#### Scenario: New label preserves completed round
+- **WHEN** a trusted actor removes and reapplies the revision label while an earlier round is running or awaiting completion delivery
+- **THEN** intake retains and completes the earlier round's saved work and consumption before selecting another round
+- **THEN** delivering the earlier event does not remove the newer application, and a later poll handles it using the cumulative consumed set
+
+#### Scenario: Pause and stop preserve snapshots
+- **WHEN** a selected revision job completes while daemon delivery is paused, or the selected job has durable stop intent
+- **THEN** pause retains the saved result for authorized resume without duplicate dispatch, and stopped work remains held without delivery or consumption
+- **THEN** resume of an eligible unstopped result acknowledges only the saved snapshot under the existing stage success rule
+
+### Requirement: Feedback state compatibility
+
+Intake SHALL validate known feedback-state fields, preserve cumulative IDs and unknown fields across rounds, and reject invalid or unsupported state without resetting history. Legacy receipts SHALL remain readable for existing collection and delivery; new rounds SHALL be deferred with an actionable history-initialization diagnostic, without inferring consumption from timestamps or text.
+
+#### Scenario: Legacy delivery does not invent history
+- **WHEN** an authorized PR has a legacy receipt lacking feedback-state metadata and its saved job or delivery is pending
+- **THEN** existing collection and delivery can finish with their saved payload and marker under existing pause and cancellation rules
+- **THEN** a subsequent new round is deferred with an actionable initialization diagnostic while preserving the receipt and launching no new command
+
+#### Scenario: Validated state survives replacement
+- **WHEN** a version-1 receipt contains consumed IDs and unknown fields, and a later empty or refused round replaces the prior round
+- **THEN** the consumed IDs and unknown fields survive and previously consumed feedback stays excluded
+- **THEN** malformed known fields or an unsupported version instead cause an error without overwriting the receipt or launching work
+
+### Requirement: Worker feedback compatibility
+
+The existing `queue.pr_feedback` string-returning interface and optional `since` behavior for worker callers SHALL remain unchanged by specloop's ID-based selection.
+
+#### Scenario: Worker timestamp cutoff remains
+- **WHEN** a worker caller requests PR feedback with a `since` timestamp and comments exist before, at, and after it
+- **THEN** it receives the same rendered strings strictly newer than the cutoff, with its existing trust, latest-PR, and best-effort read behavior
+
+## MODIFIED Requirements
+
+### Requirement: Spec-stage revision
+
+`agent:revise` on an otherwise eligible spec PR whose change is not admitted SHALL re-run `specloop propose` only after Revision actor gate succeeds, with the PR's eligible unconsumed review feedback added to the idea, push the revised branch, acknowledge the selected IDs, remove the corresponding label application and comment what changed. Selection and acknowledgement SHALL follow Consumption based eligibility and Durable round snapshot.
+
+#### Scenario: Spec revised from review
+- **WHEN** a reviewer comments on an unapproved spec PR with an eligible unconsumed ID and a trusted actor labels it agent:revise
+- **THEN** propose runs again with that comment as feedback, the branch is updated, its ID is consumed, and the corresponding agent:revise application is removed
+
+### Requirement: Build-stage revision
+
+`agent:revise` on the PR of an admitted change SHALL turn eligible unconsumed review feedback into a review round with `specloop revise` only after Revision actor gate succeeds, acknowledge the selected IDs when the successful result is durable, and remove the corresponding label application once the round is queued. Selection SHALL NOT depend on the remote branch tip time or await publication.
+
+#### Scenario: Review comments become tasks
+- **WHEN** an admitted change's PR has two eligible unconsumed inline review comments and is labelled agent:revise by a trusted actor
+- **THEN** specloop revise receives both, each with its file and line, their IDs are consumed on success, and the corresponding agent:revise application is removed
+
+### Requirement: No instruction, no revision
+
+An authorized revise request with no eligible unconsumed review feedback SHALL be refused with a comment explaining that no unconsumed review feedback is available, leaving the change untouched and preserving consumed history. An unauthorized request SHALL use the authorization rejection behavior and retain its label instead.
+
+#### Scenario: Empty revise refused
+- **WHEN** a PR is labelled agent:revise by a trusted actor and every eligible feedback ID is already consumed or no actionable trusted feedback exists
+- **THEN** the daemon comments that there is nothing to revise, removes the corresponding label application, and runs no specloop command, including status
+- **THEN** it preserves consumed history and does not describe the branch tip as the feedback cutoff
+
+### Requirement: Revision actor gate
+
+Revision requests SHALL use issue-intake's Latest label actor authorization, Actor relationship resolution, and Rejection comment idempotency requirements for the configured `agent:revise` label. The gate SHALL run before feedback/status reads, feedback-state writes, new drafting or revision dispatch, recovery delivery, and empty-feedback handling. Feedback trust SHALL remain independent of label authorization. The consumed-ID filter SHALL replace the timestamp filter without broadening author trust.
+
+#### Scenario: Unauthorized revision ignored at either stage
+- **WHEN** an unadmitted or admitted change has a revision label last applied by an untrusted actor
+- **THEN** one authorization rejection comment is posted without fetching feedback, invoking specloop/git, changing labels, or altering revision receipts or consumption history
+- **THEN** the same result holds when no unconsumed feedback exists
+
+#### Scenario: Trusted label does not trust feedback
+- **WHEN** a trusted actor applies the revision label and the PR includes feedback from trusted, untrusted, and missing-association authors, along with self-prefixed comments and consumed IDs
+- **THEN** only trusted actionable feedback with unconsumed IDs reaches the revision command, including eligible comments older than the tip
