@@ -17,6 +17,7 @@ class BuildCommands(Commands):
         self.runs = [{"change": CHANGE, "pr": gh.pr_url}]
         self.result = {"version": 1, "outcome": "revised", "commit": REVISED}
         self.feedback = []
+        self.revise_label = "agent:revise"
 
     def __call__(self, args, **kwargs):
         if args[:2] != ["specloop", "revise"]:
@@ -24,7 +25,7 @@ class BuildCommands(Commands):
         self.calls.append(args)
         assert args[2] == CHANGE and args[3] == "--feedback" and args[-1] == "--json"
         assert args[5:7] == ["--feedback-format", "json"]
-        assert "agent:revise" in self.gh.labels
+        assert self.revise_label in self.gh.labels
         self.feedback.append(Path(args[4]).read_text())
         return subprocess.CompletedProcess(args, int(self.result.get("outcome") == "refused"),
                                            json.dumps(self.result), "")

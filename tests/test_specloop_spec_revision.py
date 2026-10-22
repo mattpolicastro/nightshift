@@ -20,6 +20,7 @@ class RevisionGh(ApprovalGh):
         super().__init__(("spec:review", "agent:revise"))
         self.feedback_error = False
         self.inline = []
+        self.reviews = []
         self.fail_comment = False
         self.fail_needs_human = False
         self.feedback = [
@@ -28,13 +29,15 @@ class RevisionGh(ApprovalGh):
             {"author": {"login": "bot"}, "body": queue.SELF_COMMENT_PREFIX + " Draft ready",
              "createdAt": "2026-10-20T13:00:00Z"},
         ]
+        for comment in self.feedback:
+            comment["authorAssociation"] = "COLLABORATOR"
 
     def __call__(self, args):
         if args[:2] == ["pr", "view"] and args[-1] == "comments,reviews":
             self.calls.append(args)
             if self.feedback_error:
                 raise RuntimeError("feedback unavailable")
-            return json.dumps({"comments": self.feedback, "reviews": []})
+            return json.dumps({"comments": self.feedback, "reviews": self.reviews})
         if args[:2] == ["pr", "view"]:
             return json.dumps({**json.loads(super().__call__(args)), "title": "Spec: Add a gate", "body": "Closes #7"})
         if args[0] == "api" and "/commits/" in args[1]:

@@ -542,6 +542,7 @@ def test_blocked_skip_allows_another_eligible_issue_to_draft(repo, tmp_path, cap
 
 
 @pytest.mark.scenario("issue-intake/drafting-from-an-issue/draft-pr-opened")
+@pytest.mark.real_trust
 @pytest.mark.parametrize("armed", [("spec:draft",), ("agent:ready",), ("spec:draft", "agent:ready")])
 def test_draft_pr_opened(repo, tmp_path, armed):
     gh, commands = DraftGh(armed), Commands()
@@ -597,6 +598,7 @@ def test_draft_change_and_branch_preserve_all_title_digits(repo, tmp_path):
 
 
 @pytest.mark.scenario("issue-intake/drafting-from-an-issue/questions-posted")
+@pytest.mark.real_trust
 def test_questions_posted(repo, tmp_path):
     gh = DraftGh(("spec:draft", "agent:ready"))
     questions = ["Which gate voltage?", "Should it retrigger?"]
@@ -611,6 +613,7 @@ def test_questions_posted(repo, tmp_path):
 
 
 @pytest.mark.scenario("issue-intake/drafting-from-an-issue/unfixable-draft-escalated")
+@pytest.mark.real_trust
 @pytest.mark.parametrize("findings", [
     {"contradictions": [{"task": "1.2", "problem": "Frozen files must change", "evidence": "checker.py:7"}]},
     {"problems": ["Scenario has no covering task", "Strict validation failed after 3 rounds"]},
@@ -860,7 +863,13 @@ def test_pr_closed_during_delivery_is_not_relabelled(repo, tmp_path, existing):
     with pytest.raises(RuntimeError, match="no longer open"):
         poll(repo, tmp_path, closed_during_delivery, commands)
     assert not calls(gh, "pr", "edit")
-    assert all(call[1].endswith("/events") for call in calls(gh, "api"))
+    # Both new drafting and existing-PR recovery authorize the actor. A closed
+    # PR still prevents any delivery comment reads or writes afterward.
+    assert calls(gh, "api") == [
+        ["api", "repos/owner/sample/issues/7/events", "--paginate", "--slurp"],
+        ["api", "repos/owner/sample"],
+        ["api", "repos/owner/sample/collaborators/maintainer", "--include"],
+    ]
     assert not calls(gh, "issue", "comment")
     assert gh.labels == {"spec:draft"}
 
