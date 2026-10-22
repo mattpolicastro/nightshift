@@ -12,7 +12,10 @@ from nightshift import queue, specloop_intake
 from nightshift.config import Repo
 from specloop import cli, loop, serve, state
 from test_specloop_approval import ApprovalGh
-from test_specloop_base_sync import advance_base, base_env, sh
+from test_specloop_base_sync import (
+    advance_base, base_env, controlled_verify, forbid_publication,
+    publish_without_preparing, sh,
+)
 
 
 class Interrupted(BaseException):
@@ -96,7 +99,8 @@ run = ["/usr/bin/true"]
     def runner(args, **kwargs):
         assert args[0] == "specloop" and args[1] in ("status", "publish")
         p.calls.append(args[1])
-        expected_error = "injected push transport failure" if p.fail_push else "scheduled"
+        expected_error = ("injected push transport failure" if p.fail_push
+                          else getattr(p, "expected_error", "scheduled"))
         capfd.readouterr()
         if args[1] == "publish":
             assert kwargs["timeout"] == 30
@@ -402,3 +406,216 @@ def test_successive_base_advances_publish_only_latest_verified_receipt(publicati
     assert [event["head"] for event in handoffs] == [initial_head, *heads[:-1]]
     assert [event["base"] for event in handoffs] == observed_bases
     assert len(handoffs) == len(heads) == 3
+
+
+def fail_publication_fetch(p, monkeypatch, failure):
+    """Fail the real transport boundary immediately, retaining the stale ref."""
+    if failure == "missing-base":
+        sh(p.env.origin, "git", "update-ref", "-d", "refs/heads/release/stable")
+    real_run, attempts = subprocess.run, []
+
+    def transport(args, **kwargs):
+        if "fetch" in args and args[-1].endswith(":refs/specloop/publish-base"):
+            assert kwargs["timeout"] == 20
+            assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+            assert args[-1] == "+refs/heads/release/stable:refs/specloop/publish-base"
+            attempts.append(args)
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(args, 20, stderr=b"transport stalled")
+            if failure == "transport":
+                raise subprocess.CalledProcessError(128, args, stderr="transport unavailable")
+            if failure == "os-error":
+                raise OSError("transport could not start")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(loop.subprocess, "run", transport)
+    return attempts
+
+
+def publication_command(mode):
+    return (["act", "c", "publish", "--json"] if mode == "act"
+            else ["publish", "c", *(["--json"] if mode == "json" else [])])
+
+
+def retry_explanation(output, mode):
+    assert "Traceback" not in output.err
+    if mode == "plain":
+        assert output.out == ""
+        return output.err
+    document = json.loads(output.out)  # Rejects extra documents or stray stdout.
+    if mode == "json":
+        assert set(document) == {"version", "error"} and document["version"] == 1
+        return document["error"]
+    assert set(document) == {"version", "outcome", "verb", "detail"}
+    assert (document["version"], document["outcome"], document["verb"]) == (1, "refused", "publish")
+    return document["detail"]
+
+
+@pytest.mark.scenario("publish-base-sync/fetch-current-base/publish-fetch-fails-retryably")
+@pytest.mark.parametrize("failure", ["timeout", "transport", "missing-base", "os-error"])
+@pytest.mark.parametrize("mode", ["json", "plain", "act"])
+@pytest.mark.parametrize("pending", [False, True])
+def test_publish_fetch_failure_retains_readiness(publication, monkeypatch, capfd, failure, mode, pending):
+    p = publication
+    run = state.Run.for_change("c")
+    head = p.ctx.head()
+    if pending:
+        run.state.base_sync = {"base": p.env.initial, "previous_head": head, "merged_head": head,
+                               "verified_head": "", "retry_verify": True, "receipts": ["saved attempt"]}
+        run.save()
+    before = (run.dir / "state.json").read_bytes()
+    events = (run.dir / "events.jsonl").read_bytes()
+    attempts = fail_publication_fetch(p, monkeypatch, failure)
+    forbid_publication(monkeypatch)
+
+    def stale_fallback(*args):
+        pytest.fail("a failed fetch must not evaluate stale ancestry or schedule preparation")
+
+    monkeypatch.setattr(loop, "_publish_needs_prepare", stale_fallback)
+    capfd.readouterr()
+    publish_without_preparing(monkeypatch, publication_command(mode), 1)
+    explanation = retry_explanation(capfd.readouterr(), mode)
+    diagnostic = {"timeout": "timed out after 20s", "transport": "transport unavailable",
+                  "missing-base": "couldn't find remote ref", "os-error": "transport could not start"}
+    assert diagnostic[failure] in explanation and "refs/heads/release/stable" in explanation
+    assert "Retry `specloop publish c`" in explanation and "nothing was published" in explanation
+    assert len(attempts) == 1
+    assert (run.dir / "state.json").read_bytes() == before
+    assert (run.dir / "events.jsonl").read_bytes() == events
+    assert p.ctx.head() == head and not p.pushes and not p.merges and not p.verified
+    assert sh(p.ctx.repo, "git", "rev-parse", "refs/specloop/publish-base") == p.env.initial
+    status = p.status()
+    assert status["pr"] == p.gh.pr_url and status["pause"]["reason"] == "ready_to_publish"
+    assert status["pause"]["detail"] == run.state.pause.detail
+
+
+@pytest.mark.scenario("publish-base-sync/fetch-current-base/publish-fetch-fails-retryably")
+@pytest.mark.parametrize("failure", ["timeout", "transport", "missing-base"])
+def test_daemon_retries_fetch_without_refusal_or_delivery(publication, monkeypatch, failure):
+    p = publication
+    ready = p.status()
+    before = (p.ctx.run.dir / "state.json").read_bytes()
+    p.expected_error = "refs/heads/release/stable"
+    with monkeypatch.context() as failing:
+        attempts = fail_publication_fetch(p, failing, failure)
+        forbid_publication(failing)
+        for count in (1, 2):
+            assert len(p.poll()) == 1
+            assert len(attempts) == count  # Each poll retries once; no inline retry.
+            assert (p.ctx.run.dir / "state.json").read_bytes() == before
+            receipt = p.receipt()
+            assert receipt["head"] == ready["head"] and receipt["checks"] == ready["pause"]["detail"]
+            assert receipt["pr"] == p.gh.pr_url
+            assert not receipt.get("delivered") and "result" not in receipt
+            assert not p.gh.comments and not p.gh.labels and not p.pushes
+    if failure == "missing-base":
+        sh(p.env.origin, "git", "update-ref", "refs/heads/release/stable", p.env.initial)
+    assert p.poll() == []
+    delivered = p.receipt()
+    assert delivered["delivered"] and delivered["result"]["outcome"] == "published"
+    assert delivered["head"] == ready["head"] and delivered["checks"] == ready["pause"]["detail"]
+    assert p.pushes == [ready["head"]] and len(p.gh.comments) == 1
+    assert not p.merges and not p.verified
+
+
+@pytest.mark.scenario("publish-base-sync/preserve-publication-contracts/wrong-publication-target")
+@pytest.mark.parametrize("target", ["absent", "mismatch"])
+@pytest.mark.parametrize("mode", ["json", "act"])
+def test_target_refusal_precedes_fetch(publication, monkeypatch, capfd, target, mode):
+    p = publication
+    if target == "absent":
+        path = p.ctx.run.manifest_path
+        path.write_text(path.read_text().replace('github = "owner/sample"', 'github = ""'))
+        expected = "manifest names no GitHub repository"
+    else:
+        sh(p.env.src, "git", "remote", "set-url", "origin", "https://github.com/other/repository.git")
+        expected = "manifest publishes to owner/sample"
+    before = (p.ctx.run.dir / "state.json").read_bytes()
+    head = p.ctx.head()
+    forbid_publication(monkeypatch)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("target refusal must precede fetching")
+
+    monkeypatch.setattr(loop, "_fetch_publish_base", forbidden)
+    capfd.readouterr()
+    publish_without_preparing(monkeypatch, publication_command(mode), 1)
+    document = json.loads(capfd.readouterr().out)
+    assert document["version"] == 1 and document["outcome"] == "refused"
+    if mode == "json":
+        assert set(document) == {"version", "outcome", "reasons"}
+        assert len(document["reasons"]) == 1 and expected in document["reasons"][0]
+    else:
+        assert set(document) == {"version", "outcome", "verb", "detail"}
+        assert document["verb"] == "publish" and expected in document["detail"]
+    assert (p.ctx.run.dir / "state.json").read_bytes() == before
+    assert p.ctx.head() == head and not p.fetches
+
+
+@pytest.mark.scenario("publish-base-sync/preserve-publication-contracts/driver-pause-blocks-publication")
+@pytest.mark.parametrize("reason", ["base_conflict", "base_drift"])
+def test_driver_pause_diagnostics_survive_publication_refusal(publication, monkeypatch, capfd, reason):
+    p, ctx = publication, publication.ctx
+    ctx.run.reload()
+    if reason == "base_conflict":
+        old = ctx.head()
+        repaired = loop.seal.commit_files(ctx.repo, old, {"base.txt": "run change\n"}, "run change")
+        loop.git(ctx.repo, "update-ref", ctx.ref, repaired, old)
+    head = ctx.head()
+    base = advance_base(p.env)
+    ctx.run.state.status, ctx.run.state.pause = "running", None
+    ctx.run.save()
+    checked = controlled_verify(monkeypatch, ctx, exit_code=1)
+    forbid_publication(monkeypatch)
+    with ctx.run.lock() as mine:
+        assert mine and loop.run(ctx) == "paused"
+    status = p.status()
+    assert status["pause"]["reason"] == reason and status["pr"] == p.gh.pr_url
+    detail = status["pause"]["detail"]
+    if reason == "base_conflict":
+        assert "base.txt" in detail and ctx.head() == head and not checked
+    else:
+        assert base in detail and ctx.head() in detail and ctx.head() != head
+        assert "ok: expected exit 0, got 1" in detail
+        for name in ("receipts.json", "ok.log"):
+            path = checked[0][1] / name
+            assert str(path) in detail and path.is_file()
+    before = (ctx.run.dir / "state.json").read_bytes()
+    events = (ctx.run.dir / "events.jsonl").read_bytes()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("non-ready publication must not fetch or validate a target")
+
+    monkeypatch.setattr(loop, "_fetch_publish_base", forbidden)
+    monkeypatch.setattr(cli, "_remote", forbidden)
+    for mode in ("json", "act"):
+        capfd.readouterr()
+        publish_without_preparing(monkeypatch, publication_command(mode), 1)
+        document = json.loads(capfd.readouterr().out)
+        assert document == ({"version": 1, "outcome": "refused", "reasons": ["c is not ready to publish"]}
+                            if mode == "json" else {"version": 1, "outcome": "refused", "verb": "publish",
+                                                    "detail": "publish is not allowed for c's current pause"})
+        assert (ctx.run.dir / "state.json").read_bytes() == before
+        assert (ctx.run.dir / "events.jsonl").read_bytes() == events
+        assert p.status()["pause"]["detail"] == detail
+
+
+@pytest.mark.scenario("publish-base-sync/driver-preparation-handoff/moved-base-schedules-preparation")
+@pytest.mark.parametrize("mode", ["json", "plain", "act"])
+def test_handoff_cli_formats_preserve_checks_until_driver_readiness(publication, monkeypatch, capfd, mode):
+    p = publication
+    head = p.ctx.head()
+    before = asdict(state.Run.for_change("c").state)
+    advance_base(p.env)
+    capfd.readouterr()
+    with monkeypatch.context() as guard:
+        forbid_publication(guard)
+        publish_without_preparing(guard, publication_command(mode), 1)
+    explanation = retry_explanation(capfd.readouterr(), mode)
+    assert all(text in explanation for text in ("scheduled", "nothing was published", "Retry", "readiness"))
+    assert p.ctx.head() == head and p.operations == [("fetch", 20)]
+    assert asdict(state.Run.for_change("c").state) == {**before, "status": "running", "pause": None}
+    selected = []
+    assert serve.pass_once(lambda _: None, spawn=selected.append) == selected == ["c"]
+    finish(p, {"head": head, "round_id": "no prior publication"})
+    assert p.fetches == [20, 300, 20] and p.merges == p.verified == p.pushes

@@ -498,7 +498,10 @@ def _publish(args, run: Run) -> int:
         head = ctx.head()
         needs_prepare = loop._publish_needs_prepare(ctx, base, head)
     except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
-        reason = (f"{exc}; nothing was published. Retry `specloop publish {args.change}` "
+        # Keep transport/check failures retryable, even with a pending intent.
+        # No successful freshness result means readiness and checks stay intact.
+        reason = (f"Could not check publication base refs/heads/{ctx.m.pr_base}: {exc}; "
+                  f"nothing was published. Retry `specloop publish {args.change}` "
                   "when the current base can be checked.")
     else:
         reason = ""
