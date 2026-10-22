@@ -39,6 +39,8 @@ def drafter(*bodies, stray=False, feasible=True):
 
     def agent(call):
         calls.append(call)
+        if call.prompt.startswith("# Spec critic of an OpenSpec change"):
+            return agents.Result("ok", {"contradictions": [], "risks": []})
         if call.access == "read":
             found = [] if feasible else [{"task": "1.1", "problem": "frozen", "evidence": "x:1"}]
             return agents.Result("ok", {"contradictions": found, "risks": []})
@@ -93,6 +95,8 @@ def test_feasibility_contradictions_go_back_to_the_drafter(source, tmp_path):
 
     def agent(call):
         calls.append(call)
+        if call.prompt.startswith("# Spec critic of an OpenSpec change"):
+            return agents.Result("ok", {"contradictions": [], "risks": []})
         if call.access == "read":
             ok = verdicts.pop(0)
             found = [] if ok else [{"task": "1.1", "problem": "tests are not importable", "evidence": "design.md:28"}]
