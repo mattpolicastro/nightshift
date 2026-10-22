@@ -171,6 +171,10 @@ def test_spec_revised_from_review_through_daemon(setup, tmp_path, monkeypatch, i
     assert "The original issue and comments." in idea and "Handle empty input" in idea
     assert "Old feedback" not in idea and "Draft ready" not in idea
     assert gh.head == REVISED and gh.labels == {"spec:review"}
+    receipt = json.loads((tmp_path / "revisions/owner__sample/8.json").read_text())
+    selected = ["conversation:102", *(f"inline:{i + 1}" for i in range(inline_count))]
+    assert receipt["feedback_ids"] == selected
+    assert receipt["consumed_feedback_ids"] == sorted(["conversation:101", "inline:1000", *selected])
     comment, = gh.comments
     assert "Handle empty input" in comment["body"] and REVISED in comment["body"]
     expected = [f"**reviewer on `specs/gate/spec.md:{i + 1}`:**\n\nClarify gate case {i + 1}."
@@ -289,7 +293,7 @@ def test_delivery_retry_does_not_redraft_or_duplicate_comment(setup, tmp_path, l
     assert "Second round: café." in gh.comments[-1]["body"]
 
 
-@pytest.mark.parametrize("failure", ["feedback", "status", "fetch", "push"])
+@pytest.mark.parametrize("failure", ["feedback", "status", "fetch", "push", "branch", "commit"])
 def test_failures_preserve_revision_label(setup, tmp_path, failure):
     _, gh, commands = setup
     if failure == "feedback":
@@ -298,16 +302,68 @@ def test_failures_preserve_revision_label(setup, tmp_path, failure):
         commands.status_error = True
     elif failure == "fetch":
         commands.fetch_head = "c" * 40
-    else:
+    elif failure == "push":
         commands.push_error = True
+    elif failure == "branch":
+        commands.result["branch"] = "spec/another-change"
+    else:
+        del commands.result["commit"]
     with pytest.raises(RuntimeError):
         poll(setup, tmp_path)
     assert gh.head == HEAD and "agent:revise" in gh.labels and not gh.comments
-    assert len(commands.proposals) == (1 if failure == "push" else 0)
+    receipt = json.loads((tmp_path / "revisions/owner__sample/8.json").read_text())
+    assert receipt["consumed_feedback_ids"] == ["conversation:101", "inline:1000"]
+    assert len(commands.proposals) == (1 if failure in ("push", "branch", "commit") else 0)
     if failure == "push":
+        assert receipt["feedback_ids"] == ["conversation:102"]
+        assert receipt["result"]["commit"] == REVISED
         commands.push_error = False
         poll(setup, tmp_path)
         assert len(commands.proposals) == 1 and gh.head == REVISED
+        receipt = json.loads((tmp_path / "revisions/owner__sample/8.json").read_text())
+        assert "conversation:102" in receipt["consumed_feedback_ids"]
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("pr-revision/spec-stage-revision/spec-revised-from-review")
+@pytest.mark.parametrize("failure", ["push_response", "acknowledgment_save"])
+def test_landed_spec_push_reconciles_before_acknowledgment(setup, tmp_path, monkeypatch, failure):
+    repo, gh, commands = setup
+    path = tmp_path / "revisions/owner__sample/8.json"
+    original = json.loads(path.read_text())["consumed_feedback_ids"]
+    save = specloop_intake._save
+
+    def fail_ack(path, receipt):
+        if "conversation:102" in receipt.get("consumed_feedback_ids", []):
+            raise OSError("acknowledgment save failed")
+        save(path, receipt)
+
+    def run(args, **kwargs):
+        if args[0] == "git" and args[3] == "push":
+            saved = json.loads(path.read_text())
+            assert saved["result"]["commit"] == REVISED
+            assert saved["consumed_feedback_ids"] == original
+            commands(args, **kwargs)  # The push lands before delivery fails.
+            if failure == "push_response":
+                raise RuntimeError("push response lost")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return commands(args, **kwargs)
+
+    if failure == "acknowledgment_save":
+        monkeypatch.setattr(specloop_intake, "_save", fail_ack)
+    with pytest.raises((RuntimeError, OSError), match="response lost|save failed"):
+        specloop_intake.revise_pending(repo, queue.Labels(), tmp_path, runner=gh,
+                                      specloop_runner=commands, git_runner=run)
+    assert gh.head == REVISED and not gh.comments and "agent:revise" in gh.labels
+    assert json.loads(path.read_text())["consumed_feedback_ids"] == original
+    monkeypatch.setattr(specloop_intake, "_save", save)
+    # The matching remote head permits retrying the saved push, not redrafting.
+    poll(setup, tmp_path)
+    saved = json.loads(path.read_text())
+    assert saved["consumed_feedback_ids"] == sorted([*original, "conversation:102"])
+    assert saved["delivered"] and gh.labels == {"spec:review"}
+    assert len(commands.proposals) == len(gh.comments) == 1
+    assert sum(c[0] == "git" and c[3] == "push" for c in commands.calls) == 2
 
 
 def test_fetch_failure_explained_and_retried(setup, tmp_path):
