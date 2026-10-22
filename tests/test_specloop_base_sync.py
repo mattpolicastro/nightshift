@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from specloop import cli, loop, manifest, seal, state
+from specloop import cli, loop, manifest, seal, serve, state
 
 
 def sh(cwd, *args):
@@ -627,3 +627,208 @@ def test_driver_fetch_failure_blocks_final_checks_and_readiness(base_env, monkey
     assert ctx.run.state.pr == "https://example.test/pull/17"
     assert ctx.run.state.coverage_rounds == ctx.run.state.acceptance_rounds == 0
     assert not (ctx.run.dir / "final").exists()
+
+
+@pytest.fixture
+def publish_env(base_env, monkeypatch):
+    env, ctx = base_env, base_env.ctx
+    ctx.m = replace(ctx.m, github="example/repo", coverage_exempt={
+        "cap/req/manual": "inspect the result", "cap/req/other": "check the UI"})
+
+    def load(run):
+        ctx.run = run
+        return ctx
+
+    monkeypatch.setattr(cli, "_ctx", load)
+    env.operations = []
+    real_run = subprocess.run
+
+    def runner(args, **kwargs):
+        if "fetch" in args and args[-1].endswith(":refs/specloop/publish-base"):
+            env.operations.append(("fetch", kwargs["timeout"]))
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(loop.subprocess, "run", runner)
+    env.url = "https://github.com/example/repo/pull/17"
+    env.existing_pr = ""
+
+    def push(repo, remote, ref):
+        assert env.operations[-1] == ("fetch", 20)
+        assert (repo, remote, ref) == (ctx.repo, str(env.origin), ctx.ref)
+        env.operations.append(("push", ctx.head()))
+
+    def gh(*args):
+        env.operations.append(("gh", args[:2]))
+        if args[0] == "api":
+            return json.dumps([{"html_url": env.existing_pr, "head": {
+                "ref": ctx.m.branch, "repo": {"full_name": ctx.m.github}},
+                "base": {"ref": ctx.m.pr_base}}] if env.existing_pr else [])
+        assert args[:3] == ("pr", "create", "--draft")
+        return env.url
+
+    monkeypatch.setattr(cli, "_push", push)
+    monkeypatch.setattr(cli, "_gh", gh)
+    return env
+
+
+def publish_without_preparing(monkeypatch, command, code):
+    def forbidden(*args, **kwargs):
+        pytest.fail("publish must leave all preparation and recovery to the driver")
+
+    with monkeypatch.context() as guard:
+        for name in ("prepare_publish", "_merge_publish_base", "_merge_commits", "run", "finals"):
+            guard.setattr(loop, name, forbidden)
+        guard.setattr(loop.verify, "run_steps", forbidden)
+        assert cli.main(command) == code
+
+
+@pytest.mark.scenario("publish-base-sync/fetch-current-base/publish-fetches-again")
+@pytest.mark.scenario("publish-base-sync/verify-integrated-head/merged-head-passes")
+@pytest.mark.scenario("publish-base-sync/driver-preparation-handoff/moved-base-schedules-preparation")
+@pytest.mark.parametrize("pr_kind", ["adopted", "reconciled", "new"])
+@pytest.mark.parametrize("failed_push", [False, True])
+def test_moved_base_is_merged_and_verified_before_publish(publish_env, monkeypatch, capfd,
+                                                        pr_kind, failed_push):
+    env, ctx = publish_env, publish_env.ctx
+    old = ctx.head()
+    ctx.run.state.pr = env.url if pr_kind == "adopted" else ""
+    env.existing_pr = env.url if pr_kind == "reconciled" else ""
+    assert loop.run(ctx) == "paused"
+    assert ctx.run.state.pause.reason == "ready_to_publish"
+    if failed_push:
+        with monkeypatch.context() as failure:
+            def fail(*args):
+                raise RuntimeError("push unavailable")
+            failure.setattr(cli, "_push", fail)
+            publish_without_preparing(failure, ["publish", "c", "--json"], 1)
+        assert json.loads(capfd.readouterr().out) == {"version": 1, "error": "push unavailable"}
+        ctx.run.reload()
+        assert ctx.run.state.pause.reason == "ready_to_publish"
+    env.operations.clear()
+    base = advance_base(env)
+    before, source = asdict(ctx.run.state), snapshot(env.src)
+    publish_without_preparing(monkeypatch, ["publish", "c", "--json"], 1)
+    document = json.loads(capfd.readouterr().out)
+    assert set(document) == {"version", "error"} and document["version"] == 1
+    assert "scheduled" in document["error"] and "nothing was published" in document["error"]
+    assert "Retry" in document["error"] and "readiness" in document["error"]
+    ctx.run.reload()
+    assert asdict(ctx.run.state) == {**before, "status": "running", "pause": None}
+    assert ctx.head() == old and env.operations == [("fetch", 20)]
+    events = [json.loads(line) for line in (ctx.run.dir / "events.jsonl").read_text().splitlines()]
+    assert not any(e["event"] == "published" for e in events)
+    assert events[-1]["event"] == "publish_preparation_scheduled"
+    assert (events[-1]["base"], events[-1]["head"]) == (base, old)
+    selected = []
+    assert serve.pass_once(lambda _: None, spawn=selected.append) == selected == ["c"]
+    verified = controlled_verify(monkeypatch, ctx)
+    with ctx.run.lock() as mine:
+        assert mine
+        assert loop.run(ctx) == "paused"
+    ctx.run.reload()
+    merged = ctx.head()
+    assert merged != old and sh(ctx.repo, "git", "show", "-s", "--format=%P", merged).split() == [old, base]
+    assert len(verified) == 1 and verified[0][0] == ctx.run.state.base_sync["verified_head"] == merged
+    assert ctx.run.state.pause.reason == "ready_to_publish"
+    assert merged[:12] in ctx.run.state.pause.detail
+    for sid, why in ctx.m.coverage_exempt.items():
+        assert f"- [ ] `{sid}`: {why}" in ctx.run.state.pause.detail
+    assert ctx.run.state.pause.detail.endswith("Next: `specloop publish c`")
+    assert env.operations == [("fetch", 20), ("fetch", 300)]
+    publish_without_preparing(monkeypatch, ["publish", "c", "--json"], 0)
+    assert json.loads(capfd.readouterr().out) == {"version": 1, "outcome": "published", "pr": env.url}
+    assert env.operations[:4] == [("fetch", 20), ("fetch", 300), ("fetch", 20), ("push", merged)]
+    assert [op for op in env.operations if op[0] == "gh"] == (
+        [] if pr_kind == "adopted" else [("gh", ("api", "repos/example/repo/pulls"))]
+        + ([("gh", ("pr", "create"))] if pr_kind == "new" else []))
+    ctx.run.reload()
+    assert ctx.run.state.pause.reason == "human_checks" and ctx.run.state.pr == env.url
+    assert ctx.head() == merged and snapshot(env.src) == source
+
+
+@pytest.mark.scenario("publish-base-sync/verify-integrated-head/unmoved-base")
+@pytest.mark.parametrize("previously_integrated", [False, True])
+def test_unmoved_base_publishes_without_merge(publish_env, monkeypatch, capfd, previously_integrated):
+    env, ctx = publish_env, publish_env.ctx
+    if previously_integrated:
+        advance_base(env)
+        controlled_verify(monkeypatch, ctx)
+    assert loop.run(ctx) == "paused"
+    head, sync = ctx.head(), dict(ctx.run.state.base_sync)
+    env.operations.clear()
+    publish_without_preparing(monkeypatch, ["publish", "c", "--json"], 0)
+    assert json.loads(capfd.readouterr().out)["outcome"] == "published"
+    assert env.operations[:2] == [("fetch", 20), ("push", head)]
+    assert sum(op[0] == "fetch" for op in env.operations) == 1
+    ctx.run.reload()
+    assert ctx.head() == head and ctx.run.state.base_sync == sync
+    assert ctx.run.state.pause.reason == "human_checks"
+
+
+@pytest.mark.scenario("publish-base-sync/driver-preparation-handoff/pending-verification-schedules-preparation")
+@pytest.mark.parametrize("obligation", ["intent", "retry", "changed-head"])
+def test_pending_verification_schedules_preparation(publish_env, monkeypatch, capfd, obligation):
+    env, ctx = publish_env, publish_env.ctx
+    head = ctx.head()
+    merged = seal.commit_files(ctx.repo, head, {"out/repair": "repair"}, "repair")
+    if obligation == "changed-head":
+        seal.git(ctx.repo, "update-ref", ctx.ref, merged, head)
+    ctx.run.state.base_sync = {
+        "base": env.initial, "previous_head": head,
+        "merged_head": merged if obligation == "intent" else head,
+        "verified_head": "" if obligation == "intent" else head,
+        "retry_verify": obligation == "retry", "receipts": ["retained attempt"],
+    }
+    ctx.run.state.pr = env.url
+    ctx.run.state.task("1.1").status = "passed"
+    ctx.run.state.gates_passed = [1]
+    ctx.run.pause("ready_to_publish", detail="all human checks")
+    before = asdict(ctx.run.state)
+    entry_head = ctx.head()
+    publish_without_preparing(monkeypatch, ["publish", "c", "--json"], 1)
+    assert set(json.loads(capfd.readouterr().out)) == {"version", "error"}
+    ctx.run.reload()
+    assert asdict(ctx.run.state) == {**before, "status": "running", "pause": None}
+    assert ctx.head() == entry_head and env.operations == [("fetch", 20)]
+    verified = []
+
+    def verify(repo, current, steps, m, out):
+        saved = state.Run(ctx.run.dir, require_existing=True).state
+        assert saved.status == "running" and saved.pause is None
+        assert saved.base_sync["retry_verify"] and not saved.base_sync["verified_head"]
+        assert current == ctx.head() and loop._is_ancestor(repo, env.initial, current)
+        verified.append(current)
+        return [loop.verify.Receipt("ok", ["check"], 0, 0, True, 0.1, "")]
+
+    monkeypatch.setattr(loop.verify, "run_steps", verify)
+    assert loop.run(ctx) == "paused"
+    assert len(verified) == 1
+    assert ctx.head() == (head if obligation == "retry" else merged)
+    assert ctx.run.state.base_sync["verified_head"] == ctx.head()
+    assert not ctx.run.state.base_sync["retry_verify"]
+    assert ctx.run.state.pause.reason == "ready_to_publish"
+
+
+@pytest.mark.scenario("publish-base-sync/driver-preparation-handoff/moved-base-schedules-preparation")
+@pytest.mark.parametrize("mode", ["plain", "act"])
+def test_scheduling_output_and_independent_stop(publish_env, monkeypatch, capfd, mode):
+    env, ctx = publish_env, publish_env.ctx
+    advance_base(env)
+    ctx.run.pause("ready_to_publish")
+    ctx.run.request_pause()
+    command = ["publish", "c"] if mode == "plain" else ["act", "c", "publish", "--json"]
+    publish_without_preparing(monkeypatch, command, 1)
+    output = capfd.readouterr()
+    if mode == "act":
+        document = json.loads(output.out)
+        assert set(document) == {"version", "outcome", "verb", "detail"}
+        assert (document["version"], document["outcome"], document["verb"]) == (1, "refused", "publish")
+        explanation = document["detail"]
+    else:
+        assert output.out == ""
+        explanation = output.err
+    assert "scheduled" in explanation and "nothing was published" in explanation
+    assert "readiness" in explanation and "specloop run c" in explanation
+    ctx.run.reload()
+    assert ctx.run.state.status == "running" and ctx.run.state.pause is None
+    assert ctx.run.pause_requested() and env.operations == [("fetch", 20)]

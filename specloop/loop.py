@@ -108,6 +108,18 @@ def _is_ancestor(repo: Path, base: str, head: str) -> bool:
     return result.returncode == 0
 
 
+def _publish_needs_prepare(ctx: Ctx, base: str, head: str) -> bool:
+    """Read-only publication check; only the driver may discharge obligations."""
+    sync = ctx.run.state.base_sync
+    merged = sync.get("merged_head")
+    return bool(
+        (base != head and not _is_ancestor(ctx.repo, base, head))
+        or sync.get("retry_verify")
+        or ((sync.get("base") or merged) and sync.get("verified_head") != head)
+        or (merged and not _is_ancestor(ctx.repo, merged, head))
+    )
+
+
 def _merge_commits(repo: Path, head: str, base: str) -> str:
     """Import a two-parent merge object, without changing any repository ref.
 

@@ -464,6 +464,8 @@ def test_publish_json(template, monkeypatch, capfd, tmp_path, json_mode, hook_ex
     run.pause("ready_to_publish")
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    # The publication gate now fetches main before reaching the push hook.
+    git(run.dir / "repo.git", "push", "-q", str(remote), "main:main")
     hooks = run.dir / "repo.git" / "hooks"
     git(run.dir / "repo.git", "config", "core.hooksPath", str(hooks))
     hook = hooks / "pre-push"
@@ -573,6 +575,8 @@ def test_publish_failure_is_json_and_remains_ready(template, monkeypatch, capfd,
     capfd.readouterr()
     Run.for_change(CHANGE).pause("ready_to_publish")
     monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
+    # This transport fake models an unchanged base before the failing push.
+    monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
 
     def fail(*args):
         raise RuntimeError("push failed")

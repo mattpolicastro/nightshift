@@ -325,6 +325,8 @@ def test_publish_then_finish(env, monkeypatch, tmp_path):
     assert run.state.pause.reason == "ready_to_publish"
     github = tmp_path / "github.git"
     subprocess.run(["git", "init", "-q", "--bare", str(github)], check=True)
+    # Publish now fetches the PR base from this separate publication remote.
+    sh(src, "git", "push", "-q", str(github), "HEAD:refs/heads/main")
     calls = []
 
     def gh(*args):
