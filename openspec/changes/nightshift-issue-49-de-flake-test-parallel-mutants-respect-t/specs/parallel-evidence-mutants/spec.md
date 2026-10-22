@@ -24,8 +24,3 @@ change; production code, shared helpers, and other tests SHALL remain unchanged.
 - **WHEN** controlled baseline durations exercise the floor, fractional scaling, missing/zero fallback, and both manifest-cap cases while a third hanging mutant queues behind the first two
 - **THEN** the test asserts exact budgets `(10.0, 11.25, 40, 50, 20, 5)` for the corresponding steps and `10.0` for the final test step, retains baseline manifest ceilings, and verifies manifest immutability
 - **THEN** two workers overlap without exceeding the limit, the third waits at least 10.0 seconds before execution, and each hanging final step still receives and consumes its full 10.0-second execution budget
-
-#### Scenario: Repeated execution under CPU load
-- **WHEN** an external validation harness runs both parameter values in 20 consecutive pytest invocations while `stress -c 10` or ten equivalent CPU-bound workers remain active
-- **THEN** all 20 invocations pass both parameter values without retries, skips, xfails, or relaxed assertions, and the harness terminates and reaps its load workers on completion, failure, or interruption
-- **THEN** a subsequent `uv run pytest` is green, the implementation changes no other test, and load generation remains confined to the temporary validation harness

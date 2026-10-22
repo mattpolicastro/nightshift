@@ -89,36 +89,24 @@ Production behavior is out of scope, including `specloop/evidence.py` and
    timeouts followed by one kill and one survivor. Never manufacture timeout
    receipts, mock process termination, or accept multiple classifications.
 
-4. **Validate in the same implementation task using an external harness.**
-   The test patch and its focused, loaded, and full-suite validation form one
-   task, completed before the agent hands the patch back for sealing. A separate
-   validation-only task cannot succeed when the test passes unchanged:
-   `specloop/seal.py` returns without a commit when no admissible files changed,
-   and `specloop/loop.py` fails that task with `No admissible change was made.`
-   Temporary logs and implementation evidence support the test patch; they do
-   not replace its required repository diff. First run
-   `uv run pytest tests/test_specloop_evidence.py::test_parallel_mutants_respect_time_box`.
-   Then start `stress -c 10` once, keep it running throughout 20 sequential
-   invocations of that same command, and require all 20 to pass both parameter
-   values (40 test cases, including 20 prepared cases). Use no automatic retries
-   or discarded failures. Verify the load process remains live throughout.
-   If `stress` is unavailable, a temporary Python harness may launch ten
-   independent CPU-bound processes with readiness signals, run the same pytest
-   loop, and check worker liveness. No package installation is needed. Use
-   `try/finally` or shell traps to terminate and reap all load workers on success,
-   failure, or interruption. Keep the harness and logs in external temporary
-   storage, never in production code or a committed extra test. Record commands,
-   platform, worker count, and individual run outcomes in implementation evidence.
-   After stopping the load, require `uv run pytest` green. Inspect the diff to
+4. **Validate once normally in the implementation task.** The test patch and
+   its focused and full-suite validation form one task, completed before the
+   agent hands the patch back for sealing. Run one ordinary invocation of
+   `uv run pytest tests/test_specloop_evidence.py::test_parallel_mutants_respect_time_box`
+   covering both parameter values, then require `uv run pytest` green. Record
+   commands and results in implementation evidence and inspect the diff to
    confirm that only the authorized test/decorators changed outside this change's
-   OpenSpec documents. Any repair stays within the named test and requires a
-   fresh complete validation run. Failed validation must be reported, not fixed
-   elsewhere or deferred to a separate validation-only task.
+   OpenSpec documents. Any repair stays within the named test; rerun ordinary
+   validation after a repair. Report failures without weakening assertions or
+   changing other tests. Do not add an agent-run load generator or repetition
+   loop. A scenario marker proves neither CPU load nor repetition count, and
+   the former 20-run check costs about 14 minutes with an agent idle-timeout
+   risk. The blocking fixture makes intended hangs deterministic by construction;
+   loaded repetition belongs to the post-merge human checklist below.
 
-5. **Preserve existing contracts and scenario coverage.** Add the delta scenario
-   markers to this test while keeping its current budget and cleanup markers.
-   The loaded repetition scenario is established by external execution of the
-   marked test, not by spawning CPU load during every normal pytest run. All
+5. **Preserve existing contracts and scenario coverage.** Add the two delta
+   scenario markers to this test while keeping its current budget and cleanup
+   markers. Both scenarios are exercised by an ordinary test run. All
    `parallel-evidence-mutants` requirements remain in force, including baseline
    ordering, bounded concurrency, isolation, immutable per-step budgets,
    classification, scoring, reporting, and cleanup. No changes to
@@ -127,19 +115,26 @@ Production behavior is out of scope, including `specloop/evidence.py` and
 ## Risks / Trade-offs
 
 - Roomier real timeouts cost approximately 20 seconds per parameter value just
-  for two waves of hanging work; the full stress acceptance loop can take around
-  14 minutes plus setup overhead. This is a deliberate test-only trade-off.
+  for two waves of hanging work. This is a deliberate test-only trade-off.
   A permanently blocking fixture also relies on the existing verifier timeout;
   run it under the normal verification watchdog to bound a broken executor.
 - Finite margins cannot guarantee success under unlimited scheduler starvation.
-  Blocking makes intended hangs deterministic; the 20-run experiment checks
-  ordinary subprocess startup under the specified load. Retained diagnostics
-  identify accidental prepare or verify timeouts if the experiment fails.
+  Blocking makes intended hangs deterministic; the human's post-merge loaded
+  repetition checks ordinary subprocess startup under contention. Retained
+  diagnostics identify accidental prepare or verify timeouts if it fails.
 - Tests require local subprocess and filesystem support and the repository's
   supported macOS sandbox environment. They need no running Nightshift daemon,
   Paseo, GitHub, or credentials. Receipt-only mocks would miss the regression.
-- **Human checklist for the implementation PR:** watch the next evidence gates
-  on the loaded Mac Studio, especially gates with three concurrent builds. Note
+- **Human checklist for the implementation PR, after merge:** the human reviewer
+  runs the focused command above 20 consecutive times under `stress -c 10` or
+  ten equivalent CPU workers, requiring every invocation to pass both parameter
+  values. Keep load generation in a temporary validation harness, confirm the
+  workers stay active, record the load and every outcome without retries or
+  discarded failures, and terminate/reap the workers on completion, failure, or
+  interruption. This check is not an implementing-agent task or a scenario
+  credited by a pytest marker.
+- **Human checklist for subsequent evidence gates:** watch the next gates on
+  the loaded Mac Studio, especially gates with three concurrent builds. Note
   the gate/section, load, and any failure of this test; inspect its worker receipts
   to distinguish the intended hangs from accidental startup timeouts. CI and
   synthetic CPU load cannot prove behavior on that specific host. This is an

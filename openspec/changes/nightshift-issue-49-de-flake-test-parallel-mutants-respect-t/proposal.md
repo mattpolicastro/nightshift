@@ -18,10 +18,10 @@ blocked-by: #21
   and every branch of the original budget matrix.
 - Retain the ordered results `timeout, timeout, timeout, killed, survived`,
   real process termination, diagnostics, cleanup, and queue-wait assertions.
-- Require `uv run pytest` green and 20 consecutive passes per parameter value
-  under `stress -c 10` or ten equivalent CPU workers, controlled only by an
-  external validation harness. Complete this validation in the same task as
-  the test patch, before handing it back for sealing.
+- Require one ordinary focused pytest invocation covering both parameter
+  values and a green `uv run pytest`, in the same task as the test patch.
+  Leave loaded repetition to the human reviewer after merge, as documented
+  in the design's human checklist; it is not an implementation task or scenario.
 
 Out of scope: production code, other tests, shared test helpers/constants,
 new test files, dependency or CI changes, permanent load generators, retries,
