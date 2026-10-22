@@ -778,6 +778,25 @@ def test_touchpoints_json_document(tmp_path, monkeypatch, capsys):
     assert table.endswith("Errors:\n  None\n")
 
 
+def test_report_diagnostics_sort_by_line_before_message(tmp_path):
+    put(tmp_path, "proposals/o__r/8.json",
+        dict(change="r-issue-8-feature", result=dict(outcome="drafted")))
+    path = event_log(tmp_path, [
+        dict(event="revised", commit=42),
+        dict(event="human_accept"),
+        dict(event="pause", reason=42),
+    ])
+    report = collect_report(tmp_path, tmp_path / "runs")
+    # Message order opposes line order, so replacing line numbers with zero
+    # must not silently reorder diagnostics from the same file.
+    errors = report["errors"]
+    assert [(error["path"], error["line"]) for error in errors] == [
+        (str(path), 1), (str(path), 3),
+    ]
+    assert errors[0]["message"] > errors[1]["message"]
+    assert report["totals"]["human_accepts"] == 1
+
+
 def test_empty_report_has_all_zero_totals(tmp_path):
     report = collect_report(tmp_path / "absent", tmp_path / "runs")
     assert not report["changes"] and not report["errors"]
@@ -872,6 +891,10 @@ def test_argparse_help_and_usage_do_not_collect(tmp_path, monkeypatch, capsys, a
     captured = capsys.readouterr()
     assert "usage:" in (captured.out if code == 0 else captured.err)
     assert (captured.err if code == 0 else captured.out) == ""
+    if args == ["--help"]:
+        help_text = " ".join(captured.out.split())
+        assert "--since YYYY-MM-DD" in help_text
+        assert "include changes drafted on or after this date (UTC, approximate)" in help_text
 
 
 def test_partial_report_module_exit_and_diagnostics_in_both_formats(tmp_path):
