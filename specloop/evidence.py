@@ -128,9 +128,12 @@ def added_lines(diff: str, paths: tuple[str, ...]) -> list[tuple[str, int, str]]
     return out
 
 
-def generate(lines: list[tuple[str, int, str]], count: int, seed: int) -> list[Mutant]:
+def generate(lines: list[tuple[str, int, str]], count: int, seed: int, *,
+             mutation_skip: tuple[str, ...] = ()) -> list[Mutant]:
     options = []
     for path, n, text in lines:
+        if any(pattern in text for pattern in mutation_skip):
+            continue
         for name, rx, repl in OPERATORS:
             for m in rx.finditer(text):
                 if name == "int":
@@ -239,7 +242,8 @@ def gather(repo: Path, base: str, head: str, section_scenarios: list[str], seen:
         ev.skipped = "section started before evidence was recorded"
     else:
         diff = git(repo, "diff", "--unified=0", base, head).decode(errors="replace")
-        ev.mutants = generate(added_lines(diff, m.mutation_paths), m.mutation_count, seed=section)
+        ev.mutants = generate(added_lines(diff, m.mutation_paths), m.mutation_count, seed=section,
+                              mutation_skip=m.mutation_skip)
         if not ev.mutants:
             ev.skipped = "no mutable lines added under mutation_paths"
         else:

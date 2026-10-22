@@ -498,7 +498,8 @@ def test_mutant_timeout_is_recorded_not_killed(tmp_path, monkeypatch, prepared, 
     selected += [evidence.Mutant("calc.py", 2, "mismatch", "wrong original", "unused"),
                  evidence.Mutant("calc.py", 7, "True", code.splitlines()[6], "unused = False")]
 
-    def generate(lines, count, seed):
+    def generate(lines, count, seed, *, mutation_skip):
+        assert mutation_skip == ()
         assert ("calc.py", 2, before) in lines and seed == 1
         return [replace(mut) for mut in selected]
 
@@ -1023,7 +1024,8 @@ def test_parallel_mutants_match_serial_results(tmp_path, monkeypatch, prepared, 
 
     # Fix selection to include failures and nonexecuting mutants, but exercise
     # gather, the real dispatcher, private workers, and real command receipts.
-    def generate(lines, count, seed):
+    def generate(lines, count, seed, *, mutation_skip):
+        assert mutation_skip == ()
         assert ("calc.py", 2, before) in lines and seed == 1
         return [replace(mut) for mut in selected]
 
