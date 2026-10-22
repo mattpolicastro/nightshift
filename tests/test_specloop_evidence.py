@@ -1173,29 +1173,45 @@ print(source, end="")
 
 @pytest.mark.scenario("parallel-evidence-mutants/baseline-step-time-boxes/parallel-mutants-respect-time-box")
 @pytest.mark.scenario("parallel-evidence-mutants/worker-cleanup/completed-workers-release-resources")
+@pytest.mark.scenario("parallel-evidence-mutants/deterministic-time-box-regression/hanging-work-has-fixed-outcomes")
+@pytest.mark.scenario("parallel-evidence-mutants/deterministic-time-box-regression/exact-budgets-survive-queue-wait")
 @pytest.mark.parametrize("prepared", [False, True])
 def test_parallel_mutants_respect_time_box(tmp_path, monkeypatch, prepared):
     repo, _, head = project(tmp_path, STRONG)
     out = tmp_path / "out"
-    # Keep real subprocess timeouts short; test every branch of the budget
-    # formula in both preparation and verification with controlled receipts.
-    monkeypatch.setattr(evidence, "MIN_MUTANT_SECONDS", 1.0)
-    durations = (0.01, 0.375, 0, None, 2, 0.01)
-    ceilings = (10, 10, 4, 5, 2, 0.5)
-    expected = (1.0, 1.125, 4, 5, 2, 0.5)
+    # Give ordinary subprocess work scheduling margin while exercising every
+    # budget branch with controlled baseline receipts and real mutant timeouts.
+    monkeypatch.setattr(evidence, "MIN_MUTANT_SECONDS", 10.0)
+    durations = (0.1, 3.75, 0, None, 20, 0.1)
+    ceilings = (100, 100, 40, 50, 20, 5)
+    expected = (10.0, 11.25, 40, 50, 20, 5)
+    # Only the verifier can end intended hangs, including the background child.
+    process_tree_step = '''from pathlib import Path
+import json, os, subprocess, sys, threading
+source = Path("{src}/calc.py").read_text()
+child = subprocess.Popen([sys.executable, "-c", "import threading; threading.Event().wait()"])
+artifacts = Path("artifacts")
+artifacts.mkdir(exist_ok=True)
+(artifacts / "pids.json").write_text(json.dumps([os.getpid(), child.pid]))
+(artifacts / "source.txt").write_text(source)
+print("diagnostic", flush=True)
+if "# timeout" in source:
+    threading.Event().wait()
+sys.exit(3 if "# failure" in source else 0)
+'''
 
     def steps(prefix):
         return tuple(manifest.Step(f"{prefix}-{i}", ("/bin/sh", "-c", "true"), timeout=ceiling)
                      for i, ceiling in enumerate(ceilings))
 
     preparation = steps("prepare") if prepared else ()
-    checks = steps("verify") + (manifest.Step("test", (sys.executable, "-c", PROCESS_TREE_STEP), timeout=10),)
+    checks = steps("verify") + (manifest.Step("test", (sys.executable, "-c", process_tree_step), timeout=100),)
     m = replace(M, mutation_parallel=2, prepare=preparation, verify=checks,
                 mutation_steps=tuple(s.id for s in checks))
     original = replace(m)
     baseline_seconds = {s.id: seconds for group in (preparation, checks[:-1])
                         for s, seconds in zip(group, durations)}
-    baseline_seconds["test"] = 0.01
+    baseline_seconds["test"] = 0.1
     before = CODE.splitlines()[1]
     outcomes = ("timeout", "timeout", "timeout", "failure", "success")
     mutants = [evidence.Mutant("calc.py", 2, "comment", before, before + f" # {outcome}-{i}")
@@ -1217,7 +1233,7 @@ def test_parallel_mutants_respect_time_box(tmp_path, monkeypatch, prepared):
             for receipt in receipts:
                 receipt.seconds = baseline_seconds[receipt.id]
             return receipts
-        assert tuple(s.timeout for s in selected_steps) == expected + (1.0,)
+        assert tuple(s.timeout for s in selected_steps) == expected + (10.0,)
         assert tuple(s.timeout for s in run_m.prepare) == (expected if prepared else ())
         number = int(run_out.name.split("-")[1])
         with lock:
@@ -1228,7 +1244,7 @@ def test_parallel_mutants_respect_time_box(tmp_path, monkeypatch, prepared):
             peak = max(peak, active)
         try:
             if number <= 2:
-                overlap.wait(timeout=10)
+                overlap.wait(timeout=60)
             return real_run(src, sha, selected_steps, run_m, run_out)
         finally:
             with lock:
@@ -1250,9 +1266,9 @@ def test_parallel_mutants_respect_time_box(tmp_path, monkeypatch, prepared):
     monkeypatch.setattr(verify, "cleanup", cleanup)
     assert evidence.mutate(repo, head, mutants, m, out)
     assert baseline_calls == [out] and peak == 2 and active == 0
-    # The third mutant waited longer than its test budget but still receives a
-    # full second to execute. Queue dwell must never be deducted from a step.
-    assert started[3] - min(started[1], started[2]) >= 1.0
+    # The third mutant waited at least its test budget but still receives a
+    # full ten seconds to execute. Queue dwell must never be deducted from a step.
+    assert started[3] - min(started[1], started[2]) >= 10.0
     assert [mut.result for mut in mutants] == ["timeout"] * 3 + ["killed", "survived"]
     assert cleaned[-1] == out and m == original
     for number, (mut, exit_code) in enumerate(zip(mutants, (None, None, None, 3, 0)), 1):
@@ -1261,7 +1277,7 @@ def test_parallel_mutants_respect_time_box(tmp_path, monkeypatch, prepared):
         assert [r["id"] for r in receipts] == [s.id for s in preparation + checks]
         assert all(r["passed"] for r in receipts[:-1])
         if exit_code is None:
-            assert receipts[-1]["seconds"] >= 1.0
+            assert receipts[-1]["seconds"] >= 10.0
     assert_worker_resources_released(out, 0, CODE)
     assert (repo / "calc.py").read_text() == CODE
 
