@@ -128,6 +128,56 @@ def test_refusal_preserves_history_and_unknown_fields(setup, tmp_path, legacy):
     assert sum("/commits/" in c[1] for c in gh.calls) == int(legacy)
 
 
+@pytest.mark.scenario("pr-revision/durable-round-snapshot/unsuccessful-work-keeps-feedback-eligible")
+@pytest.mark.parametrize("feedback_change", ["unchanged", "body_only", "id_only"])
+def test_undelivered_failure_retries_only_when_feedback_changes(stage_setup, tmp_path, feedback_change):
+    _, gh, commands = stage_setup
+    success = commands.result
+    failure = ({"version": 1, "outcome": "refused", "reasons": ["Run is busy."]}
+               if isinstance(commands, BuildCommands) else
+               {"version": 1, "outcome": "needs_input", "questions": ["Which empty input?"]})
+    commands.result = failure
+    gh.fail_needs_human = True
+    with pytest.raises(RuntimeError, match="label response lost"):
+        poll(stage_setup, tmp_path)
+    saved = read(tmp_path)
+    assert saved["result"] == failure
+    assert not saved.get("delivered")
+    assert saved["feedback_ids"] == ["conversation:102"]
+    assert "conversation:102" not in saved["consumed_feedback_ids"]
+    assert "needs-human" in gh.labels
+
+    # Only clear needs-human: a new revise event would replace the receipt
+    # before the comparison of live feedback with the undelivered snapshot.
+    gh.label_event("needs-human", "unlabeled")
+    if feedback_change == "body_only":
+        gh.feedback[1]["body"] = "Handle empty input by returning an empty list."
+    elif feedback_change == "id_only":
+        gh.feedback[1]["id"] = 104  # Identical text still represents new feedback.
+    commands.result = success
+    expected = failure if feedback_change == "unchanged" else success
+    assert poll(stage_setup, tmp_path) == [expected]
+    recovered = read(tmp_path)
+    assert recovered["event"] == saved["event"]
+    assert recovered["delivered"]
+    dispatches = commands.feedback if isinstance(commands, BuildCommands) else commands.proposals
+    assert len(dispatches) == (1 if feedback_change == "unchanged" else 2)
+    if feedback_change == "unchanged":
+        assert recovered["feedback"] == saved["feedback"]
+        assert recovered["feedback_ids"] == saved["feedback_ids"]
+        assert recovered["consumed_feedback_ids"] == saved["consumed_feedback_ids"]
+        assert {"agent:revise", "needs-human"} <= gh.labels
+    else:
+        selected = "conversation:104" if feedback_change == "id_only" else "conversation:102"
+        block = "**reviewer:**\n\n" + gh.feedback[1]["body"]
+        assert recovered["feedback_ids"] == [selected]
+        assert recovered["feedback"] == [block]
+        assert (recovered["feedback"] == saved["feedback"]) == (feedback_change == "id_only")
+        assert recovered["consumed_feedback_ids"] == sorted([*saved["consumed_feedback_ids"], selected])
+        assert block in dispatched_feedback(commands)
+        assert "agent:revise" not in gh.labels and "needs-human" not in gh.labels
+
+
 def test_first_build_selection_includes_historical_ids_without_commit_read(setup, tmp_path):
     _, gh, commands = setup
     receipt_path(tmp_path).unlink()

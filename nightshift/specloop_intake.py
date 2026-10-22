@@ -643,6 +643,7 @@ def revise_pending(
                 edit += ["--remove-label", labels.revise]
         else:
             edit += ["--add-label", labels.needs_human]
+        # mutation-equivalent: edit has 5 arguments or 7 after a flag/value pair, so > 5 and > 6 agree.
         if len(edit) > 5:
             gh(edit)
         receipt["delivered"] = True
