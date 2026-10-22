@@ -277,7 +277,11 @@ def admit_pending(
         if (not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*", change)
                 or ".." in change or change.endswith((".", ".lock"))):
             return None
-        approval_event = _approval_event(repo.name, number, labels.spec_approved, runner=gh)
+        events = _latest_label_events(repo.name, number, {labels.spec_approved}, runner=gh)
+        if not _authorize_label_events(repo.name, number, events, runner=gh, kind="pr"):
+            return None
+        # Bind the receipt and reviewed head to the same authorized application.
+        approval_event = events[labels.spec_approved]["id"]
         # Checked before the revise/needs-human skip, so an approval applied
         # alongside agent:revise records the head the human actually saw.
         if not _approval_covers_head(state_dir, repo, number, change, approval_event, pr, labels, gh):

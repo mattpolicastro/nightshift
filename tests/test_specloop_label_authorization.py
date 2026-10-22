@@ -10,7 +10,7 @@ import pytest
 from nightshift import daemon, queue, specloop_intake
 from nightshift.config import Config, Repo
 from test_engine_routing import DraftGh
-from test_specloop_approval import ApprovalGh, Commands
+from test_specloop_approval import ApprovalGh, Commands, poll as poll_admission
 from test_specloop_intake import BlockedDraftGh, Commands as DraftCommands, poll as poll_draft, repo
 
 
@@ -364,21 +364,34 @@ def prepare_drafting_round(repo, tmp_path, gh, commands, armed, previous):
 
 
 @pytest.mark.scenario("issue-intake/latest-label-actor-authorization/untrusted-actor-ignored")
-@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
-@pytest.mark.parametrize("previous", [None, "needs_input", "rejected", "drafted"])
+@pytest.mark.parametrize("armed,previous", [
+    (armed, previous) for armed in ("spec:draft", "agent:ready")
+    for previous in (None, "needs_input", "rejected", "drafted")
+] + [("spec:approved", previous) for previous in (None, "admitted", "refused")])
 @pytest.mark.parametrize("actor", [{"login": "outsider"}, None, {}, {"login": "bad/login"}])
 def test_label_from_non_collaborator_is_ignored(repo, tmp_path, armed, previous, actor):
-    gh, commands = DraftGh((armed,)), DraftCommands()
-    prepare_drafting_round(repo, tmp_path, gh, commands, armed, previous)
+    if armed == "spec:approved":
+        gh, commands = ApprovalGh((armed,)), Commands(previous or "admitted")
+        if previous:
+            poll_admission(repo, tmp_path, gh, commands)
+            gh.label_event("needs-human", "unlabeled")
+            gh.label_event(armed, "labeled")
+            commands.calls.clear()
+            gh.calls.clear()
+        action, number = specloop_intake.admit_pending, 8
+    else:
+        gh, commands = DraftGh((armed,)), DraftCommands()
+        prepare_drafting_round(repo, tmp_path, gh, commands, armed, previous)
+        action, number = specloop_intake.propose_pending, 7
     gh.events[-1]["actor"] = actor
     labels, comments, prs = gh.labels.copy(), deepcopy(gh.comments), deepcopy(gh.prs)
     files = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
 
     def forbidden(*args, **kwargs):
-        pytest.fail("unauthorized drafting must not dispatch, deliver, or report pending/error")
+        pytest.fail("unauthorized work must not dispatch, deliver, or report pending/error")
 
     for _ in range(2):
-        assert specloop_intake.propose_pending(
+        assert action(
             repo, queue.Labels(), tmp_path, runner=gh, specloop_runner=forbidden,
             git_runner=forbidden, launcher=forbidden, on_error=forbidden, on_pending=forbidden,
         ) == []
@@ -386,7 +399,7 @@ def test_label_from_non_collaborator_is_ignored(repo, tmp_path, armed, previous,
         assert gh.labels == labels and gh.prs == prs
         assert gh.comments[:-1] == comments
         assert len(gh.comments) == len(comments) + 1
-    assert "label-authorization-7:" in gh.comments[-1]["body"]
+    assert f"label-authorization-{number}:{gh.events[-1]['id']}" in gh.comments[-1]["body"]
     assert not commands.calls
     assert not any("PATCH" in c or c[:2] in (
         ["issue", "edit"], ["pr", "edit"], ["pr", "create"],
@@ -394,10 +407,18 @@ def test_label_from_non_collaborator_is_ignored(repo, tmp_path, armed, previous,
 
 
 @pytest.mark.scenario("issue-intake/latest-label-actor-authorization/trusted-actor-accepted")
-@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+@pytest.mark.parametrize("armed,outcome", [
+    ("spec:draft", "drafted"), ("agent:ready", "drafted"),
+    pytest.param("spec:approved", "admitted", marks=pytest.mark.scenario(
+        "issue-intake/approval-admits/approved-spec-admitted")),
+    pytest.param("spec:approved", "refused", marks=pytest.mark.scenario(
+        "issue-intake/approval-admits/refused-admission-explained")),
+])
 @pytest.mark.parametrize("relationship", ["OWNER", "COLLABORATOR", "MEMBER"])
-def test_label_from_collaborator_is_acted_on(repo, tmp_path, armed, relationship):
-    gh, commands = DraftGh((armed,)), DraftCommands()
+def test_label_from_collaborator_is_acted_on(repo, tmp_path, armed, outcome, relationship):
+    admission = armed == "spec:approved"
+    gh, commands = (ApprovalGh((armed,)), Commands(outcome)) if admission else (
+        DraftGh((armed,)), DraftCommands())
     actor = "owner" if relationship == "OWNER" else "helper"
     gh.events[-1]["actor"] = {"login": actor}
     membership = MembershipGh(
@@ -411,12 +432,30 @@ def test_label_from_collaborator_is_acted_on(repo, tmp_path, armed, relationship
             return membership(args)
         return gh(args)
 
-    receipt, = poll_draft(repo, tmp_path, github, commands)
-    assert receipt["drafting_events"] == {armed: 1}
+    if admission:
+        result, = poll_admission(repo, tmp_path, github, commands)
+        assert result["outcome"] == outcome
+        receipt = json.loads((tmp_path / "admissions/owner__sample/8.json").read_text())
+        approval = json.loads((tmp_path / "approvals/owner__sample/8.json").read_text())
+        assert type(receipt["approval_event"]) is int and receipt["approval_event"] == 1
+        assert type(approval["event"]) is int and approval["event"] == 1
+        assert receipt["head"] == approval["head"] == gh.head
+        assert len(commands.admissions) == 1
+        assert commands.admissions[0][commands.admissions[0].index("--pr") + 1] == gh.pr_url
+        if outcome == "admitted":
+            assert gh.labels == set()
+            assert "build has started" in gh.comments[-1]["body"]
+        else:
+            assert gh.labels == {"needs-human"}
+            assert "Admission refused" in gh.comments[-1]["body"]
+            assert commands.result["reasons"][0] in gh.comments[-1]["body"]
+    else:
+        receipt, = poll_draft(repo, tmp_path, github, commands)
+        assert receipt["drafting_events"] == {armed: 1}
+        assert [c[0] for c in commands.calls] == ["specloop", "git"]
+        assert gh.labels == set() and len(gh.prs) == 1
+        assert gh.pr_url in gh.comments[-1]["body"]
     assert receipt["delivered"] is True
-    assert [c[0] for c in commands.calls] == ["specloop", "git"]
-    assert gh.labels == set() and len(gh.prs) == 1
-    assert gh.pr_url in gh.comments[-1]["body"]
     assert not any("label-authorization" in c["body"] for c in gh.comments)
     assert len(membership.calls) == {"OWNER": 1, "COLLABORATOR": 2, "MEMBER": 3}[relationship]
     assert sum(c[0] == "api" and c[1].endswith("/events") for c in gh.calls) == 1

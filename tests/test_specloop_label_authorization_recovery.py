@@ -18,6 +18,7 @@ import pytest
 
 from nightshift import queue, specloop_intake
 from test_engine_routing import DraftGh
+from test_specloop_approval import ApprovalGh, Commands as AdmissionCommands, CHANGE, HEAD
 from test_specloop_intake import BlockedDraftGh, Commands, idea_file, repo
 
 
@@ -387,14 +388,14 @@ def reapply(gh, label, actor):
     gh.label_event(label, "labeled", actor)
 
 
-def assert_rejection_only(gh, original_comments, label):
+def assert_rejection_only(gh, original_comments, label, kind="issue"):
     assert gh.comments[:-1] == original_comments
     body = gh.comments[-1]["body"]
     assert body.startswith(queue.SELF_COMMENT_PREFIX)
     assert f"`{label}`" in body and "`outsider`" in body
     assert all(association in body for association in queue.TRUSTED_ASSOCIATIONS)
     assert "trusted actor" in body and "remove and reapply" in body
-    assert len([c for c in gh.calls if c[:2] == ["issue", "comment"]]) == 1
+    assert len([c for c in gh.calls if c[:2] == [kind, "comment"]]) == 1
     assert not any("PATCH" in c or c[:2] in (
         ["issue", "edit"], ["pr", "edit"], ["pr", "create"],
     ) for c in gh.calls)
@@ -573,3 +574,163 @@ def test_rejected_open_pr_recovery_does_not_prevent_next_eligible_issue(repo, tm
     assert json.loads((tmp_path / "proposals/owner__sample/9.json").read_text())["delivered"]
     assert not (tmp_path / "proposals/owner__sample/7.json").exists()
     assert gh.labels == {"spec:draft"} and gh.blocker_reads == []
+
+
+def admission_poll(repo, state, gh, *, module=specloop_intake,
+                   commands=forbidden_recovery_work, labels=queue.Labels()):
+    return module.admit_pending(
+        repo, labels, state, runner=gh, specloop_runner=commands, git_runner=commands,
+        launcher=forbidden_recovery_work, on_pending=forbidden_recovery_work,
+    )
+
+
+@pytest.mark.scenario("issue-intake/authorization-preserves-intake-recovery/approval-head-remains-protected")
+@pytest.mark.parametrize("unauthorized_reapplication", [False, True])
+def test_admission_head_binding_survives_denial_and_requires_trusted_reapproval(
+    repo, tmp_path, unauthorized_reapplication,
+):
+    gh = ApprovalGh(("spec:approved", "spec:review", "agent:revise"))
+    # An authorized approval alongside revision records the reviewed head.
+    assert admission_poll(repo, tmp_path, gh) == []
+    path = tmp_path / "approvals/owner__sample/8.json"
+    saved = path.read_bytes()
+    assert json.loads(saved) == {"event": 1, "head": HEAD}
+    gh.head = "b" * 40
+    gh.label_event("agent:revise", "unlabeled")
+    gh.calls.clear()
+    if unauthorized_reapplication:
+        reapply(gh, "spec:approved", "outsider")
+        snapshot, labels = files_under(tmp_path), gh.labels.copy()
+        for module in (specloop_intake, restarted_intake()):
+            assert admission_poll(repo, tmp_path, gh, module=module) == []
+            assert files_under(tmp_path) == snapshot and gh.labels == labels
+            assert_rejection_only(gh, [], "spec:approved", kind="pr")
+    else:
+        # The same trusted event cannot cover a later tip, even after restart.
+        assert admission_poll(repo, tmp_path, gh, module=restarted_intake()) == []
+        assert "changed after it was approved" in gh.comments[-1]["body"]
+        assert gh.labels == {"spec:review"}
+    assert path.read_bytes() == saved
+    original_comments = deepcopy(gh.comments)
+    reapply(gh, "spec:approved", "maintainer")
+    event_id = gh.events[-1]["id"]
+
+    class MovingHead(AdmissionCommands):
+        def __call__(self, args, **kwargs):
+            result = super().__call__(args, **kwargs)
+            if args[0] == "git":
+                result.stdout = gh.head
+            return result
+
+    commands = MovingHead()
+    commands.result["head"] = gh.head
+    result, = admission_poll(repo, tmp_path, gh, commands=commands, module=restarted_intake())
+    assert result["outcome"] == "admitted"
+    assert json.loads(path.read_text()) == {"event": event_id, "head": gh.head}
+    receipt = json.loads((tmp_path / "admissions/owner__sample/8.json").read_text())
+    assert type(receipt["approval_event"]) is int and receipt["approval_event"] == event_id
+    assert receipt["head"] == gh.head and receipt["delivered"]
+    assert len(commands.admissions) == 1
+    assert commands.admissions[0][commands.admissions[0].index("--head") + 1] == gh.head
+    assert gh.comments[:-1] == original_comments and "build has started" in gh.comments[-1]["body"]
+    assert gh.labels == set()
+
+
+@pytest.mark.scenario(RECEIPT)
+@pytest.mark.scenario("issue-intake/approval-admits/approved-spec-admitted")
+@pytest.mark.scenario("issue-intake/approval-admits/refused-admission-explained")
+@pytest.mark.parametrize("outcome", ["admitted", "refused"])
+@pytest.mark.parametrize("configured", [False, True])
+def test_admission_receipt_waits_for_trusted_reapproval(repo, tmp_path, outcome, configured):
+    labels = queue.Labels(spec_approved="custom:approved") if configured else queue.Labels()
+    armed = labels.spec_approved
+    gh, commands = ApprovalGh((armed, "spec:review")), AdmissionCommands(outcome)
+
+    def lost_delivery(args):
+        if args[:2] == ["pr", "comment"]:
+            raise queue.GhError("delivery unavailable", transient=True)
+        return gh(args)
+
+    with pytest.raises(queue.GhError):
+        admission_poll(repo, tmp_path, lost_delivery, commands=commands, labels=labels)
+    path = tmp_path / "admissions/owner__sample/8.json"
+    original = json.loads(path.read_text())
+    assert not original.get("delivered") and type(original["approval_event"]) is int
+    assert len(commands.admissions) == 1
+    reapply(gh, armed, "outsider")
+    snapshot, original_labels = files_under(tmp_path), gh.labels.copy()
+    commands.calls.clear()
+    gh.calls.clear()
+    for module in (specloop_intake, restarted_intake()):
+        assert admission_poll(repo, tmp_path, gh, module=module, labels=labels) == []
+        assert files_under(tmp_path) == snapshot and gh.labels == original_labels
+        assert_rejection_only(gh, [], armed, kind="pr")
+    rejection = deepcopy(gh.comments[-1])
+
+    reapply(gh, armed, "maintainer")
+    event_id = gh.events[-1]["id"]
+    result, = admission_poll(repo, tmp_path, gh, commands=commands,
+                             module=restarted_intake(), labels=labels)
+    assert result["outcome"] == outcome
+    receipt = json.loads(path.read_text())
+    assert type(receipt["approval_event"]) is int and receipt["approval_event"] == event_id
+    assert receipt["delivered"] and receipt["head"] == original["head"]
+    assert gh.comments[0] == rejection and len(gh.comments) == 2
+    if outcome == "admitted":
+        # Status recovers the existing run without git or another admission.
+        assert commands.calls == [["specloop", "status", "--json"]]
+        assert commands.runs == [{"change": CHANGE, "pr": gh.pr_url, "status": "running"}]
+        assert "build has started" in gh.comments[-1]["body"] and gh.labels == set()
+    else:
+        # A new approval retries a refused round, even with an unchanged head.
+        assert len(commands.admissions) == 1 and not commands.runs
+        assert commands.result["reasons"][0] in gh.comments[-1]["body"]
+        assert gh.labels == {"spec:review", "needs-human"}
+    assert admission_poll(repo, tmp_path, gh, labels=labels) == []
+
+
+@pytest.mark.scenario(RECEIPT)
+def test_unauthorized_approval_preserves_running_and_finished_admission_job(
+    repo, tmp_path, monkeypatch,
+):
+    gh, commands, launches = ApprovalGh(), AdmissionCommands(), []
+    job_module = specloop_intake.specloop_job
+    monkeypatch.setattr(job_module, "_children", {})
+    path = tmp_path / "admissions/owner__sample/8.json"
+    with ExitStack() as locks:
+        def launch(args, **kwargs):
+            launches.append(args)
+            locks.callback(os.close, os.dup(kwargs["pass_fds"][0]))
+            return SimpleNamespace(poll=lambda: None)
+
+        assert specloop_intake.admit_pending(
+            repo, queue.Labels(), tmp_path, runner=gh, launcher=launch,
+            git_runner=commands, status_runner=commands,
+        ) == []
+        assert len(launches) == 1
+        saved = json.loads(path.read_text())
+        directory = Path(launches[0][-2])
+        assert directory.name == saved["job"]
+        reapply(gh, "spec:approved", "outsider")
+        gh.calls.clear()
+        original_labels = gh.labels.copy()
+        for finished in (False, True):
+            if finished:
+                job_module.finalize(directory, {"result": commands.result})
+                commands.runs = [{"change": CHANGE, "pr": gh.pr_url, "status": "running"}]
+                locks.close()
+            snapshot = files_under(tmp_path)
+            for module in (specloop_intake, restarted_intake()):
+                assert admission_poll(repo, tmp_path, gh, module=module) == []
+                assert files_under(tmp_path) == snapshot and gh.labels == original_labels
+                assert_rejection_only(gh, [], "spec:approved", kind="pr")
+            assert not (directory / "collected.json").exists()
+        rejection = deepcopy(gh.comments[-1])
+        reapply(gh, "spec:approved", "maintainer")
+        commands.calls.clear()
+        result, = admission_poll(repo, tmp_path, gh, commands=commands, module=restarted_intake())
+        assert result["outcome"] == "admitted"
+        assert json.loads(path.read_text())["delivered"]
+        assert (directory / "collected.json").is_file()
+        assert len(launches) == 1 and commands.calls == [["specloop", "status", "--json"]]
+        assert gh.comments[0] == rejection and len(gh.comments) == 2 and gh.labels == set()
