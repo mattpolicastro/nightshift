@@ -52,21 +52,29 @@ run = ["/usr/bin/true"]
     ctx.run.state.gates_passed = [1]
     ctx.run.save()
     p = SimpleNamespace(env=env, ctx=ctx, gh=gh, calls=[], documents=[], verified=[],
-                        merges=[], fetches=[], pushes=[], lose_response=False)
+                        merges=[], fetches=[], pushes=[], lose_response=False,
+                        operations=[], push_attempts=[], fail_push=False)
     real_merge, real_run, real_push = loop._merge_commits, subprocess.run, cli._push
 
     def merge(*args):
         result = real_merge(*args)
         p.merges.append(result)
+        p.operations.append(("merge", result))
         return result
 
     def transport(args, **kwargs):
         if "fetch" in args and args[-1].endswith(":refs/specloop/publish-base"):
             p.fetches.append(kwargs["timeout"])
+            p.operations.append(("fetch", kwargs["timeout"]))
         return real_run(args, **kwargs)
 
     def push(*args):
         assert p.fetches[-1] == 20
+        p.push_attempts.append(ctx.head())
+        p.operations.append(("push", ctx.head()))
+        if p.fail_push:
+            p.fail_push = False
+            raise OSError("injected push transport failure")
         real_push(*args)  # Push to the local bare origin, never a hosted service.
         p.pushes.append(ctx.head())
 
@@ -79,6 +87,7 @@ run = ["/usr/bin/true"]
         receipt = loop.verify.Receipt("ok", ["check"], 0, 0, True, 0.1, "passed")
         (out / "receipts.json").write_text(json.dumps([asdict(receipt)]))
         p.verified.append(head)
+        p.operations.append(("verify", head))
         return [receipt]
 
     def forbidden(*args, **kwargs):
@@ -87,6 +96,7 @@ run = ["/usr/bin/true"]
     def runner(args, **kwargs):
         assert args[0] == "specloop" and args[1] in ("status", "publish")
         p.calls.append(args[1])
+        expected_error = "injected push transport failure" if p.fail_push else "scheduled"
         capfd.readouterr()
         if args[1] == "publish":
             assert kwargs["timeout"] == 30
@@ -97,6 +107,7 @@ run = ["/usr/bin/true"]
                     for name in ("_merge_commits", "_merge_publish_base", "prepare_publish", "run", "finals"):
                         guard.setattr(loop, name, forbidden)
                     guard.setattr(loop.verify, "run_steps", forbidden)
+                    guard.setattr(cli, "_existing_pr", forbidden)
                     code = cli.main(args[1:])
             except Interrupted as exc:
                 raise OSError("publication process interrupted") from exc
@@ -110,7 +121,7 @@ run = ["/usr/bin/true"]
         p.documents.append(document)
         if args[1] == "publish" and code:
             assert code == 1 and document["version"] == 1
-            assert set(document) == {"version", "error"} and "scheduled" in document["error"]
+            assert set(document) == {"version", "error"} and expected_error in document["error"]
         if args[1] == "publish" and p.lose_response:
             p.lose_response = False
             assert code == 1 and set(document) == {"version", "error"}
@@ -145,6 +156,7 @@ run = ["/usr/bin/true"]
     assert cli.main(["run", "c"]) == 0
     assert p.status()["pause"]["reason"] == "ready_to_publish"
     p.fetches.clear()
+    p.operations.clear()
     return p
 
 
@@ -284,3 +296,109 @@ def test_driver_restart_retains_obligation_even_when_base_is_incorporated(
     assert p.verified == [merged] * (2 if boundary == "success" else 1)
     assert all(path.read_bytes() == contents for path, contents in retained.items())
     assert len(state.Run.for_change("c").state.base_sync["receipts"]) == 2
+
+
+@pytest.mark.scenario("publish-base-sync/driver-preparation-handoff/base-moves-on-successive-attempts")
+@pytest.mark.scenario("publish-base-sync/fetch-current-base/publish-fetches-again")
+@pytest.mark.parametrize("push_failure", [False, True], ids=["repeated-advance", "push-failure-then-advance"])
+def test_successive_base_advances_publish_only_latest_verified_receipt(publication, push_failure):
+    p = publication
+    initial_head = p.ctx.head()
+    heads, observed_bases, stale_receipts, verification_receipts = [], [], [], {}
+    expected_fetches, expected_operations = [], []
+
+    for attempt in range(3):
+        ready = p.status()
+        old = p.ctx.head()
+        before = asdict(state.Run.for_change("c").state)
+        assert ready["head"] == old and ready["pause"]["reason"] == "ready_to_publish"
+        observed_base = advance_base(p.env, f"publish observes base {attempt}\n")
+        observed_bases.append(observed_base)
+
+        # Every new ready head gets its own receipt before the CLI hands off.
+        assert len(p.poll()) == 1
+        expected_fetches.append(20)
+        expected_operations.append(("fetch", 20))
+        assert p.fetches == expected_fetches and p.operations == expected_operations
+        assert sh(p.ctx.repo, "git", "rev-parse", "refs/specloop/publish-base") == observed_base
+        assert p.ctx.head() == old
+        assert asdict(state.Run.for_change("c").state) == {**before, "status": "running", "pause": None}
+        receipt = p.receipt()
+        assert (receipt["change"], receipt["head"], receipt["pr"]) == ("c", old, p.gh.pr_url)
+        assert receipt["checks"] == ready["pause"]["detail"]
+        assert all(receipt["round_id"] != prior["round_id"] for prior in stale_receipts)
+        stale_receipts.append(receipt)
+        scheduled(p)
+        assert p.operations == expected_operations  # Running polls do no preparation or publication.
+
+        # Move again while scheduled: preparation must refetch, not integrate
+        # the CLI's snapshot, and it must verify that latest merge in the driver.
+        latest_base = advance_base(p.env, f"driver observes newer base {attempt}\n")
+        if attempt == 2:
+            finish(p, receipt)
+        else:
+            assert cli.main(["run", "c"]) == 0
+        merged = p.ctx.head()
+        heads.append(merged)
+        expected_fetches.append(300)
+        expected_operations.extend([("fetch", 300), ("merge", merged), ("verify", merged)])
+        if attempt == 2:
+            expected_fetches.append(20)
+            expected_operations.extend([("fetch", 20), ("push", merged)])
+        assert p.fetches == expected_fetches and p.operations == expected_operations
+        assert sh(p.ctx.repo, "git", "show", "-s", "--format=%P", merged).split() == [old, latest_base]
+        assert sh(p.ctx.repo, "git", "rev-parse", "refs/specloop/publish-base") == latest_base
+        assert p.merges == p.verified == heads
+        saved = state.Run.for_change("c").state
+        assert saved.base_sync["base"] == latest_base
+        assert saved.base_sync["verified_head"] == merged and not saved.base_sync["retry_verify"]
+        assert len(saved.base_sync["receipts"]) == attempt + 1
+        for directory in saved.base_sync["receipts"]:
+            path = Path(directory) / "receipts.json"
+            contents = path.read_bytes()
+            assert contents == verification_receipts.setdefault(path, contents)
+
+        if attempt < 2:
+            status = p.status()
+            assert status["head"] == merged and status["pause"]["reason"] == "ready_to_publish"
+            assert p.receipt() == receipt and not p.pushes and not p.gh.comments
+            assert all(f"- [ ] `{sid}`: {why}" in status["pause"]["detail"]
+                       for sid, why in p.ctx.m.coverage_exempt.items())
+
+        if attempt == 0 and push_failure:
+            before_push = asdict(saved)
+            p.fail_push = True
+            assert len(p.poll()) == 1
+            expected_fetches.append(20)
+            expected_operations.extend([("fetch", 20), ("push", merged)])
+            assert p.fetches == expected_fetches and p.operations == expected_operations
+            assert asdict(state.Run.for_change("c").state) == before_push
+            assert p.ctx.head() == merged and p.merges == p.verified == heads
+            failed_receipt = p.receipt()
+            assert failed_receipt["head"] == merged
+            assert failed_receipt["checks"] == status["pause"]["detail"]
+            assert failed_receipt["round_id"] != receipt["round_id"]
+            assert not failed_receipt.get("delivered") and "result" not in failed_receipt
+            assert not p.pushes and not p.gh.comments
+            assert sh(p.env.origin, "git", "for-each-ref", "refs/heads/spec/c") == ""
+        elif attempt == 1 and push_failure:
+            # The handoff reused the failed attempt's still-matching receipt;
+            # only readiness at another head authorizes its replacement.
+            assert receipt == failed_receipt
+
+    assert p.push_attempts == ([heads[0]] if push_failure else []) + [heads[-1]]
+    assert sh(p.ctx.repo, "git", "rev-list", "--merges", f"{initial_head}..{heads[-1]}").splitlines() == heads[::-1]
+    assert sh(p.env.src, "git", "rev-parse", "release/stable") == p.env.initial
+    assert sh(p.env.src, "git", "rev-parse", "origin/release/stable") == p.env.initial
+    delivered = p.receipt()
+    assert delivered["result"]["outcome"] == "published"
+    assert delivered["head"] == heads[-1]
+    assert delivered["result"]["pr"] == delivered["pr"] == p.gh.pr_url
+    body = p.gh.comments[0]["body"]
+    assert heads[-1][:12] in body
+    assert all(prior["round_id"] not in body and prior["head"][:12] not in body for prior in stale_receipts)
+    events = [json.loads(line) for line in (p.ctx.run.dir / "events.jsonl").read_text().splitlines()]
+    handoffs = [event for event in events if event["event"] == "publish_preparation_scheduled"]
+    assert [event["head"] for event in handoffs] == [initial_head, *heads[:-1]]
+    assert [event["base"] for event in handoffs] == observed_bases
+    assert len(handoffs) == len(heads) == 3
