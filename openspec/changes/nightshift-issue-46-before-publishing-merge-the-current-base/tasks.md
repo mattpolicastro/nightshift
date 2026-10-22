@@ -6,7 +6,7 @@
 
 ## 2. Verify and retain integration results
 
-- [ ] 2.1 Build the driver-only `loop.prepare_publish` gate from the fetch/merge helpers, persist intent before compare-and-swap advancement, invoke the existing trusted verifier and retain attempt-specific receipts; add `test_drift_that_breaks_verify_pauses_with_receipts` and prepare-failure/success tests in `tests/test_specloop_base_sync.py`. Cover `publish-base-sync/verify-integrated-head/merged-head-passes`, `publish-base-sync/verify-integrated-head/drift-breaks-verify` and `publish-base-sync/verify-integrated-head/preparation-fails`.
+- [x] 2.1 Build the driver-only `loop.prepare_publish` gate from the fetch/merge helpers, persist intent before compare-and-swap advancement, invoke the existing trusted verifier and retain attempt-specific receipts; add `test_drift_that_breaks_verify_pauses_with_receipts` and prepare-failure/success tests in `tests/test_specloop_base_sync.py`. Cover `publish-base-sync/verify-integrated-head/merged-head-passes`, `publish-base-sync/verify-integrated-head/drift-breaks-verify` and `publish-base-sync/verify-integrated-head/preparation-fails`.
 - [ ] 2.2 Reconcile interrupted integration and verification in the driver gate, bind successful receipts to head, and handle repaired descendants; add restart/failure-injection tests in new `tests/test_specloop_base_sync_recovery.py` including existing resume and explicitly resumed revision recovery. Cover `publish-base-sync/recover-pending-verification/interrupted-integration`, `publish-base-sync/recover-pending-verification/repair-against-unchanged-base` and `publish-base-sync/recover-pending-verification/legacy-state`.
 
 ## 3. Gate readiness and publication
