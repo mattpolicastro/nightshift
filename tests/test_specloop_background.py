@@ -374,6 +374,9 @@ def test_cancelled_jobs_remain_pending_after_restart_and_resume(
     saved = path.read_bytes()
     receipt = json.loads(saved)
     directory = path.parent / f"{number}.jobs" / receipt["job"]
+    # Drafting payloads share .jobs with attempt directories (see #12).
+    idea = directory.parent / f"idea-{'f' * 32}.txt"
+    idea.write_text("Drafting input fixture\n", encoding="utf-8")
     process = json.loads((directory / "process.json").read_text())
     # The subprocess is held behind the fixture's release-file barrier.
     # Let it finish to exercise a late result from the real wrapper after
@@ -389,6 +392,7 @@ def test_cancelled_jobs_remain_pending_after_restart_and_resume(
         assert not notifications
         assert len((root / "started").read_text().splitlines()) == 1
         assert len([p for p in directory.parent.iterdir() if p.is_dir()]) == 1
+        assert idea.read_text(encoding="utf-8") == "Drafting input fixture\n"
         assert not (directory / "collected.json").exists()
         rows, errors = specloop_job.list_jobs(daemon.STATE_DIR)
         assert not errors and len(rows) == 1 and rows[0].state == expected_state
@@ -658,6 +662,9 @@ def _finish_while_paused(job):
 @pytest.mark.parametrize("stage", ["draft", "admit", "spec_revision", "build_revision"])
 def test_finished_job_delivers_once_after_paused_restart(delivery_job, stage):
     job = delivery_job(stage)
+    # Reproduce a non-job entry without depending on intake to create one.
+    idea = job.directory.parent / f"idea-{'f' * 32}.txt"
+    idea.write_text("Drafting input fixture\n", encoding="utf-8")
     comments_before = len(job.gh.comments)
     _finish_while_paused(job)
     result = job.result_path.read_bytes()
@@ -699,6 +706,7 @@ def test_finished_job_delivers_once_after_paused_restart(delivery_job, stage):
         assert not job.health.failures and not job.health.item_failures and not job.health.announced
         assert len(job.children) == 1
         assert len([p for p in job.directory.parent.iterdir() if p.is_dir()]) == 1
+        assert idea.read_text(encoding="utf-8") == "Drafting input fixture\n"
         assert len((job.root / "started").read_text().splitlines()) == 1
     # Repeated polls may read status, but must dispatch no further delivery.
     for call in job.calls[delivered_at:]:
