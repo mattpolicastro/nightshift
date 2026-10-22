@@ -284,6 +284,7 @@ def run(ctx: Ctx) -> str:
 
 
 def finals(ctx: Ctx, head: str) -> bool:
+    # mutation-equivalent: Changing "and" to "or" only changes documentation; no code reads finals.__doc__.
     """Prepare the current base, then coverage and acceptance after tasks land.
 
     Returns True when it appended tasks (the loop continues), False when the

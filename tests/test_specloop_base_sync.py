@@ -629,6 +629,30 @@ def test_driver_fetch_failure_blocks_final_checks_and_readiness(base_env, monkey
     assert not (ctx.run.dir / "final").exists()
 
 
+@pytest.mark.scenario("publish-base-sync/fetch-current-base/fetch-cannot-establish-base")
+def test_finals_returns_false_when_base_preparation_pauses(base_env, monkeypatch):
+    ctx = base_env.ctx
+    head = ctx.head()
+    tasks_before = ctx.tasks_text(head)
+    ctx.m = replace(ctx.m, pr_base="missing-base", coverage_step="ok",
+                    acceptance=(manifest.Step("accept", ("accept",)),))
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("a preparation pause must stop final checks and task appends")
+
+    for owner, name in ((loop, "_seen_scenarios"), (loop.verify, "run_steps"), (loop, "_append")):
+        monkeypatch.setattr(owner, name, unexpected)
+
+    # False tells the caller to stop; True is reserved for appended tasks.
+    assert loop.finals(ctx, head) is False
+    ctx.run.reload()
+    assert ctx.run.state.status == "paused"
+    assert ctx.run.state.pause.reason == "base_fetch"
+    assert "refs/heads/missing-base" in ctx.run.state.pause.detail
+    assert ctx.head() == head and ctx.tasks_text(head) == tasks_before
+    assert ctx.run.state.coverage_rounds == ctx.run.state.acceptance_rounds == 0
+
+
 @pytest.fixture
 def publish_env(base_env, monkeypatch):
     env, ctx = base_env, base_env.ctx
