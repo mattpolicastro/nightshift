@@ -1,5 +1,58 @@
 # Validation and scope
 
+## Background job control — 2026-10-21
+
+### Manual host checks
+
+Complete both checks before operational rollout. Use a disposable repository,
+remote and isolated daemon setup (for example, a dedicated test account), not
+production work. Preserve logs and receipt copies. Record the date, host/OS,
+revision, commands and exit codes, job ID, PID/PGID, observations and evidence
+paths separately from automated/CI results. If a check is not run, leave it
+pending rather than inferring success from pytest.
+
+**macOS launchd unload procedure:**
+
+1. Start the disposable daemon under launchd and launch a long-running,
+   disposable tracked drafting/admission/revision job. Confirm it is running
+   with `uv run nightshift jobs`; record its full ID, process identity and log
+   path before unloading.
+2. Run `uv run nightshift pause`, then unload the disposable daemon's actual
+   plist using `launchctl unload <disposable-daemon.plist>`. Verify the daemon
+   service is unloaded. Pause itself must not terminate the tracked job.
+3. From another terminal in the same test account, run `uv run nightshift jobs`
+   and verify the detached job survived. Run `uv run nightshift jobs stop <id>`
+   with its full ID. Record the exit code and elapsed time; check the group has
+   no executing members, inventory says `stopped`, and logs/receipts remain.
+4. Reload the disposable daemon with pause still present, then resume and poll.
+   Verify the stopped attempt is neither delivered nor replaced. If testing
+   admitted work, inspect the independent supervisor and its run processes
+   separately; unloading Nightshift does not stop them. Keep or restore pause
+   while cleaning up disposable work after inspecting its state.
+
+**Disposable-remote mid-push procedure:**
+
+1. Record the disposable remote's refs and PRs and the local checkout,
+   admission/run state, job receipts and logs. Arrange a sufficiently slow
+   push to observe it in flight. Determine whether that push belongs to the
+   selected job's process group or is a daemon-owned delivery operation.
+2. While the push is visibly in progress, pause Nightshift and request
+   `uv run nightshift jobs stop <id>`. Record the observed push, group
+   membership, stop outcome and timing. If no in-flight push was observed,
+   the check remains pending; a completed push is not a mid-push check.
+3. Inspect remote refs/PRs again, plus local refs, logs, results, stop record
+   and committed admission state. Record any accepted remote effects, even
+   if stop succeeded locally. A daemon-owned push outside the selected group
+   is not killed by jobs stop; an operation already dispatched may finish.
+   A completed job can report `already finished` and retain delivery
+   eligibility. Neither outcome guarantees rollback.
+4. Keep pause in place while reconciling what actually happened. Any manual
+   receipt recovery comes only after inspection of local and remote state,
+   control of relevant independent writers, and backup of evidence, as
+   described in [the operator guidance](../README.md#pause-and-job-control).
+   Clean up only the disposable resources deliberately; do not treat cleanup
+   or a retry as proof that the interrupted push had no effects.
+
 ## Current public snapshot
 
 On 2026-09-08, the sanitized public snapshot passed 358 Python tests with one

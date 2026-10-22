@@ -7,6 +7,7 @@ it a new task rather than silently inheriting the old one's attempts.
 
 import hashlib
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 
 SECTION = re.compile(r"^##\s+(\d+)\.\s+(.+?)\s*$")
@@ -33,6 +34,10 @@ class Task:
     @property
     def scenarios(self) -> list[str]:
         return SCENARIO_REF.findall(self.text)
+
+    def known_scenarios(self, known: Collection[str]) -> list[str]:
+        """Resolve runtime references without changing candidates used by strict linting."""
+        return [sid for sid in self.scenarios if sid in known]
 
     def title(self) -> str:
         return f"{self.label} {self.text}".strip()

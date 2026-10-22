@@ -19,6 +19,75 @@ const response = (value: unknown, code = 0) => ({ code, stdout: JSON.stringify(v
 const status = (runs: unknown[] = [run]) => response({ version: 1, runs, internal: '/private/config' });
 const done = () => response({ version: 1, outcome: 'done', verb: 'resume', detail: 'Resumed' });
 
+const errorDetail = 'Run status could not be read. Inspect specloop status --json for details.';
+const errorRun = {
+  change: 'm-broken', status: 'paused',
+  pause: { reason: 'status_error', task: '', detail: errorDetail, auto_resumes_remaining: 0 },
+  tasks: { done: 0, total: 0 }, head: '', pr: '',
+  context: {
+    summary: 'Run status could not be read.', repo: '', branch: '', task: null,
+    detail: errorDetail, recent: [], github: '',
+  },
+  error: 'FileNotFoundError: /private/unreadable-run/manifest.toml',
+};
+const healthyRuns = ['a-healthy', 'z-healthy'].map(change => ({
+  ...run, change, pr: `https://github.com/owner/${change}/pull/7`,
+  context: {
+    summary: `Work in ${change}`, repo: `/repos/${change}`, branch: `spec/${change}`,
+    task: null, detail: 'Ready for review', recent: [], github: '',
+  },
+}));
+const mixedStatus = () => response({
+  version: 1, supervisor: { state: 'running' }, runs: [healthyRuns[0], errorRun, healthyRuns[1]],
+});
+
+test('specloop-interface/isolated-run-status-failures/error-rows-remain-compatible-and-non-actionable', async () => {
+  const calls: string[][] = [];
+  const factory = createFactory(async args => { calls.push(args); return mixedStatus(); }, () => 0, home);
+  const snapshot = await factory.read();
+  assert.equal(snapshot.stale, false);
+  assert.equal(snapshot.error, null);
+  assert.deepEqual(snapshot.runs.map(row => row.change), ['a-healthy', 'm-broken', 'z-healthy']);
+  assert.deepEqual(snapshot.runs[1], {
+    change: errorRun.change, status: 'paused', tasks: { done: 0, total: 0 }, pr: '',
+    context: errorRun.context,
+  });
+  assert.ok(!JSON.stringify(snapshot).includes('/private/unreadable-run'));
+  for (const verb of ['resume', 'accept', 'publish', 'finish', 'abort'] as const) {
+    assert.deepEqual(await factory.act({ change: errorRun.change, verb }), {
+      version: 1, outcome: 'refused', verb,
+      detail: 'Action is not available for this change. Refresh the list.',
+    });
+  }
+  assert.deepEqual(calls, [['status', '--json']]);
+});
+
+test('specloop-interface/isolated-run-status-failures/broken-run-keeps-other-repositories-visible', async () => {
+  let time = 0;
+  const calls: string[][] = [];
+  const factory = createFactory(async args => {
+    calls.push(args);
+    return time ? mixedStatus() : status([healthyRuns[0], { ...run, change: errorRun.change }, healthyRuns[1]]);
+  }, () => time, home);
+  const before = await factory.read();
+  assert.ok(before.runs[1].action?.actions.includes('abort'));
+  assert.notEqual(before.runs[0].context?.repo, before.runs[2].context?.repo);
+  time = 15_000;
+  const after = await factory.read({ refresh: true });
+  assert.equal(after.stale, false);
+  assert.equal(after.error, null);
+  assert.equal(after.fetchedAt, new Date(time).toISOString());
+  assert.notEqual(after.fetchedAt, before.fetchedAt);
+  assert.deepEqual(after.runs.map(row => row.change), ['a-healthy', 'm-broken', 'z-healthy']);
+  assert.deepEqual(after.runs[0], before.runs[0]);
+  assert.deepEqual(after.runs[2], before.runs[2]);
+  assert.equal(after.runs[1].action, undefined);
+  for (const verb of ['resume', 'accept', 'publish', 'finish', 'abort'] as const) {
+    assert.equal((await factory.act({ change: errorRun.change, verb })).outcome, 'refused');
+  }
+  assert.deepEqual(calls, [['status', '--json'], ['status', '--json']]);
+});
+
 test('run-context/details-in-the-factory-section/context-redacted-and-links-checked', async () => {
   const diagnostic = `${home}/one and ${home}/two`;
   const context = {

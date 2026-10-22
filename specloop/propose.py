@@ -107,6 +107,7 @@ def paths(text: str) -> set[str]:
 
 
 # "Do not edit `tests/x.py`": overlap feedback itself makes drafters write this.
+# mutation-equivalent: {0,60} -> {1,60} preserves matches: word boundaries between the negation and edit/chang/touch/modif require at least one separator.
 NEGATED = re.compile(r"\b(?:do not|don't|never|without)\b(?:[^.;]|\.(?=\S)){0,60}?\b(?:edit|chang|touch|modif)"
                      r"|\bleave\b(?:[^.;]|\.(?=\S)){0,60}?\b(?:unchanged|untouched|alone|as is)\b", re.I)
 
@@ -148,7 +149,8 @@ def _in_flight_section(planned: dict[str, list[str]]) -> str:
     lines = "\n".join(f"- `{p}` ({', '.join(c)})" for p, c in sorted(planned.items()))
     return ("\n## Work in flight\n\nOther changes to this repository are being built now. Their tasks change "
             "these files:\n" + lines + "\n\nPlan no edits to them unless this change cannot be done otherwise. "
-            "Put new tests in new test files rather than in any test file listed here.\n")
+            "Put new tests in new test files rather than in any test file listed here. "
+            "The implementer never sees this list: if the change must avoid a file, name it.\n")
 
 
 def overlaps(work: Path, change: str, planned: dict[str, list[str]]) -> list[str]:
