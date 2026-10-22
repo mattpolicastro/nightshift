@@ -12,6 +12,7 @@ Dependency: blocked-by #14; build on its landed CLI and runtime scenario-referen
 - If the fetched base is not already incorporated, create a harness-authored merge commit preserving the run head as first parent, then run the trusted prepare/verify pipeline on the merged head.
 - Pause as `base_conflict` with conflicting paths without moving the run branch, or as `base_drift` with retained verification receipts after a clean merge fails checks. Fetch failures also prevent readiness/publication and retain a diagnostic.
 - Persist enough integration and verification state to recover safely after interruption. An unchanged, already checked base adds one fetch and no merge or additional verification.
+- If a successful publication-time integration advances the head, leave it `ready_to_publish` and return a retryable error before any push. The next invocation fetches again and publishes if the head stays unchanged during that attempt. This lets the unchanged daemon capture its human-checks receipt at the merged head and recover lost responses or comment delivery.
 - Exclude base-only lines from section mutation evidence while retaining the section's own changes and existing coverage, selection, scoring and timeout rules.
 - Add regressions in new test files. Existing tests may change **fixture setup only** to supply a fetchable local base or a fetch-boundary stub where `_remote` is faked. Preserve every assertion and explain each changed fixture in the implementation PR.
 
@@ -25,4 +26,4 @@ Implementation scope is `specloop/loop.py`, `specloop/cli.py`, additive fields/l
 
 ### Modified Capabilities
 
-None. This adds a prerequisite to successful publication and corrects evidence attribution without replacing the existing `specloop-interface`, `run-actions`, `verify-preparation`, `parallel-evidence-mutants`, `pr-revision`, or `issue-intake` requirements. Existing repository-target refusals, adopted PR reuse, JSON contracts, preparation isolation, section scope and review rules remain in force.
+None. This adds a prerequisite and a retry boundary to successful publication and corrects evidence attribution without replacing the existing `specloop-interface`, `run-actions`, `verify-preparation`, `parallel-evidence-mutants`, `pr-revision`, or `issue-intake` requirements. In particular, `issue-intake` Publication still requires both publication and the human-checks comment, including interrupted delivery recovery. Existing repository-target refusals, adopted PR reuse, JSON contracts, preparation isolation, section scope and review rules remain in force.

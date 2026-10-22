@@ -42,7 +42,7 @@ After a base integration, the harness SHALL run the trusted manifest's prepare a
 
 #### Scenario: Merged head passes
 - **WHEN** integration succeeds and all trusted prepare and verify receipts pass
-- **THEN** readiness may proceed and publication pushes that verified merged head, preserving adopted PR reuse or existing draft PR reconciliation and the human-checks pause
+- **THEN** readiness may proceed and publication ultimately pushes that verified merged head on an invocation that does not advance it, preserving adopted PR reuse or existing draft PR reconciliation and the human-checks pause
 
 #### Scenario: Drift breaks verify
 - **WHEN** a clean base merge causes a trusted verify step to fail or time out
@@ -90,7 +90,7 @@ Section mutation evidence SHALL exclude lines introduced solely through integrat
 
 ### Requirement: Preserve publication contracts
 
-The new gate SHALL retain existing target-repository validation, locking, version-1 command JSON, publication retry reconciliation, and review rules. A gate refusal SHALL expose its diagnostic through the existing publication refusal contract without claiming successful publication.
+The new gate SHALL retain existing target-repository validation, locking, version-1 command JSON, publication retry reconciliation including delivery of the human-checks comment, and review rules. A gate refusal SHALL expose its diagnostic through the existing publication refusal contract without claiming successful publication. A successfully verified head advance SHALL instead use the retry boundary below.
 
 #### Scenario: Wrong publication target
 - **WHEN** publish has no manifest GitHub repository or a hosted source origin mismatches it
@@ -99,3 +99,35 @@ The new gate SHALL retain existing target-repository validation, locking, versio
 #### Scenario: Drift refusal as JSON
 - **WHEN** `publish --json` or `act publish --json` encounters a base conflict or verification drift
 - **THEN** it exits nonzero with exactly one existing-format version-1 refusal document conveying the pause diagnostic, retains the PR identity, and performs no publication
+
+### Requirement: Stable head publication boundary
+
+If publication preparation advances the head and verification passes, the invocation SHALL defer external publication, retain `ready_to_publish` and all human checks at the actual merged head, and report a retry instruction. Direct JSON publication SHALL use a retryable error. Each retry SHALL fetch again and publish only if preparation leaves its entry head unchanged and all verification obligations are satisfied.
+
+#### Scenario: Publish merge defers external effects
+- **WHEN** publish begins at H and clean base integration advances it to M with green verification
+- **THEN** it retains ready state at M with the human checks and performs no push, PR lookup/creation, published event or transition to `human_checks`
+- **THEN** direct `publish --json` exits 1 with exactly one version-1 top-level `error` document and no outcome or reasons; plain publish exits 1 with the retry explanation, and `act publish` keeps its refused/detail format with that explanation
+- **THEN** a subsequent invocation with an unchanged base fetches once, performs no new merge or verification, and publishes M to the same adopted PR or through existing draft PR reconciliation
+
+#### Scenario: Deferral survives interruption
+- **WHEN** a daemon poll saved an H-keyed receipt and publication stops after advancing H to M, including interruption before verification success is saved or loss of the deferral response
+- **THEN** later status reports actual head M in ready state, existing intake creates its M-keyed receipt with all checks, and pending verification completes before any eventual publication
+- **THEN** the retryable deferral produces no publication-refusal comment or needs-human label and does not mark the H-keyed receipt delivered
+
+#### Scenario: Base moves on successive attempts
+- **WHEN** the base advances again after a verified deferral, or after a later push fails before publication completes
+- **THEN** each eligible attempt fetches the current base, merges and verifies if required, and defers again whenever its head advances
+- **THEN** a subsequent stable attempt publishes only the latest verified head with a matching newly captured receipt, without duplicate merge commits or a stale human-checks receipt
+
+### Requirement: Recover publication comment after integration
+
+Publication after integration SHALL preserve human-checks comment recovery using unchanged `(change, head, pr)` matching and round markers. Intake SHALL be able to capture the merged head and checks between integration and external publication. Lost responses or interrupted delivery SHALL NOT lose or duplicate the comment or require another publication solely to deliver it. Status SHALL report the actual branch head.
+
+#### Scenario: Published response is lost
+- **WHEN** intake has refreshed its receipt to M after a base-merge deferral and the stable publish invocation pushes M and enters `human_checks` but its response is lost
+- **THEN** after restart the receipt still matches actual head M, existing intake recovers the published result and posts the complete human-checks comment exactly once without another publish invocation
+
+#### Scenario: Comment delivery is interrupted
+- **WHEN** publication of the stable merged head succeeds and its human-checks comment fails before delivery or succeeds remotely but its acknowledgement is lost
+- **THEN** later polls reuse the matching merged-head receipt and round marker, deliver or reconcile exactly one comment with all checks and the hosted CI reminder, and mark delivery complete without another publish invocation
