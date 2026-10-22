@@ -214,6 +214,33 @@ def test_feasibility_review_checks_existing_specs_and_human_tasks():
     assert "requirements in openspec/specs/ for each capability it touches" in propose.PROMPT
 
 
+@pytest.mark.parametrize("rule", [
+    "the task contradicts the design or another task;",
+    "to do the task (a manual, visual, hardware or live-service check).",
+], ids=["either-contradiction-is-sufficient", "any-human-check-is-sufficient"])
+def test_feasibility_reviewer_receives_alternative_reasons_to_refuse(source, tmp_path, rule):
+    # These are instructions consumed by the reviewer: changing 'or' to 'and'
+    # incorrectly requires multiple reasons before an impossible task is refused.
+    calls = []
+
+    def agent(call):
+        calls.append(call)
+        return agents.Result("ok", {"contradictions": [], "risks": []})
+
+    feasibility.check(source, "main", M, tmp_path / "review", agent=agent)
+
+    assert len(calls) == 1
+    assert rule in " ".join(calls[0].prompt.split())
+
+
+@pytest.mark.parametrize("gap, edited", [(0, True), (1, False), (60, False), (61, True)])
+def test_negation_requires_a_word_separator_and_has_a_bounded_reach(gap, edited):
+    # No separator joins 'not' to 'edit'; beyond 60 characters the negation
+    # no longer suppresses overlap feedback for the named file.
+    text = "do not" + " " * gap + "edit `tests/shared.py`"
+    assert propose.edited_paths(text) == ({"tests/shared.py"} if edited else set())
+
+
 def test_a_test_file_the_task_says_to_leave_alone_is_not_an_overlap(source, tmp_path, monkeypatch):
     other_run(source, tmp_path, monkeypatch)
     hands_off = SEPARATE.replace(" covering", "; do not edit `tests/test_calc.py`, covering")
