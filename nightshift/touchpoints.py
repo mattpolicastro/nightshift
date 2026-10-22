@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import stat
 from pathlib import Path
@@ -30,8 +31,8 @@ class _Reader:
     def __init__(self):
         self.errors = []
 
-    def error(self, path, exc):
-        self.errors.append(dict(path=str(path), line=None, message=f"{type(exc).__name__}: {exc}"))
+    def error(self, path, exc, line=None):
+        self.errors.append(dict(path=str(path), line=line, message=f"{type(exc).__name__}: {exc}"))
 
     def children(self, path):
         try:
@@ -276,4 +277,105 @@ def collect_intake(nightshift_root: Path, runs_root: Path) -> dict:
         _intake_counts(row, reader)
     history["errors"] = sorted(history["errors"] + reader.errors,
                                key=lambda error: (error["path"], error["message"]))
+    return history
+
+
+def _event_counts(row, reader):
+    path, counts = row["events_path"], row["counts"]
+    if path is None:
+        return
+    pause, auto_resumes, certain = None, {}, True
+
+    def increment(field, reason):
+        counts[field][reason] = counts[field].get(reason, 0) + 1
+
+    def resolve(resolution=None):
+        nonlocal pause
+        if pause is None:
+            return
+        reason, task = pause["reason"], pause.get("task", "")
+        scheduled = bool(pause.get("resume_at", 0))
+        human = not scheduled or resolution in ("resumed", "human_accept")
+        if reason == "ready_to_publish" or resolution == "auto_resumed":
+            human = False
+        elif scheduled and not human:
+            if reason == "infra" and task and certain:
+                human = auto_resumes.get(task, 0) >= 2
+            elif reason not in ("infra", "usage_limit") or not certain:
+                row["warnings"].append(f"Unclassified scheduled pause ({reason}): {path}")
+        if human:
+            counts["human_pauses"] += 1
+            increment("pauses_by_reason", reason)
+        pause = None
+
+    def validate(event):
+        if not isinstance(event, dict) or not isinstance(event.get("event"), str):
+            raise ValueError("event must be an object with a string event kind")
+        for field in ("at", "resume_at"):
+            value = event.get(field, 0) if field == "resume_at" else event.get(field)
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError(f"event {field} must be a finite number")
+        kind = event["event"]
+        if kind == "pause" and (not isinstance(event.get("reason"), str) or not event["reason"]):
+            raise ValueError("pause reason must be a nonempty string")
+        for field in ("reason", "task"):
+            if field in event and not isinstance(event[field], str):
+                raise ValueError(f"event {field} must be a string")
+        if kind == "revised" and (not isinstance(event.get("commit"), str) or not event["commit"].strip()):
+            raise ValueError("revised event commit must be a nonempty string")
+
+    try:
+        # Decode each line separately so a damaged line cannot hide later events.
+        with path.open("rb") as stream:
+            for line, raw in enumerate(stream, 1):
+                try:
+                    event = json.loads(raw.decode("utf-8"))
+                    validate(event)
+                except (ValueError, OverflowError) as exc:
+                    certain = False
+                    resolve()
+                    reader.error(path, exc, line)
+                    continue
+                kind = event["event"]
+                if kind == "pause":
+                    resolve()
+                    pause = event
+                elif kind in ("resumed", "auto_resumed", "human_accept", "revised", "finished", "aborted"):
+                    if kind == "resumed":
+                        counts["manual_resumes"] += 1
+                        increment("resumes_by_reason", pause["reason"] if pause else "unknown")
+                        if pause is None:
+                            row["warnings"].append(f"Unpaired manual resume; reason unknown: {path}:{line}")
+                    elif kind == "human_accept":
+                        counts["human_accepts"] += 1
+                    elif kind == "revised" and event["commit"] not in row["build_commits"]:
+                        row["build_commits"].add(event["commit"])
+                        counts["build_revisions"] += 1
+                    if kind == "auto_resumed":
+                        reason = event.get("reason", pause["reason"] if pause else None)
+                        task = event.get("task", pause.get("task", "") if pause else "")
+                        if reason == "infra" and task:
+                            auto_resumes[task] = auto_resumes.get(task, 0) + 1
+                    resolve(kind)
+    except FileNotFoundError as exc:
+        if any(record["kind"] == "admissions" and record["result"] is not None and
+               record["result"].get("outcome") == "admitted" for record in row["records"]):
+            reader.error(path, exc)
+    except OSError as exc:
+        certain = False
+        reader.error(path, exc)
+    resolve()
+    for field in ("pauses_by_reason", "resumes_by_reason"):
+        counts[field] = dict(sorted(counts[field].items()))
+    counts["total"] = sum(counts[field] for field in _SCALAR_COUNTS)
+
+
+def collect_events(nightshift_root: Path, runs_root: Path) -> dict:
+    """Add append-order event accounting to intake history, preserving provenance."""
+    history = collect_intake(nightshift_root, runs_root)
+    reader = _Reader()
+    for row in history["changes"]:
+        _event_counts(row, reader)
+    history["errors"] = sorted(history["errors"] + reader.errors,
+                               key=lambda error: (error["path"], error["line"] or 0, error["message"]))
     return history

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift.touchpoints import collect_history, collect_intake
+from nightshift.touchpoints import collect_events, collect_history, collect_intake
 
 
 def put(root, relative, data):
@@ -168,8 +168,18 @@ def intake_job(root, kind, job, command, outcome=None, *, number=None, head=None
     return dict(change=change, command=command, job=job, head=head, result=result)
 
 
+def event_log(root, events):
+    path = root / "runs/r-issue-8-feature/events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Deliberately decreasing timestamps: append order supplies attribution.
+    path.write_text("".join(json.dumps(dict(at=100 - index, **event)) + "\n"
+                            for index, event in enumerate(events)))
+    return path
+
+
 @pytest.mark.scenario("touchpoint-report/intake-round-accounting/each-intake-kind-counted-once")
-def test_each_intake_kind_counted_once(tmp_path):
+@pytest.mark.scenario("touchpoint-report/human-event-accounting/pauses-resumes-and-accepts-by-reason")
+def test_touchpoints_count_each_kind(tmp_path):
     rounds = [
         ("proposals", "q", "propose", "needs_input", dict(questions=["a", "b", "c"])),
         ("revisions", "q", "propose", "needs_input", dict(questions=["a", "b"])),
@@ -181,13 +191,23 @@ def test_each_intake_kind_counted_once(tmp_path):
     for kind, job, command, outcome, extra in rounds:
         receipt = intake_job(tmp_path, kind, job, command, outcome, **extra)
         put(tmp_path, f"{kind}/o__r/{8 if kind == 'proposals' else 28}.json", receipt)
-    # Matching revised-event union is exercised by task 2.1's event replay tests.
-    history = collect_intake(tmp_path, tmp_path / "runs")
+    event_log(tmp_path, [
+        dict(event="revised", commit="build"),
+        dict(event="pause", reason="requested"), dict(event="resumed"),
+        dict(event="pause", reason="blocked"), dict(event="resumed", note=""),
+        dict(event="pause", reason="stuck"), dict(event="human_accept"),
+        dict(event="pause", reason="human_checks"),
+        dict(event="pause", reason="ready_to_publish"), dict(event="arbiter_accept"),
+        dict(event="acceptance"), dict(event="auto_resumed"),
+    ])
+    history = collect_events(tmp_path, tmp_path / "runs")
     assert not history["errors"]
     row, = history["changes"]
     assert row["counts"] == dict(drafter_questions=2, spec_revisions=2, build_revisions=1,
-                               human_pauses=0, manual_resumes=0, human_accepts=0,
-                               admission_refusals=1, pauses_by_reason={}, resumes_by_reason={}, total=6)
+                               human_pauses=4, manual_resumes=2, human_accepts=1,
+                               admission_refusals=1, total=13,
+                               pauses_by_reason=dict(blocked=1, human_checks=1, requested=1, stuck=1),
+                               resumes_by_reason=dict(blocked=1, requested=1))
     assert row["build_commits"] == {"build"} and not row["warnings"]
 
 
@@ -270,11 +290,11 @@ def test_incomplete_and_empty_rounds(tmp_path):
     put(tmp_path, "admissions/o__r/28.json", receipt)
     error_path = put(tmp_path, "admissions/o__r/28.jobs/failed/result.json", dict(error="worker failed"))
     intake_job(tmp_path, "revisions", "refused", "revise", "refused")
-    # Task 2.1 adds the successful event without a receipt to this intake count.
-    history = collect_intake(tmp_path, tmp_path / "runs")
+    event_log(tmp_path, [dict(event="revised", commit="event-only")])
+    history = collect_events(tmp_path, tmp_path / "runs")
     row, = history["changes"]
-    assert row["counts"]["build_revisions"] == row["counts"]["total"] == 1
-    assert row["counts"]["admission_refusals"] == 0 and not row["build_commits"]
+    assert row["counts"]["build_revisions"] == row["counts"]["total"] == 2
+    assert row["counts"]["admission_refusals"] == 0 and row["build_commits"] == {"event-only"}
     assert any("Pending intake request" in warning and "pending/request.json" in warning
                for warning in row["warnings"])
     assert len(history["errors"]) == 1 and history["errors"][0]["path"] == str(error_path)
@@ -314,3 +334,91 @@ def test_invalid_intake_results_preserve_completed_siblings(tmp_path, extra):
     history = collect_intake(tmp_path, tmp_path / "runs")
     assert history["changes"][0]["counts"]["total"] == 1
     assert len(history["errors"]) == 1 and history["errors"][0]["path"] == str(bad)
+
+
+@pytest.mark.scenario("touchpoint-report/retained-intake-history/build-evidence-counted-once")
+def test_build_receipt_result_and_events_share_commit_identity(tmp_path):
+    receipt = intake_job(tmp_path, "revisions", "build", "revise", "revised", commit="a")
+    put(tmp_path, "revisions/o__r/28.json", receipt)
+    event_log(tmp_path, [dict(event="revised", commit=commit) for commit in ("a", "b", "b")])
+    history = collect_events(tmp_path, tmp_path / "runs")
+    assert not history["errors"]
+    row, = history["changes"]
+    assert row["counts"]["build_revisions"] == row["counts"]["total"] == 2
+    assert row["build_commits"] == {"a", "b"}
+
+
+@pytest.mark.parametrize("clearing", ["revised", "human_accept", "resumed", "auto_resumed", "finished", "aborted"])
+def test_event_resolution_clears_resume_attribution(tmp_path, clearing):
+    intake_job(tmp_path, "proposals", "draft", "propose", "drafted")
+    event_log(tmp_path, [dict(event="pause", reason="requested"),
+                         dict(event=clearing, commit="a"), dict(event="resumed")])
+    history = collect_events(tmp_path, tmp_path / "runs")
+    assert not history["errors"]
+    row, = history["changes"]
+    assert row["counts"]["human_pauses"] == (clearing != "auto_resumed")
+    assert row["counts"]["manual_resumes"] == 1 + (clearing == "resumed")
+    assert row["counts"]["resumes_by_reason"] == (
+        dict(requested=1, unknown=1) if clearing == "resumed" else dict(unknown=1))
+    assert any("Unpaired manual resume" in warning for warning in row["warnings"])
+
+
+@pytest.mark.parametrize("bad", ['{"event":', '{"event":"revised","at":1}',
+                                  '{"event":"pause","at":true,"reason":"blocked"}'])
+def test_bad_event_preserves_siblings_without_stale_reason(tmp_path, bad):
+    intake_job(tmp_path, "proposals", "draft", "propose", "drafted")
+    path = event_log(tmp_path, [dict(event="pause", reason="blocked")])
+    with path.open("a") as stream:
+        stream.write(bad + '\n{"event":"resumed","at":2}\n')
+    history = collect_events(tmp_path, tmp_path / "runs")
+    row, = history["changes"]
+    assert row["counts"]["human_pauses"] == row["counts"]["manual_resumes"] == 1
+    assert row["counts"]["resumes_by_reason"] == dict(unknown=1)
+    assert len(history["errors"]) == 1
+    assert history["errors"][0]["path"] == str(path) and history["errors"][0]["line"] == 2
+
+
+def test_identical_events_are_distinct_and_unknown_events_do_not_clear_pause(tmp_path):
+    intake_job(tmp_path, "proposals", "draft", "propose", "drafted")
+    path = event_log(tmp_path, [dict(event="pause", reason="requested"),
+                              dict(event="future_kind", extra=True), dict(event="resumed")])
+    path.write_text(path.read_text() * 2)
+    history = collect_events(tmp_path, tmp_path / "runs")
+    assert not history["errors"]
+    row, = history["changes"]
+    assert row["counts"]["human_pauses"] == row["counts"]["manual_resumes"] == 2
+    assert row["counts"]["pauses_by_reason"] == row["counts"]["resumes_by_reason"] == dict(requested=2)
+
+
+def test_replay_classifies_automatic_and_manually_resolved_pauses(tmp_path):
+    intake_job(tmp_path, "proposals", "draft", "propose", "drafted")
+    infra = dict(event="pause", reason="infra", task="1", resume_at=10)
+    automatic = dict(event="auto_resumed", reason="infra", task="1")
+    event_log(tmp_path, [
+        infra, automatic, infra, automatic, infra, dict(event="resumed"), infra,
+        dict(event="pause", reason="usage_limit", resume_at=10),
+        dict(event="pause", reason="usage_limit", resume_at=10), dict(event="human_accept"),
+        dict(event="pause", reason="future", resume_at=10), dict(event="resumed"),
+        dict(event="pause", reason="legacy"), dict(event="auto_resumed"),
+        dict(event="pause", reason="infra", resume_at=10),
+        dict(event="pause", reason="future", resume_at=10),
+    ])
+    history = collect_events(tmp_path, tmp_path / "runs")
+    assert not history["errors"]
+    row, = history["changes"]
+    counts = row["counts"]
+    assert counts["human_pauses"] == 4 and counts["manual_resumes"] == 2
+    assert counts["human_accepts"] == 1 and counts["total"] == 7
+    assert counts["pauses_by_reason"] == dict(future=1, infra=2, usage_limit=1)
+    assert counts["resumes_by_reason"] == dict(future=1, infra=1)
+    assert len(row["warnings"]) == 1 and "Unclassified scheduled pause (future)" in row["warnings"][0]
+
+
+def test_missing_event_log_is_only_an_error_for_an_admitted_change(tmp_path):
+    intake_job(tmp_path, "proposals", "draft", "propose", "drafted")
+    assert not collect_events(tmp_path, tmp_path / "runs")["errors"]
+    intake_job(tmp_path, "admissions", "admit", "admit", "admitted")
+    history = collect_events(tmp_path, tmp_path / "runs")
+    assert len(history["errors"]) == 1
+    assert history["errors"][0]["path"].endswith("r-issue-8-feature/events.jsonl")
+    assert history["changes"][0]["counts"]["total"] == 0
