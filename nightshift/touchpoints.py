@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import re
@@ -464,3 +465,70 @@ def collect_report(nightshift_root: Path, runs_root: Path, *, since: date | None
         errors=sorted(history["errors"] + reader.errors,
                       key=lambda error: (error["path"], error["line"] or 0, error["message"])),
     )
+
+
+def render_table(report: dict) -> str:
+    """Render the same counts and diagnostics as the versioned JSON document."""
+    headers = ("Repository", "Issue", "Change", "Questions", "Spec revisions",
+               "Build revisions", "Pauses", "Resumes", "Accepts", "Refusals", "Total")
+    fields = (*_SCALAR_COUNTS, "total")
+    rows = [[row["repo"], str(row["issue"]), row["change"],
+             *(str(row["counts"][field]) for field in fields)] for row in report["changes"]]
+    rows.append(["TOTAL", "-", f"{report['totals']['changes']} changes",
+                 *(str(report["totals"][field]) for field in fields)])
+    widths = [max(len(row[i]) for row in [headers, *rows]) for i in range(len(headers))]
+
+    def format_row(row):
+        return "  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip()
+
+    lines = [format_row(headers), format_row(["-" * width for width in widths])]
+    lines.extend(format_row(row) for row in rows)
+    lines.extend(["", "Pause/resume reasons:"])
+
+    def reasons(label, counts):
+        pauses = json.dumps(counts["pauses_by_reason"], sort_keys=True)
+        resumes = json.dumps(counts["resumes_by_reason"], sort_keys=True)
+        return f"  {label}: pauses={pauses}; resumes={resumes}"
+
+    for row in report["changes"]:
+        lines.append(reasons(f"{row['repo']} #{row['issue']} {row['change']}", row["counts"]))
+    lines.append(reasons("TOTAL", report["totals"]))
+    lines.extend(["", f"Coverage: {report['coverage']}; merge boundary: {report['merge_boundary']}; "
+                  f"since: {report['since'] or 'all'}", "Limitations:"])
+    lines.extend(f"  - {limitation}" for limitation in report["limitations"])
+    lines.append("Warnings:")
+    warnings = [f"  - {row['repo']} #{row['issue']} {row['change']}: {warning}"
+                for row in report["changes"] for warning in row["warnings"]]
+    lines.extend(warnings or ["  None"])
+    lines.append("Errors:")
+    for error in report["errors"]:
+        location = error["path"] + (f":{error['line']}" if error["line"] is not None else "")
+        lines.append(f"  - {location}: {error['message']}")
+    if not report["errors"]:
+        lines.append("  None")
+    return "\n".join(lines)
+
+
+def _since_date(value: str) -> date:
+    try:
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            raise ValueError("expected YYYY-MM-DD")
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected a valid calendar date in YYYY-MM-DD format") from exc
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Report observed local human touchpoints.", allow_abbrev=False)
+    parser.add_argument("--json", action="store_true", help="emit one versioned JSON document")
+    parser.add_argument("--since", type=_since_date, metavar="YYYY-MM-DD",
+                        help="include changes drafted on or after this date (UTC, approximate)")
+    args = parser.parse_args(argv)
+    home = Path.home()
+    report = collect_report(home / ".nightshift", home / ".specloop" / "runs", since=args.since)
+    print(json.dumps(report, indent=2) if args.json else render_table(report))
+    return 1 if report["errors"] else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

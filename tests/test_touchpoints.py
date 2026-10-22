@@ -1,12 +1,16 @@
 import json
 import os
+import re
+import subprocess
+import sys
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 
 import pytest
 
-from nightshift.touchpoints import collect_events, collect_history, collect_intake, collect_report
+from nightshift import touchpoints
+from nightshift.touchpoints import collect_events, collect_history, collect_intake, collect_report, main, render_table
 
 
 def put(root, relative, data):
@@ -689,26 +693,27 @@ def test_draft_attempt_date_survives_without_success_or_current_receipt(tmp_path
 
 @pytest.mark.scenario("touchpoint-report/versioned-report-output/table-and-json-agree")
 @pytest.mark.scenario("touchpoint-report/versioned-report-output/observed-history-does-not-claim-merge")
-def test_touchpoints_json_document(tmp_path):
-    # The document is shared by both renderers; command assertions follow in task 3.2.
+def test_touchpoints_json_document(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    nightshift_root, runs = tmp_path / ".nightshift", tmp_path / ".specloop/runs"
     fixtures = [("z/r", 8, "aborted"), ("a/r", 10, "active"), ("a/r", 2, "finished")]
     for repo, issue, state in fixtures:
         change = f"r-issue-{issue}-{state}"
-        dated_put(tmp_path, f"proposals/{repo.replace('/', '__')}/{issue}.json",
+        dated_put(nightshift_root, f"proposals/{repo.replace('/', '__')}/{issue}.json",
                   dict(change=change, result=dict(outcome="needs_input")), "2026-10-21T00:00:00+00:00")
         events = [dict(event=state, at=1)]
         if state == "finished":
-            put(tmp_path, "revisions/a__r/22.json",
+            put(nightshift_root, "revisions/a__r/22.json",
                 dict(change=change, command="propose", result=dict(outcome="needs_input")))
             events += [dict(event="human_accept", at=2), dict(event="revised", at=3, commit="post-finish")]
         else:
             for reason in (["zebra", "alpha"] if state == "active" else ["zebra"]):
                 events += [dict(event="pause", reason=reason, at=2), dict(event="resumed", at=3)]
-        path = put(tmp_path, f"runs/{change}/events.jsonl", {})
+        path = put(runs, f"{change}/events.jsonl", {})
         path.write_text("".join(json.dumps(event) + "\n" for event in events))
-    report = collect_report(tmp_path, tmp_path / "runs")
+    report = collect_report(nightshift_root, runs)
     encoded = json.dumps(report)
-    assert encoded == json.dumps(collect_report(tmp_path, tmp_path / "runs"))
+    assert encoded == json.dumps(collect_report(nightshift_root, runs))
     assert json.loads(encoded) == report
     assert set(report) == {"version", "since", "coverage", "merge_boundary", "limitations", "changes", "totals", "errors"}
     assert type(report["version"]) is int and report["version"] == 1
@@ -738,6 +743,40 @@ def test_touchpoints_json_document(tmp_path):
             assert list(counts[field]) == sorted(counts[field])
             assert sum(counts[field].values()) == counts[counter]
 
+    outputs = {}
+    for args in ([], ["--json"]):
+        for _ in range(2):
+            assert main(args) == 0  # Approximation/history warnings are not errors.
+            captured = capsys.readouterr()
+            assert captured.err == ""
+            key = tuple(args)
+            assert captured.out == outputs.setdefault(key, captured.out)
+    assert json.loads(outputs[("--json",)]) == report  # Rejects extra stdout documents/logging.
+    table = outputs[()]
+    assert table == render_table(report) + "\n"
+    lines = table.splitlines()
+    assert re.split(r"  +", lines[0]) == [
+        "Repository", "Issue", "Change", "Questions", "Spec revisions", "Build revisions",
+        "Pauses", "Resumes", "Accepts", "Refusals", "Total",
+    ]
+    for line, row in zip(lines[2:5], report["changes"]):
+        cells = re.split(r"  +", line)
+        assert cells[:3] == [row["repo"], str(row["issue"]), row["change"]]
+        assert list(map(int, cells[3:])) == [row["counts"][field] for field in (*scalar, "total")]
+    total_cells = re.split(r"  +", lines[5])
+    assert total_cells[:3] == ["TOTAL", "-", "3 changes"]
+    assert list(map(int, total_cells[3:])) == [totals[field] for field in (*scalar, "total")]
+    labels = [f"{row['repo']} #{row['issue']} {row['change']}" for row in report["changes"]]
+    for label, counts in zip([*labels, "TOTAL"], [*(row["counts"] for row in report["changes"]), totals]):
+        reason_line = next(line for line in lines if line.startswith(f"  {label}: pauses="))
+        pauses, resumes = reason_line.split(": pauses=", 1)[1].split("; resumes=")
+        assert json.loads(pauses) == counts["pauses_by_reason"]
+        assert json.loads(resumes) == counts["resumes_by_reason"]
+    assert "observed_local_history" in table and "merge boundary: unknown" in table
+    assert all(limitation in table for limitation in report["limitations"])
+    assert all(warning in table for row in report["changes"] for warning in row["warnings"])
+    assert table.endswith("Errors:\n  None\n")
+
 
 def test_empty_report_has_all_zero_totals(tmp_path):
     report = collect_report(tmp_path / "absent", tmp_path / "runs")
@@ -746,3 +785,114 @@ def test_empty_report_has_all_zero_totals(tmp_path):
                                      human_pauses=0, manual_resumes=0, human_accepts=0, admission_refusals=0,
                                      pauses_by_reason={}, resumes_by_reason={}, total=0)
     assert not list(tmp_path.iterdir())
+
+
+def module_cli(home, *args):
+    repo = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, HOME=str(home), PYTHONPATH=str(repo), PYTHONDONTWRITEBYTECODE="1")
+    return subprocess.run([sys.executable, "-m", "nightshift.touchpoints", *args],
+                          cwd=repo, env=env, capture_output=True, text=True, timeout=30)
+
+
+@pytest.mark.scenario("touchpoint-report/local-report-entry-point/empty-local-history")
+@pytest.mark.parametrize("existing_roots", [False, True])
+@pytest.mark.parametrize("args", [[], ["--json"]])
+def test_empty_history_module_entry_point(tmp_path, existing_roots, args):
+    if existing_roots:
+        for kind in ("proposals", "admissions", "revisions"):
+            (tmp_path / ".nightshift" / kind).mkdir(parents=True)
+        (tmp_path / ".specloop/runs").mkdir(parents=True)
+    before = sorted(tmp_path.rglob("*"))
+    result = module_cli(tmp_path, *args)
+    assert result.returncode == 0 and result.stderr == ""
+    report = collect_report(tmp_path / ".nightshift", tmp_path / ".specloop/runs")
+    assert report["changes"] == report["errors"] == []
+    for field, value in report["totals"].items():
+        assert value == ({} if field.endswith("_by_reason") else 0)
+    if args:
+        assert json.loads(result.stdout) == report
+    else:
+        assert result.stdout == render_table(report) + "\n"
+        total = re.split(r"  +", result.stdout.splitlines()[2])
+        assert total[:3] == ["TOTAL", "-", "0 changes"]
+        assert list(map(int, total[3:])) == [0] * 8
+        assert result.stdout.startswith("Repository")
+    assert sorted(tmp_path.rglob("*")) == before
+
+
+@pytest.mark.scenario("touchpoint-report/draft-date-selection/approximate-missing-and-invalid-dates")
+@pytest.mark.parametrize("value", ["2026-02-29", "2026-13-01", "2026-04-31", "0000-01-01",
+                                   "20261021", "2026-W43-3", "2026-1-01", "2026-10-21T00:00:00", ""])
+def test_invalid_date_is_rejected_before_collection(tmp_path, monkeypatch, capsys, value):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid arguments must not collect local records")
+    monkeypatch.setattr(touchpoints, "collect_report", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        main(["--json", "--since", value])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "YYYY-MM-DD" in captured.err
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.scenario("touchpoint-report/draft-date-selection/approximate-missing-and-invalid-dates")
+def test_since_module_entry_point_and_unknown_date_exit(tmp_path):
+    state = tmp_path / ".nightshift"
+    dated_put(state, "proposals/o__r/8.json",
+              dict(change="r-issue-8-feature", result=dict(outcome="needs_input")),
+              "2026-10-20T19:00:00-05:00")
+    put(state, "admissions/o__r/29.json",
+        dict(change="r-issue-9-feature", result=dict(outcome="refused")))
+    unfiltered = module_cli(tmp_path, "--json")
+    assert unfiltered.returncode == 0 and unfiltered.stderr == ""
+    estimated, unknown = json.loads(unfiltered.stdout)["changes"]
+    assert estimated["drafted_at"] == "2026-10-21T00:00:00+00:00"
+    assert estimated["drafted_at_source"] == "receipt_mtime" and estimated["warnings"]
+    assert unknown["drafted_at"] is unknown["drafted_at_source"] is None
+    filtered = module_cli(tmp_path, "--json", "--since", "2026-10-21")
+    assert filtered.returncode == 1 and filtered.stderr == ""
+    report = json.loads(filtered.stdout)
+    assert report["since"] == "2026-10-21" and report["changes"] == [estimated]
+    assert report["totals"]["total"] == 1
+    assert "draft date unknown" in report["errors"][0]["message"]
+    invalid = module_cli(tmp_path, "--json", "--since", "2026-02-30")
+    assert invalid.returncode == 2 and invalid.stdout == "" and "YYYY-MM-DD" in invalid.stderr
+
+
+@pytest.mark.parametrize("args,code", [(["--help"], 0), (["--unknown"], 2), (["--since"], 2)])
+def test_argparse_help_and_usage_do_not_collect(tmp_path, monkeypatch, capsys, args, code):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    def forbidden(*args, **kwargs):
+        pytest.fail("help and invalid arguments must not collect records")
+    monkeypatch.setattr(touchpoints, "collect_report", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        main(args)
+    assert exc.value.code == code
+    captured = capsys.readouterr()
+    assert "usage:" in (captured.out if code == 0 else captured.err)
+    assert (captured.err if code == 0 else captured.out) == ""
+
+
+def test_partial_report_module_exit_and_diagnostics_in_both_formats(tmp_path):
+    state = tmp_path / ".nightshift"
+    put(state, "proposals/o__r/8.json", dict(change="r-issue-8-feature", result=dict(outcome="needs_input")))
+    bad = put(state, "proposals/o__r/9.json", {})
+    bad.write_text('{"private": "do not echo",')
+    events = put(tmp_path, ".specloop/runs/r-issue-8-feature/events.jsonl", {})
+    events.write_text('{"event":"human_accept","at":1}\nBAD\n{"event":"human_accept","at":2}\n')
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+              for path in tmp_path.rglob("*") if path.is_file()}
+    encoded, table = module_cli(tmp_path, "--json"), module_cli(tmp_path)
+    assert encoded.returncode == table.returncode == 1
+    assert encoded.stderr == table.stderr == ""
+    report = json.loads(encoded.stdout)
+    assert report["totals"]["human_accepts"] == 2 and report["totals"]["total"] == 3
+    assert len(report["errors"]) == 2
+    assert table.stdout == render_table(report) + "\n"
+    for error in report["errors"]:
+        assert error["message"] in table.stdout
+    assert f"{events}:2:" in table.stdout and f"{bad}:" in table.stdout
+    assert "do not echo" not in encoded.stdout + table.stdout
+    assert before == {path: (path.read_bytes(), path.stat().st_mtime_ns)
+                      for path in tmp_path.rglob("*") if path.is_file()}
