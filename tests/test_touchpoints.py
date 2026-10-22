@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift.touchpoints import collect_history
+from nightshift.touchpoints import collect_history, collect_intake
 
 
 def put(root, relative, data):
@@ -152,3 +152,165 @@ def test_discovery_permission_errors_preserve_siblings(tmp_path, monkeypatch, op
     assert [row["issue"] for row in history["changes"]] == expected
     assert history["errors"] == [dict(path=str(denied), line=None,
                                      message="PermissionError: fixture access denied")]
+
+
+def intake_job(root, kind, job, command, outcome=None, *, number=None, head=None, **extra):
+    number = number or (8 if kind == "proposals" else 28)
+    change = "r-issue-8-feature"
+    args = ["revise", change] if command == "revise" else [command, "manifest", "--change", change]
+    if head is not None:
+        args += ["--head", head]
+    base = f"{kind}/o__r/{number}.jobs/{job}"
+    put(root, f"{base}/request.json", dict(args=args))
+    result = dict(outcome=outcome, **extra) if outcome is not None else None
+    if result is not None:
+        put(root, f"{base}/result.json", dict(result=result))
+    return dict(change=change, command=command, job=job, head=head, result=result)
+
+
+@pytest.mark.scenario("touchpoint-report/intake-round-accounting/each-intake-kind-counted-once")
+def test_each_intake_kind_counted_once(tmp_path):
+    rounds = [
+        ("proposals", "q", "propose", "needs_input", dict(questions=["a", "b", "c"])),
+        ("revisions", "q", "propose", "needs_input", dict(questions=["a", "b"])),
+        ("revisions", "s", "propose", "drafted", dict(commit="spec")),
+        ("revisions", "b", "revise", "revised", dict(commit="build")),
+        ("admissions", "no", "admit", "refused", {}),
+        ("admissions", "yes", "admit", "admitted", {}),
+    ]
+    for kind, job, command, outcome, extra in rounds:
+        receipt = intake_job(tmp_path, kind, job, command, outcome, **extra)
+        put(tmp_path, f"{kind}/o__r/{8 if kind == 'proposals' else 28}.json", receipt)
+    # Matching revised-event union is exercised by task 2.1's event replay tests.
+    history = collect_intake(tmp_path, tmp_path / "runs")
+    assert not history["errors"]
+    row, = history["changes"]
+    assert row["counts"] == dict(drafter_questions=2, spec_revisions=2, build_revisions=1,
+                               human_pauses=0, manual_resumes=0, human_accepts=0,
+                               admission_refusals=1, pauses_by_reason={}, resumes_by_reason={}, total=6)
+    assert row["build_commits"] == {"build"} and not row["warnings"]
+
+
+@pytest.mark.parametrize("kind,command,outcome,expected", [
+    ("proposals", "propose", "drafted", {}),
+    ("proposals", "propose", "needs_input", dict(drafter_questions=1)),
+    ("proposals", "propose", "rejected", {}),
+    ("revisions", "propose", "drafted", dict(spec_revisions=1)),
+    ("revisions", "propose", "needs_input", dict(drafter_questions=1, spec_revisions=1)),
+    ("revisions", "propose", "rejected", dict(spec_revisions=1)),
+    ("revisions", "revise", "revised", dict(build_revisions=1)),
+    ("revisions", "revise", "refused", dict(build_revisions=1)),
+    ("admissions", "admit", "admitted", {}),
+    ("admissions", "admit", "refused", dict(admission_refusals=1)),
+])
+def test_intake_terminal_outcomes(tmp_path, kind, command, outcome, expected):
+    intake_job(tmp_path, kind, "job", command, outcome, commit="abc")
+    history = collect_intake(tmp_path, tmp_path / "runs")
+    assert not history["errors"]
+    counts = history["changes"][0]["counts"]
+    nonzero = dict(expected, total=sum(expected.values())) if expected else {}
+    assert {key: value for key, value in counts.items() if value} == nonzero
+
+
+@pytest.mark.scenario("touchpoint-report/retained-intake-history/retained-jobs-survive-snapshot-replacement")
+@pytest.mark.parametrize("kind,command,outcome,field", [
+    ("proposals", "propose", "needs_input", "drafter_questions"),
+    ("admissions", "admit", "refused", "admission_refusals"),
+])
+@pytest.mark.parametrize("reference", [True, False])
+@pytest.mark.parametrize("ambiguous", [True, False])
+def test_independent_jobs_and_replaced_snapshots(tmp_path, kind, command, outcome, field, reference, ambiguous):
+    for job in ("first", "latest"):
+        # Different heads distinguish admission snapshots; commit distinguishes proposals.
+        marker = "same" if ambiguous else job
+        receipt = intake_job(tmp_path, kind, job, command, outcome, head=marker, commit=marker)
+    if not reference:
+        receipt.pop("job")
+    number = 8 if kind == "proposals" else 28
+    put(tmp_path, f"{kind}/o__r/{number}.json", receipt)
+    put(tmp_path, "revisions/o__r/29.json",
+        dict(change=receipt["change"], command="propose", result=dict(outcome="rejected")))
+    history = collect_intake(tmp_path, tmp_path / "runs")
+    assert not history["errors"]
+    row, = history["changes"]
+    assert row["counts"][field] == 2 and row["counts"]["spec_revisions"] == 1
+    assert row["counts"]["total"] == 3
+    assert any("earlier rounds may have been overwritten" in warning for warning in row["warnings"])
+    assert any("Ambiguous receipt" in warning for warning in row["warnings"]) == (ambiguous and not reference)
+
+
+@pytest.mark.parametrize("difference", ["head", "commit", "outcome", "command", "number", "job"])
+def test_snapshot_matching_requires_compatible_evidence(tmp_path, difference):
+    receipt = intake_job(tmp_path, "admissions", "job", "admit", "refused", head="head", commit="commit")
+    receipt.pop("job")
+    kind, number = "admissions", 28
+    if difference in ("head", "job"):
+        receipt[difference] = "other"
+    elif difference in ("commit", "outcome"):
+        receipt["result"][difference] = "other" if difference == "commit" else "admitted"
+    elif difference == "command":
+        kind, receipt["command"] = "revisions", "revise"
+    else:
+        number = 29
+    put(tmp_path, f"{kind}/o__r/{number}.json", receipt)
+    history = collect_intake(tmp_path, tmp_path / "runs")
+    assert not history["errors"]
+    row, = history["changes"]
+    assert row["counts"]["total"] == (1 if difference == "outcome" else 2)
+    assert any("Unmatched legacy snapshot" in warning for warning in row["warnings"])
+
+
+@pytest.mark.scenario("touchpoint-report/incomplete-intake-rounds/incomplete-and-empty-rounds")
+def test_incomplete_and_empty_rounds(tmp_path):
+    for command, number in (("propose", 28), ("revise", 29)):
+        put(tmp_path, f"revisions/o__r/{number}.json",
+            dict(change="r-issue-8-feature", command=command, result=dict(outcome="empty")))
+    intake_job(tmp_path, "revisions", "pending", "revise")
+    receipt = intake_job(tmp_path, "admissions", "failed", "admit")
+    put(tmp_path, "admissions/o__r/28.json", receipt)
+    error_path = put(tmp_path, "admissions/o__r/28.jobs/failed/result.json", dict(error="worker failed"))
+    intake_job(tmp_path, "revisions", "refused", "revise", "refused")
+    # Task 2.1 adds the successful event without a receipt to this intake count.
+    history = collect_intake(tmp_path, tmp_path / "runs")
+    row, = history["changes"]
+    assert row["counts"]["build_revisions"] == row["counts"]["total"] == 1
+    assert row["counts"]["admission_refusals"] == 0 and not row["build_commits"]
+    assert any("Pending intake request" in warning and "pending/request.json" in warning
+               for warning in row["warnings"])
+    assert len(history["errors"]) == 1 and history["errors"][0]["path"] == str(error_path)
+    assert "wrapper" in history["errors"][0]["message"]
+
+
+def test_successful_build_results_share_commit_identity(tmp_path):
+    for job, commit in (("first", "a"), ("repeat", "a"), ("next", "b")):
+        intake_job(tmp_path, "revisions", job, "revise", "revised", commit=commit)
+    history = collect_intake(tmp_path, tmp_path / "runs")
+    assert not history["errors"]
+    row, = history["changes"]
+    assert row["counts"]["build_revisions"] == 2 and row["build_commits"] == {"a", "b"}
+
+
+@pytest.mark.parametrize("state", ["pending", "completed", "failed"])
+def test_undelivered_receipt_uses_retained_job_state(tmp_path, state):
+    receipt = intake_job(tmp_path, "admissions", "job", "admit")
+    put(tmp_path, "admissions/o__r/28.json", receipt)
+    if state != "pending":
+        wrapper = dict(result=dict(outcome="refused")) if state == "completed" else dict(error="failed")
+        put(tmp_path, "admissions/o__r/28.jobs/job/result.json", wrapper)
+    history = collect_intake(tmp_path, tmp_path / "runs")
+    row, = history["changes"]
+    assert row["counts"]["total"] == (1 if state == "completed" else 0)
+    assert len(history["errors"]) == (1 if state == "failed" else 0)
+    assert sum("Pending intake request" in warning for warning in row["warnings"]) == (state == "pending")
+
+
+@pytest.mark.parametrize("extra", [dict(outcome=True), dict(outcome={}), dict(outcome="admitted"),
+                                    dict(commit=None), dict(commit=[]), dict(commit=" ")])
+def test_invalid_intake_results_preserve_completed_siblings(tmp_path, extra):
+    intake_job(tmp_path, "revisions", "good", "revise", "refused")
+    intake_job(tmp_path, "revisions", "bad", "revise", "revised", commit="abc")
+    bad = put(tmp_path, "revisions/o__r/28.jobs/bad/result.json",
+              dict(result=dict(dict(outcome="revised", commit="abc"), **extra)))
+    history = collect_intake(tmp_path, tmp_path / "runs")
+    assert history["changes"][0]["counts"]["total"] == 1
+    assert len(history["errors"]) == 1 and history["errors"][0]["path"] == str(bad)

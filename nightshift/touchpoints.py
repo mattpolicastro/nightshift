@@ -1,4 +1,4 @@
-"""Read-only discovery and identity normalization for local touchpoint history."""
+"""Read-only discovery, identity joins and intake accounting for touchpoints."""
 
 from __future__ import annotations
 
@@ -178,3 +178,102 @@ def collect_history(nightshift_root: Path, runs_root: Path) -> dict:
             matches[0]["events_path"] = path
     return dict(changes=[rows[key] for key in sorted(rows)],
                 errors=sorted(reader.errors, key=lambda error: (error["path"], error["message"])))
+
+
+_SCALAR_COUNTS = ("drafter_questions", "spec_revisions", "build_revisions", "human_pauses",
+                  "manual_resumes", "human_accepts", "admission_refusals")
+
+
+def _intake_counts(row, reader):
+    counts = dict.fromkeys(_SCALAR_COUNTS, 0)
+    counts.update(pauses_by_reason={}, resumes_by_reason={})
+    completed = []
+    for record in row["records"]:
+        path = record["path"].with_name("result.json") if record["retained"] else record["path"]
+        try:
+            for field in ("job", "head"):
+                value = record[field]
+                if value is not None and (not isinstance(value, str) or not value.strip()):
+                    raise ValueError(f"{field} must be a nonempty string")
+            if record["wrapper_error"] is not None:
+                raise ValueError("intake job wrapper reported an error; no completed round")
+            result = record["result"]
+            if result is None:
+                # A receipt awaiting delivery may already have a terminal job.
+                linked = not record["retained"] and record["job"] is not None and any(
+                    other["retained"] and all(record[field] == other[field] for field in
+                    ("kind", "repo", "number", "change", "command", "job"))
+                    for other in row["records"])
+                if not linked:
+                    row["warnings"].append(f"Pending intake request: {record['path']}")
+                continue
+            outcomes = {"propose": ("drafted", "needs_input", "rejected"),
+                        "admit": ("admitted", "refused"), "revise": ("revised", "refused")}
+            outcome = result.get("outcome")
+            if outcome not in outcomes[record["command"]] and not (
+                    record["kind"] == "revisions" and outcome == "empty"):
+                raise ValueError("unrecognized intake outcome for command")
+            commit = result.get("commit")
+            if (commit is not None or outcome == "revised") and (
+                    not isinstance(commit, str) or not commit.strip()):
+                raise ValueError("result commit must be a nonempty string")
+            completed.append(record)
+        except ValueError as exc:
+            reader.error(path, exc)
+
+    jobs = [record for record in completed if record["retained"]]
+    rounds = list(jobs)
+    for receipt in (record for record in completed if not record["retained"]):
+        matches = []
+        for job in jobs:
+            if any(receipt[field] != job[field] for field in
+                   ("kind", "repo", "number", "change", "command")):
+                continue
+            if receipt["job"] is not None:
+                compatible = receipt["job"] == job["job"]
+            else:
+                compatible = all(receipt["result"].get(field) == job["result"].get(field)
+                                 for field in ("outcome", "commit"))
+                if receipt["kind"] == "admissions":
+                    compatible = compatible and receipt["head"] == job["head"]
+            if compatible:
+                matches.append(job)
+        if len(matches) > 1:
+            row["warnings"].append(f"Ambiguous receipt match; retained jobs counted: {receipt['path']}")
+        elif not matches:
+            rounds.append(receipt)
+            row["warnings"].append(
+                f"Unmatched legacy snapshot; earlier rounds may have been overwritten: {receipt['path']}")
+
+    build_commits = set()
+    for record in rounds:
+        outcome = record["result"]["outcome"]
+        if record["command"] == "propose" and outcome == "needs_input":
+            counts["drafter_questions"] += 1
+        if record["kind"] == "revisions" and outcome != "empty":
+            if record["command"] == "propose":
+                counts["spec_revisions"] += 1
+            elif outcome == "revised":
+                build_commits.add(record["result"]["commit"])
+            else:
+                counts["build_revisions"] += 1
+        if record["kind"] == "admissions" and outcome == "refused":
+            counts["admission_refusals"] += 1
+    counts["build_revisions"] += len(build_commits)
+    counts["total"] = sum(counts[field] for field in _SCALAR_COUNTS)
+    row.update(counts=counts, build_commits=build_commits)
+
+
+def collect_intake(nightshift_root: Path, runs_root: Path) -> dict:
+    """Aggregate observed intake rounds, preserving history for later event replay.
+
+    Each row retains successful build_commits so event accounting can add only
+    unseen commits. The normalized records remain available for date provenance.
+    """
+    history = collect_history(nightshift_root, runs_root)
+    reader = _Reader()
+    for row in history["changes"]:
+        _intake_counts(row, reader)
+    history["errors"] = sorted(history["errors"] + reader.errors,
+                               key=lambda error: (error["path"], error["message"]))
+    return history
