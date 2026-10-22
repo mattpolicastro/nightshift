@@ -175,13 +175,19 @@ def prepare_publish(ctx: Ctx) -> bool:
     head = ctx.head()
     sync = ctx.run.state.base_sync
     try:
+        # Reconcile the durable intent before considering the newly fetched
+        # base. A crash may have left the ref at H, M, or a repaired descendant
+        # of M. Only H permits installing the saved merge; never overwrite an
+        # unrelated head or reconstruct an already imported merge object.
+        merged = sync.get("merged_head")
+        if merged and not _is_ancestor(ctx.repo, merged, head):
+            if head != sync.get("previous_head"):
+                raise RuntimeError(f"integration intent {merged} is not in run head {head}")
+            git(ctx.repo, "update-ref", ctx.ref, merged, head)
+            head = merged
         incorporated = _is_ancestor(ctx.repo, base, head)
         pending = sync.get("retry_verify") or (
             (sync.get("base") or sync.get("merged_head")) and sync.get("verified_head") != head)
-        # A saved intent that is not installed must not be overwritten by a
-        # fresh attempt. Recovery must reconcile it before any new advancement.
-        if sync.get("merged_head") and not _is_ancestor(ctx.repo, sync["merged_head"], head):
-            raise RuntimeError(f"integration intent {sync['merged_head']} is not in run head {head}")
         if incorporated and not pending:
             return True
 
