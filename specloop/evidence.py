@@ -139,6 +139,7 @@ def added_lines(diff: str, paths: tuple[str, ...]) -> list[tuple[str, int, str]]
 
 
 def _python_protected_spans(path: str, source: str) -> dict[int, list[tuple[int, int]]]:
+    # mutation-equivalent: Docstring wording only; no execution reads this helper's __doc__.
     """Map docstrings and comments to physical lines and character offsets."""
     source_lines = source.split("\n")
     spans: dict[int, list[tuple[int, int]]] = {}
@@ -217,6 +218,9 @@ def generate(lines: list[tuple[str, int, str]], count: int, seed: int, *,
             continue
         for name, rx, repl in OPERATORS:
             for m in rx.finditer(text):
+                # Comments and non-Python spans end at EOL; valid Python needs a
+                # separator after a docstring before a current operator can match.
+                # mutation-equivalent: No match can start at a span's end, so < and <= reject the same candidates.
                 if any(m.start() < end and m.end() > start for start, end in protected[path].get(n, ())):
                     continue
                 if name == "int":

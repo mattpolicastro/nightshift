@@ -329,6 +329,23 @@ def test_non_python_blocks_exclude_bare_prose_before_sampling(suffix):
                 assert mut.after == {9: 'value = 101;', 11: 'single = 116;', 15: 'limit = 141;'}[mut.line]
 
 
+@pytest.mark.scenario("mutation-selection/prose-is-never-mutated/non-python-comment-lines-excluded")
+@pytest.mark.parametrize("path", ["src/example.cpp", "src/example.tsx"])
+def test_empty_block_does_not_absorb_code_before_the_next_block(path):
+    source = ('/**/\n'
+              'value = 10;\n'
+              '/* supported block\n'
+              'bare prose 20\n'
+              '*/\n'
+              'limit = 30;\n')
+    mutants = evidence.generate(non_python_added_lines(source, path), 100, 1,
+                                sources={path: source})
+    assert sorted((mut.line, mut.before, mut.after) for mut in mutants) == [
+        (2, 'value = 10;', 'value = 11;'),
+        (6, 'limit = 30;', 'limit = 31;'),
+    ]
+
+
 @pytest.mark.scenario("mutation-selection/prose-is-never-mutated/non-python-tracking-stays-line-level")
 @pytest.mark.parametrize("source, eligible_lines", [
     ('value; // prose 10\n', {1}),
@@ -338,6 +355,9 @@ def test_non_python_blocks_exclude_bare_prose_before_sampling(suffix):
     ('value; /* opening 10\nbare prose 20\n*/\n', {1, 2}),
     ('/* opening 10\nbare prose 20\nvalue = 30;\n', {2, 3}),
     ('/* opening 10\nbare prose 20\n*/ value = 30;\nvalue = 40;\n*/\n', {2, 4}),
+    # A single non-whitespace character after */ still makes a mixed boundary.
+    ('/* opening 10\nbare prose 20\n*/;\nvalue = 40;\n*/\n', {2, 4}),
+    ('/* opening 10\nbare prose 20\nclosing 30 */}\t\n*/\n', {2, 3}),
     ('/* opening 10\nbare prose 20\nclosing 30 */ value = 40;\n*/\n', {2, 3}),
     ('/* prose 10 */ value = 20;\nvalue = 30;\n*/\n', {2}),
     ('/* prose 10 */ /* second opening\nbare prose 20\n*/\n', {2}),
