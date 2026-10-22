@@ -4,7 +4,8 @@ Writing specific specs was the bottleneck the worker engine's September review
 identified. A drafting session writes openspec/changes/<name>/ in a clone of the
 target repository; the harness validates it (OpenSpec strict validation, the
 scenario lint, every task's scenario IDs) and feeds problems back, then runs the
-feasibility review. A clean draft is committed to a local branch for approval.
+feasibility review and an independent spec critic. A clean draft is committed
+to a local branch for approval.
 
 Each rule in `lint` started as a spec PR a human sent back: a check only a
 person could make written as a task (it stalls the build), and a test file
@@ -24,7 +25,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from specloop import agents, feasibility, manifest, openspec, state, tasks
+from specloop import agents, critic, feasibility, manifest, openspec, state, tasks
 from specloop.manifest import Manifest
 from specloop.seal import IDENTITY, git
 
@@ -219,6 +220,8 @@ def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m
     d = Draft(change, work, branch=branch)
     profile = (m.chains.get("implement") or (m.roles["implement"],))[0]
     planned = in_flight(source, change)
+    concurrent_context = None
+    critic_correction = False
     feedback = ""
     for n in range(1, rounds + 1):
         prompt = PROMPT.format(change=change, idea=idea, feedback=feedback, in_flight=_in_flight_section(planned),
@@ -235,6 +238,8 @@ def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m
         # Overlap gets one round of feedback: a change may have to edit a shared test file.
         d.problems = lint(work, change) + (overlaps(work, change, planned) if n == 1 else [])
         if d.problems:
+            if critic_correction:
+                break
             feedback = ("\n## Your previous draft was rejected by the harness\n\nFix every problem:\n"
                         + "\n".join(f"- {p}" for p in d.problems) + "\n")
             continue
@@ -251,12 +256,32 @@ def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m
         if review.get("error"):
             d.problems = [f"feasibility review failed: {review['error']}"]
             return d
-        d.contradictions, d.risks, d.commit = review.get("contradictions", []), review.get("risks", []), head
-        if not d.contradictions:
+        d.contradictions, d.risks, d.commit = review.get("contradictions", []), list(review.get("risks", [])), head
+        if d.contradictions:
+            if critic_correction:
+                break
+            # A contradiction in a draft is a spec bug the drafter can fix.
+            feedback = ("\n## A feasibility review found tasks impossible as written\n\nRevise the change so each is "
+                        "achievable under the stated rules:\n" + "\n".join(
+                            f"- {c['task']}: {c['problem']} (evidence: {c['evidence']})" for c in d.contradictions) + "\n")
+            continue
+        # Remote context is needed only for candidates that reach the critic.
+        # Keep this snapshot for the single possible correction review.
+        if concurrent_context is None:
+            concurrent_context = critic.open_pr_files(m.github, branch)
+        pr_files, context_notes = concurrent_context
+        review = critic.check(work, head, m, out / f"critic-{n}", change=change,
+                              planned=planned, pr_files=pr_files, context_notes=context_notes, agent=agent)
+        if review.get("error"):
+            d.problems = [f"critic review failed: {review['error']}"]
+            return d
+        d.contradictions = review["contradictions"]
+        d.risks += list(dict.fromkeys(
+            f"Critic: {note.removeprefix('Critic: ')}" for note in review["risks"] + context_notes))
+        if not d.contradictions or critic_correction:
             break
-        # A contradiction in a draft is a spec bug the drafter can fix.
-        feedback = ("\n## A feasibility review found tasks impossible as written\n\nRevise the change so each is "
-                    "achievable under the stated rules:\n" + "\n".join(
+        critic_correction = True
+        feedback = ("\n## Spec critic feedback\n\nRevise the change to resolve every blocking finding:\n" + "\n".join(
                         f"- {c['task']}: {c['problem']} (evidence: {c['evidence']})" for c in d.contradictions) + "\n")
     if d.problems:
         return d
