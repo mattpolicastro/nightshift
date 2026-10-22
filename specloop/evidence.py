@@ -139,7 +139,6 @@ def added_lines(diff: str, paths: tuple[str, ...]) -> list[tuple[str, int, str]]
 
 
 def _python_protected_spans(path: str, source: str) -> dict[int, list[tuple[int, int]]]:
-    # mutation-equivalent: Docstring wording only; no execution reads this helper's __doc__.
     """Map docstrings and comments to physical lines and character offsets."""
     source_lines = source.split("\n")
     spans: dict[int, list[tuple[int, int]]] = {}
@@ -250,7 +249,6 @@ MIN_MUTANT_SECONDS = 30.0
 
 def _mutate_one(number: int, mut: Mutant, baseline_src: Path, head: str,
                 steps: tuple[Step, ...], m: Manifest, out: Path) -> str:
-    # mutation-equivalent: Docstring wording only; execution never reads this function's __doc__.
     """Run one mutation in a private source and build, retaining its diagnostics."""
     mutant_out = out / f"mutant-{number}"
     try:
@@ -283,7 +281,6 @@ def _mutate_one(number: int, mut: Mutant, baseline_src: Path, head: str,
 
 
 def mutate(repo: Path, head: str, mutants: list[Mutant], m: Manifest, out: Path) -> bool:
-    # mutation-equivalent: False describes the return contract here; this docstring is not executed or read.
     """Classify each mutant. False when the unmutated head itself fails."""
     steps = tuple(s for s in m.verify if s.id in m.mutation_steps)
     try:

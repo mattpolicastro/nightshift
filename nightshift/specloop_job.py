@@ -144,12 +144,10 @@ def _job_state(directory: Path, process: dict | None) -> str:
 
 
 def list_jobs(state_dir: Path) -> tuple[list[Job], list[str]]:
-    # mutation-equivalent: Docstring wording is not read by inventory logic or callers.
     """Return local attempts and diagnostics, independent of receipts/handles."""
 
     # Rows sort by stage, repository, numeric item and full ID. Malformed jobs
     # remain visible as unknown when their directory context can be recovered;
-    # mutation-equivalent: This explanatory prose does not control diagnostic handling.
     # errors are returned separately so callers can display good rows and fail.
     # A live lock without metadata is starting (or a legacy live job); absent
     # process metadata is always exposed as None, never guessed from a PID.
@@ -218,11 +216,9 @@ def save(path: Path, data: dict) -> None:
 
 @contextmanager
 def control_lock(directory: Path):
-    # mutation-equivalent: Docstring conjunctions do not change the flock used by all three callers.
     """Serialize stop admission, finalization and collection across processes.
 
     This is separate from the inherited lifetime lock. Never wait for that
-    # mutation-equivalent: This docstring text cannot change lock acquisition or termination waits.
     lock or for process termination while holding this short-lived lock.
     """
     with (directory / "control.lock").open("a") as lock:
@@ -241,10 +237,8 @@ def _read_stop(directory: Path) -> dict | None:
 
 
 def request_stop(directory: Path, *, verify_identity) -> str:
-    # mutation-equivalent: Return values come from the branches below, not this unread docstring.
     """Admit stop intent, returning stopping, stopped, or finished.
 
-    # mutation-equivalent: This docstring text does not resolve paths or invoke the ownership verifier.
     The control caller must resolve the job directory and supply an ownership
     verifier returning the verified process identity (or raising on refusal).
     Verification runs under the lock, before accepting intent. Only a stopping
@@ -351,7 +345,6 @@ def _group_identities(process: dict, members: set[int]) -> dict[int, str]:
     """Remember live witnesses while the wrapper still proves ownership.
 
     SIGTERM may kill the wrapper before an ignoring descendant. A surviving
-    # mutation-equivalent: This docstring wording is not used by the ownership checks.
     member with the same start identity and group/session proves continuity
     for escalation within this call; a later stop still requires the leader.
     """
@@ -498,13 +491,10 @@ def start(path: Path, receipt: dict, args: list[str], *, launcher=None) -> None:
 
 
 def collect(path: Path, receipt: dict) -> dict | None:
-    # mutation-equivalent: The listed replacement is identical; docstring wording cannot alter collection.
     """Return a completed result, or None while the job is live or cancelled.
 
     A dead/failed job is reported through RepoHealth before a later poll may
-    # mutation-equivalent: Retry checks execute in callers; none reads this docstring's conjunctions.
     retry (after the usual GitHub and specloop state checks). Intentional stop
-    # mutation-equivalent: Pending receipts and failure/retry handling are independent of this docstring.
     keeps the parent's job reference pending, without failure or automatic retry.
     """
     reap()
