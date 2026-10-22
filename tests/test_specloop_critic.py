@@ -227,3 +227,13 @@ def test_failed_extraction_cleans_read_only_files_and_retains_diagnostic(candida
     assert "extraction interrupted" in result["error"]
     assert json.loads((out / "critic.json").read_text()) == result
     assert not (out / "checkout").exists()
+
+
+def test_critic_checklist_blocks_migrations_retries_and_stale_docs():
+    # Spec PR #61's critic raised all three as non-blocking notes; each needed a
+    # human revision round, so they are checklist items a blocker may cite.
+    from specloop import critic
+    assert "Work through all eight checklist items" in critic.PROMPT
+    for item in ("6. Unplanned migrations", "7. Retry and idempotency gaps",
+                 "8. Stale operator docs and manual steps"):
+        assert item in critic.PROMPT
