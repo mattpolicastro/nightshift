@@ -6,9 +6,12 @@ fatal. The run only stops at a defined pause, and every pause says why.
 """
 
 import json
+import os
+import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import time
@@ -45,6 +48,208 @@ class Ctx:
                                        pr=self.run.state.pr, resume_at=resume_at))
 
 
+def _fetch_publish_base(ctx: Ctx, remote: str | None = None, *, timeout: float) -> str:
+    """Fetch the source origin's base, never falling back to a previous fetch.
+
+    Publish can supply its already validated origin URL; driver preparation
+    resolves it here without requiring a GitHub target. Callers own pause/retry
+    policy. Only the run repository is written, and transport keeps the user's
+    credential-helper configuration (unlike seal.git).
+    """
+    requested = f"refs/heads/{ctx.m.pr_base}"
+    destination = "refs/specloop/publish-base"
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        if remote is None:
+            remote = subprocess.run(
+                ["git", "-C", str(ctx.m.repo), "remote", "get-url", "origin"],
+                capture_output=True, text=True, check=True, timeout=timeout, env=env,
+            ).stdout.strip()
+        if not remote:
+            raise RuntimeError("source clone has no origin URL")
+        # Git's URL schemes and scp-style host:path syntax are not local paths.
+        # Relative filesystem origins are relative to the source, not repo.git.
+        if not re.match(r"^[^/]+:", remote):
+            remote = str((ctx.m.repo / remote).resolve())
+        subprocess.run(
+            ["git", *seal.SAFE_FLAGS, "-C", str(ctx.repo), "fetch", "--no-tags",
+             "--no-recurse-submodules", "--", remote, f"+{requested}:{destination}"],
+            capture_output=True, text=True, check=True, timeout=timeout, env=env,
+        )
+        return git(ctx.repo, "rev-parse", "--verify", f"{destination}^{{commit}}").decode().strip()
+    except subprocess.TimeoutExpired as exc:
+        diagnostic = exc.stderr or exc.stdout or ""
+        if isinstance(diagnostic, bytes):
+            diagnostic = diagnostic.decode(errors="replace")
+        raise RuntimeError(f"fetch {requested} from source origin timed out after {timeout:g}s: "
+                           f"{diagnostic.strip()[:400]}") from exc
+    except (subprocess.CalledProcessError, OSError, RuntimeError) as exc:
+        diagnostic = (exc.stderr or exc.stdout or f"git exited {exc.returncode}") \
+            if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        if isinstance(diagnostic, bytes):
+            diagnostic = diagnostic.decode(errors="replace")
+        raise RuntimeError(f"fetch {requested} from source origin failed: {diagnostic.strip()[:400]}") from exc
+
+
+class _MergeConflict(RuntimeError):
+    def __init__(self, paths: list[str], diagnostic: str):
+        super().__init__(diagnostic)
+        self.paths = paths
+
+
+def _is_ancestor(repo: Path, base: str, head: str) -> bool:
+    # merge-base's exit 1 means non-ancestry, not an operational failure.
+    result = subprocess.run(
+        ["git", *seal.SAFE_FLAGS, "-C", str(repo), "merge-base", "--is-ancestor", base, head],
+        capture_output=True, timeout=60, env={**os.environ, **seal.SAFE_GIT},
+    )
+    if result.returncode not in (0, 1):
+        raise RuntimeError(result.stderr.decode(errors="replace").strip())
+    return result.returncode == 0
+
+
+def _publish_needs_prepare(ctx: Ctx, base: str, head: str) -> bool:
+    """Read-only publication check; only the driver may discharge obligations."""
+    sync = ctx.run.state.base_sync
+    merged = sync.get("merged_head")
+    return bool(
+        (base != head and not _is_ancestor(ctx.repo, base, head))
+        or sync.get("retry_verify")
+        or ((sync.get("base") or merged) and sync.get("verified_head") != head)
+        or (merged and not _is_ancestor(ctx.repo, merged, head))
+    )
+
+
+def _merge_commits(repo: Path, head: str, base: str) -> str:
+    """Import a two-parent merge object, without changing any repository ref.
+
+    The caller owns ancestry checks, intent persistence and CAS installation.
+    Also usable for a synthetic evidence baseline. All indexes and merge state
+    live in the disposable checkout, including when Git fails or conflicts.
+    """
+    with tempfile.TemporaryDirectory(prefix="base-merge-", dir=repo.parent) as tmp:
+        work = Path(tmp)
+        git(work, "init", "-q")
+        git(work, "fetch", "--no-tags", "--no-recurse-submodules", "--", str(repo), head, base)
+        git(work, "checkout", "-q", "--detach", head)
+        try:
+            git(work, "merge", "--no-ff", "--no-commit", base, env=seal.IDENTITY)
+        except RuntimeError as exc:
+            paths = sorted({os.fsdecode(p) for p in
+                            git(work, "diff", "--name-only", "--diff-filter=U", "-z").split(b"\0") if p})
+            if paths:
+                raise _MergeConflict(paths, str(exc)) from exc
+            raise
+        tree = git(work, "write-tree").decode().strip()
+        merged = git(work, "commit-tree", tree, "-p", head, "-p", base,
+                     "-m", f"Merge current PR base {base}", env=seal.IDENTITY).decode().strip()
+        git(repo, "fetch", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules",
+            "--", str(work), merged)
+        return merged
+
+
+def _merge_publish_base(ctx: Ctx, base: str, head: str) -> str | None:
+    """Construct integration for the driver; None means a durable pause.
+
+    A successful result still needs an intent saved before CAS advancement and
+    trusted verification. An incorporated base leaves that obligation untouched.
+    """
+    try:
+        if _is_ancestor(ctx.repo, base, head):
+            return head
+        return _merge_commits(ctx.repo, head, base)
+    except _MergeConflict as exc:
+        # Do not replace the last integrated base with one that conflicted.
+        ctx.run.state.base_sync["retry_verify"] = True
+        ctx.pause("base_conflict", detail=f"base {base} conflicts with run head {head}:\n"
+                  + "\n".join(exc.paths) + f"\n{exc}\nRepair, then `specloop resume {ctx.m.change}`.")
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        ctx.pause("infra", detail=f"could not merge base {base} into run head {head}: {exc}\n"
+                  f"Repair, then `specloop resume {ctx.m.change}`.")
+    return None
+
+
+def prepare_publish(ctx: Ctx) -> bool:
+    """Driver-only gate, under the run lock; True permits final checks.
+
+    Save the integration intent before CAS, and never infer verification from
+    ancestry alone. Each attempt owns its logs even when verification crashes.
+    """
+    recovery = f"Repair, then `specloop resume {ctx.m.change}`."
+    try:
+        base = _fetch_publish_base(ctx, timeout=300)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        ctx.pause("base_fetch", detail=f"{exc}\n{recovery}")
+        return False
+
+    out = None
+    head = ctx.head()
+    sync = ctx.run.state.base_sync
+    try:
+        # Reconcile the durable intent before considering the newly fetched
+        # base. A crash may have left the ref at H, M, or a repaired descendant
+        # of M. Only H permits installing the saved merge; never overwrite an
+        # unrelated head or reconstruct an already imported merge object.
+        merged = sync.get("merged_head")
+        if merged and not _is_ancestor(ctx.repo, merged, head):
+            if head != sync.get("previous_head"):
+                raise RuntimeError(f"integration intent {merged} is not in run head {head}")
+            git(ctx.repo, "update-ref", ctx.ref, merged, head)
+            head = merged
+        incorporated = _is_ancestor(ctx.repo, base, head)
+        pending = sync.get("retry_verify") or (
+            (sync.get("base") or sync.get("merged_head")) and sync.get("verified_head") != head)
+        if incorporated and not pending:
+            return True
+
+        root = ctx.run.dir / "final" / "base-sync"
+        root.mkdir(parents=True, exist_ok=True)
+        out = Path(tempfile.mkdtemp(prefix="attempt-", dir=root))
+        sync.setdefault("receipts", []).append(str(out))
+        ctx.run.save()
+        merged = _merge_publish_base(ctx, base, head)
+        if merged is None:
+            (out / "diagnostic.txt").write_text(ctx.run.state.pause.detail)
+            return False
+        if merged != head:
+            sync.update(base=base, previous_head=head, merged_head=merged,
+                        verified_head="", retry_verify=True)
+            ctx.run.save()
+            git(ctx.repo, "update-ref", ctx.ref, merged, head)
+            head = merged
+        else:
+            # An incorporated base still needs checks after a failed attempt
+            # or a manual conflict repair.
+            sync.update(base=base, verified_head="", retry_verify=True)
+            ctx.run.save()
+        (out / "integration.json").write_text(json.dumps(
+            {"base": base, "head": head, "previous_head": sync.get("previous_head", "")}, indent=2))
+        try:
+            receipts = verify.run_steps(ctx.repo, head, ctx.m.verify, ctx.m, out)
+        finally:
+            verify.cleanup(out)
+        if not verify.ok(receipts, ctx.m.prepare + ctx.m.verify):
+            logs = "\n".join(str(out / f"{r.id}.log") for r in receipts)
+            detail = (f"base {base}; run head {head}\n{verify.summary(receipts)}\n"
+                      f"Receipts: {out / 'receipts.json'}\nLogs:\n{logs}\n{recovery}")
+            (out / "diagnostic.txt").write_text(detail)
+            ctx.pause("base_drift", detail=detail)
+            return False
+        if ctx.head() != head:
+            raise RuntimeError(f"run head changed while verifying {head}")
+        sync.update(verified_head=head, retry_verify=False)
+        ctx.run.save()
+        return True
+    except Exception as exc:
+        detail = f"could not prepare base {base} at run head {head}: {exc}\n"
+        if out is not None:
+            sync.update(verified_head="", retry_verify=True)
+            detail += f"Saved receipts/logs: {out}\n"
+            (out / "diagnostic.txt").write_text(detail)
+        ctx.pause("infra", detail=detail + recovery)
+        return False
+
+
 def run(ctx: Ctx) -> str:
     """Advance until a pause or completion. Returns the final run status."""
     st = ctx.run.state
@@ -78,12 +283,15 @@ def run(ctx: Ctx) -> str:
 
 
 def finals(ctx: Ctx, head: str) -> bool:
-    """Coverage, then acceptance, once every task has landed.
+    """Prepare the current base, then coverage and acceptance after tasks land.
 
     Returns True when it appended tasks (the loop continues), False when the
     run paused or finished. Each stage gets one round of appended tasks; a
     second failure pauses rather than churning.
     """
+    if not prepare_publish(ctx):
+        return False
+    head = ctx.head()
     st, m = ctx.run.state, ctx.m
     if m.coverage_step:
         ok, seen, receipts = _seen_scenarios(ctx, head, ctx.run.dir / "final" / f"coverage-{st.coverage_rounds}")
@@ -168,6 +376,40 @@ def _seen_scenarios(ctx: Ctx, head: str, out: Path) -> tuple[bool, set[str], lis
     return verify.ok(receipts, ctx.m.prepare + ctx.m.verify), seen, receipts
 
 
+def _evidence_base(ctx: Ctx, section: int, head: str) -> str | None:
+    """Compare against earlier sections plus integrated base content; never move refs.
+
+    An empty baseline preserves gather's legacy skip. None means construction
+    failed and the evidence gate has paused before generating any mutants.
+    """
+    st = ctx.run.state
+    start = st.section_base.get(str(section), "")
+    base = st.base_sync.get("base", "")
+    if not start or not base:
+        return start
+    out = ctx.run.dir / "gates" / f"section-{section}-{st.strengthen_rounds.get(str(section), 0)}"
+    diagnostic = {"section_base": start, "integrated_base": base, "head": head}
+    try:
+        if not _is_ancestor(ctx.repo, base, head) or _is_ancestor(ctx.repo, base, start):
+            return start
+        comparison = _merge_commits(ctx.repo, start, base)
+        diagnostic["comparison_base"] = comparison
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        diagnostic["error"] = str(exc)
+        if isinstance(exc, _MergeConflict):
+            diagnostic["paths"] = exc.paths
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "comparison-base.json").write_text(json.dumps(diagnostic, indent=2))
+        ctx.pause("gate_evidence", key=f"section:{section}",
+                  detail=f"could not construct section comparison baseline: section base {start}, "
+                  f"integrated base {base}, head {head}\n"
+                  + "\n".join(diagnostic.get("paths", [])) + f"\n{exc}\nDiagnostics: {out}")
+        return None
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "comparison-base.json").write_text(json.dumps(diagnostic, indent=2))
+    return comparison
+
+
 def section_evidence(ctx: Ctx, n: int, head: str, all_tasks: list[tasks.Task]) -> bool:
     """Coverage and mutation evidence for a finished section.
 
@@ -182,7 +424,10 @@ def section_evidence(ctx: Ctx, n: int, head: str, all_tasks: list[tasks.Task]) -
     cited = sorted({s for t in all_tasks if t.section == n for s in t.known_scenarios(known)})
     if not m.coverage_step:
         seen = set(cited)
-    ev = evidence.gather(ctx.repo, st.section_base.get(str(n), ""), head, cited, seen, m, out, n)
+    base = _evidence_base(ctx, n, head)
+    if base is None:
+        return False
+    ev = evidence.gather(ctx.repo, base, head, cited, seen, m, out, n)
     summary = ev.summary()
     ctx.run.event("evidence", section=n, passed=ev.passed(m.mutation_min), score=ev.score,
                   timeouts=sum(x.result == "timeout" for x in ev.mutants),

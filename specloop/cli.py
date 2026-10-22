@@ -493,6 +493,32 @@ def _publish(args, run: Run) -> int:
         _outcome(args, reasons=[str(e)])
         print(e, file=sys.stderr)
         return 1
+    try:
+        base = loop._fetch_publish_base(ctx, remote, timeout=20)
+        head = ctx.head()
+        needs_prepare = loop._publish_needs_prepare(ctx, base, head)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        # Keep transport/check failures retryable, even with a pending intent.
+        # No successful freshness result means readiness and checks stay intact.
+        reason = (f"Could not check publication base refs/heads/{ctx.m.pr_base}: {exc}; "
+                  f"nothing was published. Retry `specloop publish {args.change}` "
+                  "when the current base can be checked.")
+    else:
+        reason = ""
+        if needs_prepare:
+            st.status, st.pause = "running", None
+            run.save()
+            reason = ("Base preparation was scheduled; nothing was published. Retry publication after "
+                      "the driver restores readiness. Without `specloop serve`, run "
+                      f"`specloop run {args.change}`, then retry `specloop publish {args.change}`.")
+            run.event("publish_preparation_scheduled", base=base, head=head, reason=reason)
+    if reason:
+        if getattr(args, "json", False) and hasattr(args, "document"):
+            args.document = {"version": 1, "error": reason}
+        else:
+            _outcome(args, reasons=[reason])
+        print(reason, file=sys.stderr)
+        return 1
     _push(ctx.repo, remote, ctx.ref)
     url = st.pr
     if not url:
