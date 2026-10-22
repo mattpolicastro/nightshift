@@ -175,9 +175,10 @@ def section_evidence(ctx: Ctx, n: int, head: str, all_tasks: list[tasks.Task]) -
     same section, so they run next; a second failure pauses.
     """
     st, m = ctx.run.state, ctx.m
+    known = _scenarios_at(ctx, head)
     out = ctx.run.dir / "gates" / f"section-{n}-{st.strengthen_rounds.get(str(n), 0)}"
     ok, seen, receipts = _seen_scenarios(ctx, head, out) if m.coverage_step else (True, set(), [])
-    cited = sorted({s for t in all_tasks if t.section == n for s in t.scenarios})
+    cited = sorted({s for t in all_tasks if t.section == n for s in t.known_scenarios(known)})
     if not m.coverage_step:
         seen = set(cited)
     ev = evidence.gather(ctx.repo, st.section_base.get(str(n), ""), head, cited, seen, m, out, n)
@@ -322,11 +323,11 @@ def _gate_context(ctx: Ctx, n: int, head: str, section: list[tasks.Task], ts: Ta
     except openspec.SpecError as e:
         known = {}
         ctx.run.event("gate_scenarios_failed", section=n, error=str(e)[:300])
-    cited = sorted({sid for t in section for sid in t.scenarios})
+    cited = sorted({sid for t in section for sid in t.known_scenarios(known)})
     lines = [f"# Section {n}: {section[0].section_title}", ""]
     lines += [f"- [{'x' if t.done else ' '}] {t.label} {t.text}" for t in section]
     lines += ["", "## Scenarios cited", ""]
-    lines += [f"### `{sid}`\n{known.get(sid, '(no such scenario in the change)')}\n" for sid in cited] or ["(none)"]
+    lines += [f"### `{sid}`\n{known[sid]}\n" for sid in cited] or ["(none)"]
     (context / "section.md").write_text("\n".join(lines) + "\n")
     base = ctx.run.state.section_base.get(str(n), "")
     diff = git(ctx.repo, "diff", base, head).decode(errors="replace") if base else "(the section's starting point was not recorded)"
@@ -655,8 +656,8 @@ def _scenario_text(work: Path, ctx: Ctx, task: tasks.Task) -> str:
         known = openspec.scenarios(work, ctx.m.change)
     except openspec.SpecError as e:
         return f"(scenario lookup failed: {e})"
-    return "\n\n".join(f"### `{sid}`\n{known.get(sid, '(no such scenario in the change — flag this)')}"
-                       for sid in task.scenarios) or "(this task names no scenario IDs)"
+    return "\n\n".join(f"### `{sid}`\n{known[sid]}"
+                       for sid in task.known_scenarios(known)) or "(this task names no scenario IDs)"
 
 
 def _copy_change(work: Path, ctx: Ctx, context: Path) -> None:
