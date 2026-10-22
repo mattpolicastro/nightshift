@@ -388,7 +388,7 @@ def test_cancelled_jobs_remain_pending_after_restart_and_resume(
         assert not health.failures and not health.item_failures and not health.announced
         assert not notifications
         assert len((root / "started").read_text().splitlines()) == 1
-        assert len(list(directory.parent.iterdir())) == 1
+        assert len([p for p in directory.parent.iterdir() if p.is_dir()]) == 1
         assert not (directory / "collected.json").exists()
         rows, errors = specloop_job.list_jobs(daemon.STATE_DIR)
         assert not errors and len(rows) == 1 and rows[0].state == expected_state
@@ -600,6 +600,29 @@ def _finish_delivery_job(job):
     assert json.loads(job.result_path.read_text())["result"] == job.result
 
 
+def test_jobs_ignores_drafting_idea_file(delivery_job, capsys):
+    from nightshift import cli
+
+    job = delivery_job("draft")
+    _finish_delivery_job(job)
+    # Use the input written by intake and passed to the real background job.
+    args = json.loads((job.directory / "request.json").read_text())["args"]
+    idea = Path(args[args.index("--idea-file") + 1])
+    assert idea.parent == job.directory.parent
+    assert idea.match("idea-*.txt") and idea.read_text()
+    before = {p: p.read_bytes() for p in daemon.STATE_DIR.rglob("*") if p.is_file()}
+
+    assert cli.main(["jobs"]) == 0
+    output = capsys.readouterr()
+    rows = [line for line in output.out.splitlines() if not line.startswith(" ")]
+    assert rows == [
+        f"{job.directory.name}  proposals  owner/sample#7  finished "
+        "(execution complete; delivery may be pending)"
+    ]
+    assert output.err == ""
+    assert {p: p.read_bytes() for p in daemon.STATE_DIR.rglob("*") if p.is_file()} == before
+
+
 def _assert_paused_delivery_held(job):
     assert daemon.PAUSE_FILE.exists()
     saved = job.path.read_bytes()
@@ -675,7 +698,7 @@ def test_finished_job_delivers_once_after_paused_restart(delivery_job, stage):
         assert (job.gh.labels, job.gh.comments, job.gh.prs) == effects
         assert not job.health.failures and not job.health.item_failures and not job.health.announced
         assert len(job.children) == 1
-        assert len(list(job.directory.parent.iterdir())) == 1
+        assert len([p for p in job.directory.parent.iterdir() if p.is_dir()]) == 1
         assert len((job.root / "started").read_text().splitlines()) == 1
     # Repeated polls may read status, but must dispatch no further delivery.
     for call in job.calls[delivered_at:]:

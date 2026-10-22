@@ -367,8 +367,8 @@ the receipt or deliberately enable another attempt. Do not blindly remove a
 job reference or stop record to retry: SIGKILL may leave partial artifacts,
 and remote effects or admission may already have committed. Neither pause,
 stop nor receipt recovery promises rollback. Resume only when the intended
-delivery/retry is safe. The [validation record](docs/validation.md#background-job-control--2026-10-21)
-separates automated checks from pending launchd and disposable-remote checks.
+delivery/retry is safe. The [manual host checks](docs/validation.md#manual-host-checks)
+cover launchd unload and stopping during a push to a disposable remote.
 
 ### What needs you
 

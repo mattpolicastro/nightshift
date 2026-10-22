@@ -2,63 +2,7 @@
 
 ## Background job control — 2026-10-21
 
-### Local automated checks
-
-Task 6.1 extends the existing scenario tests for retained evidence, label
-reapplication after cancellation, and inventory of finished admissions held
-by pause. These are implementation-session results, not trusted acceptance
-evidence; the harness independently reruns its verification commands.
-
-Environment: macOS, Python 3.14.6, pytest 9.1.1. Commands used the preinstalled
-virtual environment with `UV_OFFLINE=1`, `UV_NO_SYNC=1`,
-`UV_PROJECT_ENVIRONMENT` pointing to that environment,
-`UV_CACHE_DIR=build/uv-cache`, `PYTHONPATH=.`, and
-`PYTHONDONTWRITEBYTECODE=1`. No dependency download or installation was needed.
-
-The targeted `uv run pytest -q ... -p no:cacheprovider` invocation selected
-the two named acceptance tests below, plus
-`test_cancelled_jobs_remain_pending_after_restart_and_resume` and
-`test_committed_admission_survives_delivery_hold`: **17 passed in 14.24s**,
-exit 0. Both named acceptance tests passed, including all three termination
-parameter cases:
-
-- `tests/test_specloop_jobs.py::test_jobs_stop_terminates_process_group`
-- `tests/test_specloop_background.py::test_paused_daemon_does_not_deliver_finished_admission`
-
-Full `uv run pytest -p no:cacheprovider`: **1,276 passed, 5 skipped, 2 failed
-in 183.57s**, exit 1. Both named acceptance tests also passed in this run.
-The two failures were outside the changed tests:
-
-- `tests/test_reviewer_readonly.py::test_a_write_outside_the_worktree_is_still_a_breach`:
-  the sandbox denies writing `/tmp/verdict.txt` (`Operation not permitted`),
-  before the expected `CONTRACT BREACHED` diagnostic. An isolated rerun
-  reproduced the failure.
-- `tests/test_specloop_seal_verify.py::test_a_step_leaves_no_background_processes`:
-  `pgrep` exits 3 with `sysmond service not found` / `Cannot get process list`,
-  instead of exit 1 for no matching process.
-
-These existing tests and their production code are unchanged; no test was
-weakened or newly skipped. The full suite is not claimed green in this sandbox.
-
-The termination test uses disposable real wrapper/child/grandchild groups
-and pipe EOF to confirm exit. In a sandbox that denies `ps`, it injects
-process inspection while retaining real signals and group-exit checks.
-Delivery tests use fake GitHub/git/specloop interfaces and temporary state;
-the independent-supervisor test uses real local run state with a fake driver
-launch. These checks cannot establish launchd behavior or remote push effects.
-
-### CI and harness evidence
-
-Current-change CI and trusted harness results: **pending**. No CI result is
-claimed from the local commands above. Historical CI results below describe
-their dated snapshots only.
-
 ### Manual host checks
-
-| Check | Actual host result for this change |
-| --- | --- |
-| macOS launchd unload with a surviving detached job | **Pending — not performed.** No daemon service was loaded or unloaded in this implementation session. |
-| Stop during an observed push to a disposable remote | **Pending — not performed.** No network or remote mutation was performed in this implementation session. |
 
 Complete both checks before operational rollout. Use a disposable repository,
 remote and isolated daemon setup (for example, a dedicated test account), not
