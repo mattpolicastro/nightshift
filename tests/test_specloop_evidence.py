@@ -296,6 +296,208 @@ def test_generate_is_deterministic_and_one_mutant_per_line():
     assert len({m.line for m in first}) == len(first) == 2
 
 
+@pytest.mark.scenario("mutation-selection/bare-condition-negation/if-and-while-names-are-negated")
+@pytest.mark.scenario("mutation-selection/bare-condition-negation/condition-formatting-is-preserved")
+@pytest.mark.parametrize("suffix", ["py", "pyi"])
+@pytest.mark.parametrize("keyword,name", [("if", "blocked"), ("while", "active")])
+@pytest.mark.parametrize("indent,template", [
+    ("    ", "{keyword} {name}:"),
+    ("\t", "{keyword}\t{name}  :  # café True 42  "),
+    ("    ", "{keyword} ({name}):"),
+    ("\t", "{keyword}  ((  {name}  )) :\t# retained\t"),
+    ("    ", "{keyword} ((é{name}界)):  "),
+    ("    ", "{keyword} K{name}:  # normalized AST name differs from source"),
+])
+def test_bare_condition_is_negated(suffix, keyword, name, indent, template):
+    path = f"condition.{suffix}"
+    name = ("é" + name + "界" if "é" in template else "K" + name if "K" in template else name)
+    template = template.replace("é{name}界", "{name}").replace("K{name}", "{name}")
+    header = indent + template.format(keyword=keyword, name=name)
+    source = (f"def choose({name}):\n{header}\n"
+              f"{indent}{indent}return 'entered'\n{indent}return 'outside'\n")
+    mutants = evidence.generate([(path, 2, header)], 10, 1, sources={path: source})
+    expected_header = header.replace(name, "not " + name, 1)
+    assert mutants == [evidence.Mutant(path, 2, "negate-condition", header, expected_header)]
+    lines = source.splitlines(keepends=True)
+    lines[mutants[0].line - 1] = mutants[0].after + "\n"
+    changed = "".join(lines)
+    assert changed == source.replace(header, expected_header, 1)
+    original, mutated = {}, {}
+    exec(compile(source, path, "exec"), original)
+    exec(compile(changed, path, "exec"), mutated)
+    # Returning from the loop body bounds both versions to at most one iteration.
+    for value in (False, True):
+        assert original["choose"](value) == ("entered" if value else "outside")
+        assert mutated["choose"](value) == ("outside" if value else "entered")
+
+
+@pytest.mark.scenario("mutation-selection/bare-condition-negation/other-condition-forms-retain-existing-eligibility")
+@pytest.mark.parametrize("header,operators", [
+    ("if not blocked:", set()),
+    ("if blocked < active:", {"<"}),
+    ("if blocked and active:", {"and"}),
+    ("if blocked or active:", {"or"}),
+    ("if True:", {"True"}),
+    ("if 1:", {"int"}),
+    ("if None:", set()),
+    ("if blocked.active:", set()),
+    ("if blocked[0]:", {"int"}),
+    ("if blocked():", set()),
+    ("while not active:", set()),
+    ("while blocked == active:", {"=="}),
+    ("while active():", set()),
+    ("while (active\n    ):", set()),
+    ("while active: return True\n    if not blocked:", {"True"}),
+    ("if (blocked := active):", set()),
+    ("if blocked: return True\n    if not active:", {"True"}),
+    ("if not active:\n        pass\n    elif blocked:", set()),
+    ("if (\n        blocked\n    ):", set()),
+    ("if (blocked\n    ):", set()),
+    ("if \\\n        blocked:", set()),
+    ("if blocked \\\n        :", set()),
+    ("if blocked: \\\n        return None\n    if not active:", set()),
+])
+def test_other_conditions_retain_existing_operators(header, operators):
+    source = f"def choose(blocked, active):\n    {header}\n        return None\n"
+    lines = [("calc.py", n, line) for n, line in enumerate(source.splitlines(), 1)]
+    mutants = evidence.generate(lines, 100, 1, sources={"calc.py": source})
+    assert {mut.op for mut in mutants} == operators
+    assert all(mut.before == source.splitlines()[mut.line - 1] for mut in mutants)
+
+
+def test_condition_analysis_parses_and_tokenizes_each_file_once(monkeypatch):
+    source = "if blocked:\n    pass\nwhile active:\n    break\n"
+    calls = {"parse": 0, "tokens": 0}
+    parse, tokens = evidence.ast.parse, evidence.tokenize.generate_tokens
+
+    def track_parse(*args, **kwargs):
+        calls["parse"] += 1
+        return parse(*args, **kwargs)
+
+    def track_tokens(*args, **kwargs):
+        calls["tokens"] += 1
+        return tokens(*args, **kwargs)
+
+    monkeypatch.setattr(evidence.ast, "parse", track_parse)
+    monkeypatch.setattr(evidence.tokenize, "generate_tokens", track_tokens)
+    lines = [("calc.py", n, line) for n, line in enumerate(source.splitlines(), 1)]
+    mutants = evidence.generate(lines, 100, 1, sources={"calc.py": source})
+    assert {(mut.line, mut.op) for mut in mutants} == {(1, "negate-condition"), (3, "negate-condition")}
+    assert calls == {"parse": 1, "tokens": 1}
+
+
+@pytest.mark.scenario("mutation-selection/control-flow-candidate-compatibility/existing-exclusions-cover-new-operators")
+@pytest.mark.parametrize("count", [1, 2, 100])
+@pytest.mark.parametrize("seed", [0, 1, 7])
+def test_condition_exclusions_precede_sampling(count, seed):
+    source = ('"""\nif documented:\n    return None\nTrue\n"""\n'
+              '# if commented: return True\n'
+              'text = """\nwhile quoted:\n    return None\n"""\n'
+              'literal = "if quoted: return True"\n'
+              'if excluded:  # configured skip\n    pass\n'
+              'if blocked:  # True stays protected\n    pass\n'
+              'while active:\n    break\n')
+    unchanged = 'if unchanged:\n    pass\n'
+    paths = ("calc.py", "calc.pyi", "notes.txt", "outside.py")
+    sources = {path: source + unchanged for path in paths}
+    sources["notes.txt"] = ('if blocked:\n    pass\nwhile active:\n    break\n'
+                            'literal = "if quoted: return True"\n' + unchanged)
+    diff = "".join(f"+++ b/{path}\n@@ -0,0 +1 @@\n"
+                   + "".join("+" + line + "\n" for line in sources[path].removesuffix(unchanged).splitlines())
+                   for path in paths)
+    lines = evidence.added_lines(diff, ("calc.py", "calc.pyi", "notes.txt"))
+    mutants = evidence.generate(lines, count, seed, sources=sources, mutation_skip=("configured skip",))
+    eligible = [line for line in lines if line[2].startswith('literal =') or (
+        line[0] != "notes.txt" and line[2].startswith(("if blocked:", "while active:")))]
+    assert mutants == evidence.generate(eligible, count, seed, sources=sources)
+    assert len(mutants) == min(count, 7)
+    assert len({(mut.path, mut.line) for mut in mutants}) == len(mutants)
+    for mut in mutants:
+        assert mut.before == sources[mut.path].splitlines()[mut.line - 1]
+        if mut.before.startswith('literal ='):
+            assert mut.op == "True" and mut.after == mut.before.replace("True", "False")
+        else:
+            assert mut.op == "negate-condition" and mut.path in ("calc.py", "calc.pyi")
+
+
+@pytest.mark.scenario("mutation-selection/control-flow-candidate-compatibility/analysis-failures-still-propagate")
+@pytest.mark.parametrize("failure", ["missing", "parse", "tokenize"])
+@pytest.mark.parametrize("excluded", [False, True])
+def test_condition_analysis_errors_abort_generation_and_gather(tmp_path, monkeypatch, failure, excluded):
+    source = "if blocked:\n    pass\n"
+    bad_source = "if active:\n    pass\n" if failure != "parse" else "if active:\n"
+    sources = {"a.py": source, "calc.py": bad_source}
+    lines = [(path, 1, text.splitlines()[0]) for path, text in sources.items()]
+    skip = ("if ",) if excluded else ()
+    real_tokens = evidence.tokenize.generate_tokens
+
+    def tokens(readline):
+        if failure == "tokenize" and readline.__self__.getvalue() == bad_source:
+            raise evidence.tokenize.TokenError("broken token stream", (1, 0))
+        return real_tokens(readline)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("analysis errors must precede sampling and execution")
+
+    monkeypatch.setattr(evidence.tokenize, "generate_tokens", tokens)
+    monkeypatch.setattr(evidence.random.Random, "shuffle", unexpected)
+    monkeypatch.setattr(evidence, "mutate", unexpected)
+    available = {"a.py": source} if failure == "missing" else sources
+    with pytest.raises(ValueError, match=r"calc\.py"):
+        evidence.generate(lines, 1, 1, sources=available, mutation_skip=skip)
+
+    # Exercise gather's committed-source boundary without starting any workers.
+    diff = "".join(f"+++ b/{path}\n@@ -0,0 +1 @@\n+{text}\n" for path, _, text in lines)
+
+    def git(repo, *args):
+        if args == ("diff", "--unified=0", "base", "head"):
+            return diff.encode()
+        assert args[0] == "show"
+        path = args[1].removeprefix("head:")
+        if path not in available:
+            raise RuntimeError("committed source unavailable")
+        return available[path].encode()
+
+    monkeypatch.setattr(evidence, "git", git)
+    out = tmp_path / "evidence"
+    with pytest.raises(ValueError, match=r"calc\.py"):
+        evidence.gather(tmp_path, "base", "head", [], set(),
+                        replace(M, mutation_paths=("a.py", "calc.py"), mutation_skip=skip), out, 1)
+    assert not (out / "evidence.json").exists()
+
+
+@pytest.mark.scenario("mutation-selection/control-flow-candidate-compatibility/existing-exclusions-cover-new-operators")
+def test_condition_candidates_use_committed_source(tmp_path, monkeypatch):
+    repo, _, _ = project(tmp_path, STRONG)
+    source = ("def choose(blocked, active):\n"
+              "    if not blocked:\n        return None\n"
+              "    while active:\n        break\n")
+    (repo / "calc.py").write_text(source)
+    sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "before")
+    base = sh(repo, "git", "rev-parse", "HEAD")
+    source = source.replace("if not blocked:", "if blocked:")
+    (repo / "calc.py").write_text(source)
+    sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "condition")
+    head = sh(repo, "git", "rev-parse", "HEAD")
+    # The working copy hides the header inside a runtime string.
+    dirty = 'text = """\n    if blocked:\n"""\n'
+    (repo / "calc.py").write_text(dirty)
+    expected = evidence.Mutant("calc.py", 2, "negate-condition",
+                               "    if blocked:", "    if not blocked:")
+
+    def mutate(source_repo, revision, mutants, effective, out):
+        assert source_repo == repo and revision == head and effective == M
+        assert mutants == [expected]  # The unchanged while header is ineligible.
+        mutants[0].result = "killed"
+        return True
+
+    monkeypatch.setattr(evidence, "mutate", mutate)
+    ev = evidence.gather(repo, base, head, [], set(), M, tmp_path / "out", 1)
+    assert ev.mutants == [replace(expected, result="killed")]
+    assert ev.skipped == "" and ev.score == 1.0
+    assert (repo / "calc.py").read_text() == dirty
+
+
 @pytest.mark.parametrize("tests,expect_pass", [(WEAK, False), (STRONG, True)])
 def test_mutation_separates_weak_from_strong_tests(tmp_path, tests, expect_pass):
     src, base, head = project(tmp_path, tests)
