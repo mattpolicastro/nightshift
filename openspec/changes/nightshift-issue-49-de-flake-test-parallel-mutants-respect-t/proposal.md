@@ -20,7 +20,8 @@ blocked-by: #21
   real process termination, diagnostics, cleanup, and queue-wait assertions.
 - Require `uv run pytest` green and 20 consecutive passes per parameter value
   under `stress -c 10` or ten equivalent CPU workers, controlled only by an
-  external validation harness.
+  external validation harness. Complete this validation in the same task as
+  the test patch, before handing it back for sealing.
 
 Out of scope: production code, other tests, shared test helpers/constants,
 new test files, dependency or CI changes, permanent load generators, retries,

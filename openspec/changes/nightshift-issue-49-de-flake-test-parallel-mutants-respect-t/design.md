@@ -89,7 +89,14 @@ Production behavior is out of scope, including `specloop/evidence.py` and
    timeouts followed by one kill and one survivor. Never manufacture timeout
    receipts, mock process termination, or accept multiple classifications.
 
-4. **Validate in an external harness.** First run
+4. **Validate in the same implementation task using an external harness.**
+   The test patch and its focused, loaded, and full-suite validation form one
+   task, completed before the agent hands the patch back for sealing. A separate
+   validation-only task cannot succeed when the test passes unchanged:
+   `specloop/seal.py` returns without a commit when no admissible files changed,
+   and `specloop/loop.py` fails that task with `No admissible change was made.`
+   Temporary logs and implementation evidence support the test patch; they do
+   not replace its required repository diff. First run
    `uv run pytest tests/test_specloop_evidence.py::test_parallel_mutants_respect_time_box`.
    Then start `stress -c 10` once, keep it running throughout 20 sequential
    invocations of that same command, and require all 20 to pass both parameter
@@ -104,7 +111,9 @@ Production behavior is out of scope, including `specloop/evidence.py` and
    platform, worker count, and individual run outcomes in implementation evidence.
    After stopping the load, require `uv run pytest` green. Inspect the diff to
    confirm that only the authorized test/decorators changed outside this change's
-   OpenSpec documents. Failed validation must be reported, not fixed elsewhere.
+   OpenSpec documents. Any repair stays within the named test and requires a
+   fresh complete validation run. Failed validation must be reported, not fixed
+   elsewhere or deferred to a separate validation-only task.
 
 5. **Preserve existing contracts and scenario coverage.** Add the delta scenario
    markers to this test while keeping its current budget and cleanup markers.
