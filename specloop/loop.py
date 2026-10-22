@@ -11,6 +11,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import time
@@ -88,6 +89,72 @@ def _fetch_publish_base(ctx: Ctx, remote: str | None = None, *, timeout: float) 
         if isinstance(diagnostic, bytes):
             diagnostic = diagnostic.decode(errors="replace")
         raise RuntimeError(f"fetch {requested} from source origin failed: {diagnostic.strip()[:400]}") from exc
+
+
+class _MergeConflict(RuntimeError):
+    def __init__(self, paths: list[str], diagnostic: str):
+        super().__init__(diagnostic)
+        self.paths = paths
+
+
+def _is_ancestor(repo: Path, base: str, head: str) -> bool:
+    # merge-base's exit 1 means non-ancestry, not an operational failure.
+    result = subprocess.run(
+        ["git", *seal.SAFE_FLAGS, "-C", str(repo), "merge-base", "--is-ancestor", base, head],
+        capture_output=True, timeout=60, env={**os.environ, **seal.SAFE_GIT},
+    )
+    if result.returncode not in (0, 1):
+        raise RuntimeError(result.stderr.decode(errors="replace").strip())
+    return result.returncode == 0
+
+
+def _merge_commits(repo: Path, head: str, base: str) -> str:
+    """Import a two-parent merge object, without changing any repository ref.
+
+    The caller owns ancestry checks, intent persistence and CAS installation.
+    Also usable for a synthetic evidence baseline. All indexes and merge state
+    live in the disposable checkout, including when Git fails or conflicts.
+    """
+    with tempfile.TemporaryDirectory(prefix="base-merge-", dir=repo.parent) as tmp:
+        work = Path(tmp)
+        git(work, "init", "-q")
+        git(work, "fetch", "--no-tags", "--no-recurse-submodules", "--", str(repo), head, base)
+        git(work, "checkout", "-q", "--detach", head)
+        try:
+            git(work, "merge", "--no-ff", "--no-commit", base, env=seal.IDENTITY)
+        except RuntimeError as exc:
+            paths = sorted({os.fsdecode(p) for p in
+                            git(work, "diff", "--name-only", "--diff-filter=U", "-z").split(b"\0") if p})
+            if paths:
+                raise _MergeConflict(paths, str(exc)) from exc
+            raise
+        tree = git(work, "write-tree").decode().strip()
+        merged = git(work, "commit-tree", tree, "-p", head, "-p", base,
+                     "-m", f"Merge current PR base {base}", env=seal.IDENTITY).decode().strip()
+        git(repo, "fetch", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules",
+            "--", str(work), merged)
+        return merged
+
+
+def _merge_publish_base(ctx: Ctx, base: str, head: str) -> str | None:
+    """Construct integration for the driver; None means a durable pause.
+
+    A successful result still needs an intent saved before CAS advancement and
+    trusted verification. An incorporated base leaves that obligation untouched.
+    """
+    try:
+        if _is_ancestor(ctx.repo, base, head):
+            return head
+        return _merge_commits(ctx.repo, head, base)
+    except _MergeConflict as exc:
+        # Do not replace the last integrated base with one that conflicted.
+        ctx.run.state.base_sync["retry_verify"] = True
+        ctx.pause("base_conflict", detail=f"base {base} conflicts with run head {head}:\n"
+                  + "\n".join(exc.paths) + f"\n{exc}\nRepair, then `specloop resume {ctx.m.change}`.")
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        ctx.pause("infra", detail=f"could not merge base {base} into run head {head}: {exc}\n"
+                  f"Repair, then `specloop resume {ctx.m.change}`.")
+    return None
 
 
 def run(ctx: Ctx) -> str:

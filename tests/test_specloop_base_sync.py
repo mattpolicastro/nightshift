@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from specloop import loop, manifest, seal, state
+from specloop import cli, loop, manifest, seal, state
 
 
 def sh(cwd, *args):
@@ -173,3 +173,97 @@ def test_hosted_origin_is_passed_as_an_unchanged_argument(base_env, monkeypatch,
     with pytest.raises(RuntimeError, match="transport unavailable"):
         loop._fetch_publish_base(base_env.ctx, remote, timeout=20)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("fast_forward", [
+    pytest.param(False, marks=pytest.mark.scenario("publish-base-sync/preserve-run-history/clean-moved-base")),
+    pytest.param(True, marks=pytest.mark.scenario("publish-base-sync/preserve-run-history/fast-forward-shaped-base")),
+])
+def test_merge_constructs_two_harness_authored_parents(base_env, monkeypatch, fast_forward):
+    env, ctx = base_env, base_env.ctx
+    head = ctx.head()
+    if fast_forward:
+        sh(env.upstream, "git", "fetch", "-q", str(ctx.repo), head)
+        sh(env.upstream, "git", "merge", "--ff-only", head)
+    base = advance_base(env)
+    # Upstream content need not pass the agent seal's path allowlist.
+    base = commit(env.upstream, "upstream-only.txt", "trusted base content\n")
+    sh(env.upstream, "git", "push", "-q", "origin", "release/stable")
+    assert loop._fetch_publish_base(ctx, timeout=300) == base
+    before = snapshot(env.src)
+    refs = sh(ctx.repo, "git", "show-ref")
+    for key in seal.IDENTITY:
+        monkeypatch.setenv(key, "outsider@example.test" if "EMAIL" in key else "outsider")
+    env.config.write_text("[commit]\n\tgpgsign = true\n[user]\n\tname = outsider\n\temail = outsider@example.test\n")
+
+    merged = loop._merge_publish_base(ctx, base, head)
+
+    assert merged and merged not in (head, base)
+    assert sh(ctx.repo, "git", "show", "-s", "--format=%P", merged).split() == [head, base]
+    assert sh(ctx.repo, "git", "show", "-s", "--format=%an%n%ae%n%cn%n%ce", merged).splitlines() == [
+        "specloop", "specloop@localhost", "specloop", "specloop@localhost"]
+    assert sh(ctx.repo, "git", "show", f"{merged}:base.txt") == "upstream change"
+    assert sh(ctx.repo, "git", "show", f"{merged}:upstream-only.txt") == "trusted base content"
+    assert sh(ctx.repo, "git", "show", f"{merged}:{ctx.tasks_path}") == ctx.tasks_text(head).strip()
+    assert loop._is_ancestor(ctx.repo, head, base) == fast_forward
+    # Construction is reusable for evidence; the driver later saves intent and installs it.
+    assert ctx.head() == head and sh(ctx.repo, "git", "show-ref") == refs
+    assert snapshot(env.src) == before
+    assert not list(ctx.run.dir.glob("base-merge-*"))
+
+
+@pytest.mark.scenario("publish-base-sync/preserve-run-history/conflicting-files")
+def test_base_conflict_pauses_without_publishing(base_env, monkeypatch):
+    env, ctx = base_env, base_env.ctx
+    paths = ["base.txt", "space name.txt", "tab\tname.txt", "line\nname.txt"]
+    head = seal.commit_files(ctx.repo, ctx.head(), dict.fromkeys(paths, "run edits\n"), "run edits")
+    seal.git(ctx.repo, "update-ref", ctx.ref, head, ctx.head())
+    for path in paths:
+        commit(env.upstream, path, "base edits\n")
+    sh(env.upstream, "git", "push", "-q", "origin", "release/stable")
+    base = loop._fetch_publish_base(ctx, timeout=300)
+    ctx.run.state.base_sync = {"base": env.initial, "verified_head": head, "receipts": ["old receipt"]}
+    before, refs = snapshot(env.src), sh(ctx.repo, "git", "show-ref")
+    tree = sh(ctx.repo, "git", "rev-parse", f"{head}^{{tree}}")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("conflict must stop verification and publication")
+
+    monkeypatch.setattr(loop.verify, "run_steps", forbidden)
+    monkeypatch.setattr(cli, "_push", forbidden)
+    monkeypatch.setattr(cli, "_gh", forbidden)
+    assert loop._merge_publish_base(ctx, base, head) is None
+    ctx.run.reload()
+    pause = ctx.run.state.pause
+    assert pause.reason == "base_conflict" and pause.resume_at == 0
+    assert "\n".join(sorted(paths)) in pause.detail
+    assert base in pause.detail and head in pause.detail and "specloop resume c" in pause.detail
+    assert ctx.run.state.base_sync == {"base": env.initial, "verified_head": head,
+                                       "receipts": ["old receipt"], "retry_verify": True}
+    assert ctx.head() == head and sh(ctx.repo, "git", "show-ref") == refs
+    assert sh(ctx.repo, "git", "rev-parse", f"{ctx.ref}^{{tree}}") == tree
+    assert not (ctx.repo / "index").exists() and not (ctx.repo / "MERGE_HEAD").exists()
+    assert not list(ctx.run.dir.glob("base-merge-*"))
+    assert snapshot(env.src) == before
+    assert cli._publish(SimpleNamespace(change="c"), ctx.run) == 1
+
+
+def test_operational_merge_error_is_not_a_file_conflict(base_env, monkeypatch):
+    ctx = base_env.ctx
+    base = advance_base(base_env)
+    loop._fetch_publish_base(ctx, timeout=300)
+    head, real_git = ctx.head(), loop.git
+
+    def fail_merge(repo, *args, **kwargs):
+        if args[0] == "merge":
+            raise RuntimeError("merge process failed")
+        return real_git(repo, *args, **kwargs)
+
+    monkeypatch.setattr(loop, "git", fail_merge)
+    assert loop._merge_publish_base(ctx, base, head) is None
+    ctx.run.reload()
+    assert ctx.run.state.pause.reason == "infra"
+    assert ctx.run.state.pause.resume_at == 0
+    assert "merge process failed" in ctx.run.state.pause.detail
+    assert ctx.head() == head and ctx.run.state.base_sync == {}
+    assert not list(ctx.run.dir.glob("base-merge-*"))
