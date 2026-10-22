@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from specloop import agents, critic, manifest, openspec, propose, state
+from specloop import agents, cli, critic, manifest, openspec, propose, state
 
 
 CLEAN = "spec-critic/ordered-proposal-gates/clean-draft-receives-the-extra-review"
@@ -15,6 +15,12 @@ CORRECTION = "spec-critic/single-critic-correction/blocking-finding-triggers-one
 BOTH = "spec-critic/concurrent-file-context/both-sources-reach-the-critic"
 PARTIAL = "spec-critic/concurrent-file-context/partial-lookup-remains-visible"
 NOTES = "spec-critic/notes-through-existing-risks/final-notes-replace-superseded-notes"
+EARLIER = "spec-critic/ordered-proposal-gates/earlier-gate-prevents-critic"
+FAILURE = "spec-critic/independent-checklist-review/review-failure-is-not-a-pass"
+PERSISTENT = "spec-critic/single-critic-correction/persistent-findings-reject"
+EXHAUSTED = "spec-critic/single-critic-correction/no-remaining-attempt-rejects"
+UNCHANGED = "spec-critic/single-critic-correction/unchanged-correction-keeps-findings"
+FAILED_GATE = "spec-critic/single-critic-correction/correction-fails-an-earlier-gate"
 CHANGE = "sign-helpers"
 DIRECTORY = f"openspec/changes/{CHANGE}"
 TASKS = "## 1. Sign\n\n- [ ] 1.1 Implement sign covering `calc/sign/zero`\n"
@@ -26,6 +32,9 @@ FINDINGS = [
 ]
 PASS = {"contradictions": [], "risks": []}
 BLOCKED = {"contradictions": FINDINGS, "risks": ["Superseded critic note"]}
+INFEASIBLE = {"contradictions": [
+    {"task": "1.1", "problem": "Required helper is frozen", "evidence": "manifest.toml:9"},
+], "risks": []}
 REAL_IN_FLIGHT = propose.in_flight
 
 
@@ -76,6 +85,47 @@ def env(tmp_path, monkeypatch):
     return e
 
 
+@pytest.fixture
+def invoke_cli(env, monkeypatch, capfd):
+    """Run real drafting and CLI rejection, capturing the result before serialization."""
+    real_draft = propose.draft
+    notifications = []
+    monkeypatch.setattr(cli, "load_env", lambda path: {})
+    monkeypatch.setattr(cli, "notifier", lambda secrets: notifications.append)
+    monkeypatch.setattr(manifest, "template", lambda path, **kw: (
+        replace(env.m, change=kw["change"], branch=kw["branch"]), ""))
+
+    def invoke(agent, *, rounds=4, questions=False):
+        drafts = []
+
+        def draft(source, base, change, idea, sources, m, out, **kwargs):
+            env.out = out
+            result = real_draft(source, base, change, idea, sources, m, out,
+                                rounds=rounds, **kwargs)
+            drafts.append(result)
+            return result
+
+        monkeypatch.setattr(propose, "draft", draft)
+        monkeypatch.setattr(agents, "run", agent)
+        refs = git(env.source, "show-ref")
+        code = cli.main(["propose", "unused.toml", "--change", CHANGE,
+                         "--branch", f"spec/{CHANGE}", "--idea", "Define sign", "--json"])
+        captured = capfd.readouterr()
+        d, = drafts  # Do not mistake a caught exception for a domain rejection.
+        assert code == (2 if questions else 1), captured.err
+        document = json.loads(captured.out)
+        assert document == {
+            "version": 1, "outcome": "needs_input" if questions else "rejected",
+            "branch": d.branch, "commit": d.commit, "questions": d.questions,
+            "contradictions": d.contradictions, "risks": d.risks, "problems": d.problems,
+        }
+        assert git(env.source, "show-ref") == refs  # No proposal branch was published.
+        assert len(notifications) == (1 if questions else 0)
+        return d
+
+    return invoke
+
+
 class Script:
     def __init__(self, env, bodies=(INITIAL,), feasibility=(PASS,), critics=(PASS,), tasks=TASKS):
         self.env, self.tasks = env, tasks
@@ -101,10 +151,13 @@ class Script:
                     "#### Scenario: Zero\n- **WHEN** input is zero\n- **THEN** return zero\n")
             return agents.Result("ok", {"status": "drafted", "summary": "", "questions": []})
         kind = "critic" if call.prompt.startswith("# Spec critic of an OpenSpec change") else "feasibility"
+        assert kind == "critic" or call.prompt.startswith("# Feasibility check")
         self.env.events.append(kind)
         self.snapshots.append((kind, git(self.work, "rev-parse", "HEAD"),
                                (call.cwd / DIRECTORY / "design.md").read_text()))
         result = next(self.critics if kind == "critic" else self.feasibility)
+        if isinstance(result, Exception):
+            raise result
         return result if isinstance(result, agents.Result) else agents.Result("ok", result)
 
     def draft(self, **kwargs):
@@ -237,26 +290,48 @@ def test_final_notes_replace_superseded_notes_and_preserve_overlap(env):
 
 
 @pytest.mark.parametrize("case,rounds,writes,reads", [
-    ("persistent", 4, 2, 2), ("exhausted", 1, 1, 1), ("unchanged", 4, 2, 1),
+    pytest.param("persistent", 4, 2, 2, marks=pytest.mark.scenario(PERSISTENT)),
+    pytest.param("exhausted", 1, 1, 1, marks=pytest.mark.scenario(EXHAUSTED)),
+    pytest.param("unchanged", 4, 2, 1, marks=pytest.mark.scenario(UNCHANGED)),
 ])
-def test_critic_correction_is_bounded_and_never_clears_unresolved_findings(env, case, rounds, writes, reads):
+def test_critic_correction_is_bounded_and_never_clears_unresolved_findings(
+        env, invoke_cli, case, rounds, writes, reads):
     agent = Script(env, bodies=(INITIAL, None if case == "unchanged" else CORRECTED),
                    feasibility=(PASS, PASS), critics=(BLOCKED, BLOCKED))
-    d = agent.draft(rounds=rounds)
+    d = invoke_cli(agent, rounds=rounds)
     assert len(agent.prompts("write")) == writes and len(agent.prompts("critic")) == reads
+    assert writes <= rounds
     assert d.contradictions == FINDINGS and not d.problems
     assert d.commit == agent.snapshots[-1][1]
     assert json.loads((env.out / "draft.json").read_text())["contradictions"] == FINDINGS
+    expected = ["write", "lint", "feasibility", "lookup", "critic"]
+    if writes == 2:
+        expected += ["write", "lint"]
+        for finding in FINDINGS:
+            assert all(value in agent.prompts("write")[1] for value in finding.values())
+    if reads == 2:
+        expected += ["feasibility", "critic"]
+        assert d.commit != agent.snapshots[0][1]
+        assert git(d.work, "rev-parse", f"{d.commit}^") == agent.snapshots[0][1]
+    else:
+        assert d.commit == agent.snapshots[0][1]
+        assert not (env.out / "feasibility-2").exists()
+        assert not (env.out / "critic-2").exists()
+    assert env.events == expected
+    assert env.lookups == [("org/repo", f"spec/{CHANGE}")]
+    assert git(d.work, "rev-parse", "HEAD") == d.commit
+    assert git(d.work, "status", "--porcelain") == ""
 
 
+@pytest.mark.scenario(FAILED_GATE)
 @pytest.mark.parametrize("gate", ["lint", "feasibility", "feasibility-error", "questions", "drafter-error"])
-def test_failed_correction_stops_at_earlier_gate(env, gate):
+def test_failed_correction_stops_at_earlier_gate(env, invoke_cli, gate):
     body = CORRECTED
     if gate == "questions":
         body = agents.Result("ok", {"status": "needs_input", "questions": ["Which sign convention?"]})
     elif gate == "drafter-error":
         body = agents.Result("infra", None, detail="drafter crashed")
-    feasibility = agents.Result("infra", None, detail="review crashed") if gate == "feasibility-error" else BLOCKED
+    feasibility = agents.Result("infra", None, detail="review crashed") if gate == "feasibility-error" else INFEASIBLE
     agent = Script(env, bodies=(INITIAL, body), feasibility=(PASS, feasibility), critics=(BLOCKED,))
     if gate == "lint":
         original = agent.tasks
@@ -267,32 +342,120 @@ def test_failed_correction_stops_at_earlier_gate(env, gate):
             yield CORRECTED
 
         agent.bodies = bodies()
-    d = agent.draft()
+    d = invoke_cli(agent, questions=gate == "questions")
     assert len(agent.prompts("write")) == 2 and len(agent.prompts("critic")) == 1
     if gate == "questions":
         assert d.questions == ["Which sign convention?"]
     elif gate == "feasibility":
-        assert d.contradictions == FINDINGS
+        assert d.contradictions == INFEASIBLE["contradictions"]
+        assert d.commit != agent.snapshots[0][1]
     else:
         assert d.problems
+        if gate == "lint":
+            assert "task 1.1: unknown scenario `calc/sign/unknown`" in d.problems
+        elif gate == "feasibility-error":
+            assert d.problems == ["feasibility review failed: infra: review crashed"]
+        else:
+            assert d.problems == ["drafting session failed: infra drafter crashed"]
     assert env.events.count("feasibility") == (2 if gate.startswith("feasibility") else 1)
+    expected = ["write", "lint", "feasibility", "lookup", "critic", "write"]
+    if gate not in ("questions", "drafter-error"):
+        expected.append("lint")
+    if gate.startswith("feasibility"):
+        expected.append("feasibility")
+    assert env.events == expected
+    assert env.lookups == [("org/repo", f"spec/{CHANGE}")]
+    assert not (env.out / "critic-2").exists()
 
 
-@pytest.mark.parametrize("failure", [agents.Result("infra", None, detail="critic crashed"), agents.Result("ok", {})])
-def test_critic_failure_stops_without_redrafting(env, failure):
-    agent = Script(env, critics=(failure,))
-    d = agent.draft()
-    assert len(agent.prompts("write")) == 1
+@pytest.mark.scenario(FAILURE)
+@pytest.mark.parametrize("failure,diagnostic", [
+    (agents.Result("infra", None, detail="critic crashed"), "infra: critic crashed"),
+    (agents.Result("usage_limit", PASS, detail="quota exhausted"), "usage_limit: quota exhausted"),
+    (agents.Result("ok", None), "expected object"),
+    (agents.Result("ok", {}), "missing contradictions"),
+    (agents.Result("ok", {"contradictions": "none", "risks": []}), "expected array"),
+    (agents.Result("ok", {"contradictions": [{"task": "1.1", "problem": "bad"}], "risks": []}), "missing evidence"),
+    (agents.Result("ok", {**PASS, "verdict": "pass"}), "unexpected fields"),
+    (RuntimeError("critic exploded"), "RuntimeError: critic exploded"),
+])
+@pytest.mark.parametrize("on_correction", [False, True])
+def test_critic_failure_stops_without_redrafting(env, invoke_cli, failure, diagnostic, on_correction):
+    agent = Script(env, bodies=(INITIAL, CORRECTED), feasibility=(PASS, PASS),
+                   critics=(BLOCKED, failure) if on_correction else (failure,))
+    d = invoke_cli(agent)
+    attempts = 2 if on_correction else 1
+    assert len(agent.prompts("write")) == attempts
+    assert len(agent.prompts("critic")) == attempts
     assert d.problems[0].startswith("critic review failed: ")
-    assert "error" in json.loads((env.out / "critic-1/critic.json").read_text())
+    review_dir = env.out / f"critic-{attempts}"
+    result = json.loads((review_dir / "critic.json").read_text())
+    assert "error" in result and diagnostic in result["error"]
+    assert d.problems == [f"critic review failed: {result['error']}"]
+    assert not (review_dir / "checkout").exists()
+    assert env.events == (["write", "lint", "feasibility", "lookup", "critic"]
+                          + (["write", "lint", "feasibility", "critic"] if on_correction else []))
+    assert env.lookups == [("org/repo", f"spec/{CHANGE}")]
 
 
+@pytest.mark.scenario(EARLIER)
 @pytest.mark.parametrize("gate", ["lint", "feasibility", "feasibility-error", "questions"])
-def test_context_lookup_is_lazy_until_all_earlier_gates_pass(env, gate):
+def test_context_lookup_is_lazy_until_all_earlier_gates_pass(env, invoke_cli, gate):
     body = agents.Result("ok", {"status": "needs_input", "questions": ["Which convention?"]}) if gate == "questions" else INITIAL
     review = agents.Result("infra", None, detail="review crashed") if gate == "feasibility-error" else BLOCKED
     agent = Script(env, bodies=(body,), feasibility=(review,), critics=(),
                    tasks=TASKS.replace("calc/sign/zero", "calc/sign/unknown") if gate == "lint" else TASKS)
-    d = agent.draft(rounds=1)
+    d = invoke_cli(agent, rounds=4 if gate in ("questions", "feasibility-error") else 1,
+                   questions=gate == "questions")
     assert d.problems or d.questions or d.contradictions
     assert not env.lookups and not agent.prompts("critic")
+    expected = ["write"]
+    if gate == "questions":
+        assert d.questions == ["Which convention?"]
+    else:
+        expected.append("lint")
+        if gate == "lint":
+            assert "task 1.1: unknown scenario `calc/sign/unknown`" in d.problems
+        else:
+            expected.append("feasibility")
+            if gate == "feasibility-error":
+                assert d.problems == ["feasibility review failed: infra: review crashed"]
+            else:
+                assert d.contradictions == FINDINGS
+    assert env.events == expected
+    assert not list(env.out.glob("critic-*"))
+
+
+@pytest.mark.scenario(EARLIER)
+@pytest.mark.scenario(EXHAUSTED)
+@pytest.mark.parametrize("gate", ["lint", "feasibility"])
+def test_earlier_gate_retry_uses_last_attempt_before_critic_blocker(env, invoke_cli, gate):
+    agent = Script(env, bodies=(INITIAL, CORRECTED), critics=(BLOCKED,),
+                   feasibility=(INFEASIBLE, PASS) if gate == "feasibility" else (PASS,))
+    if gate == "lint":
+        def bodies():
+            agent.tasks = TASKS.replace("calc/sign/zero", "calc/sign/unknown")
+            yield INITIAL
+            agent.tasks = TASKS
+            yield CORRECTED
+
+        agent.bodies = bodies()
+    d = invoke_cli(agent, rounds=2)
+    assert len(agent.prompts("write")) == 2
+    feedback = agent.prompts("write")[1]
+    if gate == "lint":
+        assert "unknown scenario `calc/sign/unknown`" in feedback
+        assert "scenario `calc/sign/zero` is not covered by any task" in feedback
+    else:
+        for finding in INFEASIBLE["contradictions"]:
+            assert all(value in feedback for value in finding.values())
+    assert "## Spec critic feedback" not in feedback
+    assert env.events == (["write", "lint"] + (["feasibility"] if gate == "feasibility" else [])
+                          + ["write", "lint", "feasibility", "lookup", "critic"])
+    assert env.lookups == [("org/repo", f"spec/{CHANGE}")]
+    assert d.contradictions == FINDINGS and not (d.problems or d.questions)
+    assert d.commit == agent.snapshots[-1][1]
+    assert agent.snapshots[-1][2] == CORRECTED
+    assert not (env.out / "critic-1").exists()
+    assert json.loads((env.out / "critic-2/critic.json").read_text()) == BLOCKED
+    assert json.loads((env.out / "draft.json").read_text())["contradictions"] == FINDINGS
