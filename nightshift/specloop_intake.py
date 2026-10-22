@@ -392,12 +392,17 @@ def revise_pending(
         if (not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*", change)
                 or ".." in change or change.endswith((".", ".lock"))):
             return None
+        events = _latest_label_events(repo.name, number, {labels.revise}, runner=gh)
+        if not _authorize_label_events(repo.name, number, events, runner=gh, kind="pr"):
+            return None
+        # Authorization and receipt identity use the same current application.
+        # Even collecting a finished job must wait until its trigger is trusted.
+        event = events[labels.revise]["id"]
         directory = repo.name.replace("/", "__")
         path = state_dir / "revisions" / directory / f"{number}.json"
         receipt = json.loads(path.read_text()) if path.exists() else None
         if receipt and not _collect(path, receipt, receipt.get("command", "propose")):
             return _PENDING
-        event = _label_events(repo.name, number, {labels.revise}, runner=gh)[labels.revise]
         if receipt and (receipt["change"] != change or receipt["event"] != event
                         or "result" not in receipt
                         or (receipt.get("delivered")

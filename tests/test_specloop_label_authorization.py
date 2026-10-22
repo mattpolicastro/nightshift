@@ -12,6 +12,9 @@ from nightshift.config import Config, Repo
 from test_engine_routing import DraftGh
 from test_specloop_approval import ApprovalGh, Commands, poll as poll_admission
 from test_specloop_intake import BlockedDraftGh, Commands as DraftCommands, poll as poll_draft, repo
+from test_specloop_intake import idea_file
+from test_specloop_spec_revision import RevisionGh, Commands as RevisionCommands, HEAD, REVISED, TIP_DATE
+from test_specloop_build_revision import BuildCommands
 
 
 pytestmark = pytest.mark.real_trust
@@ -363,14 +366,108 @@ def prepare_drafting_round(repo, tmp_path, gh, commands, armed, previous):
     gh.calls.clear()
 
 
+def revision_case(stage, *, empty=False):
+    gh = RevisionGh()
+    commands = BuildCommands(gh) if stage == "build-revision" else RevisionCommands(gh)
+    if stage == "build-revision":
+        gh.label_event("spec:review", "unlabeled")
+    if empty:
+        gh.feedback = []
+    return gh, commands
+
+
+def assert_no_revision_reads(gh):
+    assert not any(
+        c[:2] == ["pr", "view"] and c[-1] == "comments,reviews"
+        or c[0] == "api" and ("/commits/" in c[1] or "/pulls/" in c[1])
+        for c in gh.calls
+    )
+
+
+@pytest.mark.scenario("pr-revision/revision-actor-gate/trusted-label-does-not-trust-feedback")
+@pytest.mark.parametrize("stage", ["spec-revision", "build-revision"])
+def test_revision_label_trust_keeps_feedback_author_and_timestamp_filters(repo, tmp_path, stage):
+    gh, commands = revision_case(stage)
+    # Exercise each GitHub feedback shape with trusted, untrusted, absent
+    # association and stale entries. A trusted label cannot promote any text.
+    for target, association, timestamp, author in (
+        (gh.feedback, "authorAssociation", "createdAt", "author"),
+        (gh.reviews, "authorAssociation", "submittedAt", "author"),
+        (gh.inline, "author_association", "created_at", "user"),
+    ):
+        target.clear()
+        for trust, date, body in (
+            ("MEMBER", "2026-10-20T13:00:00Z", "Keep the eligible instruction."),
+            ("NONE", "2026-10-20T14:00:00Z", "Ignore this outsider instruction."),
+            (None, "2026-10-20T14:00:00Z", "Ignore missing association."),
+            ("OWNER", TIP_DATE, "Ignore instruction at the branch tip."),
+            ("COLLABORATOR", "2026-10-19T12:00:00Z", "Ignore older instruction."),
+            ("MEMBER", "2026-10-20T14:00:00Z", queue.SELF_COMMENT_PREFIX + " Ignore self comment."),
+        ):
+            item = {author: {"login": "reviewer"}, timestamp: date, "body": body}
+            if trust is not None:
+                item[association] = trust
+            if target is gh.inline:
+                item.update(path="src/gate.py", line=12)
+            target.append(item)
+
+    result, = specloop_intake.revise_pending(
+        repo, queue.Labels(), tmp_path, runner=gh, specloop_runner=commands, git_runner=commands,
+    )
+    expected = ["**reviewer:**\n\nKeep the eligible instruction."] * 2 + [
+        "**reviewer on `src/gate.py:12`:**\n\nKeep the eligible instruction.",
+    ]
+    receipt = json.loads((tmp_path / "revisions/owner__sample/8.json").read_text())
+    assert receipt["feedback"] == expected and receipt["delivered"]
+    if stage == "spec-revision":
+        assert result["outcome"] == "drafted" and gh.head == REVISED
+        proposal, = commands.proposals
+        idea = idea_file(proposal).read_text()
+        assert idea.endswith("\n\n---\n\n".join(expected)) and "Ignore" not in idea
+    else:
+        assert result["outcome"] == "revised"
+        assert [json.loads(blocks) for blocks in commands.feedback] == [expected]
+    assert "agent:revise" not in gh.labels
+    assert not any("label-authorization" in c["body"] for c in gh.comments)
+
+
+@pytest.mark.scenario("pr-revision/no-instruction-no-revision/empty-revise-refused")
+@pytest.mark.parametrize("stage", ["spec-revision", "build-revision"])
+def test_authorized_empty_revision_refuses_without_status_or_dispatch(repo, tmp_path, stage):
+    gh, commands = revision_case(stage)
+    gh.feedback[1]["createdAt"] = TIP_DATE
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("empty revision must not read status, dispatch, or invoke git")
+
+    result, = specloop_intake.revise_pending(
+        repo, queue.Labels(), tmp_path, runner=gh, specloop_runner=forbidden,
+        git_runner=forbidden, status_runner=forbidden, launcher=forbidden,
+    )
+    assert result == {"outcome": "empty"}
+    assert gh.head == HEAD and "agent:revise" not in gh.labels
+    comment, = gh.comments
+    assert "nothing to revise" in comment["body"] and "since the branch tip" in comment["body"]
+    assert "label-authorization" not in comment["body"]
+    receipt = json.loads((tmp_path / "revisions/owner__sample/8.json").read_text())
+    assert receipt["feedback"] == [] and receipt["delivered"]
+
+
 @pytest.mark.scenario("issue-intake/latest-label-actor-authorization/untrusted-actor-ignored")
 @pytest.mark.parametrize("armed,previous", [
     (armed, previous) for armed in ("spec:draft", "agent:ready")
     for previous in (None, "needs_input", "rejected", "drafted")
-] + [("spec:approved", previous) for previous in (None, "admitted", "refused")])
+] + [("spec:approved", previous) for previous in (None, "admitted", "refused")]
+  + [pytest.param(stage, feedback, marks=pytest.mark.scenario(
+      "pr-revision/revision-actor-gate/unauthorized-revision-ignored-at-either-stage"))
+     for stage in ("spec-revision", "build-revision") for feedback in (None, "empty")])
 @pytest.mark.parametrize("actor", [{"login": "outsider"}, None, {}, {"login": "bad/login"}])
 def test_label_from_non_collaborator_is_ignored(repo, tmp_path, armed, previous, actor):
-    if armed == "spec:approved":
+    revision = armed in ("spec-revision", "build-revision")
+    if revision:
+        gh, commands = revision_case(armed, empty=previous == "empty")
+        action, number = specloop_intake.revise_pending, 8
+    elif armed == "spec:approved":
         gh, commands = ApprovalGh((armed,)), Commands(previous or "admitted")
         if previous:
             poll_admission(repo, tmp_path, gh, commands)
@@ -383,7 +480,9 @@ def test_label_from_non_collaborator_is_ignored(repo, tmp_path, armed, previous,
         gh, commands = DraftGh((armed,)), DraftCommands()
         prepare_drafting_round(repo, tmp_path, gh, commands, armed, previous)
         action, number = specloop_intake.propose_pending, 7
-    gh.events[-1]["actor"] = actor
+    trigger = "agent:revise" if revision else armed
+    event = next(e for e in reversed(gh.events) if e["label"]["name"] == trigger)
+    event["actor"] = actor
     labels, comments, prs = gh.labels.copy(), deepcopy(gh.comments), deepcopy(gh.prs)
     files = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
 
@@ -399,7 +498,9 @@ def test_label_from_non_collaborator_is_ignored(repo, tmp_path, armed, previous,
         assert gh.labels == labels and gh.prs == prs
         assert gh.comments[:-1] == comments
         assert len(gh.comments) == len(comments) + 1
-    assert f"label-authorization-{number}:{gh.events[-1]['id']}" in gh.comments[-1]["body"]
+    assert f"label-authorization-{number}:{event['id']}" in gh.comments[-1]["body"]
+    if revision:
+        assert_no_revision_reads(gh)
     assert not commands.calls
     assert not any("PATCH" in c or c[:2] in (
         ["issue", "edit"], ["pr", "edit"], ["pr", "create"],
@@ -413,14 +514,30 @@ def test_label_from_non_collaborator_is_ignored(repo, tmp_path, armed, previous,
         "issue-intake/approval-admits/approved-spec-admitted")),
     pytest.param("spec:approved", "refused", marks=pytest.mark.scenario(
         "issue-intake/approval-admits/refused-admission-explained")),
+    pytest.param("spec-revision", "drafted", marks=pytest.mark.scenario(
+        "pr-revision/spec-stage-revision/spec-revised-from-review")),
+    pytest.param("build-revision", "revised", marks=pytest.mark.scenario(
+        "pr-revision/build-stage-revision/review-comments-become-tasks")),
 ])
 @pytest.mark.parametrize("relationship", ["OWNER", "COLLABORATOR", "MEMBER"])
 def test_label_from_collaborator_is_acted_on(repo, tmp_path, armed, outcome, relationship):
     admission = armed == "spec:approved"
+    revision = armed in ("spec-revision", "build-revision")
     gh, commands = (ApprovalGh((armed,)), Commands(outcome)) if admission else (
         DraftGh((armed,)), DraftCommands())
+    if revision:
+        gh, commands = revision_case(armed)
+        gh.feedback = []
+        gh.inline = [
+            {"user": {"login": "reviewer"}, "author_association": "COLLABORATOR",
+             "path": path, "line": line, "body": body, "created_at": "2026-10-20T13:00:00Z"}
+            for path, line, body in [("src/gate.py", 12, "Handle empty input."),
+                                     ("tests/test_gate.py", 42, "Cover the empty case.")]
+        ]
     actor = "owner" if relationship == "OWNER" else "helper"
-    gh.events[-1]["actor"] = {"login": actor}
+    trigger = "agent:revise" if revision else armed
+    event = next(e for e in reversed(gh.events) if e["label"]["name"] == trigger)
+    event["actor"] = {"login": actor}
     membership = MembershipGh(
         owner_type="Organization" if relationship == "MEMBER" else "User",
         collaborator=NO_CONTENT if relationship == "COLLABORATOR" else NOT_FOUND,
@@ -432,7 +549,27 @@ def test_label_from_collaborator_is_acted_on(repo, tmp_path, armed, outcome, rel
             return membership(args)
         return gh(args)
 
-    if admission:
+    if revision:
+        result, = specloop_intake.revise_pending(
+            repo, queue.Labels(), tmp_path, runner=github,
+            specloop_runner=commands, git_runner=commands,
+        )
+        assert result["outcome"] == outcome
+        receipt = json.loads((tmp_path / "revisions/owner__sample/8.json").read_text())
+        assert type(receipt["event"]) is int and receipt["event"] == event["id"]
+        expected = ["**reviewer on `src/gate.py:12`:**\n\nHandle empty input.",
+                    "**reviewer on `tests/test_gate.py:42`:**\n\nCover the empty case."]
+        assert receipt["feedback"] == expected
+        if armed == "spec-revision":
+            proposal, = commands.proposals
+            assert idea_file(proposal).read_text().endswith("\n\n---\n\n".join(expected))
+            assert gh.head == REVISED and gh.labels == {"spec:review"}
+            assert "Revised the spec" in gh.comments[-1]["body"]
+        else:
+            assert [json.loads(blocks) for blocks in commands.feedback] == [expected]
+            assert gh.head == HEAD and gh.labels == set()
+            assert "Queued review tasks" in gh.comments[-1]["body"]
+    elif admission:
         result, = poll_admission(repo, tmp_path, github, commands)
         assert result["outcome"] == outcome
         receipt = json.loads((tmp_path / "admissions/owner__sample/8.json").read_text())

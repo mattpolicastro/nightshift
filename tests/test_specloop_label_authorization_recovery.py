@@ -16,10 +16,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from nightshift import queue, specloop_intake
+from nightshift import daemon, queue, specloop_intake
+from nightshift.config import Config
 from test_engine_routing import DraftGh
 from test_specloop_approval import ApprovalGh, Commands as AdmissionCommands, CHANGE, HEAD
 from test_specloop_intake import BlockedDraftGh, Commands, idea_file, repo
+from test_specloop_label_authorization import revision_case, assert_no_revision_reads
+from test_specloop_spec_revision import REVISED
 
 
 pytestmark = pytest.mark.real_trust
@@ -734,3 +737,185 @@ def test_unauthorized_approval_preserves_running_and_finished_admission_job(
         assert (directory / "collected.json").is_file()
         assert len(launches) == 1 and commands.calls == [["specloop", "status", "--json"]]
         assert gh.comments[0] == rejection and len(gh.comments) == 2 and gh.labels == set()
+
+
+def revision_poll(repo, state, gh, *, module=specloop_intake,
+                  commands=forbidden_recovery_work, labels=queue.Labels()):
+    return module.revise_pending(
+        repo, labels, state, runner=gh, specloop_runner=commands, git_runner=commands,
+        launcher=forbidden_recovery_work, on_error=forbidden_recovery_work,
+        on_pending=forbidden_recovery_work,
+    )
+
+
+@pytest.mark.scenario(RECEIPT)
+@pytest.mark.scenario(TRUSTED)
+@pytest.mark.scenario("pr-revision/revision-actor-gate/unauthorized-revision-ignored-at-either-stage")
+@pytest.mark.parametrize("stage", ["spec-revision", "build-revision"])
+@pytest.mark.parametrize("configured", [False, True])
+def test_revision_receipt_survives_untrusted_reapplication(repo, tmp_path, stage, configured):
+    gh, commands = revision_case(stage)
+    labels = queue.Labels(revise="custom:revise") if configured else queue.Labels()
+    if stage == "build-revision":
+        commands.revise_label = labels.revise
+    if configured:
+        # Configure the trigger before the first poll; preserve fixture event IDs.
+        gh.labels.remove("agent:revise")
+        gh.labels.add(labels.revise)
+        for event in gh.events:
+            if event["label"]["name"] == "agent:revise":
+                event["label"]["name"] = labels.revise
+
+    def lost_delivery(args):
+        if args[:2] == ["pr", "comment"]:
+            raise queue.GhError("delivery unavailable", transient=True)
+        return gh(args)
+
+    # A completed result exists, but its delivery is still armed.
+    with pytest.raises(queue.GhError):
+        specloop_intake.revise_pending(
+            repo, labels, tmp_path, runner=lost_delivery,
+            specloop_runner=commands, git_runner=commands,
+        )
+    path = tmp_path / "revisions/owner__sample/8.json"
+    original = json.loads(path.read_text())
+    assert "result" in original and not original.get("delivered")
+    reapply(gh, labels.revise, "outsider")
+    rejected_event = gh.events[-1]["id"]
+    snapshot, original_labels = files_under(tmp_path), gh.labels.copy()
+    commands.calls.clear()
+    gh.calls.clear()
+    for module in (specloop_intake, restarted_intake()):
+        assert revision_poll(repo, tmp_path, gh, module=module, labels=labels) == []
+        assert files_under(tmp_path) == snapshot and gh.labels == original_labels
+        assert_rejection_only(gh, [], labels.revise, kind="pr")
+        assert_no_revision_reads(gh)
+    rejection = deepcopy(gh.comments[-1])
+    assert f"label-authorization-8:{rejected_event}" in rejection["body"]
+
+    reapply(gh, labels.revise, "maintainer")
+    authorized_event = gh.events[-1]["id"]
+    commands.fetch_head = gh.head
+    result, = revision_poll(repo, tmp_path, gh, module=restarted_intake(),
+                            commands=commands, labels=labels)
+    receipt = json.loads(path.read_text())
+    # Revision event IDs define rounds: a new application requests a new round,
+    # rather than delivering the older event's result as this event's work.
+    assert receipt["event"] == authorized_event != original["event"]
+    assert receipt["round_id"] == str(authorized_event) and receipt["delivered"]
+    assert result["outcome"] == ("drafted" if stage == "spec-revision" else "revised")
+    dispatch = "propose" if stage == "spec-revision" else "revise"
+    assert sum(c[:2] == ["specloop", dispatch] for c in commands.calls) == 1
+    assert gh.comments[0] == rejection and len(gh.comments) == 2
+    assert labels.revise not in gh.labels
+    assert all((tmp_path / name).read_bytes() == data for name, data in snapshot.items()
+               if name != path.relative_to(tmp_path))
+    calls = commands.calls.copy()
+    assert revision_poll(repo, tmp_path, gh, labels=labels) == []
+    assert commands.calls == calls
+
+
+@pytest.mark.scenario(RECEIPT)
+@pytest.mark.parametrize("stage", ["spec-revision", "build-revision"])
+@pytest.mark.parametrize("recovery", ["receipt", "job"])
+def test_revision_recovery_rechecks_membership_and_reuses_same_event(
+    repo, tmp_path, monkeypatch, stage, recovery,
+):
+    gh, commands = revision_case(stage)
+    job_module = specloop_intake.specloop_job
+    monkeypatch.setattr(job_module, "_children", {})
+    path = tmp_path / "revisions/owner__sample/8.json"
+    launches = []
+    trusted = True
+
+    def github(args):
+        if not trusted and args == ["api", "repos/owner/sample/collaborators/maintainer", "--include"]:
+            gh.calls.append(args)
+            return "HTTP/2.0 404 Not Found\r\n\r\n"
+        return gh(args)
+
+    with ExitStack() as locks:
+        def launch(args, **kwargs):
+            launches.append(args)
+            locks.callback(os.close, os.dup(kwargs["pass_fds"][0]))
+            return SimpleNamespace(poll=lambda: None)
+
+        if recovery == "job":
+            assert specloop_intake.revise_pending(
+                repo, queue.Labels(), tmp_path, runner=github, launcher=launch,
+                git_runner=commands, status_runner=commands,
+            ) == []
+            assert len(launches) == 1
+            directory = Path(launches[0][-2])
+        else:
+            def lost_delivery(args):
+                if args[:2] == ["pr", "comment"]:
+                    raise queue.GhError("delivery unavailable", transient=True)
+                return github(args)
+
+            with pytest.raises(queue.GhError):
+                specloop_intake.revise_pending(
+                    repo, queue.Labels(), tmp_path, runner=lost_delivery,
+                    git_runner=commands, specloop_runner=commands,
+                )
+        original = json.loads(path.read_text())
+        original_labels = gh.labels.copy()
+        trusted = False  # Current membership is rechecked even for this same event.
+        commands.calls.clear()
+        gh.calls.clear()
+        for finished in (False, True) if recovery == "job" else (True,):
+            if recovery == "job" and finished:
+                job_module.finalize(directory, {"result": commands.result})
+                locks.close()
+            snapshot = files_under(tmp_path)
+            for module in (specloop_intake, restarted_intake()):
+                assert revision_poll(repo, tmp_path, github, module=module) == []
+                assert files_under(tmp_path) == snapshot and gh.labels == original_labels
+                assert len(gh.comments) == 1
+                assert "label-authorization-8:" in gh.comments[0]["body"]
+                assert_no_revision_reads(gh)
+                assert not any("PATCH" in c or c[:2] == ["pr", "edit"] for c in gh.calls)
+            if recovery == "job":
+                assert not (directory / "collected.json").exists()
+        rejection = deepcopy(gh.comments[0])
+        assert sum(c[:2] == ["pr", "comment"] for c in gh.calls) == 1
+
+        trusted = True
+        gh.calls.clear()
+        # A pause at the event read must also leave collection pending: actor
+        # authorization has not completed, even if the job already finished.
+        monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
+        before_pause = files_under(tmp_path)
+
+        def pause_after_events(args):
+            response = github(args)
+            if args[0] == "api" and args[1].endswith("/events"):
+                daemon.PAUSE_FILE.touch()
+            return response
+
+        health = daemon.RepoHealth()
+        daemon.poll_specloop(Config(repos=[repo]), health,
+                             runner=pause_after_events, specloop_runner=commands)
+        assert daemon.PAUSE_FILE.exists()
+        assert gh.calls[-1][1].endswith("/events")
+        assert files_under(tmp_path) == before_pause
+        assert not health.failures and not health.item_failures and not health.announced
+        assert not commands.calls and gh.comments == [rejection] and gh.labels == original_labels
+        daemon.PAUSE_FILE.unlink()
+        gh.calls.clear()
+        result, = revision_poll(repo, tmp_path, github, commands=commands, module=restarted_intake())
+        receipt = json.loads(path.read_text())
+        assert receipt["event"] == original["event"] and receipt["delivered"]
+        assert result == commands.result
+        assert_no_revision_reads(gh)
+        assert not any(c[0] == "specloop" for c in commands.calls)
+        if stage == "spec-revision":
+            assert len(commands.calls) == 1 and commands.calls[0][3] == "push"
+            assert gh.head == REVISED
+        else:
+            assert not commands.calls
+        if recovery == "job":
+            assert receipt["job"] == original["job"] == directory.name
+            assert len(launches) == 1 and (directory / "collected.json").exists()
+        assert gh.comments[0] == rejection and len(gh.comments) == 2
+        assert "agent:revise" not in gh.labels

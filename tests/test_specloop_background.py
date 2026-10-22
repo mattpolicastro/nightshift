@@ -839,7 +839,12 @@ def test_pause_between_delivery_calls_holds_remaining_operations(delivery_job, s
     job.poll()
     assert len(paused_after) == 1
     assert job.calls[-1] == paused_after[0]  # Even the next read must wait.
-    assert json.loads(job.path.read_text())["result"] == job.result
+    if stage == "spec_revision" and operation == "events":
+        # Authorization now precedes collection of the finished revision job.
+        assert "result" not in json.loads(job.path.read_text())
+        assert not (job.directory / "collected.json").exists()
+    else:
+        assert json.loads(job.path.read_text())["result"] == job.result
     _assert_paused_delivery_held(job)
 
 
