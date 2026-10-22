@@ -125,7 +125,6 @@ def _merge_commits(repo: Path, head: str, base: str) -> str:
 
     The caller owns ancestry checks, intent persistence and CAS installation.
     Also usable for a synthetic evidence baseline. All indexes and merge state
-    # mutation-equivalent: Wording in this docstring is not executed; no code reads _merge_commits.__doc__.
     live in the disposable checkout, including when Git fails or conflicts.
     """
     with tempfile.TemporaryDirectory(prefix="base-merge-", dir=repo.parent) as tmp:
@@ -284,7 +283,6 @@ def run(ctx: Ctx) -> str:
 
 
 def finals(ctx: Ctx, head: str) -> bool:
-    # mutation-equivalent: Changing "and" to "or" only changes documentation; no code reads finals.__doc__.
     """Prepare the current base, then coverage and acceptance after tasks land.
 
     Returns True when it appended tasks (the loop continues), False when the
@@ -382,7 +380,6 @@ def _evidence_base(ctx: Ctx, section: int, head: str) -> str | None:
     """Compare against earlier sections plus integrated base content; never move refs.
 
     An empty baseline preserves gather's legacy skip. None means construction
-    # mutation-equivalent: This docstring is not executed; no code reads _evidence_base.__doc__.
     failed and the evidence gate has paused before generating any mutants.
     """
     st = ctx.run.state
