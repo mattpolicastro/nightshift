@@ -670,6 +670,91 @@ def test_condition_candidates_use_committed_source(tmp_path, monkeypatch):
     assert (repo / "calc.py").read_text() == dirty
 
 
+@pytest.mark.scenario("mutation-selection/guard-clause-diffs-produce-evidence/guard-only-change-is-measured")
+def test_gate_measures_a_guard_clause_change(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    base_source = "def choose(blocked, fallback):\n    return fallback\n"
+    source = base_source.replace("    return fallback\n",
+                                 "    if blocked:\n        return None\n    return fallback\n")
+    (repo / "calc.py").write_text(base_source)
+    sh(repo, "git", "init", "-q", "-b", "main")
+    sh(repo, "git", "add", "calc.py")
+    sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+    base = sh(repo, "git", "rev-parse", "HEAD")
+    (repo / "calc.py").write_text(source)
+    sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "guard")
+    head = sh(repo, "git", "rev-parse", "HEAD")
+    diff = sh(repo, "git", "diff", "--unified=0", base, head)
+    assert sh(repo, "git", "diff", "--numstat", base, head) == "2\t0\tcalc.py"
+    assert evidence.added_lines(diff, ("calc.py",)) == [
+        ("calc.py", 2, "    if blocked:"),
+        ("calc.py", 3, "        return None"),
+    ]
+    m = replace(M, mutation_count=2, mutation_parallel=2, mutation_skip=())
+    out = tmp_path / "out"
+    observed = {}
+    fallback = "available"
+
+    def run(src, sha, steps, run_m, run_out):
+        assert sha == head and src == run_out / "src" and src != repo
+        assert not run_m.prepare and [step.id for step in steps] == ["test"]
+        private_source = (src / "calc.py").read_text()
+        namespace = {}
+        exec(compile(private_source, str(src / "calc.py"), "exec"), namespace)
+        # Check both inputs even when the first assertion fails. Receipts come
+        # from behavior, independently of mutant identity and worker number.
+        checks = []
+        for blocked, expected in ((True, None), (False, fallback)):
+            actual = namespace["choose"](blocked, fallback)
+            try:
+                assert actual == expected
+            except AssertionError:
+                checks.append(False)
+            else:
+                checks.append(True)
+        passed = all(checks)
+        step = steps[0]
+        receipts = [verify.Receipt(step.id, list(step.run), step.expect,
+                                   0 if passed else 1, passed, 0.01, "")]
+        observed[run_out] = (private_source, checks)
+        (run_out / "receipts.json").write_text(json.dumps([asdict(r) for r in receipts]))
+        return receipts
+
+    monkeypatch.setattr(verify, "run_extracted", run)
+    ev = evidence.gather(repo, base, head, ["guard"], {"guard"}, m, out, 1)
+    assert len(ev.mutants) == 2
+    assert {mut.op for mut in ev.mutants} == {"negate-condition", "drop-return"}
+    expected = {
+        "negate-condition": evidence.Mutant(
+            "calc.py", 2, "negate-condition", "    if blocked:", "    if not blocked:", "killed"),
+        "drop-return": evidence.Mutant(
+            "calc.py", 3, "drop-return", "        return None", "        pass", "killed"),
+    }
+    assert {mut.op: mut for mut in ev.mutants} == expected
+    assert observed[out] == (source, [True, True])
+    assert set(observed) == {out, out / "mutant-1", out / "mutant-2"}
+    for number, mut in enumerate(ev.mutants, 1):
+        worker = out / f"mutant-{number}"
+        checks = [False, False] if mut.op == "negate-condition" else [False, True]
+        assert observed[worker] == (source.replace(mut.before, mut.after), checks)
+        receipts = json.loads((worker / "receipts.json").read_text())
+        assert receipts[0]["exit"] == 1 and receipts[0]["passed"] is False
+    baseline = json.loads((out / "receipts.json").read_text())
+    assert baseline[0]["exit"] == 0 and baseline[0]["passed"] is True
+    assert ev.skipped == "" and not ev.baseline_failed and not ev.unmeasured
+    assert ev.covered == ["guard"] and ev.uncovered == []
+    assert ev.score == 1.0 and ev.passed(1.0)
+    assert "no mutable lines added under mutation_paths" not in ev.summary()
+    assert "mutation: 2/2 caught" in ev.summary()
+    saved = json.loads((out / "evidence.json").read_text())
+    assert saved == {**asdict(ev), "score": 1.0}
+    assert {mut["op"]: mut for mut in saved["mutants"]} == {
+        op: asdict(mut) for op, mut in expected.items()
+    }
+    assert (repo / "calc.py").read_text() == source
+
+
 @pytest.mark.parametrize("tests,expect_pass", [(WEAK, False), (STRONG, True)])
 def test_mutation_separates_weak_from_strong_tests(tmp_path, tests, expect_pass):
     src, base, head = project(tmp_path, tests)
