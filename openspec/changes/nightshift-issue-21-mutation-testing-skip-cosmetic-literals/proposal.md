@@ -41,6 +41,8 @@ and non-Python inline comment parsing are also out of scope. The implementation
 must avoid the concurrent-work files listed in the design; `specloop_job.py`
 is explicitly allowed for prose cleanup after #8 merges.
 
+Descoped during the build (2026-10-21): the JSX inline-style filter (task 3.1). Four review rounds each found another valid TSX input it misparsed, and filtering style literals reliably needs a real TSX parser. UI repositories can skip style lines with the manifest's `mutation_skip` patterns from task 1.1 instead.
+
 ## Capabilities
 
 - **Added: `mutation-selection`** — configurable exclusions, committed-source

@@ -1,8 +1,8 @@
 ## Purpose
 
 Select behavioral mutation candidates without spending the sample on configured
-cosmetic lines, Python docstrings and comments, supported non-Python comment
-lines or inline JSX style integers.
+cosmetic lines, Python docstrings and comments, and supported non-Python comment
+lines.
 
 ## ADDED Requirements
 
@@ -34,7 +34,7 @@ only the selected unprotected match, and precede seeded sampling. Source-analysi
 failure SHALL propagate without successful partial evidence.
 
 #### Scenario: Unchanged context determines eligibility
-- **WHEN** added lines are inside a docstring, block comment or JSX style object opened on unchanged lines, and the worktree differs from the requested head
+- **WHEN** added lines are inside a docstring or block comment opened on unchanged lines, and the worktree differs from the requested head
 - **THEN** eligibility follows the committed full-file context across diff hunks, never the worktree or diff fragment alone
 
 #### Scenario: Stable selection and exact replacement
@@ -73,26 +73,6 @@ parsing or non-Python inline comment parsing.
 #### Scenario: Non Python tracking stays line level
 - **WHEN** a non-Python file has inline or trailing comments, a block opener after executable code, or an opener without a matching comment-only closing line
 - **THEN** the new block filter adds no protected range for those forms, existing prefix exclusions remain in effect, eligible code outside supported blocks remains available, and no lexical parsing error is raised
-
-### Requirement: JSX style integers excluded by default
-
-By default, the generator SHALL suppress integer mutants within confirmed JSX
-`style` object spans in `.jsx` and `.tsx`, using brace counting that ignores
-single, double and backtick-quoted strings and honors escapes. It SHALL leave
-uncertain candidates eligible without modeling regex or template interpolation.
-It SHALL NOT suppress other operators or numbers outside the style object.
-
-#### Scenario: Inline and multiline styles excluded
-- **WHEN** JSX or TSX has `style={{ fontWeight: '600', paddingVertical: 12 }}` or an equivalent with whitespace around `=` and between braces, multiline nested objects and supported numeric expressions
-- **THEN** no integer mutant is produced within the style object, including quoted digits, irrespective of whether its opening line was changed
-
-#### Scenario: Style boundaries preserve behavioral candidates
-- **WHEN** a line contains a style object and numeric code outside it, or the source contains ordinary objects named `style`, `lifestyle` identifiers, strings containing `style={{`, braces inside single, double or backtick-quoted strings including escaped quotes, or non-integer operators inside an actual style object
-- **THEN** only integer matches inside the actual style object are suppressed, its closing boundary is recognized correctly with backtick contents treated as opaque including `${...}` text, and the other eligible matches remain candidates
-
-#### Scenario: Uncertain style spans remain eligible
-- **WHEN** a candidate style object has no confirmed closing boundary or contains an unquoted slash that could be division, a regex or an inline comment
-- **THEN** that candidate adds no integer exclusions and causes no parsing error, numeric candidates outside it remain eligible, and the filter does not distinguish regex from division or parse template interpolation
 
 ### Requirement: Prose equivalence annotations removed
 
