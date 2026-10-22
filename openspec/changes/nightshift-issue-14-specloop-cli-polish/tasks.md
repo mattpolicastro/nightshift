@@ -4,7 +4,7 @@
 
 ## 2. Include preparation in both agent recipes
 
-- [ ] 2.1 Update recipe rendering in `specloop/loop.py` and `specloop/feasibility.py` to show labeled prepare and verify groups, ordered and expanded commands with shell-safe quoting and expected exits, the empty-prepare case, and the harness execution context. Add `test_implementer_recipe_and_feasibility_review_include_prepare_steps` in new `tests/test_specloop_prepare_prompts.py`, exercising both actual prompt consumers with multiple steps and no preparation; keep execution and agent permissions unchanged and run the focused tests. Cover `verify-preparation/preparation-visible-in-agent-recipes/prepare-commands-precede-checks` and `verify-preparation/preparation-visible-in-agent-recipes/no-preparation-configured`.
+- [x] 2.1 Update recipe rendering in `specloop/loop.py` and `specloop/feasibility.py` to show labeled prepare and verify groups, ordered and expanded commands with shell-safe quoting and expected exits, the empty-prepare case, and the harness execution context. Add `test_implementer_recipe_and_feasibility_review_include_prepare_steps` in new `tests/test_specloop_prepare_prompts.py`, exercising both actual prompt consumers with multiple steps and no preparation; keep execution and agent permissions unchanged and run the focused tests. Cover `verify-preparation/preparation-visible-in-agent-recipes/prepare-commands-precede-checks` and `verify-preparation/preparation-visible-in-agent-recipes/no-preparation-configured`.
 
 ## 3. Return JSON for argument errors
 
