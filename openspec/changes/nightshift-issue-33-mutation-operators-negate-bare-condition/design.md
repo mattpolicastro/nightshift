@@ -165,14 +165,53 @@ adaptation, retain the behavior each assertion checks and explain each setup
 change in the implementation PR. Do not weaken a timeout, score, count or
 classification assertion to accommodate a different candidate population.
 
+### Preserve the existing equivalence fixture's single candidate
+
+`tests/test_mutation_prose_annotations.py::annotated_code` currently builds a
+clamp with `if value < lower: return lower` followed by `return value` (each
+statement on its own physical line). Its guard return must gain a `drop-return`
+candidate. `test_real_code_equivalence_path` supplies every source line to
+`generate` with budget 100 and asserts exactly one comparison mutant, so leaving
+this fixture unchanged would break verification.
+
+In the same task that adds `drop-return`, change only the fixture's source
+string to place `return value` in an explicit `else` suite:
+
+```python
+def clamp(value, lower):
+    if value < lower:  # retain the existing annotation text and placement
+        return lower
+    else:
+        return value
+```
+
+Keep the fixture's actual annotation text and its inline/preceding
+parameterization unchanged; the comment above illustrates placement only.
+The `if` is now the last statement in the function, so neither return qualifies
+for `drop-return`. The comparison is not a bare condition. The only candidate
+remains `<` to `<=`, and both clamp forms return the same value at equality.
+Retain the full-line input to `generate`, budget 100, seed, all assertions and
+verification fakes unchanged, including the exact count, operator, preserved
+comments, equivalent classification and no-command checks. Do not filter out
+return candidates, add exclusions, or special-case this test in production.
+Run both fixture parameterizations with the new operator enabled. Explain this
+fixture adaptation individually in the implementation PR: it isolates the
+existing comparison-annotation contract without changing clamp behavior.
+
 Run focused evidence and mutation-filter tests after their associated changes,
+including `tests/test_mutation_prose_annotations.py` when adding `drop-return`,
 then require `uv run pytest` to pass. Existing sandbox integration tests retain
 their macOS requirements; the new tests need no host application or services.
 
 ### File boundaries
 
 Implementation edits are restricted to generation code and private helpers in
-`specloop/evidence.py` and `tests/test_specloop_evidence.py`. Do not edit
+`specloop/evidence.py`, tests in `tests/test_specloop_evidence.py`, and the
+`annotated_code` fixture source string in `tests/test_mutation_prose_annotations.py`
+as specified above. This narrow third-file exception is necessary to retain
+the existing assertions after adding guard-return candidates; it permits no
+other edits to that file. All new tests remain in `tests/test_specloop_evidence.py`.
+Do not edit
 `Evidence`, `gather`, `mutate`, `_mutate_one`, the selection loop, or manifest
 parsing. No new dependencies are needed.
 

@@ -23,9 +23,14 @@ blocked-by: #21
   must generate and kill the return-dropping mutant as well as condition negation.
   Preserve existing assertions;
   explain any fixture or fake setup changes individually in the implementation PR.
+- Adapt only the `annotated_code` fixture in
+  `tests/test_mutation_prose_annotations.py` to use a terminal `if`/`else` clamp.
+  This keeps its comparison-equivalence test at one mutant when guard-return
+  generation lands, preserving every assertion and both annotation placements.
 
 Implementation scope is mutant generation in `specloop/evidence.py` and tests in
-`tests/test_specloop_evidence.py`. Selection policy, scoring, execution, timeouts,
+`tests/test_specloop_evidence.py`, plus that fixture-only compatibility update in
+`tests/test_mutation_prose_annotations.py`. Selection policy, scoring, execution, timeouts,
 manifest settings, non-Python operators and other production files are explicitly
 out of scope. A return followed by more code in its own branch is ineligible;
 this operator targets guard-clause fall-through, not unreachable following code.
