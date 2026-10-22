@@ -67,6 +67,211 @@ M = manifest.parse({
 })
 
 
+def _section_with_evidence(tmp_path, monkeypatch, ev):
+    from specloop import loop
+    from specloop.state import Run
+
+    run = Run(tmp_path / "run")
+    run.state.section_base["1"] = "base"
+    # A failing event fixture reaches the existing pause instead of rewriting tasks.
+    if not ev.passed(0.5):
+        run.state.strengthen_rounds["1"] = 1
+    m = replace(M, mutation_min=0.5, coverage_step="")
+    ctx = loop.Ctx(run, m, {})
+    section = tasks.parse("## 1. Core\n\n- [x] 1.1 Cover `c/r/s`\n")
+    calls = []
+
+    def gather(repo, base, head, cited, seen, manifest, out, number):
+        calls.append(number)
+        assert (repo, base, head) == (ctx.repo, "base", "head")
+        assert cited == ["c/r/s"] and seen == {"c/r/s"}
+        assert manifest == m and number == ev.section
+        return ev
+
+    monkeypatch.setattr(evidence, "gather", gather)
+    assert loop.section_evidence(ctx, 1, "head", section) is ev.passed(0.5)
+    assert calls == [1]
+    return ctx, section
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/timeout-reporting/event-counts-timeout-mutants")
+@pytest.mark.parametrize("uncovered", [False, True])
+def test_evidence_event_counts_only_test_timeout_mutants(tmp_path, monkeypatch, uncovered):
+    source = tmp_path / "baseline"
+    source.mkdir()
+    (source / "calc.py").write_text("x = 1\n")
+    steps = {name: manifest.Step(name, ("/bin/sh", "-c", "true"))
+             for name in ("dependencies", "configure", "build", "check")}
+    m = replace(M, prepare=(steps["dependencies"],),
+                verify=tuple(steps[name] for name in ("configure", "build", "check")))
+    outcomes = [("check", 3), ("check", 0), ("check", None), ("check", None),
+                ("dependencies", None), ("configure", None), ("build", None)]
+    ev = evidence.Evidence(1, covered=["c/r/s"], uncovered=["c/r/missing"] if uncovered else [])
+    for number, (stage, exit_code) in enumerate(outcomes, 1):
+        receipt = verify.Receipt(stage, [], 0, exit_code, exit_code == 0, 1, "")
+        monkeypatch.setattr(verify, "run_extracted", lambda *args, receipt=receipt: [receipt])
+        mut = evidence.Mutant("calc.py", 1, "int", "x = 1", f"x = {number + 1}")
+        mut.result = evidence._mutate_one(number, mut, source, "head", m.verify, m, tmp_path / "out")
+        ev.mutants.append(mut)
+    assert [mut.result for mut in ev.mutants] == [
+        "killed", "survived", "timeout", "timeout", "invalid", "invalid", "invalid"]
+
+    ctx, _ = _section_with_evidence(tmp_path, monkeypatch, ev)
+    events = [json.loads(line) for line in (ctx.run.dir / "events.jsonl").read_text().splitlines()]
+    recorded = [event for event in events if event["event"] == "evidence"]
+    assert len(recorded) == 1
+    event = recorded[0]
+    assert isinstance(event.pop("at"), (int, float))
+    assert type(event["timeouts"]) is int
+    assert event == {"event": "evidence", "section": 1, "passed": not uncovered, "score": 0.5,
+                     "uncovered": ev.uncovered, "survived": ["calc.py:1"], "timeouts": 2}
+    assert ev.summary().splitlines().count("2 of 7 mutants timed out and were not counted") == 1
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/timeout-reporting/zero-timeouts-are-explicit")
+@pytest.mark.parametrize("case", ["judged", "skipped", "baseline-timeout"])
+def test_evidence_event_reports_explicit_zero_timeouts(tmp_path, monkeypatch, case):
+    if case == "judged":
+        ev = _evidence_with_results("killed", "survived", "invalid", "equivalent")
+    elif case == "skipped":
+        ev = evidence.Evidence(1, covered=["c/r/s"], skipped="no mutation_steps in the manifest")
+    else:
+        ev = _evidence_with_results("", "")
+
+        def baseline(*args):
+            return [verify.Receipt("test", [], 0, None, False, 1, "baseline timed out")]
+
+        def unexpected_worker(*args, **kwargs):
+            pytest.fail("a baseline timeout must not dispatch mutants")
+
+        monkeypatch.setattr(verify, "run_steps", baseline)
+        monkeypatch.setattr(evidence, "ThreadPoolExecutor", unexpected_worker)
+        ev.baseline_failed = not evidence.mutate(tmp_path, "head", ev.mutants, M, tmp_path / "out")
+        assert ev.baseline_failed and [mut.result for mut in ev.mutants] == ["invalid", "invalid"]
+    ctx, _ = _section_with_evidence(tmp_path, monkeypatch, ev)
+    events = [json.loads(line) for line in (ctx.run.dir / "events.jsonl").read_text().splitlines()]
+    recorded = [event for event in events if event["event"] == "evidence"]
+    assert len(recorded) == 1
+    event = recorded[0]
+    assert isinstance(event.pop("at"), (int, float))
+    assert type(event["timeouts"]) is int
+    assert event == {"event": "evidence", "section": 1, "passed": case != "baseline-timeout",
+                     "score": 0.5 if case == "judged" else None, "uncovered": [],
+                     "survived": ["calc.py:2"] if case == "judged" else [], "timeouts": 0}
+    assert "timed out and were not counted" not in ev.summary()
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/timeout-reporting/reviewer-receives-timeout-count")
+def test_reviewer_receives_saved_timeout_summary(tmp_path, monkeypatch):
+    from specloop import loop
+    from specloop.state import Run, TaskState
+
+    ev = _evidence_with_results("killed", "survived", "timeout", "timeout", "invalid", "equivalent")
+    ctx, section = _section_with_evidence(tmp_path, monkeypatch, ev)
+    # Reload the saved state so the reviewer consumes the durable summary.
+    ctx.run = Run(ctx.run.dir)
+    assert ctx.run.state.evidenced == [1] and ctx.run.state.pause is None
+    summary = ctx.run.state.evidence_summary["1"]
+    assert summary == ev.summary()
+    monkeypatch.setattr(loop, "_copy_change", lambda *args: None)
+    monkeypatch.setattr(loop.openspec, "scenarios", lambda *args: {"c/r/s": "Covered scenario"})
+    monkeypatch.setattr(loop, "git", lambda *args: b"section diff\n")
+    context = tmp_path / "context"
+    loop._gate_context(ctx, 1, "head", section, TaskState(), tmp_path / "checkout", context)
+    reviewer = (context / "evidence.md").read_text()
+    assert reviewer == summary + "\n"
+    for text in (summary, reviewer):
+        assert "mutation: 1/2 caught (1 marked equivalent)" in text.splitlines()
+        assert text.splitlines().count("2 of 6 mutants timed out and were not counted") == 1
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/stable-evidence-results/parallel-results-match-serial")
+@pytest.mark.parametrize("prepared", [False, True])
+def test_timeout_results_match_serial_despite_parallel_completion_order(tmp_path, monkeypatch, prepared):
+    code = "x = 1\n"
+    selected = [evidence.Mutant("calc.py", 1, "int", "x = 1", f"x = {number + 1}")
+                for number in range(1, 6)]
+    results = ["timeout", "survived", "killed", "timeout", "invalid"]
+    prepare = (manifest.Step("dependencies", ("/bin/sh", "-c", "true")),) if prepared else ()
+    checks = tuple(manifest.Step(name, ("/bin/sh", "-c", "true")) for name in ("build", "check"))
+    m = replace(M, prepare=prepare, verify=checks, mutation_steps=("build", "check"))
+    monkeypatch.setattr(evidence, "git", lambda *args: b"+++ b/calc.py\n@@ -0,0 +1 @@\n+x = 1\n")
+    monkeypatch.setattr(evidence, "generate", lambda *args, **kwargs: [replace(mut) for mut in selected])
+
+    def baseline(repo, head, steps, run_m, out):
+        (out / "src").mkdir(parents=True)
+        (out / "src/calc.py").write_text(code)
+        return [verify.Receipt(step.id, list(step.run), 0, 0, True, 1, "")
+                for step in run_m.prepare + steps]
+
+    monkeypatch.setattr(verify, "run_steps", baseline)
+    real_cleanup = verify.cleanup
+    snapshots = []
+    for parallel in (1, 2):
+        out = tmp_path / f"parallel-{parallel}"
+        first_pair = Barrier(2)
+        second_cleaned = Event()
+        completed = []
+        lock = Lock()
+
+        def run(src, head, steps, run_m, run_out):
+            number = int(run_out.name.split("-")[1])
+            assert (src / "calc.py").read_text() == selected[number - 1].after + "\n"
+            assert bool(run_m.prepare) is prepared
+            if parallel > 1 and number <= 2:
+                first_pair.wait(timeout=10)
+            if parallel > 1 and number == 1:
+                assert second_cleaned.wait(10)
+            receipts = []
+            for step in run_m.prepare + steps:
+                exit_code = 0
+                if step.id == "build" and number == 5:
+                    exit_code = None
+                elif step.id == "check":
+                    exit_code = {1: None, 2: 0, 3: 9, 4: None}[number]
+                receipts.append(verify.Receipt(step.id, list(step.run), 0, exit_code,
+                                               exit_code == 0, 1, ""))
+                if exit_code != 0:
+                    break
+            (run_out / "receipts.json").write_text(json.dumps([asdict(r) for r in receipts]))
+            (run_out / "identity.txt").write_text(selected[number - 1].after)
+            with lock:
+                completed.append(number)
+            return receipts
+
+        def cleanup(run_out):
+            real_cleanup(run_out)
+            if run_out == out / "mutant-2":
+                second_cleaned.set()
+
+        monkeypatch.setattr(verify, "run_extracted", run)
+        monkeypatch.setattr(verify, "cleanup", cleanup)
+        ev = evidence.gather(tmp_path, "base", "head", ["c/r/s"], {"c/r/s"},
+                             replace(m, mutation_parallel=parallel), out, 1)
+        assert sorted(completed) == list(range(1, 6))
+        if parallel == 1:
+            assert completed == list(range(1, 6))
+        else:
+            assert completed.index(2) < completed.index(1)
+        assert [replace(mut, result="") for mut in ev.mutants] == selected
+        assert [mut.result for mut in ev.mutants] == results
+        assert ev.score == 0.5 and ev.passed(0.5) and not ev.passed(0.8)
+        assert ev.summary().splitlines().count("2 of 5 mutants timed out and were not counted") == 1
+        saved = (out / "evidence.json").read_text()
+        assert json.loads(saved) == {**asdict(ev), "score": 0.5}
+        snapshots.append((saved, ev.summary(), ev.passed(0.5), ev.passed(0.8)))
+        for number, mut in enumerate(ev.mutants, 1):
+            worker = out / f"mutant-{number}"
+            assert (worker / "identity.txt").read_text() == mut.after
+            receipts = json.loads((worker / "receipts.json").read_text())
+            assert [r["id"] for r in receipts] == (["dependencies"] if prepared else []) + (
+                ["build"] if number == 5 else ["build", "check"])
+            assert receipts[-1]["exit"] == {1: None, 2: 0, 3: 9, 4: None, 5: None}[number]
+            assert not (worker / "src").exists()
+        assert not (out / "src").exists()
+    assert snapshots[0] == snapshots[1]
+
+
 def test_added_lines_tracks_new_line_numbers_and_paths():
     diff = ("+++ b/calc.py\n@@ -0,0 +1,3 @@\n+def f(x):\n+    # note\n+    return x < 1\n"
             "+++ b/tests/t.py\n@@ -0,0 +1 @@\n+assert f(0)\n")
