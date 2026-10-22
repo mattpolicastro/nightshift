@@ -418,7 +418,6 @@ def collect_events(nightshift_root: Path, runs_root: Path) -> dict:
 def collect_report(nightshift_root: Path, runs_root: Path, *, since: date | None = None) -> dict:
     """Select whole changes by estimated initial draft time and return a JSON document.
 
-    # mutation-equivalent: This docstring is not read by collection or CLI output; wording cannot affect report behavior.
     Events are never cut off at a lifecycle marker or filtered by event date.
     Keep errors from all discovered history, even when its row is excluded.
     """
