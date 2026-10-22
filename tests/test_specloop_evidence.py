@@ -1698,3 +1698,19 @@ sys.exit(3 if "# failure" in source else 0)
                 break
             assert time.monotonic() < deadline, f"step child {pid} still running"
             time.sleep(0.05)
+
+
+@pytest.fixture(autouse=True)
+def _all_scenarios_known(monkeypatch):
+    # Tests here drive section_evidence and _gate_context with fake runs that have
+    # no commit to read scenarios from; #14 added that lookup (loop._scenarios_at).
+    from specloop import loop
+
+    class Known(dict):
+        def __contains__(self, key):
+            return True
+
+        def __missing__(self, key):
+            return ""
+
+    monkeypatch.setattr(loop, "_scenarios_at", lambda ctx, rev: Known(), raising=False)
