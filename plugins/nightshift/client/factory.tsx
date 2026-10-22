@@ -4,12 +4,29 @@ import { AppState, Linking, Pressable, Text, TextInput, View } from 'react-nativ
 import {
   factoryRuns, factoryAct, type FactoryRun, type FactorySnapshot, type FactoryActInput,
 } from '../shared/factory';
-import { decideFactoryAction, factoryButtons, factoryDetails, matchWorkspace, orderFactoryRuns, type ActionDecision } from './factory-model';
+import { decideFactoryAction, factoryButtons, factoryDetails, groupFactoryRuns, matchWorkspace, type ActionDecision } from './factory-model';
 
 type Colors = PluginSurfaceProps['theme']['colors'];
 type Confirmation = Extract<ActionDecision, { kind: 'confirm' }>;
 type Workspaces = Awaited<ReturnType<ReturnType<typeof getPaseoClient>['workspaces']['list']>>['entries'];
 type HostProps = Pick<PluginSurfaceProps, 'host' | 'navigation'>;
+
+function actionStyles(colors: Colors, role: 'primary' | 'destructive' | 'outlined') {
+  const primary = role === 'primary';
+  const destructive = role === 'destructive';
+  return {
+    button: {
+      minHeight: 44, minWidth: 44, paddingHorizontal: 14, paddingVertical: 10,
+      borderRadius: 8, borderWidth: 1, alignItems: 'center' as const, justifyContent: 'center' as const,
+      backgroundColor: primary ? colors.accent : colors.surface1,
+      borderColor: destructive ? colors.statusDanger : primary ? colors.accent : colors.border,
+    },
+    text: {
+      color: destructive ? colors.statusDanger : primary ? colors.accentForeground : colors.foreground,
+      fontWeight: '600' as const,
+    },
+  };
+}
 
 function FactoryRow({ run, colors, disabled, act, report, notice, host, navigation, workspaces, onDetailsOpen }: {
   run: FactoryRun; colors: Colors; disabled: boolean;
@@ -22,6 +39,14 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
   const buttons = factoryButtons(run);
   const details = factoryDetails(run);
   const workspace = matchWorkspace(run.context?.repo ?? '', workspaces);
+  const showChangeLink = detailsOpen && Boolean(details.github);
+  const showWorkspaceLink = detailsOpen && workspace !== null && typeof navigation?.openWorkspace === 'function';
+  const confirmStyles = actionStyles(colors, confirmation?.request.verb === 'abort' ? 'destructive' : 'primary');
+  const cancelStyles = actionStyles(colors, 'outlined');
+  const statusColor = {
+    paused: colors.statusWarning, running: colors.accent,
+    done: colors.statusSuccess, aborted: colors.foregroundMuted,
+  }[run.status];
 
   function choose(verb: FactoryActInput['verb'], confirmed = false) {
     if (disabled) return;
@@ -39,21 +64,73 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
 
   return <View style={{ padding: 16, gap: 8, borderWidth: 1, borderColor: colors.border, borderRadius: 12, backgroundColor: colors.surface1 }}>
     <Text style={{ color: colors.foreground, fontSize: 17, fontWeight: '600' }}>{run.change}</Text>
-    <Text style={{ color: colors.foregroundMuted }}>{run.status} · {run.tasks.done}/{run.tasks.total} tasks done</Text>
+    <Text style={{ color: colors.foregroundMuted }}>
+      <Text style={{ color: statusColor, backgroundColor: colors.surface2, borderRadius: 6,
+        paddingHorizontal: 6, paddingVertical: 2, fontWeight: '600' }}>{run.status}</Text>
+      {' · '}{run.tasks.done}/{run.tasks.total} tasks done
+    </Text>
     {run.action ? <>
       <Text style={{ color: colors.foreground, fontWeight: '600' }}>{run.action.headline}</Text>
       <Text style={{ color: colors.foreground }}>{run.action.why}</Text>
     </> : null}
-    {run.pr ? <Pressable accessibilityRole="link" accessibilityLabel={`Open PR for ${run.change}`}
-      onPress={() => { void Linking.openURL(run.pr).catch(() => report('Could not open GitHub.')); }}
-      style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
-      <Text style={{ color: colors.accent, fontWeight: '600' }}>Open PR ↗</Text>
-    </Pressable> : null}
+    {buttons.some(button => button.verb === 'resume') ? <View style={{ gap: 4 }}>
+      <Text style={{ color: colors.foregroundMuted }}>Resume note (optional)</Text>
+      <TextInput accessibilityLabel={`Resume note for ${run.change}`} value={note} onChangeText={setNote}
+        editable={!disabled} multiline maxLength={2000} placeholder="Guidance for the next attempt"
+        placeholderTextColor={colors.foregroundMuted}
+        style={{ color: colors.foreground, borderColor: colors.border, borderWidth: 1, borderRadius: 8, padding: 12, minHeight: 72 }} />
+    </View> : null}
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+      {buttons.map((button, index) => {
+        const styles = actionStyles(colors, button.verb === 'abort' ? 'destructive' : index === 0 ? 'primary' : 'outlined');
+        return <Pressable key={button.verb} accessibilityRole="button"
+          accessibilityLabel={`${button.label} ${run.change}`} disabled={disabled || confirmation !== null}
+          onPress={() => choose(button.verb)} style={{ ...styles.button, opacity: disabled || confirmation ? 0.5 : 1 }}>
+          <Text style={styles.text}>{button.label}</Text>
+        </Pressable>;
+      })}
+    </View>
+    {confirmation ? <View style={{ gap: 8 }}>
+      <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{confirmation.message}</Text>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+        <Pressable accessibilityRole="button" accessibilityLabel={`Confirm ${confirmation.request.verb} ${run.change}`}
+          disabled={disabled} onPress={() => choose(confirmation.request.verb, true)} style={confirmStyles.button}>
+          <Text style={confirmStyles.text}>Confirm {confirmation.request.verb}</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" onPress={() => setConfirmation(null)} style={cancelStyles.button}>
+          <Text style={cancelStyles.text}>Cancel</Text>
+        </Pressable>
+      </View>
+    </View> : null}
+    {run.pr || showChangeLink || showWorkspaceLink ? <View style={{
+      flexDirection: 'row', flexWrap: 'wrap', gap: 12,
+      borderTopWidth: 1, borderColor: colors.border, paddingTop: 8,
+    }}>
+      {run.pr ? <Pressable accessibilityRole="link" accessibilityLabel={`Open PR for ${run.change}`}
+        onPress={() => { void Linking.openURL(run.pr).catch(() => report('Could not open GitHub.')); }}
+        style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
+        <Text style={{ color: colors.accent, fontWeight: '600', textDecorationLine: 'underline' }}>Open PR ↗</Text>
+      </Pressable> : null}
+      {showChangeLink ? <Pressable accessibilityRole="link" accessibilityLabel={`Open change ${run.change} on GitHub`}
+        onPress={() => { void Linking.openURL(details.github).catch(() => report('Could not open GitHub.')); }}
+        style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
+        <Text style={{ color: colors.accent, fontWeight: '600', textDecorationLine: 'underline' }}>Open change on GitHub ↗</Text>
+      </Pressable> : null}
+      {showWorkspaceLink && workspace ? <Pressable accessibilityRole="button"
+        accessibilityLabel={`Open ${run.change} in Paseo`}
+        onPress={() => {
+          try { navigation.openWorkspace({ serverId: host.id, workspaceId: workspace.id }); }
+          catch { report('Could not open the Paseo workspace.'); }
+        }} style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
+        <Text style={{ color: colors.accent, fontWeight: '600', textDecorationLine: 'underline' }}>Open in Paseo</Text>
+      </Pressable> : null}
+    </View> : null}
     <Pressable accessibilityRole="button" accessibilityLabel={`Details for ${run.change}`}
       accessibilityState={{ expanded: detailsOpen }}
       onPress={() => { if (!detailsOpen) onDetailsOpen(); setDetailsOpen(!detailsOpen); }}
-      style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
-      <Text style={{ color: colors.accent, fontWeight: '600' }}>Details {detailsOpen ? '▴' : '▾'}</Text>
+      style={{ paddingVertical: 10, alignSelf: 'flex-start', minHeight: 44,
+        flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+      <Text style={{ color: colors.foregroundMuted, fontWeight: '600' }}>Details {detailsOpen ? '▴' : '▾'}</Text>
     </Pressable>
     {detailsOpen ? <View style={{ gap: 8 }}>
       {details.fields.map(field => <View key={field.label} style={{ gap: 4 }}>
@@ -66,47 +143,8 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
           {new Date(event.at).toLocaleString()} · {event.text}
         </Text>)}
       </View> : null}
-      {details.github ? <Pressable accessibilityRole="link" accessibilityLabel={`Open change ${run.change} on GitHub`}
-        onPress={() => { void Linking.openURL(details.github).catch(() => report('Could not open GitHub.')); }}
-        style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
-        <Text style={{ color: colors.accent, fontWeight: '600' }}>Open change on GitHub ↗</Text>
-      </Pressable> : null}
-      {workspace && typeof navigation?.openWorkspace === 'function' ? <Pressable accessibilityRole="button"
-        accessibilityLabel={`Open ${run.change} in Paseo`}
-        onPress={() => {
-          try { navigation.openWorkspace({ serverId: host.id, workspaceId: workspace.id }); }
-          catch { report('Could not open the Paseo workspace.'); }
-        }} style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
-        <Text style={{ color: colors.accent, fontWeight: '600' }}>Open in Paseo</Text>
-      </Pressable> : null}
       <Text style={{ color: colors.foregroundMuted }}>More detail (run on the Paseo host)</Text>
       <Text selectable style={{ color: colors.foreground }}>{details.command}</Text>
-    </View> : null}
-    {buttons.some(button => button.verb === 'resume') ? <View style={{ gap: 4 }}>
-      <Text style={{ color: colors.foregroundMuted }}>Resume note (optional)</Text>
-      <TextInput accessibilityLabel={`Resume note for ${run.change}`} value={note} onChangeText={setNote}
-        editable={!disabled} multiline maxLength={2000} placeholder="Guidance for the next attempt"
-        placeholderTextColor={colors.foregroundMuted}
-        style={{ color: colors.foreground, borderColor: colors.border, borderWidth: 1, borderRadius: 8, padding: 12, minHeight: 72 }} />
-    </View> : null}
-    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 16 }}>
-      {buttons.map(button => <Pressable key={button.verb} accessibilityRole="button"
-        accessibilityLabel={`${button.label} ${run.change}`} disabled={disabled || confirmation !== null}
-        onPress={() => choose(button.verb)} style={{ paddingVertical: 12, opacity: disabled || confirmation ? 0.5 : 1 }}>
-        <Text style={{ color: colors.accent, fontWeight: '600' }}>{button.label}</Text>
-      </Pressable>)}
-    </View>
-    {confirmation ? <View style={{ gap: 8 }}>
-      <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{confirmation.message}</Text>
-      <View style={{ flexDirection: 'row', gap: 24 }}>
-        <Pressable accessibilityRole="button" accessibilityLabel={`Confirm ${confirmation.request.verb} ${run.change}`}
-          disabled={disabled} onPress={() => choose(confirmation.request.verb, true)} style={{ paddingVertical: 12 }}>
-          <Text style={{ color: colors.accent, fontWeight: '600' }}>Confirm {confirmation.request.verb}</Text>
-        </Pressable>
-        <Pressable accessibilityRole="button" onPress={() => setConfirmation(null)} style={{ paddingVertical: 12 }}>
-          <Text style={{ color: colors.foreground }}>Cancel</Text>
-        </Pressable>
-      </View>
     </View> : null}
     {notice ? <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{notice}</Text> : null}
   </View>;
@@ -117,8 +155,9 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
   const send = useRpc(factoryAct);
   const [data, setData] = useState<FactorySnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // An action's outcome shows beside the run it was sent for, not above a long list.
+  // Keep outcomes beside their rendered row, or above the list while folded or absent.
   const [notice, setNotice] = useState<{ change: string; text: string } | null>(null);
+  const [finishedOpen, setFinishedOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [acting, setActing] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspaces>([]);
@@ -198,22 +237,39 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
     }
   }
 
+  const { active, finished } = groupFactoryRuns(data?.runs ?? []);
+  const noticeInRow = notice && (active.some(run => run.change === notice.change) ||
+    (finishedOpen && finished.some(run => run.change === notice.change)));
+  const renderRow = (run: FactoryRun) => <FactoryRow key={run.change} run={run} colors={colors}
+    disabled={acting} act={act} report={text => setNotice({ change: run.change, text })}
+    notice={noticeInRow && notice?.change === run.change ? notice.text : null} host={host} navigation={navigation}
+    workspaces={workspaces} onDetailsOpen={() => { void loadWorkspaces(); }} />;
+
   return <View style={{ gap: 12 }}>
     <Text accessibilityRole="header" style={{ color: colors.foreground, fontSize: 24, fontWeight: '700' }}>Factory</Text>
     <Text style={{ color: data?.stale || error ? colors.statusWarning : colors.foregroundMuted }}>
-      {data ? `${data.runs.length} ${data.runs.length === 1 ? 'run' : 'runs'}${data.stale || error ? ' · Stale' : ''}` : 'Loading Factory…'}
+      {data ? `${active.length} ${active.length === 1 ? 'run' : 'runs'}${finished.length ? ` · ${finished.length} finished` : ''}${data.stale || error ? ' · Stale' : ''}` : 'Loading Factory…'}
     </Text>
     <Pressable accessibilityRole="button" accessibilityLabel="Refresh Factory" disabled={loading || acting}
-      onPress={() => void refresh()} style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
-      <Text style={{ color: colors.accent, fontWeight: '600' }}>{loading ? 'Checking…' : 'Refresh Factory'}</Text>
+      onPress={() => void refresh()} style={{ paddingVertical: 8, paddingHorizontal: 12, alignSelf: 'flex-start',
+        minHeight: 44, minWidth: 44, borderRadius: 8, borderWidth: 1, borderColor: colors.border,
+        backgroundColor: colors.surface2, alignItems: 'center', justifyContent: 'center' }}>
+      <Text style={{ color: colors.foreground, fontSize: 13, fontWeight: '600' }}>{loading ? 'Checking…' : 'Refresh Factory'}</Text>
     </Pressable>
     {error || data?.error ? <Text accessibilityRole="alert" style={{ color: colors.statusWarning }}>{error || data?.error}</Text> : null}
-    {notice && !data?.runs.some(run => run.change === notice.change)
+    {notice && !noticeInRow
       ? <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{`${notice.change}: ${notice.text}`}</Text> : null}
-    {data && !data.runs.length ? <Text style={{ color: colors.foreground }}>No Factory runs.</Text> : null}
-    {orderFactoryRuns(data?.runs ?? []).map(run => <FactoryRow key={run.change} run={run} colors={colors}
-      disabled={acting} act={act} report={text => setNotice({ change: run.change, text })}
-      notice={notice?.change === run.change ? notice.text : null} host={host} navigation={navigation}
-      workspaces={workspaces} onDetailsOpen={() => { void loadWorkspaces(); }} />)}
+    {data && !active.length && !finished.length ? <Text style={{ color: colors.foreground }}>No Factory runs.</Text> : null}
+    {active.map(renderRow)}
+    {finished.length ? <Pressable accessibilityRole="button" accessibilityLabel={`Finished (${finished.length})`}
+      accessibilityState={{ expanded: finishedOpen }} onPress={() => setFinishedOpen(open => !open)}
+      style={{ paddingVertical: 10, alignSelf: 'flex-start', minHeight: 44,
+        flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+      <Text style={{ color: colors.foregroundMuted, fontWeight: '600' }}>{`Finished (${finished.length})`}</Text>
+      <View accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
+        style={{ width: 8, height: 8, borderRightWidth: 2, borderBottomWidth: 2,
+          borderColor: colors.foregroundMuted, transform: [{ rotate: finishedOpen ? '225deg' : '45deg' }] }} />
+    </Pressable> : null}
+    {finishedOpen ? finished.map(renderRow) : null}
   </View>;
 }

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { FactoryActInput, FactoryRun } from '../shared/factory';
 import { orderFactoryRuns, factoryButtons, decideFactoryAction, matchWorkspace, factoryMoreCommand } from '../client/factory-model';
+import { groupFactoryRuns } from '../client/factory-model';
 
 test('run-context/details-in-the-factory-section/workspace-matched-for-open-in-paseo', () => {
   const older = {
@@ -137,4 +138,84 @@ test('an action carries the pause the page showed, so a later pause refuses it',
   const shown = { ...run, action: { ...run.action!, pause_id: 'stuck:a1b2c3' } };
   assert.deepEqual(decideFactoryAction(shown, 'accept'),
     { kind: 'send', request: { change: run.change, verb: 'accept', expect: 'stuck:a1b2c3' } });
+});
+
+test('orderFactoryRuns separates active from finished', async t => {
+  const a: FactoryRun = { ...running, change: 'A', status: 'done' };
+  const b: FactoryRun = { ...running, change: 'B' };
+  const c = paused('C');
+  const d: FactoryRun = { ...running, change: 'D', status: 'aborted' };
+  const e = paused('E');
+  const f: FactoryRun = { ...running, change: 'F' };
+  const g: FactoryRun = { ...running, change: 'G', status: 'done' };
+
+  await t.test('factory-finished-runs/stable-run-groups/mixed-statuses-retain-stable-groups', async t => {
+    await t.test('stable ordering within active statuses and across finished statuses', () => {
+      const input = [a, b, c, d, e, f, g];
+      const before = structuredClone(input);
+      const { active, finished } = groupFactoryRuns(input);
+      assert.deepEqual(active.map(run => run.change), ['C', 'E', 'B', 'F']);
+      assert.deepEqual(finished.map(run => run.change), ['A', 'D', 'G']);
+      assert.deepEqual(input, before);
+    });
+
+    await t.test('original object identity is retained exactly once in fresh arrays', () => {
+      const input = [a, b, c, d, e, f, g];
+      const { active, finished } = groupFactoryRuns(input);
+      [c, e, b, f].forEach((run, index) => assert.strictEqual(active[index], run));
+      [a, d, g].forEach((run, index) => assert.strictEqual(finished[index], run));
+      assert.equal(active.length + finished.length, input.length);
+      assert.equal(new Set([...active, ...finished]).size, input.length);
+      assert.notStrictEqual(active, input);
+      assert.notStrictEqual(finished, input);
+      assert.notStrictEqual(active, finished);
+      const again = groupFactoryRuns(input);
+      assert.notStrictEqual(again.active, active);
+      assert.notStrictEqual(again.finished, finished);
+    });
+
+    await t.test('frozen input and run objects remain unchanged', () => {
+      const input = Object.freeze(structuredClone([a, b, c, d, e, f, g]).map(run => {
+        Object.freeze(run.tasks);
+        if (run.action) {
+          Object.freeze(run.action.actions);
+          Object.freeze(run.action);
+        }
+        return Object.freeze(run);
+      }));
+      const before = structuredClone(input);
+      const { active, finished } = groupFactoryRuns(input);
+      assert.deepEqual(active, [input[2], input[4], input[1], input[5]]);
+      assert.deepEqual(finished, [input[0], input[3], input[6]]);
+      assert.deepEqual(input, before);
+    });
+  });
+
+  await t.test('factory-finished-runs/stable-run-groups/empty-and-single-group-inputs', async t => {
+    const cases: { name: string; input: FactoryRun[]; active: FactoryRun[]; finished: FactoryRun[] }[] = [
+      { name: 'empty input', input: [], active: [], finished: [] },
+      { name: 'only active runs', input: [b, c, f, e], active: [c, e, b, f], finished: [] },
+      { name: 'only finished runs', input: [a, d, g], active: [], finished: [a, d, g] },
+    ];
+    for (const { name, input, active, finished } of cases) {
+      await t.test(name, () => {
+        const before = structuredClone(input);
+        const groups = groupFactoryRuns(Object.freeze(input));
+        assert.deepEqual(groups, { active, finished });
+        assert.notStrictEqual(groups.active, input);
+        assert.notStrictEqual(groups.finished, input);
+        assert.notStrictEqual(groups.active, groups.finished);
+        assert.deepEqual(input, before);
+      });
+    }
+  });
+
+  await t.test('factory-finished-runs/existing-ordering-interface/existing-flat-ordering-remains-compatible', () => {
+    const input = Object.freeze([a, c, b, e]);
+    const rows = orderFactoryRuns(input);
+    assert.deepEqual(rows, [c, e, a, b]);
+    [c, e, a, b].forEach((run, index) => assert.strictEqual(rows[index], run));
+    assert.notStrictEqual(rows, input);
+    assert.deepEqual(input, [a, c, b, e]);
+  });
 });

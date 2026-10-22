@@ -1,6 +1,8 @@
 import json
 import subprocess
+from dataclasses import asdict
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -95,7 +97,8 @@ def test_paused_run_reported(admitted, capsys, named):
         "runs": [{
             "change": "paused-change",
             "status": "paused",
-            "pause": {"reason": "stuck", "task": key, "detail": detail},
+            "pause": {"reason": "stuck", "task": key, "detail": detail,
+                      "auto_resumes_remaining": 0},
             "tasks": {"done": 1, "total": 3},
             "head": head,
             "pr": "https://github.com/example/repo/pull/7",
@@ -123,6 +126,151 @@ def test_paused_run_reported(admitted, capsys, named):
             },
         }],
     }
+
+
+@pytest.mark.scenario("specloop-interface/remaining-automatic-resumes/infrastructure-budget-reported")
+@pytest.mark.parametrize("named", [False, True])
+@pytest.mark.parametrize("resume_at", [1, 4102444800], ids=["past", "future"])
+@pytest.mark.parametrize("consumed, remaining", [(0, 2), (1, 1), (2, 0), (3, 0)])
+def test_infrastructure_resume_budget(admitted, capsys, named, resume_at, consumed, remaining):
+    run, _ = admitted("infra")
+    key = tasks.parse(TASKS)[1].key
+    run.state.task(key).auto_resumes = consumed
+    run.pause("infra", key, "Worker unavailable", resume_at=resume_at)
+
+    assert cli.main(["status", "--json", *(["infra"] if named else [])]) == 0
+    pause = json.loads(capsys.readouterr().out)["runs"][0]["pause"]
+    assert pause == {
+        "reason": "infra", "task": key, "detail": "Worker unavailable",
+        "auto_resumes_remaining": remaining,
+    }
+
+
+@pytest.mark.scenario("specloop-interface/remaining-automatic-resumes/infrastructure-budget-reported")
+@pytest.mark.parametrize("named", [False, True])
+def test_resume_budget_uses_supervisor_policy(admitted, monkeypatch, capsys, named):
+    run, _ = admitted("infra")
+    key = tasks.parse(TASKS)[1].key
+    run.state.task(key).auto_resumes = 1
+    run.pause("infra", key, resume_at=1)
+    monkeypatch.setitem(serve.AUTO_RESUME, "infra", 5)
+
+    assert cli.main(["status", "--json", *(["infra"] if named else [])]) == 0
+    assert json.loads(capsys.readouterr().out)["runs"][0]["pause"]["auto_resumes_remaining"] == 4
+
+
+@pytest.mark.scenario("specloop-interface/remaining-automatic-resumes/unlimited-scheduled-recovery")
+@pytest.mark.parametrize("named", [False, True])
+@pytest.mark.parametrize("resume_at", [1, 4102444800], ids=["past", "future"])
+@pytest.mark.parametrize("reason, has_task", [
+    ("usage_limit", True), ("usage_limit", False), ("infra", False),
+])
+def test_unlimited_scheduled_recovery(admitted, capsys, named, resume_at, reason, has_task):
+    run, _ = admitted("unlimited")
+    key = tasks.parse(TASKS)[1].key
+    if has_task:
+        run.state.task(key).auto_resumes = 3
+    else:
+        # An unrelated task must not supply a budget for the paused task.
+        run.state.task(tasks.parse(TASKS)[0].key).auto_resumes = 3
+    run.pause(reason, key, resume_at=resume_at)
+
+    assert cli.main(["status", "--json", *(["unlimited"] if named else [])]) == 0
+    assert json.loads(capsys.readouterr().out)["runs"][0]["pause"]["auto_resumes_remaining"] is None
+
+
+@pytest.mark.scenario("specloop-interface/remaining-automatic-resumes/no-automatic-recovery")
+@pytest.mark.parametrize("named", [False, True])
+@pytest.mark.parametrize("has_task", [False, True])
+@pytest.mark.parametrize("reason, resume_at", [
+    ("requested", 0), ("requested", 1),
+    ("unknown_reason", 0), ("unknown_reason", 1),
+    ("infra", 0), ("usage_limit", 0),
+    ("infra", None), ("usage_limit", None),
+])
+def test_no_automatic_recovery(admitted, capsys, named, has_task, reason, resume_at):
+    run, _ = admitted("human")
+    key = tasks.parse(TASKS)[1].key
+    if has_task:
+        run.state.task(key).auto_resumes = 0
+    run.pause(reason, key, resume_at=resume_at or 0)
+    if resume_at is None:
+        persisted = json.loads((run.dir / "state.json").read_text())
+        del persisted["pause"]["resume_at"]
+        (run.dir / "state.json").write_text(json.dumps(persisted))
+
+    assert cli.main(["status", "--json", *(["human"] if named else [])]) == 0
+    assert json.loads(capsys.readouterr().out)["runs"][0]["pause"]["auto_resumes_remaining"] == 0
+
+
+@pytest.mark.scenario("specloop-interface/remaining-automatic-resumes/status-remains-read-only")
+@pytest.mark.parametrize("named", [False, True])
+def test_resume_allowance_status_is_read_only(admitted, monkeypatch, capsys, named):
+    runs = {}
+    key = tasks.parse(TASKS)[1].key
+    for change in ["budget", "missing-task", "unpaused"]:
+        run, head = admitted(change)
+        run.state.pr = "https://github.com/example/repo/pull/7"
+        if change == "budget":
+            run.state.task(key).auto_resumes = 1
+        if change != "unpaused":
+            run.pause("infra", key, "Worker unavailable", resume_at=1)
+        else:
+            run.save()
+        runs[change] = (run, head)
+
+    def file_snapshot():
+        return {
+            path: (path.read_bytes(), path.stat().st_mtime_ns) if path.exists() else None
+            for run, _ in runs.values()
+            for path in [run.dir / "state.json", run.dir / "events.jsonl"]
+        }
+
+    before = file_snapshot()
+    loaded = []
+    original_for_change = Run.for_change
+
+    def track_load(cls, change, **kwargs):
+        run = original_for_change(change, **kwargs)
+        loaded.append((run, asdict(run.state)))
+        return run
+
+    def no_mutation(*args, **kwargs):
+        pytest.fail("status tried to mutate run or task state")
+
+    monkeypatch.setattr(Run, "for_change", classmethod(track_load))
+    monkeypatch.setattr(Run, "save", no_mutation)
+    monkeypatch.setattr(Run, "event", no_mutation)
+    monkeypatch.setattr(state.RunState, "task", no_mutation)
+
+    for names in ([[change] for change in runs] if named else [[]]):
+        assert cli.main(["status", "--json", *names]) == 0
+        output = capsys.readouterr()
+        assert output.err == ""
+        document = json.loads(output.out)
+        assert document["version"] == 1
+        assert document["supervisor"] == {"state": "not running"}
+        assert [entry["change"] for entry in document["runs"]] == (names or list(runs))
+        for entry in document["runs"]:
+            run, head = runs[entry["change"]]
+            assert entry["status"] == run.state.status
+            assert entry["head"] == head
+            assert entry["pr"] == run.state.pr
+            assert entry["tasks"] == {"done": 1, "total": 3}
+            assert entry["context"]["branch"] == f"spec/{entry['change']}"
+            if entry["change"] == "unpaused":
+                assert entry["pause"] is None
+                assert "action" not in entry
+            else:
+                assert entry["pause"] == {
+                    "reason": "infra", "task": key, "detail": "Worker unavailable",
+                    "auto_resumes_remaining": 1 if entry["change"] == "budget" else None,
+                }
+                assert entry["action"]["pause_id"] == f"infra:{key}"
+
+    assert len(loaded) == len(runs)
+    assert all(asdict(run.state) == before_state for run, before_state in loaded)
+    assert file_snapshot() == before
 
 
 @pytest.mark.scenario("run-actions/actions-in-status/gate-action-described")
@@ -193,6 +341,7 @@ def test_pause_action_matches_message_and_allowed_verbs(admitted, capsys, reason
 
 
 @pytest.mark.scenario("specloop-interface/status-json/unknown-change")
+@pytest.mark.scenario("specloop-interface/isolated-run-status-failures/unknown-changes-and-document-failures")
 def test_unknown_change(home, capsys):
     assert cli.main(["status", "never-admitted", "--json"]) == 1
     output = capsys.readouterr()
@@ -204,6 +353,7 @@ def test_unknown_change(home, capsys):
     assert not home.exists()
 
 
+@pytest.mark.scenario("specloop-interface/isolated-run-status-failures/unknown-changes-and-document-failures")
 def test_empty_status(home, capsys):
     assert cli.main(["status", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
@@ -229,13 +379,362 @@ def test_multiple_runs_and_change_filter(admitted, monkeypatch, capsys):
     assert [run["change"] for run in json.loads(capsys.readouterr().out)["runs"]] == ["z"]
 
 
-def test_unreadable_run_returns_one_error_document(admitted, capsys):
-    run, _ = admitted("broken")
-    run.manifest_path.unlink()
-    assert cli.main(["status", "--json"]) == 1
-    document = json.loads(capsys.readouterr().out)
+def status_document(capsys, *names, code=0):
+    assert cli.main(["status", "--json", *names]) == code
+    output = capsys.readouterr()
+    assert output.err == ""
+    # json.loads rejects trailing prose and a second JSON document.
+    document = json.loads(output.out)
     assert document["version"] == 1
-    assert document["error"]
+    if code == 0:
+        assert set(document) == {"version", "supervisor", "runs"}
+        assert document["supervisor"] == {"state": "not running"}
+    else:
+        assert set(document) == {"version", "error"}
+        assert document["error"]
+    return document
+
+
+def assert_status_error(entry, change, error_class):
+    error = entry["error"]
+    assert error.startswith(f"{error_class}:")
+    assert 0 < len(error) <= 500
+    detail = "Run status could not be read. Inspect specloop status --json for details."
+    assert entry == {
+        "change": change,
+        "status": "paused",
+        "pause": {"reason": "status_error", "task": "", "detail": detail,
+                  "auto_resumes_remaining": 0},
+        "tasks": {"done": 0, "total": 0},
+        "head": "",
+        "pr": "",
+        "context": {"summary": "Run status could not be read.", "repo": "", "branch": "",
+                    "task": None, "detail": detail, "recent": [], "github": ""},
+        "error": error,
+    }
+    assert "action" not in entry
+
+
+@pytest.mark.scenario("specloop-interface/isolated-run-status-failures/broken-run-keeps-other-repositories-visible")
+@pytest.mark.parametrize("failure, error_class", [
+    ("state-json", "JSONDecodeError"),
+    ("state-object", "AttributeError"),
+    ("pause", "TypeError"),
+    ("task-state", "AttributeError"),
+    ("manifest-missing", "FileNotFoundError"),
+    ("manifest-invalid", "TOMLDecodeError"),
+    ("manifest-fields", "KeyError"),
+    ("roles", "JSONDecodeError"),
+    ("ref", "RuntimeError"),
+    ("permission", "PermissionError"),
+    ("git-timeout", "TimeoutExpired"),
+    ("task-parse", "ValueError"),
+    ("message", "AttributeError"),
+    ("action", "TypeError"),
+])
+def test_status_reports_broken_run_and_keeps_others(admitted, monkeypatch, capsys, failure, error_class):
+    # Each admission has its own source and bare repository. Create out of order.
+    last, _ = admitted("z-healthy", proposal="## Why\n\nLast repository.\n")
+    broken, _ = admitted("m-broken", task_text=TASKS.replace("First task", "Broken task"))
+    first, _ = admitted("a-healthy", proposal="## Why\n\nFirst repository.\n")
+    for run in (first, broken, last):
+        run.state.pr = f"https://github.com/example/{run.state.change}/pull/7"
+        run.pause("human_checks", detail="Review the published change")
+    before = status_document(capsys)["runs"]
+    assert before[0]["context"]["repo"] != before[2]["context"]["repo"]
+    state_path = broken.dir / "state.json"
+    if failure == "state-json":
+        state_path.write_text('{"change":')
+    elif failure == "state-object":
+        state_path.write_text("[]")
+    elif failure in ("pause", "task-state"):
+        raw = json.loads(state_path.read_text())
+        raw["pause" if failure == "pause" else "tasks"] = {} if failure == "pause" else []
+        state_path.write_text(json.dumps(raw))
+    elif failure == "manifest-missing":
+        broken.manifest_path.unlink()
+    elif failure == "manifest-invalid":
+        broken.manifest_path.write_text("[run")
+    elif failure == "manifest-fields":
+        broken.manifest_path.write_text("[run]\n")
+    elif failure == "roles":
+        (broken.dir / "roles.json").write_text("{")
+    elif failure == "ref":
+        seal.git(broken.dir / "repo.git", "update-ref", "-d", "refs/heads/spec/m-broken")
+    elif failure == "permission":
+        read_text = Path.read_text
+
+        def denied(path, *args, **kwargs):
+            if path == state_path:
+                raise PermissionError("state is unreadable")
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", denied)
+    elif failure == "git-timeout":
+        real_git = cli.git
+
+        def timeout(repo, *args):
+            if repo == broken.dir / "repo.git":
+                raise subprocess.TimeoutExpired("git", 60)
+            return real_git(repo, *args)
+
+        monkeypatch.setattr(cli, "git", timeout)
+    elif failure == "task-parse":
+        parse = tasks.parse
+
+        def invalid(text):
+            if "Broken task" in text:
+                raise ValueError("invalid tasks")
+            return parse(text)
+
+        monkeypatch.setattr(tasks, "parse", invalid)
+    elif failure == "message":
+        # Fail late, after all core fields and context have been assembled.
+        for_pause = messages.for_pause
+
+        def fail_action(change, *args, **kwargs):
+            if change == "m-broken":
+                raise AttributeError("cannot construct pause message")
+            return for_pause(change, *args, **kwargs)
+
+        monkeypatch.setattr(messages, "for_pause", fail_action)
+    else:
+        broken.pause("broken_action")
+        actions_for_pause = messages.actions_for_pause
+
+        def fail_verbs(reason):
+            if reason == "broken_action":
+                raise TypeError("cannot construct action")
+            return actions_for_pause(reason)
+
+        monkeypatch.setattr(messages, "actions_for_pause", fail_verbs)
+
+    entries = status_document(capsys)["runs"]
+    assert [entry["change"] for entry in entries] == ["a-healthy", "m-broken", "z-healthy"]
+    assert entries[0] == before[0]
+    assert entries[2] == before[2]
+    assert "error" not in entries[0] and "error" not in entries[2]
+    assert_status_error(entries[1], "m-broken", error_class)
+
+
+@pytest.mark.scenario("specloop-interface/isolated-run-status-failures/error-rows-remain-compatible-and-non-actionable")
+@pytest.mark.scenario("specloop-interface/isolated-run-status-failures/broken-run-keeps-other-repositories-visible")
+@pytest.mark.parametrize("message", ["", 'private path: /repo\n"failed"', "x" * 1000])
+def test_error_row_shape_and_diagnostic(admitted, monkeypatch, capsys, message):
+    from nightshift import outcomes, specloop_attention, specloop_client
+
+    for change in ("z-healthy", "m-broken", "a-healthy"):
+        run, _ = admitted(change)
+        run.state.pr = f"https://github.com/example/{change}/pull/7"
+        run.pause("human_checks", detail="Ready for review")
+    document = status_document(capsys)
+    before = document["runs"]
+    assert before[0]["context"]["repo"] != before[2]["context"]["repo"]
+
+    def runner(argv, **kwargs):
+        assert argv == ["specloop", "status", "--json"]
+        assert kwargs == {"capture_output": True, "text": True, "check": False}
+        return subprocess.CompletedProcess(argv, 0, json.dumps(document), "")
+
+    monkeypatch.setattr(outcomes, "now", lambda: "2026-10-21T12:00:00+00:00")
+    cached = specloop_attention.snapshot(runner=runner)
+    assert cached["error"] is None
+    assert len(cached["entries"]) == 3
+    real_manifest = cli._manifest
+
+    def fail_manifest(run):
+        if run.dir.name == "m-broken":
+            raise RuntimeError(message)
+        return real_manifest(run)
+
+    monkeypatch.setattr(cli, "_manifest", fail_manifest)
+    document = status_document(capsys)
+    error = document["runs"][1]
+    assert_status_error(error, "m-broken", "RuntimeError")
+    assert error["error"] == f"RuntimeError: {message}"[:500]
+    assert document["runs"][0] == before[0]
+    assert document["runs"][2] == before[2]
+    accepted = specloop_client.call(["status"], runner=runner)
+    assert accepted == document
+    expected = [
+        {"change": "a-healthy", "reason": "human_checks", "pr": before[0]["pr"]},
+        {"change": "m-broken", "reason": "status_error", "pr": ""},
+        {"change": "z-healthy", "reason": "human_checks", "pr": before[2]["pr"]},
+    ]
+    assert specloop_attention._entries(accepted) == expected
+    checked_at = "2026-10-21T13:00:00+00:00"
+    monkeypatch.setattr(outcomes, "now", lambda: checked_at)
+    refreshed = specloop_attention.snapshot(runner=runner)
+    assert refreshed == {
+        "entries": [{**entry, "checked_at": checked_at, "error": None, "stale": False}
+                    for entry in expected],
+        "checked_at": checked_at, "error": None,
+    }
+    assert "action" not in refreshed["entries"][1]
+    assert specloop_attention.snapshot(offline=True) == refreshed
+
+
+@pytest.mark.scenario("specloop-interface/isolated-run-status-failures/named-and-entirely-broken-collections")
+@pytest.mark.parametrize("named", [False, True])
+def test_named_and_entirely_broken_collections(admitted, capsys, named):
+    for change in ("z-broken", "a-broken"):
+        run, _ = admitted(change)
+        run.manifest_path.unlink()
+    names = ["z-broken"] if named else []
+    entries = status_document(capsys, *names)["runs"]
+    assert [entry["change"] for entry in entries] == (names or ["a-broken", "z-broken"])
+    for entry in entries:
+        assert_status_error(entry, entry["change"], "FileNotFoundError")
+
+
+@pytest.mark.scenario("specloop-interface/isolated-run-status-failures/unknown-changes-and-document-failures")
+@pytest.mark.parametrize("change", ["../escape", "/absolute", ".", "..", "bad/name", ""])
+def test_unsafe_named_status(home, monkeypatch, capsys, change):
+    def no_run_read(*args, **kwargs):
+        pytest.fail("unsafe name reached run collection")
+
+    monkeypatch.setattr(Run, "for_change", no_run_read)
+    document = status_document(capsys, change, code=1)
+    assert "unsafe change name" in document["error"]
+    assert not home.exists()
+
+
+@pytest.mark.scenario("specloop-interface/isolated-run-status-failures/unknown-changes-and-document-failures")
+@pytest.mark.parametrize("stage", ["discovery", "supervisor"])
+@pytest.mark.parametrize("error", [PermissionError("unreadable"), TypeError("bad data"),
+                                 subprocess.TimeoutExpired("lookup", 60), RuntimeError()])
+def test_document_failures(admitted, monkeypatch, capsys, stage, error):
+    admitted("healthy")
+
+    def fail(*args, **kwargs):
+        raise error
+
+    if stage == "discovery":
+        monkeypatch.setattr(Path, "glob", fail)
+    else:
+        monkeypatch.setattr(serve, "liveness", fail)
+    status_document(capsys, code=1)
+
+
+@pytest.mark.scenario("specloop-interface/status-after-partial-finish/missing-live-and-archived-tasks")
+@pytest.mark.parametrize("named", [False, True])
+def test_missing_live_and_archived_tasks(admitted, tmp_path, capsys, named):
+    broken, _ = admitted("broken")
+    admitted("healthy")
+    healthy = status_document(capsys, "healthy")["runs"][0]
+    source = tmp_path / "broken"
+    for args in [
+        ["rm", "openspec/changes/broken/tasks.md"],
+        ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "remove tasks"],
+        ["push", "-q", str(broken.dir / "repo.git"), "HEAD:refs/heads/spec/broken"],
+    ]:
+        subprocess.run(["git", "-C", str(source), *args], check=True, capture_output=True)
+    broken.pause("human_checks", detail="Finish was interrupted")
+    entries = status_document(capsys, *(["broken"] if named else []))["runs"]
+    assert_status_error(entries[0], "broken", "RuntimeError")
+    assert "tasks.md" in entries[0]["error"]
+    assert entries[1:] == ([] if named else [healthy])
+
+
+@pytest.mark.scenario("specloop-interface/isolated-run-status-failures/read-failures-leave-run-data-untouched")
+@pytest.mark.parametrize("named", [False, True])
+@pytest.mark.parametrize("failure, error_class", [
+    ("corrupt", "JSONDecodeError"), ("permission", "PermissionError"),
+    ("disappeared", "FileNotFoundError"), ("action", "TypeError"),
+])
+def test_failed_status_is_read_only(admitted, tmp_path, monkeypatch, capsys, named, failure, error_class):
+    broken, _ = admitted("broken")
+    healthy, _ = admitted("healthy")
+    for run in (broken, healthy):
+        run.state.pr = "https://github.com/example/repo/pull/7"
+        run.pause("human_checks", detail="Review before finishing")
+    healthy_entry = status_document(capsys, "healthy")["runs"][0]
+    state_path = broken.dir / "state.json"
+    if failure == "corrupt":
+        state_path.write_text("{")
+
+    def snapshot():
+        # Include directories, all run files, source repos, refs and reflogs.
+        return {
+            path.relative_to(tmp_path): (path.stat().st_mtime_ns,
+                                         path.read_bytes() if path.is_file() else None)
+            for path in tmp_path.rglob("*")
+        }
+
+    expected = snapshot()
+    load = Run._load
+
+    def read(run):
+        nonlocal expected
+        assert run.require_existing is True
+        if run.dir == broken.dir and failure == "disappeared":
+            # Simulate another process deleting state after selection. The
+            # real strict loader must now fail, without recreating the file.
+            state_path.unlink()
+            expected = snapshot()
+        return load(run)
+
+    monkeypatch.setattr(Run, "_load", read)
+    if failure == "permission":
+        read_text = Path.read_text
+
+        def denied(path, *args, **kwargs):
+            if path == state_path:
+                raise PermissionError("state read denied")
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", denied)
+    if failure == "action":
+        for_pause = messages.for_pause
+
+        def failed_message(change, *args, **kwargs):
+            if change == "broken":
+                raise TypeError("action read failed")
+            return for_pause(change, *args, **kwargs)
+
+        monkeypatch.setattr(messages, "for_pause", failed_message)
+
+    def no_mutation(*args, **kwargs):
+        pytest.fail("failed status tried to mutate run data or create an execution context")
+
+    for method in ("save", "event", "lock", "pause"):
+        monkeypatch.setattr(Run, method, no_mutation)
+    monkeypatch.setattr(state.RunState, "task", no_mutation)
+    monkeypatch.setattr(cli, "_ctx", no_mutation)
+    monkeypatch.setattr(cli, "_finish", no_mutation)
+    execute = subprocess.run
+
+    def read_only_command(argv, *args, **kwargs):
+        if argv[0] != "git" or "-C" not in argv:
+            pytest.fail(f"unexpected status command: {argv}")
+        if argv[argv.index("-C") + 2] not in {"rev-parse", "ls-tree", "show"}:
+            pytest.fail(f"mutating status command: {argv}")
+        return execute(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", read_only_command)
+    entries = status_document(capsys, *(["broken"] if named else []))["runs"]
+    assert_status_error(entries[0], "broken", error_class)
+    assert entries[1:] == ([] if named else [healthy_entry])
+    assert snapshot() == expected
+    if failure == "disappeared":
+        assert not state_path.exists()
+
+
+@pytest.mark.scenario("specloop-interface/isolated-run-status-failures/read-failures-leave-run-data-untouched")
+@pytest.mark.parametrize("named", [False, True])
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(7)])
+def test_status_propagates_control_flow_exceptions(admitted, monkeypatch, capsys, named, error):
+    admitted("broken")
+
+    def interrupted(run):
+        raise error
+
+    monkeypatch.setattr(Run, "_load", interrupted)
+    with pytest.raises(type(error)) as caught:
+        cli.main(["status", "--json", *(["broken"] if named else [])])
+    assert caught.value is error
+    output = capsys.readouterr()
+    assert output.out == output.err == ""
 
 
 @pytest.mark.parametrize("status", ["done", "paused", "aborted"])

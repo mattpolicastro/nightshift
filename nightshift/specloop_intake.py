@@ -7,6 +7,7 @@ without spending another drafting session or duplicating a PR or comment.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import tomllib
@@ -16,6 +17,9 @@ from pathlib import Path
 
 from . import queue, specloop_client, specloop_job
 from .config import Repo
+
+
+log = logging.getLogger(__name__)
 
 
 class Paused(RuntimeError):
@@ -172,6 +176,11 @@ look like an absent label or an empty set of comments.
             receipt["delivered"] = True
             _save(path, receipt)
             return receipt
+        blocked = queue.open_blockers(repo.name, queue.blockers(raw["body"]), runner=gh)
+        if blocked:
+            log.info("#%s is blocked by %s — not drafting", number,
+                     ", ".join(f"#{blocker}" for blocker in blocked))
+            return None
         if drafting_events is None:
             drafting_events = _label_events(repo.name, number, drafting_labels, runner=gh)
         receipt = {"repo": repo.name, "issue": number, "change": change,
@@ -193,8 +202,8 @@ look like an absent label or an empty set of comments.
             return receipt
         if not _start(path, receipt, [
             "propose", str(repo.manifest), "--change", change,
-            "--branch", branch, "--base", repo.base, "--idea", idea,
-        ], runner=specloop_runner, launcher=launcher):
+            "--branch", branch, "--base", repo.base,
+        ], idea=idea, runner=specloop_runner, launcher=launcher):
             return _PENDING
         _save(path, receipt)
         _deliver(repo, labels, number, change, receipt, current, runner=gh, git_runner=git_runner)
@@ -431,8 +440,8 @@ def revise_pending(
                     raise RuntimeError(f"{branch} changed during revision; retry on the next poll")
                 if not _start(path, receipt, [
                     "propose", str(repo.manifest), "--change", change, "--branch", branch,
-                    "--from-branch", fetched_ref, "--idea", idea,
-                ], runner=specloop_runner, launcher=launcher):
+                    "--from-branch", fetched_ref,
+                ], idea=idea, runner=specloop_runner, launcher=launcher):
                     return _PENDING
             _save(path, receipt)
 
@@ -633,7 +642,14 @@ def _validate(result: dict, command: str, receipt: dict) -> None:
         raise specloop_client.SpecloopError("revise returned no landed commit")
 
 
-def _start(path: Path, receipt: dict, args: list[str], *, runner, launcher) -> bool:
+def _start(path: Path, receipt: dict, args: list[str], *, runner, launcher,
+           idea: str | None = None) -> bool:
+    if idea is not None:
+        # Retain a distinct input for each invocation, including detached readers.
+        payload = (path.parent / f"{path.stem}.jobs" / f"idea-{uuid.uuid4().hex}.txt").resolve()
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_text(idea, encoding="utf-8")
+        args = [*args, "--idea-file", str(payload)]
     # An injected completed-process runner keeps CLI protocol/delivery tests
     # deterministic. Production launches a durable subprocess and returns now.
     if runner is None:

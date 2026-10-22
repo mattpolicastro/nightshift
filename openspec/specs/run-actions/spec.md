@@ -31,3 +31,21 @@ and a note over 2,000 characters.
 #### Scenario: Wrong verb refused
 - **WHEN** act publish is called on a run paused at a phase gate
 - **THEN** the outcome is refused and the run is unchanged
+
+### Requirement: Refusals keep their reason
+When a verb is refused by the command it maps to, `act` SHALL report that
+command's own reason as the outcome's `detail`, not a generic refusal.
+
+#### Scenario: Publish refusal explained
+- **WHEN** act publish is refused because the manifest names no GitHub repository
+- **THEN** the outcome is refused and its detail says the manifest names no GitHub repository
+
+### Requirement: Publish only to the named repository
+`publish` and `finish` SHALL refuse, without pushing, when the manifest names no
+GitHub repository, or when the source clone's `origin` is a hosted URL for a
+different repository than the manifest names. A local-path origin SHALL be
+accepted.
+
+#### Scenario: Fork still pointing upstream
+- **WHEN** a run is ready to publish, its manifest names `owner/fork`, and the source clone's origin is `github.com/upstream/project`
+- **THEN** publish refuses with a reason naming both, and nothing is pushed

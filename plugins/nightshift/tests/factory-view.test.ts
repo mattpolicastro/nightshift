@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import React from 'react';
-import type { FactoryRun } from '../shared/factory';
+import type { FactoryRun, FactorySnapshot } from '../shared/factory';
 
 const run: FactoryRun = {
   change: 'factory-context', status: 'paused', tasks: { done: 1, total: 3 }, pr: '',
@@ -34,8 +34,9 @@ type Hook = { value?: any; deps?: unknown[]; cleanup?: () => void };
 function view(options: {
   runs?: FactoryRun[]; client?: unknown; navigation?: unknown; getClient?: () => unknown;
   act?: (input: unknown) => Promise<unknown>;
+  read?: () => Promise<FactorySnapshot>;
 } = {}) {
-  const calls = { hosts: [] as string[], lists: 0, opened: [] as unknown[], links: [] as string[] };
+  const calls = { hosts: [] as string[], lists: 0, opened: [] as unknown[], links: [] as string[], reads: 0, actions: [] as unknown[] };
   const client = 'client' in options ? options.client : { workspaces: { list: async () => {
     calls.lists++;
     return { entries: [workspace] };
@@ -72,7 +73,11 @@ function view(options: {
   };
   const runsRpc = {};
   const actRpc = {};
-  const read = async () => ({ runs: options.runs ?? [run], stale: false, fetchedAt: '', error: null });
+  const read = async () => {
+    calls.reads++;
+    return options.read ? options.read() : { runs: options.runs ?? [run], stale: false, fetchedAt: '', error: null };
+  };
+  const act = async (input: unknown) => { calls.actions.push(input); return options.act?.(input); };
   const filename = resolve('client/factory.tsx');
   const require = createRequire(filename);
   const exports: Props = {};
@@ -89,7 +94,7 @@ function view(options: {
         Linking: { openURL: async (url: string) => { calls.links.push(url); } },
       };
       if (name === '@getpaseo/plugin/client') return {
-        useRpc: (rpc: unknown) => rpc === runsRpc ? read : options.act ?? (async () => {}),
+        useRpc: (rpc: unknown) => rpc === runsRpc ? read : act,
         getPaseoClient: (id: string) => { calls.hosts.push(id); return options.getClient ? options.getClient() : client; },
       };
       if (name === '../shared/factory') return { factoryRuns: runsRpc, factoryAct: actRpc };
@@ -124,7 +129,7 @@ function view(options: {
   async function settle() { await new Promise(resolve => setImmediate(resolve)); draw(); }
   draw();
   return {
-    calls, find, text, settle,
+    calls, find, text, settle, nodes,
     async press(label: string) { const button = find(label); assert.ok(button, `Missing ${label}`); button.props.onPress(); draw(); await settle(); },
     dispose() { components.forEach(hooks => hooks.forEach(hook => hook.cleanup?.())); },
   };
@@ -225,4 +230,454 @@ test('An action result shows in the row it was sent from, and above the list onc
   await page.press('Refresh Factory');
   assert.ok(page.text().includes(`second-change: Refused · ${refusal}`));
   assert.ok(page.text().indexOf(refusal) < page.text().indexOf('first-change'), 'above the list');
+});
+
+test('finished runs are folded under a collapsed toggle', async t => {
+  const makeRun = (change: string, status: FactoryRun['status']): FactoryRun => ({
+    ...run, change, status, context: undefined,
+  });
+  const mixed = [makeRun('done-a', 'done'), makeRun('running-b', 'running'), makeRun('paused-c', 'paused'),
+    makeRun('aborted-d', 'aborted'), makeRun('paused-e', 'paused'), makeRun('running-f', 'running'), makeRun('done-g', 'done')];
+  const snapshot = (runs: FactoryRun[], stale = false): FactorySnapshot => ({ runs, stale, fetchedAt: '', error: null });
+  const hasText = (page: ReturnType<typeof view>, text: string) =>
+    page.nodes().some(node => node.type === 'Text' && page.text(node.children) === text);
+
+  await t.test('factory-finished-runs/finished-disclosure/finished-rows-start-folded-and-can-be-toggled', async t => {
+    const page = view({ runs: mixed });
+    t.after(page.dispose);
+    await page.settle();
+    const callsBefore = JSON.stringify(page.calls);
+    for (let presses = 0; presses <= 2; presses++) {
+      if (presses) await page.press('Finished (3)');
+      const expanded = presses === 1;
+      const toggle = page.find('Finished (3)')!;
+      assert.ok(toggle);
+      assert.equal(toggle.props.accessibilityRole, 'button');
+      assert.equal(page.text(toggle.children), 'Finished (3)');
+      assert.equal(toggle.props.accessibilityState.expanded, expanded);
+      const order = ['paused-c', 'paused-e', 'running-b', 'running-f', 'Finished (3)',
+        ...(expanded ? ['done-a', 'aborted-d', 'done-g'] : [])];
+      let previous = -1;
+      for (const value of order) {
+        const position = page.text().indexOf(value);
+        assert.ok(position > previous, `${value} follows the previous row`);
+        previous = position;
+      }
+      for (const change of ['done-a', 'aborted-d', 'done-g']) {
+        assert.equal(Boolean(page.find(`Details for ${change}`)), expanded);
+        assert.equal(page.text().includes(change), expanded);
+      }
+      assert.equal(JSON.stringify(page.calls), callsBefore, 'toggle causes no RPC or workspace requests');
+    }
+  });
+
+  await t.test('factory-finished-runs/finished-disclosure/expanded-rows-retain-existing-content', async t => {
+    const finished = { ...run, status: 'done' as const, pr: 'https://github.com/owner/repo/pull/42' };
+    const page = view({ runs: [finished] });
+    t.after(page.dispose);
+    await page.settle();
+    await page.press('Finished (1)');
+    assert.ok(hasText(page, finished.change));
+    assert.ok(hasText(page, 'done · 1/3 tasks done'));
+    assert.equal(page.find('Details for factory-context')?.props.accessibilityState.expanded, false);
+    assert.equal(page.calls.lists, 0);
+    assert.equal(page.find('Open PR for factory-context')?.props.accessibilityRole, 'link');
+    await page.press('Open PR for factory-context');
+    await page.press('Details for factory-context');
+    assert.equal(page.find('Details for factory-context')?.props.accessibilityState.expanded, true);
+    for (const value of ['Summary', 'Repository', 'Branch', 'Task', 'Pause detail', 'Recent events',
+      run.context!.summary, run.context!.repo, run.context!.branch, '2.2 · Paseo plugin · Add Details.',
+      run.context!.detail, ...run.context!.recent.map(event => `${new Date(event.at).toLocaleString()} · ${event.text}`),
+      'More detail (run on the Paseo host)', 'specloop status factory-context --events 20']) {
+      assert.ok(hasText(page, value), `Missing ${value}`);
+    }
+    assert.ok(page.text().indexOf('task 2.2 attempt 1 failed') < page.text().indexOf('task 1.1 landed'));
+    await page.press('Open change factory-context on GitHub');
+    await page.press('Open factory-context in Paseo');
+    assert.deepEqual(page.calls.links, [finished.pr, run.context!.github]);
+    assert.equal(JSON.stringify(page.calls.opened), JSON.stringify([{ serverId: 'host-1', workspaceId: workspace.id }]));
+    assert.equal(page.calls.lists, 1);
+  });
+
+  await t.test('factory-finished-runs/group-counts-and-empty-state/counts-describe-active-and-finished-runs', async t => {
+    let stale = false;
+    const page = view({ read: async () => snapshot(mixed.slice(0, 4).concat(mixed[6]), stale) });
+    t.after(page.dispose);
+    await page.settle();
+    for (const expected of ['2 runs · 3 finished', '2 runs · 3 finished · Stale']) {
+      await page.press('Refresh Factory');
+      assert.ok(hasText(page, expected));
+      await page.press('Finished (3)');
+      assert.ok(hasText(page, expected));
+      await page.press('Finished (3)');
+      assert.ok(hasText(page, expected));
+      stale = true;
+    }
+  });
+
+  await t.test('factory-finished-runs/group-counts-and-empty-state/active-only-finished-only-and-empty-snapshots', async t => {
+    for (const [runs, summary, finishedCount] of [
+      [[mixed[1]], '1 run', 0], [[mixed[0], mixed[3]], '0 runs · 2 finished', 2], [[], '0 runs', 0],
+    ] as const) {
+      const page = view({ runs: [...runs] });
+      t.after(page.dispose);
+      assert.ok(hasText(page, 'Loading Factory…'));
+      assert.ok(!hasText(page, 'No Factory runs.'));
+      await page.settle();
+      assert.ok(hasText(page, summary));
+      const toggles = page.nodes().filter(node => node.props.accessibilityLabel?.startsWith('Finished ('));
+      assert.equal(toggles.length, finishedCount ? 1 : 0);
+      assert.equal(hasText(page, 'No Factory runs.'), runs.length === 0);
+      if (finishedCount) {
+        await page.press(`Finished (${finishedCount})`);
+        assert.ok(hasText(page, summary));
+        assert.ok(!hasText(page, 'No Factory runs.'));
+      }
+    }
+  });
+
+  await t.test('factory-finished-runs/visible-action-results/action-result-follows-a-finished-run', async t => {
+    for (const verb of ['finish', 'abort'] as const) for (const initiallyOpen of [false, true]) {
+      await t.test(`${verb}, initially ${initiallyOpen ? 'expanded' : 'collapsed'}`, async t => {
+        const target: FactoryRun = { ...makeRun('acted-change', 'paused'), action: {
+          kind: 'decision', headline: 'Human checks', why: '', command: '', actions: [verb], pause_id: 'human_checks:',
+        } };
+        let runs = [makeRun('other-active', 'running'), target, mixed[0]];
+        const detail = `${verb} completed for acted-change`;
+        const page = view({ read: async () => snapshot(runs), act: async () => {
+          runs = runs.map(item => item === target ? { ...target, status: verb === 'finish' ? 'done' : 'aborted', action: undefined } : item);
+          return { version: 1, outcome: 'done', verb, detail };
+        } });
+        t.after(page.dispose);
+        await page.settle();
+        if (initiallyOpen) await page.press('Finished (1)');
+        await page.press(`${verb === 'finish' ? 'Finish' : 'Abort'} acted-change`);
+        assert.deepEqual(page.calls.actions, [], 'confirmation sends nothing');
+        await page.press(`Confirm ${verb} acted-change`);
+        assert.deepEqual(page.calls.actions, [{ change: 'acted-change', verb, expect: 'human_checks:' }]);
+        assert.equal(page.calls.reads, 2, 'action refreshes the snapshot');
+        assert.ok(hasText(page, '1 run · 2 finished'));
+        const checkNotice = (expanded: boolean, removed = false) => {
+          assert.equal(page.find(`Finished (${removed ? 1 : 2})`)?.props.accessibilityState.expanded, expanded);
+          const inRow = expanded && !removed;
+          assert.equal(Boolean(page.find('Details for acted-change')), inRow);
+          assert.equal(page.text().split(detail).length, 2, 'result appears exactly once');
+          const alerts = page.nodes().filter(node => node.props.accessibilityRole === 'alert');
+          assert.equal(alerts.length, 1);
+          assert.equal(page.text(alerts[0].children), `${inRow ? '' : 'acted-change: '}Done · ${detail}`);
+          assert.equal(page.nodes()[0].children.includes(alerts[0]), !inRow, 'only folded or absent notices use the above-list slot');
+          if (inRow) {
+            const row = page.nodes().find(node => node.type === 'View' && node.children.some(child =>
+              typeof child !== 'string' && child.type === 'Text' && page.text(child.children) === 'acted-change'))!;
+            assert.ok(row.children.includes(alerts[0]), 'notice is in the originating row');
+          } else assert.ok(page.text().indexOf(detail) < page.text().indexOf('other-active'));
+        };
+        checkNotice(initiallyOpen);
+        await page.press('Finished (2)');
+        checkNotice(!initiallyOpen);
+        await page.press('Finished (2)');
+        checkNotice(initiallyOpen);
+        runs = runs.filter(item => item.change !== target.change);
+        await page.press('Refresh Factory');
+        checkNotice(initiallyOpen, true);
+        await page.press('Finished (1)');
+        checkNotice(!initiallyOpen, true);
+      });
+    }
+  });
+});
+
+test('Finished disclosure preserves its touch spacing and semibold label across toggles', async t => {
+  const page = view({ runs: [{ ...run, status: 'done' }] });
+  t.after(page.dispose);
+  await page.settle();
+
+  for (const expanded of [false, true, false]) {
+    const toggle = page.find('Finished (1)');
+    assert.ok(toggle);
+    assert.equal(toggle.props.accessibilityState.expanded, expanded);
+    // Keep the disclosure's touch spacing and emphasis consistent with Details.
+    assert.equal(toggle.props.style.paddingVertical, 10);
+    assert.equal(toggle.props.style.alignSelf, 'flex-start');
+    const label = toggle.children.find((child): child is Node =>
+      typeof child !== 'string' && child.type === 'Text');
+    assert.ok(label);
+    assert.equal(page.text(label.children), 'Finished (1)');
+    assert.equal(label.props.style.fontWeight, '600');
+    if (expanded) {
+      const details = page.find(`Details for ${run.change}`);
+      assert.ok(details);
+      assert.equal(toggle.props.style.paddingVertical, details.props.style.paddingVertical);
+    }
+    await page.press('Finished (1)');
+  }
+});
+
+function assertActionNotice(page: ReturnType<typeof view>, change: string, text: string, inRow: boolean) {
+  const alerts = page.nodes().filter(node => node.props.accessibilityRole === 'alert');
+  assert.equal(alerts.length, 1, 'exactly one visible notice');
+  assert.equal(page.text().split(text).length - 1, 1, 'notice text is not duplicated');
+  assert.equal(page.text(alerts[0].children), inRow ? text : `${change}: ${text}`);
+  const section = page.nodes()[0];
+  assert.equal(section.children.includes(alerts[0]), !inRow, 'above-list slot only when the row is hidden');
+  const row = page.nodes().find(node => node.type === 'View' && node.children.some(child =>
+    typeof child !== 'string' && child.type === 'Text' && page.text(child.children) === change));
+  assert.equal(Boolean(row), inRow, 'originating row visibility');
+  if (inRow) assert.ok(page.nodes(row!.children).includes(alerts[0]), 'notice belongs to the originating row');
+  else {
+    const firstRow = section.children.find(child => typeof child !== 'string' && child.type === 'View');
+    assert.ok(firstRow, 'another run remains visible');
+    assert.ok(section.children.indexOf(alerts[0]) < section.children.indexOf(firstRow), 'notice is above the list');
+  }
+}
+
+function actionNoticeRuns(verb: 'finish' | 'abort'): FactoryRun[] {
+  return [
+    { ...run, change: 'other-active', status: 'running', context: undefined },
+    { ...run, change: 'notice-target', context: undefined, action: {
+      kind: 'decision', headline: 'Human checks', why: '', command: '', actions: [verb], pause_id: 'human_checks:',
+    } },
+    { ...run, change: 'other-finished', status: 'done', context: undefined },
+  ];
+}
+
+test('factory-finished-runs/visible-action-results/action-result-follows-a-finished-run', async t => {
+  for (const verb of ['finish', 'abort'] as const) for (const initiallyOpen of [false, true]) {
+    await t.test(`${verb}: delayed response and refresh, initially ${initiallyOpen ? 'expanded' : 'collapsed'}`, async t => {
+      let runs = actionNoticeRuns(verb);
+      const snapshot = (): FactorySnapshot => ({ runs, stale: false, fetchedAt: '', error: null });
+      let completeAction!: (result: unknown) => void;
+      const actionResponse = new Promise<unknown>(resolve => { completeAction = resolve; });
+      let completeRefresh!: (result: FactorySnapshot) => void;
+      let pendingRefresh: Promise<FactorySnapshot> | undefined;
+      const page = view({ read: async () => pendingRefresh ?? snapshot(), act: async () => actionResponse });
+      t.after(page.dispose);
+      await page.settle();
+      if (initiallyOpen) await page.press('Finished (1)');
+      assert.equal(page.nodes().filter(node => node.props.accessibilityRole === 'alert').length, 0);
+      await page.press(`${verb === 'finish' ? 'Finish' : 'Abort'} notice-target`);
+      assert.deepEqual(page.calls.actions, [], 'opening confirmation does not send');
+      assert.equal(page.calls.reads, 1, 'opening confirmation does not refresh');
+      assertActionNotice(page, 'notice-target', verb === 'finish'
+        ? 'Finish notice-target? This pushes to GitHub.' : 'Abort notice-target? This cannot be undone.', true);
+
+      pendingRefresh = new Promise(resolve => { completeRefresh = resolve; });
+      await page.press(`Confirm ${verb} notice-target`);
+      assert.deepEqual(page.calls.actions, [{ change: 'notice-target', verb, expect: 'human_checks:' }]);
+      assert.equal(page.calls.reads, 1, 'refresh waits for the action response');
+      assertActionNotice(page, 'notice-target', 'Sending action…', true);
+      for (const expanded of [!initiallyOpen, initiallyOpen]) {
+        await page.press('Finished (1)');
+        assert.equal(page.find('Finished (1)')?.props.accessibilityState.expanded, expanded);
+        assertActionNotice(page, 'notice-target', 'Sending action…', true);
+      }
+      const detail = `${verb} completed for notice-target`;
+      completeAction({ version: 1, outcome: 'done', verb, detail });
+      await page.settle();
+      assert.equal(page.calls.reads, 2, 'confirmed action requests a post-action snapshot');
+      assertActionNotice(page, 'notice-target', `Done · ${detail}`, true);
+      const status = verb === 'finish' ? 'done' : 'aborted';
+      runs = runs.map(item => item.change === 'notice-target' ? { ...item, status, action: undefined } : item);
+      completeRefresh(snapshot());
+      pendingRefresh = undefined;
+      await page.settle();
+
+      const checkFinished = (expanded: boolean, removed = false) => {
+        assert.equal(page.find(`Finished (${removed ? 1 : 2})`)?.props.accessibilityState.expanded, expanded);
+        assert.equal(Boolean(page.find('Details for notice-target')), expanded && !removed);
+        assertActionNotice(page, 'notice-target', `Done · ${detail}`, expanded && !removed);
+        if (expanded && !removed) {
+          const row = page.nodes().find(node => node.type === 'View' && node.children.some(child =>
+            typeof child !== 'string' && child.props.accessibilityLabel === 'Details for notice-target'))!;
+          assert.ok(page.text(row.children).includes(`${status} · 1/3 tasks done`));
+        }
+      };
+      checkFinished(initiallyOpen);
+      const callsAfterAction = JSON.stringify(page.calls);
+      for (const expanded of [!initiallyOpen, initiallyOpen]) {
+        await page.press('Finished (2)');
+        checkFinished(expanded);
+      }
+      assert.equal(JSON.stringify(page.calls), callsAfterAction, 'toggling preserves the result without RPCs');
+      runs = runs.filter(item => item.change !== 'notice-target');
+      await page.press('Refresh Factory');
+      assert.equal(page.calls.reads, 3);
+      checkFinished(initiallyOpen, true);
+      for (const expanded of [!initiallyOpen, initiallyOpen]) {
+        await page.press('Finished (1)');
+        checkFinished(expanded, true);
+      }
+      assert.equal(page.calls.actions.length, 1, 'the action is never resent');
+      assert.equal(page.calls.reads, 3, 'toggles do not refresh');
+    });
+  }
+});
+
+test('factory-finished-runs/visible-action-results/result-remains-in-an-active-row', async t => {
+  for (const verb of ['finish', 'abort'] as const) for (const outcome of ['done', 'refused', 'transport-error'] as const) {
+    for (const status of ['paused', 'running'] as const) for (const initiallyOpen of [false, true]) {
+      await t.test(`${verb}: ${outcome}, remains ${status}, initially ${initiallyOpen ? 'expanded' : 'collapsed'}`, async t => {
+        let runs = actionNoticeRuns(verb);
+        const detail = outcome === 'done' ? `${verb} completed for notice-target` : 'The pause changed; refresh before retrying.';
+        const expected = outcome === 'transport-error'
+          ? 'Could not confirm the action result. Check the refreshed status before retrying.'
+          : `${outcome === 'done' ? 'Done' : 'Refused'} · ${detail}`;
+        const page = view({
+          read: async () => ({ runs, stale: false, fetchedAt: '', error: null }),
+          act: async () => {
+            runs = runs.map(item => item.change === 'notice-target' ? { ...item, status, action: undefined } : item);
+            if (outcome === 'transport-error') throw new Error('RPC connection lost');
+            return { version: 1, outcome, verb, detail };
+          },
+        });
+        t.after(page.dispose);
+        await page.settle();
+        if (initiallyOpen) await page.press('Finished (1)');
+        await page.press(`${verb === 'finish' ? 'Finish' : 'Abort'} notice-target`);
+        assert.deepEqual(page.calls.actions, [], 'no action before confirmation');
+        await page.press(`Confirm ${verb} notice-target`);
+        assert.deepEqual(page.calls.actions, [{ change: 'notice-target', verb, expect: 'human_checks:' }]);
+        assert.equal(page.calls.reads, 2, 'success, refusal, and transport error all refresh');
+        const callsAfterAction = JSON.stringify(page.calls);
+        const checkActive = (expanded: boolean) => {
+          assert.equal(page.find('Finished (1)')?.props.accessibilityState.expanded, expanded);
+          assert.ok(page.find('Details for notice-target'));
+          assertActionNotice(page, 'notice-target', expected, true);
+          const row = page.nodes().find(node => node.type === 'View' && node.children.some(child =>
+            typeof child !== 'string' && child.props.accessibilityLabel === 'Details for notice-target'))!;
+          assert.ok(page.text(row.children).includes(`${status} · 1/3 tasks done`));
+        };
+        checkActive(initiallyOpen);
+        for (const expanded of [!initiallyOpen, initiallyOpen]) {
+          await page.press('Finished (1)');
+          checkActive(expanded);
+        }
+        assert.equal(JSON.stringify(page.calls), callsAfterAction, 'toggles neither clear the notice nor send requests');
+        await page.press('Refresh Factory');
+        checkActive(initiallyOpen);
+        assert.equal(page.calls.reads, 3, 'a later refresh preserves the notice');
+        assert.equal(page.calls.actions.length, 1);
+      });
+    }
+  }
+});
+
+function assertRefreshedGroups(page: ReturnType<typeof view>, expected: {
+  active: FactoryRun[]; finished: FactoryRun[]; expanded: boolean; summary: string; error?: string;
+}) {
+  const { active, finished, expanded, summary, error } = expected;
+  assert.ok(page.nodes().some(node => node.type === 'Text' && page.text(node.children) === summary), summary);
+  const labels = page.nodes().map(node => node.props.accessibilityLabel as string | undefined)
+    .filter(label => label?.startsWith('Details for ') || label?.startsWith('Finished ('));
+  assert.deepEqual(labels, [
+    ...active.map(item => `Details for ${item.change}`),
+    ...(finished.length ? [`Finished (${finished.length})`] : []),
+    ...(expanded ? finished.map(item => `Details for ${item.change}`) : []),
+  ], 'active rows precede the disclosure and any visible finished rows, without duplicates');
+  if (finished.length) {
+    assert.equal(page.find(`Finished (${finished.length})`)?.props.accessibilityState.expanded, expanded);
+  }
+  for (const item of [...active, ...(expanded ? finished : [])]) {
+    const row = page.nodes().find(node => node.type === 'View' && node.children.some(child =>
+      typeof child !== 'string' && child.props.accessibilityLabel === `Details for ${item.change}`));
+    assert.ok(row, `visible row for ${item.change}`);
+    assert.ok(page.text(row.children).includes(`${item.status} · ${item.tasks.done}/${item.tasks.total} tasks done`));
+  }
+  if (!expanded) for (const item of finished) assert.ok(!page.text().includes(item.change), 'finished row is folded');
+  assert.equal(page.text().includes('No Factory runs.'), active.length + finished.length === 0);
+  assert.deepEqual(page.nodes().filter(node => node.props.accessibilityRole === 'alert')
+    .map(node => page.text(node.children)), error ? [error] : []);
+  assert.equal(page.find('Refresh Factory')?.props.disabled, false, 'refresh is available again');
+}
+
+test('factory-finished-runs/existing-interactions-remain-intact/refresh-updates-groups-without-resetting-disclosure', async t => {
+  for (const from of ['paused', 'running'] as const) for (const to of ['done', 'aborted'] as const) {
+    for (const expanded of [false, true]) {
+      await t.test(`${from} to ${to}, disclosure ${expanded ? 'expanded' : 'collapsed'}`, async t => {
+        const target: FactoryRun = { ...run, change: 'transition-target', status: from, context: undefined };
+        const otherActive: FactoryRun = { ...run, change: 'still-running', status: 'running', context: undefined };
+        const otherFinished: FactoryRun = { ...run, change: 'already-finished', status: 'done', context: undefined };
+        let runs = [otherFinished, target, otherActive];
+        const page = view({ read: async () => ({ runs, stale: false, fetchedAt: '', error: null }) });
+        t.after(page.dispose);
+        await page.settle();
+        // Explicitly choose collapsed too, so retention is tested beyond the mount default.
+        await page.press('Finished (1)');
+        if (!expanded) await page.press('Finished (1)');
+        assertRefreshedGroups(page, { active: [target, otherActive], finished: [otherFinished], expanded,
+          summary: '2 runs · 1 finished' });
+
+        const transitioned = { ...target, status: to, tasks: { done: 3, total: 3 } };
+        runs = [otherFinished, transitioned, otherActive];
+        await page.press('Refresh Factory');
+        const refreshed = { active: [otherActive], finished: [otherFinished, transitioned], expanded,
+          summary: '1 run · 2 finished' };
+        assertRefreshedGroups(page, refreshed);
+        await page.press('Refresh Factory');
+        assertRefreshedGroups(page, refreshed);
+
+        // Retain the choice through both an active-only snapshot and a completely empty one.
+        for (const remaining of [[otherActive], []]) {
+          runs = remaining;
+          await page.press('Refresh Factory');
+          assertRefreshedGroups(page, { active: remaining, finished: [], expanded,
+            summary: remaining.length ? '1 run' : '0 runs' });
+          runs = [otherFinished, transitioned, otherActive];
+          await page.press('Refresh Factory');
+          assertRefreshedGroups(page, refreshed);
+        }
+        assert.equal(page.calls.reads, 7, 'only mount and the six requested refreshes read');
+        assert.deepEqual(page.calls.actions, []);
+        assert.deepEqual(page.calls.hosts, []);
+        assert.equal(page.calls.lists, 0);
+      });
+    }
+  }
+});
+
+test('factory-finished-runs/existing-interactions-remain-intact/failed-refresh-retains-groups-and-stale-handling', async t => {
+  for (const failure of ['rejected RPC', 'stale snapshot'] as const) for (const expanded of [false, true]) {
+    await t.test(`${failure}, disclosure ${expanded ? 'expanded' : 'collapsed'}`, async t => {
+      const paused: FactoryRun = { ...run, change: 'waiting', context: undefined };
+      const running: FactoryRun = { ...run, change: 'building', status: 'running', context: undefined };
+      const done: FactoryRun = { ...run, change: 'completed', status: 'done', context: undefined };
+      const aborted: FactoryRun = { ...run, change: 'stopped', status: 'aborted', context: undefined };
+      const runs = [done, running, aborted, paused];
+      let fail = false;
+      const error = failure === 'rejected RPC'
+        ? 'Factory refresh failed. Any previously loaded list is stale and retained.'
+        : 'Factory status unavailable. Last successful snapshot retained.';
+      const page = view({ read: async () => {
+        if (fail && failure === 'rejected RPC') throw new Error('RPC connection lost');
+        return { runs, stale: fail, fetchedAt: '', error: fail ? error : null };
+      } });
+      t.after(page.dispose);
+      await page.settle();
+      await page.press('Finished (2)');
+      if (!expanded) await page.press('Finished (2)');
+      const good = { active: [paused, running], finished: [done, aborted], expanded, summary: '2 runs · 2 finished' };
+      assertRefreshedGroups(page, good);
+
+      fail = true;
+      const stale = { ...good, summary: '2 runs · 2 finished · Stale', error };
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await page.press('Refresh Factory');
+        assertRefreshedGroups(page, stale);
+      }
+      const readsAfterFailure = page.calls.reads;
+      await page.press('Finished (2)');
+      assertRefreshedGroups(page, { ...stale, expanded: !expanded });
+      await page.press('Finished (2)');
+      assertRefreshedGroups(page, stale);
+      assert.equal(page.calls.reads, readsAfterFailure, 'retained finished rows remain accessible without a read');
+
+      fail = false;
+      await page.press('Refresh Factory');
+      assertRefreshedGroups(page, good);
+      assert.equal(page.calls.reads, 4, 'mount, two failed refreshes, and recovery');
+      assert.deepEqual(page.calls.actions, []);
+      assert.deepEqual(page.calls.hosts, []);
+      assert.equal(page.calls.lists, 0);
+    });
+  }
 });
