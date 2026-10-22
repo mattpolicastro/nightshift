@@ -272,6 +272,86 @@ def later_feedback(gh):
     gh.feedback.append({**gh.feedback[1], "id": 104, "body": "Later feedback"})
 
 
+@pytest.mark.scenario("pr-revision/durable-round-snapshot/pause-and-stop-preserve-snapshots")
+@pytest.mark.scenario("pr-revision/revision-actor-gate/unauthorized-revision-ignored-at-either-stage")
+@pytest.mark.parametrize("control", ["pause", "stopping", "stopped"])
+def test_selected_job_survives_pause_stop_and_reauthorization(stage_setup, tmp_path, monkeypatch, control):
+    from nightshift import daemon
+    from nightshift.config import Config
+
+    repo, gh, commands = stage_setup
+    jobs = []
+    monkeypatch.setattr(specloop_job, "_children", {})
+
+    def launch(args, **kwargs):
+        jobs.append(Path(args[-2]))
+        return SimpleNamespace(poll=lambda: None)
+
+    tick(stage_setup, tmp_path, background=True, launcher=launch)
+    saved = read(tmp_path)
+    directory, = jobs
+    assert saved["feedback_ids"] == ["conversation:102"]
+    later_feedback(gh)
+    if control != "pause":
+        specloop_job.save(directory / "stop.json", {"state": control})
+    specloop_job.finalize(directory, {"result": commands.result})
+    if control == "pause":
+        collect = specloop_job.collect
+        pause = tmp_path / "pause"
+
+        def collect_then_pause(*args):
+            result = collect(*args)
+            pause.touch()
+            return result
+
+        with monkeypatch.context() as patch:
+            patch.setattr(specloop_job, "collect", collect_then_pause)
+            patch.setattr(daemon, "STATE_DIR", tmp_path)
+            patch.setattr(daemon, "PAUSE_FILE", pause)
+            patch.setattr(daemon.subprocess, "run", commands)
+            health = daemon.RepoHealth()
+            daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
+            paused = read(tmp_path)
+            assert paused["result"] == commands.result and not paused.get("delivered")
+            assert fixed(paused) == fixed(saved)
+            # Build success is acknowledged before notification; specs wait for push.
+            expected = sorted([*saved["consumed_feedback_ids"], "conversation:102"])
+            assert paused["consumed_feedback_ids"] == (
+                expected if commands.result["outcome"] == "revised" else saved["consumed_feedback_ids"])
+            assert not health.failures and not health.item_failures and not gh.comments
+            daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
+            assert read(tmp_path) == paused
+        pause.unlink()
+
+    # Resume requires the current label actor's authorization even for a saved result.
+    gh.label_event("agent:revise", "unlabeled")
+    gh.label_event("agent:revise", "labeled", actor="outsider")
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    commands.calls.clear()
+    for _ in range(2):
+        assert tick(stage_setup, tmp_path, module=restart(), background=True, launcher=launch) == []
+        assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+    assert not commands.calls and len(jobs) == len(gh.comments) == 1
+    assert "label-authorization-8:" in gh.comments[0]["body"]
+    gh.label_event("agent:revise", "unlabeled")
+    gh.label_event("agent:revise", "labeled")
+    tick(stage_setup, tmp_path, module=restart(), background=True, launcher=launch)
+    recovered = read(tmp_path)
+    assert fixed(recovered) == fixed(saved) and len(jobs) == 1 and not dispatches(commands)
+    assert "agent:revise" in gh.labels  # The newer application belongs to a later round.
+    assert json.loads((directory / "result.json").read_text()) == {"result": commands.result}
+    if control == "pause":
+        assert recovered["delivered"] and recovered["consumed_feedback_ids"] == expected
+        assert len(gh.comments) == 2
+        assert gh.comments[-1]["body"].endswith(
+            f"<!-- nightshift:revise:{saved['change']}:{saved['round_id']} -->")
+    else:
+        tick(stage_setup, tmp_path, module=restart(), background=True, launcher=launch)
+        assert read(tmp_path) == saved and not commands.calls and len(gh.comments) == 1
+        assert not (directory / "collected.json").exists()
+        assert json.loads((directory / "stop.json").read_text()) == {"state": control}
+
+
 @pytest.mark.scenario("pr-revision/durable-round-snapshot/snapshot-is-fixed-before-dispatch")
 @pytest.mark.scenario("pr-revision/durable-round-snapshot/new-label-preserves-completed-round")
 @pytest.mark.parametrize("replace_event", [False, True])

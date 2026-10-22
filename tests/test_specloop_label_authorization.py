@@ -392,8 +392,8 @@ def test_revision_label_trust_keeps_feedback_author_and_consumption_filters(repo
     # association and consumed entries. A trusted label cannot promote any text.
     seed_consumed(tmp_path, [f"{kind}:{i}" for kind in ("conversation", "review", "inline") for i in (4, 5)])
     for target, association, timestamp, author in (
-        (gh.feedback, "authorAssociation", "createdAt", "author"),
-        (gh.reviews, "authorAssociation", "submittedAt", "author"),
+        (gh.feedback, "author_association", "created_at", "user"),
+        (gh.reviews, "author_association", "submitted_at", "user"),
         (gh.inline, "author_association", "created_at", "user"),
     ):
         target.clear()
@@ -401,8 +401,8 @@ def test_revision_label_trust_keeps_feedback_author_and_consumption_filters(repo
             ("MEMBER", "2026-10-20T13:00:00Z", "Keep the eligible instruction."),
             ("NONE", "2026-10-20T14:00:00Z", "Ignore this outsider instruction."),
             (None, "2026-10-20T14:00:00Z", "Ignore missing association."),
-            ("OWNER", TIP_DATE, "Ignore instruction at the branch tip."),
-            ("COLLABORATOR", "2026-10-19T12:00:00Z", "Ignore older instruction."),
+            ("OWNER", TIP_DATE, "Ignore consumed instruction at the branch tip."),
+            ("COLLABORATOR", "2026-10-19T12:00:00Z", "Ignore consumed older instruction."),
             ("MEMBER", "2026-10-20T14:00:00Z", queue.SELF_COMMENT_PREFIX + " Ignore self comment."),
         ):
             item = {"id": len(target) + 1, author: {"login": "reviewer"}, timestamp: date, "body": body}

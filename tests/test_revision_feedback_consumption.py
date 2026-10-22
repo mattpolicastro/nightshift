@@ -36,6 +36,117 @@ def dispatched_feedback(commands):
     return idea_file(commands.proposals[-1]).read_text(encoding="utf-8")
 
 
+@pytest.mark.scenario("pr-revision/revision-actor-gate/unauthorized-revision-ignored-at-either-stage")
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("state", ["absent", "current", "legacy"])
+def test_denial_precedes_feedback_and_receipt_writes(stage_setup, tmp_path, monkeypatch, empty, state):
+    repo, gh, commands = stage_setup
+    saved = read(tmp_path)
+    if empty:
+        saved["consumed_feedback_ids"].append("conversation:102")
+        gh.feedback = []
+    if state == "legacy":
+        for key in ("feedback_state_version", "consumed_feedback_ids", "feedback_ids"):
+            saved.pop(key)
+    specloop_job.save(receipt_path(tmp_path), saved)
+    if state == "absent":
+        receipt_path(tmp_path).unlink()
+    gh.label_event("agent:revise", "unlabeled")
+    gh.label_event("agent:revise", "labeled", actor="outsider")
+    labels = gh.labels.copy()
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("denial must precede feedback reads, collection, saves, and commands")
+
+    monkeypatch.setattr(queue, "_pr_feedback_records", forbidden)
+    monkeypatch.setattr(intake, "_save", forbidden)
+    monkeypatch.setattr(specloop_job, "collect", forbidden)
+    for _ in range(2):
+        assert intake.revise_pending(repo, queue.Labels(), tmp_path, runner=gh,
+                                     specloop_runner=forbidden, git_runner=forbidden,
+                                     status_runner=forbidden, launcher=forbidden) == []
+        assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+    assert gh.labels == labels and not commands.calls
+    assert len(gh.comments) == 1
+    assert f"label-authorization-8:{gh.events[-1]['id']}" in gh.comments[0]["body"]
+    assert not any(c[:2] == ["pr", "edit"] or "/commits/" in c[1] for c in gh.calls)
+
+
+@pytest.mark.scenario("pr-revision/revision-actor-gate/trusted-label-does-not-trust-feedback")
+@pytest.mark.scenario("pr-revision/no-instruction-no-revision/empty-revise-refused")
+@pytest.mark.parametrize("empty", [False, True])
+def test_authorized_selection_uses_independent_author_trust(stage_setup, tmp_path, empty):
+    _, gh, commands = stage_setup
+    saved = read(tmp_path)
+    saved["consumed_feedback_ids"] = [f"{kind}:1" for kind in ("conversation", "inline", "review")]
+    specloop_job.save(receipt_path(tmp_path), saved)
+    for records in (gh.feedback, gh.reviews, gh.inline):
+        records.clear()
+        for i, (association, body) in enumerate([
+            ("OWNER", "Consumed instruction"), ("NONE", "Outsider instruction"),
+            (None, "Missing association"), ("MEMBER", queue.SELF_COMMENT_PREFIX + " Self comment"),
+            ("COLLABORATOR", "   "), ("MEMBER", "Historical actionable instruction"),
+        ], 1):
+            record = {"id": i, "user": {"login": "reviewer"}, "body": body,
+                      "created_at": "2026-10-19T12:00:00Z", "submitted_at": TIP_DATE,
+                      "path": "gate.py", "line": 12}
+            if association is not None:
+                record["author_association"] = association
+            if i != 6 or not empty:
+                records.append(record)
+    result, = poll(stage_setup, tmp_path)
+    receipt = read(tmp_path)
+    assert receipt["delivered"] and "agent:revise" not in gh.labels
+    selected = [] if empty else ["conversation:6", "review:6", "inline:6"]
+    assert receipt["feedback_ids"] == selected
+    assert receipt["consumed_feedback_ids"] == sorted(saved["consumed_feedback_ids"] + selected)
+    if empty:
+        assert result == {"outcome": "empty"} and not commands.calls
+        assert "nothing to revise" in gh.comments[0]["body"]
+        assert "no unconsumed review feedback" in gh.comments[0]["body"]
+        assert "branch tip" not in gh.comments[0]["body"]
+    else:
+        expected = ["**reviewer:**\n\nHistorical actionable instruction"] * 2 + [
+            "**reviewer on `gate.py:12`:**\n\nHistorical actionable instruction"]
+        assert receipt["feedback"] == expected
+        assert all(block in dispatched_feedback(commands) for block in expected)
+    assert not any("/commits/" in c[1] for c in gh.calls)
+
+
+@pytest.mark.scenario("pr-revision/worker-feedback-compatibility/worker-timestamp-cutoff-remains")
+@pytest.mark.parametrize("failure", [None, "view", "api", "list"])
+def test_worker_cutoff_and_best_effort_reads_remain_independent(failure):
+    from test_revise import PrGh
+
+    gh = PrGh(numbers=(8, 15, 9))
+    for hour in (11, 12, 13):
+        for association in ("MEMBER", "NONE", None):
+            item = {"body": f"Feedback at {hour}", "author": {"login": "reviewer"},
+                    "user": {"login": "reviewer"}, "path": "gate.py", "original_line": 12,
+                    "createdAt": f"2026-10-20T{hour}:00:00Z",
+                    "submittedAt": f"2026-10-20T{hour}:00:00Z",
+                    "created_at": f"2026-10-20T{hour}:00:00Z"}
+            if association:
+                item.update(authorAssociation=association, author_association=association)
+            gh.comments.append(item)
+            gh.reviews.append({**item, "state": "CHANGES_REQUESTED"})
+            gh.inline.append(item)
+
+    def github(args):
+        if failure and failure in args[:2]:
+            raise RuntimeError("read unavailable")
+        return gh(args)
+
+    expected = ["**reviewer:**\n\nFeedback at 13",
+                "**reviewer (changes requested):**\n\nFeedback at 13",
+                "**reviewer on `gate.py:12`:**\n\nFeedback at 13"]
+    expected = {None: expected, "view": expected[2:], "api": expected[:2], "list": []}[failure]
+    assert queue.pr_feedback("owner/sample", "spec/gate", TIP_DATE, runner=github) == expected
+    if failure not in ("list", "view"):
+        assert next(c for c in gh.calls if c[:2] == ["pr", "view"])[2] == "15"
+
+
 @pytest.mark.scenario("pr-revision/build-stage-revision/review-comments-become-tasks")
 @pytest.mark.scenario("pr-revision/consumption-based-eligibility/relabel-does-not-requeue-consumed-feedback")
 @pytest.mark.scenario("pr-revision/no-instruction-no-revision/empty-revise-refused")
