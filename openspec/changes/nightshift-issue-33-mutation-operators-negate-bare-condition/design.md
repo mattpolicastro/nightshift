@@ -16,13 +16,14 @@ No AGENTS.md exists in this checkout or its ancestor directories; README.md
 points to CLAUDE.md, which was read with the engine README and known limitations.
 
 Existing operators cannot mutate `if blocked:` or `return None`. The latter is
-usually the last statement in the immediate `if` suite. This change applies the
-requested same-block restriction literally: it adds condition coverage for that
-guard, while return dropping requires a later sibling statement.
+usually the last statement in the immediate `if` suite. Both new operators
+cover this guard: negating the condition reverses entry, while dropping the
+return lets execution continue after the enclosing `if`. The return must end
+a branch whose enclosing statement list continues after that `if`.
 
 ## Goals / Non-Goals
 
-Generate useful single-line mutants for bare Python conditions and nonterminal
+Generate useful single-line mutants for bare Python conditions and guard-clause
 returns, without changing sampling or evidence interpretation. Exercise the new
 behavior using complete source fixtures, temporary Git repositories and local
 verification stubs, independent of GitHub, launchd, Paseo or model services.
@@ -31,7 +32,7 @@ Do not change selection priorities, counts, seeds, scoring, classification,
 execution, concurrency, preparation, timeout budgets or evidence formats. Do not
 introduce configuration, a general control-flow graph, reachability analysis,
 multi-line mutants or new non-Python behavior. Arbitrary truthiness expressions
-and final returns are outside the new operators' eligibility.
+and returns outside the guard-clause rule are ineligible for the new operators.
 
 ## Decisions
 
@@ -79,15 +80,22 @@ headers and inline suites from this operator. Their existing operator candidates
 are unaffected. Do not infer control flow from string or comment contents or
 from non-Python files.
 
-### A droppable return has a later sibling in its immediate suite
+### A droppable return ends a guard branch with following code
 
-Use AST statement-list membership to determine whether an `ast.Return` has a
-following statement in the same immediate suite. Apply this rule inside normal
-and async functions, including nested branch, loop, exception-handler, `finally`
-and match-case suites. Another clause or an enclosing suite is not a later
-sibling; comments and blank lines are not statements. A later nested function
-definition is a sibling statement, but statements inside that definition are
-not siblings of the return.
+Use AST statement-list membership to find an `ast.Return` that is the last
+statement directly in an `if`, `elif` or `else` branch, and require a later
+statement after the owning `if` statement in its immediate enclosing statement
+list. The rule applies in normal and async functions, including guards inside
+nested branch, loop, exception-handler, `finally` and match-case suites. Earlier
+statements in the guard branch, such as `log(...)`, do not disqualify the return.
+
+Python represents an `elif` chain as nested `ast.If` nodes in `orelse`. Use the
+actual keyword tokens to associate `elif` branches and the final `else` with the
+chain's initial `if`; check for a following sibling after that whole statement.
+An ordinary nested `if` written inside an `else` remains a separate statement:
+it needs a following sibling in that `else` suite. Do not climb other enclosing
+suites looking for a continuation. Another clause, comments, blank lines or code
+inside a nested definition do not count as a following sibling statement.
 
 The return must occupy one physical line with only indentation before its
 `return` keyword and only whitespace or a trailing comment after its AST span.
@@ -97,21 +105,25 @@ with `pass`, retaining leading indentation and the exact trailing whitespace and
 comment. For example:
 
 ```python
-def choose(fallback):
-    return None  # short circuit
+def choose(blocked, fallback):
+    if blocked:
+        log("blocked")
+        return None  # short circuit
     return fallback
 ```
 
-The first return has a `drop-return` candidate whose replacement is
-`    pass  # short circuit`; the second has none. A bare `return` with a later
-sibling is handled the same way. The resulting source must compile. This is a
-syntactic rule, not a claim that the original later statement was reachable.
+The guard return has a `drop-return` candidate whose replacement is
+`        pass  # short circuit`; the final function return has none. A bare
+`return` ending the guard branch is handled the same way. The resulting source
+must compile. Removing the return allows control to reach `return fallback`;
+this also works when the guard return is the branch's only statement.
 
-In `if blocked: return None` written as a normal two-line suite, the return is
-the last statement of that `if` body even when the function continues after it.
-Do not drop it. Likewise, a following `else` or `finally` suite does not make a
-return nonterminal in its own suite. This conservative boundary is explicit so
-the implementation does not silently broaden the requested operator.
+Exclude returns followed by another statement in their own branch, returns
+directly in function/loop/try/handler/finally/match-case suites, and returns in
+branches of an `if` that is last in its enclosing statement list. A later outer
+statement does not qualify a return inside a different nested scope. This is a
+syntactic guard rule, without reachability analysis or a general control-flow
+graph. Existing operators on excluded return lines remain eligible.
 
 ### Tests establish behavior without changing the executor
 
@@ -124,19 +136,25 @@ one of the concurrent-work test files. Add scenario markers for the delta IDs.
   bounded fixtures to demonstrate changed branch/loop behavior. Add negative
   cases for unsupported forms and strings.
 - `test_early_return_is_dropped`: parameterize bare and expression returns with
-  later siblings, asserting `pass`, exact preserved formatting and compilability.
-  Demonstrate changed behavior, such as reaching a later return or side effect.
-  Add terminal, nested-suite, unchanged-context and unsupported-layout cases.
+  guard branches in `if`/`elif`/`else`, asserting `pass`, exact preserved formatting
+  and compilability. Cover a sole return and logging before the return; demonstrate
+  fall-through to a later return or side effect. Add normal/async functions,
+  nested guards, chain ownership, non-guard returns, same-branch following code,
+  unchanged committed context and unsupported-layout cases.
 - `test_gate_measures_a_guard_clause_change`: create base/head commits where the
   production diff adds only `if blocked:` and its indented `return None` before
-  an unchanged `return fallback`. Use a positive mutation budget and no matching
-  exclusions. Keep `gather`, Git diff/source loading, `generate`, selection and
+  an unchanged `return fallback`. Use a mutation budget of two and no matching
+  exclusions; each added line has exactly one candidate. Keep `gather`, Git
+  diff/source loading, `generate`, selection and
   `mutate` real. Stub only `verify.run_extracted` to load the private fixture
   source and check the function for blocked and unblocked inputs, returning
-  receipts from actual assertion outcomes. The baseline passes; condition
-  negation fails the behavioral assertions. Assert at least one generated
-  mutant, an empty skip reason, a killed result, measured evidence, score `1.0`
-  and matching persisted evidence. Do not stub `generate` or inject hand mutants.
+  receipts from actual assertion outcomes, using a non-`None` fallback. The
+  baseline passes; both condition negation and return dropping fail the behavioral
+  assertions independently. Assert exactly two generated mutants, one
+  `negate-condition` and one `drop-return` with exact before/after text on the
+  guard return line, both killed, an empty skip reason, measured evidence, score
+  `1.0` and matching persisted evidence for both mutants. Do not stub `generate`
+  or inject hand mutants; condition negation alone cannot satisfy this test.
 
 Keep the integration fixture's added lines free of existing operator matches,
 so it fails with the old generator. Exercise excluded paths/lines and committed
@@ -175,9 +193,10 @@ or `tests/test_specloop_spec_revision.py`.
 - Adding candidates changes the sampled population on affected diffs even with
   the same seed. Repeatability and spreading remain intact; historical mutant
   identities are not a compatibility guarantee when the operator set grows.
-- The same-block restriction excludes many common guard returns. The guard-only
-  regression proves condition coverage, not return-dropping coverage for every
-  early exit. Extending that boundary would require a separate scope decision.
+- The syntactic guard rule does not prove the continuation is reachable or
+  behaviorally different. It deliberately excludes non-guard early exits and
+  distinguishes `elif` chains from ordinary nested `if` statements; focused
+  ownership tests guard against accidental widening of the operator.
 - Negating a loop can produce nontermination. Existing timeout behavior remains
   responsible for it; generator tests use bounded loops and do not change budgets.
 - A dropped return may be equivalent, for example when later execution produces

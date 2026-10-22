@@ -1,6 +1,6 @@
 ## Purpose
 
-Extend Python mutation generation to cover bare conditions and nonterminal
+Extend Python mutation generation to cover bare conditions and guard-clause
 returns while retaining the existing source, exclusion and sampling contracts.
 
 ## ADDED Requirements
@@ -25,29 +25,35 @@ to other condition expressions, `elif`, inline suites or multiline headers.
 - **WHEN** source contains already-negated tests, comparisons, Boolean combinations, constants, attribute access, subscripts, calls, `elif`, inline suites or multiline headers
 - **THEN** these forms offer no `negate-condition` candidate and their existing operator eligibility remains unchanged
 
-### Requirement: Nonterminal return replacement
+### Requirement: Guard return replacement
 
-The generator SHALL offer `drop-return` for an eligible added, standalone,
-single-line `return` or `return <expr>` only with a later sibling in its immediate
-AST statement list. It SHALL replace the statement span with `pass`, preserving
-indentation, trailing whitespace, comments and line numbers. Other suites,
-comments and blank lines SHALL NOT establish eligibility. Unsupported layouts
-SHALL receive no `drop-return` candidate; existing operators SHALL remain eligible.
+For eligible added Python lines, the generator SHALL offer `drop-return` only
+for a standalone, single-line return ending an `if`, `elif` or `else` branch
+whose owning `if` has a later statement in its immediate enclosing list.
+It SHALL replace the complete return with `pass`, preserving indentation,
+trailing whitespace/comments and line numbers, and producing compilable source.
+Other operators SHALL retain their eligibility.
 
-#### Scenario: Bare and valued nonterminal returns are dropped
-- **WHEN** an added standalone `return` or `return <expr>` has a later sibling statement in its immediate suite, in a normal or async function
-- **THEN** it offers a `drop-return` candidate with `pass` replacing the complete return statement, exact indentation and trailing comment preservation, and compilable source that permits execution to continue to the next statement
+#### Scenario: Bare and valued guard returns are dropped
+- **WHEN** an added standalone `return` or `return <expr>` ends an `if`, `elif` or `else` branch in a normal or async function, and a statement follows the owning `if` in its enclosing statement list
+- **THEN** it offers a `drop-return` candidate with `pass` replacing the complete return statement, exact indentation and trailing whitespace/comment preservation, and compilable source that permits execution to continue after the guard
+- **THEN** a sole branch return and a return preceded by logging are both eligible
 
-#### Scenario: Terminal returns stay intact
-- **WHEN** a return is last in its immediate suite, including a sole guard-body return followed by outer function code or a return followed only by another clause, comments or blank lines
-- **THEN** it offers no `drop-return` candidate, even when other suites or enclosing scopes contain later statements
+#### Scenario: Non guard returns stay intact
+- **WHEN** a return has later statements in its own branch, belongs directly to a function or a non-conditional suite, or ends a branch whose owning `if` has no later statement in its immediate enclosing list
+- **THEN** it offers no `drop-return` candidate, including when only comments, blank lines, another clause or more distant outer-scope statements follow
 
-#### Scenario: Committed siblings determine return eligibility
-- **WHEN** only a return line is added and its later sibling is unchanged outside the diff hunk, while the worktree differs from the requested committed head
-- **THEN** eligibility follows the immediate statement list in the committed complete file, including nested suites, and neither worktree contents nor statements inside a different nested scope determine eligibility
+#### Scenario: Branch ownership determines continuation
+- **WHEN** returns end `elif` or final `else` branches in a chain followed by another statement, or end ordinary nested `if` branches inside an `else`
+- **THEN** chain branches use the continuation after the initial `if`, while an ordinary nested `if` requires its own following sibling inside the `else` suite
+- **THEN** guards nested in other suites qualify only with a following statement in that same enclosing suite; statements inside nested definitions or in a more distant outer scope do not supply continuation
+
+#### Scenario: Committed continuation determines return eligibility
+- **WHEN** only a guard return line is added and the owning `if` and following statement are unchanged outside the diff hunk, while the worktree differs from the requested committed head
+- **THEN** eligibility follows branch membership and continuation in the committed complete file, and only the added return line receives the new candidate
 
 #### Scenario: Unsupported return layouts are untouched
-- **WHEN** a nonterminal return shares a physical line with another statement, uses an inline suite, or spans multiple physical lines through parentheses, strings or explicit continuation
+- **WHEN** a guard return shares a physical line with another statement, uses an inline suite, or spans multiple physical lines through parentheses, strings or explicit continuation
 - **THEN** no `drop-return` candidate is offered and existing operator eligibility is preserved
 
 ### Requirement: Control flow candidate compatibility
@@ -74,13 +80,13 @@ Execution, equivalence, scoring and timeout requirements SHALL remain unchanged.
 
 ### Requirement: Guard clause diffs produce evidence
 
-With mutation enabled, a positive mutation count and no applicable exclusions,
-the gate SHALL generate at least one mutant for a Python diff adding only
-`if blocked:` and its indented `return None` before unchanged function code.
-The gate SHALL retain its existing execution and measurement rules for the
-generated candidates.
+With mutation enabled and no exclusions, a Python diff adding only `if blocked:`
+and its indented `return None` before unchanged function code SHALL offer both
+`negate-condition` and `drop-return`. A budget of at least two SHALL select both;
+a budget of one SHALL select one using existing seeded sampling without operator
+priority. Execution and measurement rules SHALL remain unchanged.
 
 #### Scenario: Guard only change is measured
-- **WHEN** a committed diff adds only the two guard lines before an unchanged `return fallback`, with the source under `mutation_paths` and passing baseline checks for blocked and unblocked inputs
-- **THEN** real generation yields at least one mutant through condition negation, no `no mutable lines added under mutation_paths` skip is reported, and checks that detect the negated behavior kill the mutant
-- **THEN** evidence is measured with score `1.0`, and persisted evidence contains the generated mutant and its killed result
+- **WHEN** a committed diff adds only the two guard lines before an unchanged `return fallback`, with a non-`None` fallback, the source under `mutation_paths`, a mutation budget of two, and passing baseline checks for blocked and unblocked inputs
+- **THEN** real generation yields both `negate-condition` and `drop-return`, the latter replacing the added `return None` with an equally indented `pass`, and checks against each separately mutated source kill both mutants
+- **THEN** no `no mutable lines added under mutation_paths` skip is reported, evidence is measured with score `1.0`, and persisted evidence contains both mutants and their killed results; condition negation alone does not satisfy the scenario
