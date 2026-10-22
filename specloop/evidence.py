@@ -3,9 +3,9 @@ and would they catch a plausible bug in the code it added?
 
 The mutation check uses single-line textual mutations (comparison, equality,
 boolean, arithmetic operators, integer literals) on lines the section added
-under `mutation_paths`, excluding Python docstrings and comments using committed
-source context. Each mutant is rebuilt and tested with the manifest's
-`mutation_steps` under the verify sandbox. A mutant
+under `mutation_paths`, excluding Python docstrings and comments and supported
+non-Python comment blocks using committed source context. Each mutant is rebuilt
+and tested with the manifest's `mutation_steps` under the verify sandbox. A mutant
 that does not compile is discarded, not counted. Equivalent mutants exist, so
 the threshold is below 1.
 
@@ -171,6 +171,35 @@ def _python_protected_spans(path: str, source: str) -> dict[int, list[tuple[int,
     return spans
 
 
+def _non_python_protected_spans(source: str) -> dict[int, list[tuple[int, int]]]:
+    """Protect only complete blocks with comment-only opening and closing lines.
+
+    This is line-level tracking, with no string or inline-comment parsing.
+    The existing prefix exclusions remain in added_lines.
+    """
+    source_lines = source.split("\n")
+    spans = {}
+    start = None
+    for line, text in enumerate(source_lines, 1):
+        stripped = text.lstrip()
+        if start is None:
+            if not stripped.startswith("/*"):
+                continue
+            start = line
+            end = stripped.find("*/", 2)
+        else:
+            end = stripped.find("*/")
+        if end == -1:
+            continue
+        # The first terminator ends tracking even when code follows it;
+        # a later comment-only terminator must not validate that mixed block.
+        if not stripped[end + 2:].strip():
+            for protected_line in range(start, line + 1):
+                spans[protected_line] = [(0, len(source_lines[protected_line - 1]))]
+        start = None
+    return spans
+
+
 def generate(lines: list[tuple[str, int, str]], count: int, seed: int, *,
              sources: dict[str, str],
              mutation_skip: tuple[str, ...] = ()) -> list[Mutant]:
@@ -180,7 +209,8 @@ def generate(lines: list[tuple[str, int, str]], count: int, seed: int, *,
     for path in dict.fromkeys(path for path, _, _ in lines):
         if path not in sources:
             raise ValueError(f"missing committed source for {path}")
-        protected[path] = _python_protected_spans(path, sources[path]) if _is_python(path) else {}
+        protected[path] = (_python_protected_spans(path, sources[path]) if _is_python(path)
+                           else _non_python_protected_spans(sources[path]))
     options = []
     for path, n, text in lines:
         if any(pattern in text for pattern in mutation_skip):

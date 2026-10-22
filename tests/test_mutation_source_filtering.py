@@ -1,4 +1,4 @@
-"""Full committed Python source determines mutation eligibility."""
+"""Full committed source determines mutation eligibility."""
 
 import json
 import textwrap
@@ -279,6 +279,7 @@ def test_exhausted_candidates_skip_execution_but_retain_coverage(
     assert saved["covered"] == ev.covered and saved["uncovered"] == ev.uncovered
 
 
+@pytest.mark.scenario("mutation-selection/prose-is-never-mutated/non-python-comment-lines-excluded")
 def test_added_lines_retains_non_python_prefix_and_declaration_exclusions():
     lines = ['# True 10', '// True 20', '/* True 30', '* True 40',
              'import module', 'from module import value', 'using X = Y;',
@@ -289,3 +290,116 @@ def test_added_lines_retains_non_python_prefix_and_declaration_exclusions():
     diff = '+++ b/src/example.py\n@@ -0,0 +1,10 @@\n' + ''.join('+' + line + '\n' for line in lines)
     assert evidence.added_lines(diff, M.mutation_paths) == [
         ('src/example.py', n, lines[n - 1]) for n in (1, 2, 3, 4, 10)]
+
+
+def non_python_added_lines(source, path):
+    diff = (f'+++ b/{path}\n@@ -0,0 +1,{len(source.splitlines())} @@\n'
+            + ''.join('+' + line + '\n' for line in source.splitlines()))
+    return evidence.added_lines(diff, M.mutation_paths)
+
+
+@pytest.mark.scenario("mutation-selection/prose-is-never-mutated/non-python-comment-lines-excluded")
+@pytest.mark.parametrize("suffix", ["cpp", "js", "ts", "jsx", "tsx", "css", "other"])
+def test_non_python_blocks_exclude_bare_prose_before_sampling(suffix):
+    path = f"src/example.{suffix}"
+    source = ('  # True 10\n'
+              '\t// False 20\n'
+              ' * True 30\n'
+              ' /* opening 40\n'
+              'bare prose 50 == 60 and False\n'
+              '\n'
+              'more prose 70 <= 80\n'
+              'closing prose 90 */ \t\n'
+              'value = 100;\n'
+              '/** one line 110 */\n'
+              'single = 115;\n'
+              '/* another block 120\n'
+              'bare prose 130\n'
+              ' */\n'
+              'limit = 140;\n')
+    lines = non_python_added_lines(source, path)
+    eligible = [(path, 9, 'value = 100;'), (path, 11, 'single = 115;'), (path, 15, 'limit = 140;')]
+    for seed in range(6):
+        for count in (1, 100):
+            mutants = evidence.generate(lines, count, seed, sources={path: source})
+            assert mutants == evidence.generate(eligible, count, seed, sources={path: source})
+            assert len(mutants) == min(count, 3)
+            for mut in mutants:
+                assert mut.before == source.splitlines()[mut.line - 1]
+                assert mut.after == {9: 'value = 101;', 11: 'single = 116;', 15: 'limit = 141;'}[mut.line]
+
+
+@pytest.mark.scenario("mutation-selection/prose-is-never-mutated/non-python-tracking-stays-line-level")
+@pytest.mark.parametrize("source, eligible_lines", [
+    ('value; // prose 10\n', {1}),
+    ('value; /* prose 10 */\n', {1}),
+    ('value /* prose 10 */;\n', {1}),
+    ('{/* prose 10 */}\n', {1}),
+    ('value; /* opening 10\nbare prose 20\n*/\n', {1, 2}),
+    ('/* opening 10\nbare prose 20\nvalue = 30;\n', {2, 3}),
+    ('/* opening 10\nbare prose 20\n*/ value = 30;\nvalue = 40;\n*/\n', {2, 4}),
+    ('/* opening 10\nbare prose 20\nclosing 30 */ value = 40;\n*/\n', {2, 3}),
+    ('/* prose 10 */ value = 20;\nvalue = 30;\n*/\n', {2}),
+    ('/* prose 10 */ /* second opening\nbare prose 20\n*/\n', {2}),
+    ('/* opening 10\nbare prose 20\n*/ // trailing comment 30\n*/\n', {2}),
+    ('value = "unterminated 10\npattern = / 20\ntext = ` ${ 30\n', {1, 2, 3}),
+])
+@pytest.mark.parametrize("path", ["src/example.cpp", "src/example.tsx"])
+def test_unsupported_non_python_forms_add_no_protected_range(source, eligible_lines, path):
+    lines = non_python_added_lines(source, path)
+    mutants = evidence.generate(lines, 100, 1, sources={path: source})
+    assert {mut.line for mut in mutants} == eligible_lines
+    # A subsequent supported block is still recognized after a terminated,
+    # rejected form. Keep the unmatched-opener fixture at EOF.
+    if '*/' in source:
+        following = source + '/* supported\nbare prose 50\n*/\nvalue = 60;\n'
+        mutants = evidence.generate(non_python_added_lines(following, path), 100, 1,
+                                    sources={path: following})
+        assert {mut.line for mut in mutants} == eligible_lines | {len(following.splitlines())}
+
+
+@pytest.mark.scenario("mutation-selection/prose-is-never-mutated/non-python-comment-lines-excluded")
+@pytest.mark.scenario("mutation-selection/committed-source-context/unchanged-context-determines-eligibility")
+@pytest.mark.parametrize("path", ["src/example.cpp", "src/example.ts"])
+@pytest.mark.parametrize("change_code", [False, True])
+def test_gather_uses_committed_block_boundaries_across_hunks(
+        committed_project, tmp_path, monkeypatch, path, change_code):
+    before = ('/* unchanged opening\n'
+              'first prose 10\n'
+              'unchanged prose\n'
+              'last prose 20\n'
+              '*/\n'
+              'value = 30;\n')
+    after = before.replace('prose 10', 'prose 11').replace('prose 20', 'prose 21')
+    if change_code:
+        after = after.replace('value = 30', 'value = 31')
+    repo, base, head = committed_project({path: before}, {path: after})
+    diff = seal.git(repo, "diff", "--unified=0", base, head).decode()
+    assert diff.count('@@ -') == (3 if change_code else 2)
+    assert '/*' not in diff and '*/' not in diff
+    # Local code occupies the committed prose lines, and a local block wraps
+    # the committed code line, so both directions of eligibility differ.
+    dirty = '\nfirst = 11;\n\nlast = 21;\n/*\nvalue = 31;\n*/\n'
+    (repo / path).parent.mkdir(parents=True)
+    (repo / path).write_text(dirty)
+    executed = []
+    forbid_execution(monkeypatch)
+
+    def mutate(source_repo, revision, mutants, effective, out):
+        assert source_repo == repo and revision == head and effective == M
+        executed.extend(mutants)
+        for mut in mutants:
+            mut.result = "killed"
+        return True
+
+    if change_code:
+        monkeypatch.setattr(evidence, "mutate", mutate)
+    ev = evidence.gather(repo, base, head, [], set(), M, tmp_path / "out", 1)
+    if change_code:
+        assert [(mut.path, mut.line, mut.before, mut.after) for mut in ev.mutants] == [
+            (path, 6, 'value = 31;', 'value = 32;')]
+        assert executed == ev.mutants and ev.score == 1.0
+    else:
+        assert ev.mutants == [] and ev.score is None
+        assert ev.skipped == "no mutable lines added under mutation_paths"
+    assert (repo / path).read_text() == dirty
