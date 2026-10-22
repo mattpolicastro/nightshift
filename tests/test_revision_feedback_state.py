@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -115,7 +116,11 @@ def test_saved_snapshot_precedes_dispatch_and_survives_restart(tmp_path, monkeyp
     ("consumed_feedback_ids", value) for value in (None, "review:1", [True], [1], [{}],
                                                  ["review:0"], ["unknown:1"], ["review:1"] * 2)
 ] + [("feedback_ids", None), ("feedback_ids", ["inline:1"]), ("feedback", "body"),
-     ("feedback", [1]), ("legacy_snapshot", "true")])
+     ("feedback", [1]), ("legacy_snapshot", "true")] + [
+    ("feedback_migration", value) for value in (None, {},
+        {"source": "file_mtime", "cutoff": "2026-10-20T10:00:00Z"},
+        {"source": "branch_tip"}, {"source": "receipt_saved_at", "cutoff": "invalid"})
+])
 def test_malformed_state_never_overwrites_or_dispatches(tmp_path, field, bad):
     path = tmp_path / "8.json"
     receipt = snapshot(path)
@@ -154,3 +159,169 @@ def test_missing_fields_legacy_snapshot_and_save_failure(tmp_path, monkeypatch):
             operation()
         assert path.read_bytes() == before
         assert receipt == read(path)
+
+
+SAVED = "pr-revision/feedback-state-compatibility/legacy-saved-time-initializes-consumption"
+TIP = "pr-revision/feedback-state-compatibility/legacy-missing-time-uses-tip-once"
+FAILURE = "pr-revision/feedback-state-compatibility/legacy-initialization-failure-preserves-receipt"
+CUTOFF = "2026-10-20T10:00:00Z"
+ENDPOINTS = ("issues/8/comments", "pulls/8/reviews", "pulls/8/comments")
+
+
+class LegacyGh:
+    def __init__(self):
+        self.calls = []
+        self.tip = CUTOFF
+        self.pages = {}
+        for endpoint in ENDPOINTS:
+            key = "submitted_at" if endpoint.endswith("reviews") else "created_at"
+            records = [{"id": i, "body": body, "user": {"login": "reviewer"},
+                        "author_association": "COLLABORATOR",
+                        key: stamp, "updated_at": "2026-10-25T00:00:00Z"}
+                       for i, (body, stamp) in enumerate([
+                           ("", "2026-10-20T09:59:59Z"),
+                           (queue.SELF_COMMENT_PREFIX, "2026-10-20T05:00:00-05:00"),
+                           ("Later", "2026-10-20T10:00:00.000001Z"),
+                       ], 1)]
+            # Malformed untrusted records must not affect the baseline.
+            records += [{"author_association": "NONE"}, {}]
+            self.pages[endpoint] = [[records[0]], [], records[1:]]
+
+    def __call__(self, args):
+        self.calls.append(args)
+        endpoint = args[1].removeprefix("repos/owner/sample/")
+        if endpoint.startswith("commits/"):
+            assert endpoint == "commits/current-head"
+            payload = {"commit": {"committer": {"date": self.tip}}}
+        else:
+            assert args[2:] == ["--paginate", "--slurp"]
+            payload = self.pages[endpoint]
+        if isinstance(payload, Exception):
+            raise payload
+        return json.dumps(payload)
+
+
+def legacy_receipt(path, **fields):
+    receipt = {"change": "example", "head": "old-head", "event": 7, "round_id": "7",
+               "feedback": ["Original saved payload"], "job": "saved-job",
+               "result": {"outcome": "drafted"}, "future": {"nested": [1]}, **fields}
+    intake._save(path, receipt)
+    return receipt
+
+
+def initialize(path, receipt, gh, head="current-head"):
+    return intake._initialize_revision_feedback(path, receipt, "owner/sample", 8, head, runner=gh)
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario(SAVED)
+@pytest.mark.scenario(TIP)
+@pytest.mark.parametrize("time_fields,source", [
+    ({"saved_at": "2026-10-20T12:00:00+02:00", "updated_at": "invalid"}, "receipt_saved_at"),
+    ({"updated_at": CUTOFF}, "receipt_saved_at"), ({}, "branch_tip"),
+])
+def test_legacy_baseline_is_inclusive_durable_and_uses_creation_time(tmp_path, time_fields, source):
+    path, gh = tmp_path / "8.json", LegacyGh()
+    receipt = legacy_receipt(path, **time_fields)
+    if source == "receipt_saved_at":
+        gh.tip = "2026-10-30T00:00:00Z"
+    migrated = initialize(path, receipt, gh)
+    assert read(path) == migrated  # Baseline is durable before callers can proceed.
+    assert all(migrated[key] == value for key, value in receipt.items())
+    assert migrated["feedback_state_version"] == 1
+    assert migrated["legacy_snapshot"] is True and "feedback_ids" not in migrated
+    assert migrated["feedback_migration"] == {"source": source, "cutoff": CUTOFF}
+    assert migrated["consumed_feedback_ids"] == sorted(
+        f"{kind}:{i}" for kind in ("conversation", "review", "inline") for i in (1, 2))
+    assert sum("/commits/" in call[1] for call in gh.calls) == (source == "branch_tip")
+    assert "feedback_state_version" not in receipt
+
+    gh.tip = "2026-11-01T00:00:00Z"
+    for pages in gh.pages.values():
+        pages[0][0]["body"] = "Edited into an instruction"
+        pages[2][0]["body"] = "Edited self-prefixed comment"
+    # Restart plus tip advance cannot reread or recompute an initialized ledger.
+    before, calls = path.read_bytes(), list(gh.calls)
+    restarted = initialize(path, read(path), gh, head="advanced-head")
+    assert path.read_bytes() == before and gh.calls == calls
+    next_round = snapshot(path, restarted, queue.pr_feedback_items("owner/sample", 8, runner=gh))
+    assert next_round["feedback_ids"] == ["conversation:3", "review:3", "inline:3"]
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario(FAILURE)
+@pytest.mark.parametrize("field", ["saved_at", "updated_at"])
+@pytest.mark.parametrize("bad", [None, "", True, 123, "not a date", "2026-10-20", "2026-10-20T10:00:00"])
+def test_present_invalid_saved_time_never_falls_back(tmp_path, field, bad):
+    path, gh = tmp_path / "8.json", LegacyGh()
+    receipt = legacy_receipt(path, **{field: bad})
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="revision timestamp"):
+        initialize(path, receipt, gh)
+    assert path.read_bytes() == before and receipt == read(path)
+    assert gh.calls == []
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario(FAILURE)
+@pytest.mark.parametrize("endpoint", ENDPOINTS)
+@pytest.mark.parametrize("failure", ["page", "shape", "missing_time", "naive_time", "invalid_time",
+                                    "missing_id", "bool_id", "invalid_id", "commit", "commit_time", "save"])
+def test_initialization_failure_preserves_receipt_and_retries(tmp_path, monkeypatch, endpoint, failure):
+    path, gh = tmp_path / "8.json", LegacyGh()
+    receipt = legacy_receipt(path)
+    before = path.read_bytes()
+    if failure in ("page", "shape"):
+        gh.pages[endpoint] = RuntimeError("page failed") if failure == "page" else [[{}], None]
+    else:
+        record = gh.pages[endpoint][2][1]  # Validate even records after the cutoff.
+        key = "submitted_at" if endpoint.endswith("reviews") else "created_at"
+        if failure == "missing_time":
+            record.pop(key)
+        elif failure in ("naive_time", "invalid_time"):
+            record[key] = "2026-10-20T10:00:00" if failure == "naive_time" else "bad"
+        elif failure == "missing_id":
+            record.pop("id")
+        elif failure in ("bool_id", "invalid_id"):
+            record["id"] = True if failure == "bool_id" else "3"
+    if failure == "commit_time":
+        gh.tip = None
+
+    def runner(args):
+        if failure == "commit" and "/commits/" in args[1]:
+            raise RuntimeError("commit read failed")
+        return gh(args)
+
+    def fail_replace(*args):
+        raise OSError("atomic replacement failed")
+
+    effects, errors = [], []
+
+    def process(number):
+        initialize(path, receipt, runner)
+        effects.append("dispatch or delivery")
+
+    with monkeypatch.context() as patch:
+        if failure == "save":
+            patch.setattr(Path, "replace", fail_replace)
+        assert intake._each([8], process, on_error=lambda n, e: errors.append((n, e))) == []
+    assert len(errors) == 1 and errors[0][0] == 8 and effects == []
+    assert isinstance(errors[0][1], (ValueError, RuntimeError, OSError))
+    assert path.read_bytes() == before and receipt == read(path)
+    assert initialize(path, read(path), LegacyGh())["feedback_state_version"] == 1
+
+
+@pytest.mark.scenario(FAILURE)
+@pytest.mark.parametrize("metadata", [
+    {"feedback_state_version": 1}, {"feedback_state_version": None},
+    {"consumed_feedback_ids": []}, {"feedback_ids": []},
+    {"legacy_snapshot": True}, {"feedback_migration": {}},
+])
+def test_partial_metadata_is_corrupt_not_legacy(tmp_path, metadata):
+    path, gh = tmp_path / "8.json", LegacyGh()
+    receipt = legacy_receipt(path, **metadata)
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="revision"):
+        initialize(path, receipt, gh)
+    assert path.read_bytes() == before and gh.calls == []
+    assert initialize(path, None, gh) is None and gh.calls == []

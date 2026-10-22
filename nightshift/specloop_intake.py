@@ -12,6 +12,7 @@ import re
 import subprocess
 import tomllib
 import uuid
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from urllib.parse import quote
@@ -364,6 +365,57 @@ def admit_pending(
                  on_error=on_error, on_pending=on_pending)
 
 
+def _revision_instant(value) -> datetime:
+    """Migration cutoffs require an explicit timezone, never local time."""
+    try:
+        instant = datetime.fromisoformat(value) if isinstance(value, str) else None
+        if instant is not None and instant.utcoffset() is not None:
+            return instant.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        pass
+    raise ValueError(f"invalid revision timestamp: {value!r}")
+
+
+def _initialize_revision_feedback(path: Path, receipt: dict | None, repo: str,
+                                  number: int, head: str, *, runner=queue._gh) -> dict | None:
+    """After authorization, initialize legacy state before collection or delivery.
+
+    `head` must be the current PR head, not the old receipt's head. Return a
+    durable copy; read/validation/save failures leave the caller's state intact.
+    No receipt means no legacy baseline. Initialized receipts never reread it.
+    """
+    if receipt is None:
+        return None
+    if not isinstance(receipt, dict):
+        raise ValueError("revision feedback receipt must be an object")
+    metadata = {"feedback_state_version", "consumed_feedback_ids", "feedback_ids",
+                "feedback_migration", "legacy_snapshot"}
+    if metadata.intersection(receipt):
+        _validate_revision_feedback(receipt)
+        return receipt
+    if "saved_at" in receipt or "updated_at" in receipt:
+        cutoff = _revision_instant(receipt["saved_at"] if "saved_at" in receipt
+                                   else receipt["updated_at"])
+        source = "receipt_saved_at"
+    else:
+        tip = json.loads(runner(["api", f"repos/{repo}/commits/{head}"]))
+        cutoff = _revision_instant(tip["commit"]["committer"]["date"])
+        source = "branch_tip"
+    consumed = set()
+    for kind, record in queue._pr_feedback_records(repo, number, runner=runner):
+        identity = queue._feedback_id(kind, record)
+        created = _revision_instant(record.get("submitted_at" if kind == "review" else "created_at"))
+        if created <= cutoff:
+            consumed.add(identity)
+    updated = {**receipt, "feedback_state_version": 1,
+               "consumed_feedback_ids": sorted(consumed), "legacy_snapshot": True,
+               "feedback_migration": {"source": source,
+                                      "cutoff": cutoff.isoformat().replace("+00:00", "Z")}}
+    _validate_revision_feedback(updated)
+    _save(path, updated)
+    return updated
+
+
 def _validate_revision_feedback(receipt: dict) -> None:
     """Validate an initialized ledger; legacy receipts must be migrated first."""
     if not isinstance(receipt, dict):
@@ -371,6 +423,12 @@ def _validate_revision_feedback(receipt: dict) -> None:
     version = receipt.get("feedback_state_version")
     if type(version) is not int or version != 1:
         raise ValueError("unsupported or missing revision feedback_state_version")
+    if "feedback_migration" in receipt:
+        migration = receipt["feedback_migration"]
+        if (not isinstance(migration, dict)
+                or migration.get("source") not in ("receipt_saved_at", "branch_tip")):
+            raise ValueError("invalid revision feedback_migration")
+        _revision_instant(migration.get("cutoff"))
     if "legacy_snapshot" in receipt and type(receipt["legacy_snapshot"]) is not bool:
         raise ValueError("invalid revision legacy_snapshot")
     legacy = receipt.get("legacy_snapshot", False)
