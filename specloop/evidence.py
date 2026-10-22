@@ -54,7 +54,7 @@ class Mutant:
     op: str
     before: str
     after: str
-    result: str = ""  # killed | survived | invalid | equivalent
+    result: str = ""  # killed | survived | timeout | invalid | equivalent
 
 
 @dataclass
@@ -89,21 +89,24 @@ class Evidence:
     def summary(self) -> str:
         lines = [f"section {self.section}: {len(self.covered)} scenario(s) covered"
                  + (f", UNCOVERED: {', '.join(self.uncovered)}" if self.uncovered else "")]
+        timeouts = sum(x.result == "timeout" for x in self.mutants)
         if self.score is not None:
-            valid = [x for x in self.mutants if x.result != "invalid"]
+            valid = [x for x in self.mutants if x.result in ("killed", "survived")]
             equivalent = sum(x.result == "equivalent" for x in self.mutants)
-            lines.append(f"mutation: {sum(x.result == 'killed' for x in valid if x.result != 'equivalent')}/"
-                         f"{len([x for x in valid if x.result != 'equivalent'])} caught"
+            lines.append(f"mutation: {sum(x.result == 'killed' for x in valid)}/{len(valid)} caught"
                          + (f" ({equivalent} marked equivalent)" if equivalent else ""))
             lines += [f"  survived: {x.path}:{x.line} {x.op}  `{x.after.strip()[:90]}`"
                       for x in self.mutants if x.result == "survived"]
         elif self.baseline_failed:
             lines.append("mutation: the unmutated head fails mutation_steps, so nothing could be measured")
         elif self.unmeasured:
+            outcomes = "invalid or timed out" if timeouts else "invalid"
             lines.append(f"mutation: none of the {len(self.mutants)} mutants could be judged (every one was "
-                         "invalid), so nothing was measured; check mutation_steps and any prepare steps")
+                         f"{outcomes}), so nothing was measured; check mutation_steps and any prepare steps")
         elif self.skipped:
             lines.append(f"mutation: skipped ({self.skipped})")
+        if timeouts:
+            lines.append(f"{timeouts} of {len(self.mutants)} mutants timed out and were not counted")
         return "\n".join(lines)
 
 
@@ -178,9 +181,13 @@ def _mutate_one(number: int, mut: Mutant, baseline_src: Path, head: str,
         f.write_text("".join(lines))
         f.chmod(mode)
         receipts = verify.run_extracted(src, head, steps, m, mutant_out)
-        failed = next((r.id for r in receipts if not r.passed), None)
+        failed = next((r for r in receipts if not r.passed), None)
         invalid_steps = set(BUILD_STEPS) | {s.id for s in m.prepare}
-        return "survived" if failed is None else "invalid" if failed in invalid_steps else "killed"
+        if failed is None:
+            return "survived"
+        if failed.id in invalid_steps:
+            return "invalid"
+        return "timeout" if failed.exit is None else "killed"
     finally:
         verify.cleanup(mutant_out)
 
