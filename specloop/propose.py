@@ -96,13 +96,18 @@ HUMAN_TASK = re.compile(
 BACKTICKED = re.compile(r"`([^`\s]+)`")
 
 
-def paths(text: str) -> set[str]:
-    """Repository file paths named in backticks, such as `tests/test_x.py` or `src/a.py::f`."""
+def paths(text: str, root: Path | None = None) -> set[str]:
+    """Backticked paths with optional `:f`/`::f`; bare names require a file in root."""
     found = set()
     for token in BACKTICKED.findall(text):
         path = token.split("::")[0].rstrip(":,.")
-        if ("/" in path and not path.startswith(("openspec/", "/", "~", "http"))
-                and re.search(r"\.\w+$|\*$", path)):
+        path = re.sub(r":[A-Za-z_][A-Za-z0-9_]*$", "", path)
+        if path.startswith(("openspec/", "/", "~", "http")):
+            continue
+        if "/" in path:
+            if re.search(r"\.\w+$|\*$", path):
+                found.add(path)
+        elif root is not None and (root / path).is_file():
             found.add(path)
     return found
 
@@ -139,7 +144,7 @@ def in_flight(source: Path, change: str) -> dict[str, list[str]]:
             text = git(d / "repo.git", "show", f"{m.branch}:openspec/changes/{m.change}/tasks.md").decode()
         except Exception:
             continue  # an unreadable run must not stop drafting
-        for path in paths(text):
+        for path in paths(text, root=root):
             planned.setdefault(path, []).append(d.name)
     return planned
 
