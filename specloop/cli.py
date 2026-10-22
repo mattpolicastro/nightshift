@@ -939,7 +939,21 @@ def status(args) -> int:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="specloop")
+    argv = list(sys.argv[1:] if argv is None else argv)
+    option_end = argv.index("--") if "--" in argv else len(argv)
+    json_errors = "--json" in argv[:option_end]
+
+    class ParseError(Exception):
+        pass
+
+    class ArgumentParser(argparse.ArgumentParser):
+        def error(self, message):
+            if json_errors:
+                raise ParseError(message)
+            super().error(message)
+
+    # argparse uses the parent's class for subparsers, sharing this error mode.
+    ap = ArgumentParser(prog="specloop")
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("admit")
     a.add_argument("manifest")
@@ -1006,7 +1020,11 @@ def main(argv=None) -> int:
     sv = sub.add_parser("serve")
     sv.add_argument("--poll", type=float, default=60)
     sv.add_argument("--once", action="store_true")
-    args = ap.parse_args(argv)
+    try:
+        args = ap.parse_args(argv)
+    except ParseError as e:
+        print(json.dumps({"version": 1, "error": str(e)}))
+        return 2
     command = {"admit": admit, "run": run_cmd, "status": status, "act": act, "resume": resume, "revise": revise,
             "accept": accept, "waive": waive, "abort": abort, "publish": publish, "finish": finish,
             "serve": serve_cmd, "propose": propose, "drill": drill_cmd, "pause": pause_cmd}[args.cmd]
