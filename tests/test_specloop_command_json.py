@@ -657,10 +657,12 @@ def test_revision_feedback_becomes_tasks(revision_run, tmp_path, capfd, json_mod
 
 
 @pytest.mark.scenario("pr-revision/build-stage-revision/review-comments-become-tasks")
+@pytest.mark.scenario("pr-revision/consumption-based-eligibility/relabel-does-not-requeue-consumed-feedback")
+@pytest.mark.real_trust
 def test_pr_comments_preserved_through_real_revision_cli(revision_run, tmp_path, capfd, monkeypatch):
     from nightshift import daemon
     from nightshift.config import Config, Repo
-    from test_specloop_spec_revision import RevisionGh, TIP_DATE
+    from test_specloop_spec_revision import RevisionGh, TIP_DATE, seed_consumed
 
     run, _ = revision_run
     gh = RevisionGh()
@@ -675,11 +677,11 @@ def test_pr_comments_preserved_through_real_revision_cli(revision_run, tmp_path,
         "Handle empty input.\n\n- [ ] Add coverage.\n## 99. This is still a comment.",
     ]
     gh.inline = [
-        {"user": {"login": "reviewer"}, "path": "src/gate.py", "line": 12,
+        {"id": 1, "author_association": "COLLABORATOR", "user": {"login": "reviewer"}, "path": "src/gate.py", "line": 12,
          "body": bodies[0], "created_at": "2026-10-20T13:00:00Z"},
-        {"user": {"login": "reviewer"}, "path": "tests/test_gate.py", "line": 42,
+        {"id": 2, "author_association": "COLLABORATOR", "user": {"login": "reviewer"}, "path": "tests/test_gate.py", "line": 42,
          "body": bodies[1], "created_at": "2026-10-20T14:00:00Z"},
-        {"user": {"login": "reviewer"}, "path": "old.py", "line": 1,
+        {"id": 3, "author_association": "COLLABORATOR", "user": {"login": "reviewer"}, "path": "old.py", "line": 1,
          "body": "Already addressed.", "created_at": TIP_DATE},
     ]
     calls = []
@@ -692,6 +694,7 @@ def test_pr_comments_preserved_through_real_revision_cli(revision_run, tmp_path,
         return subprocess.CompletedProcess(args, code, output.out, output.err)
 
     monkeypatch.setattr(daemon, "STATE_DIR", tmp_path / "intake")
+    seed_consumed(tmp_path / "intake", ("inline:3",))
     repo = Repo("owner/sample", engine="specloop", manifest=run.manifest_path)
     health = daemon.RepoHealth()
     for _ in range(2):
@@ -710,6 +713,12 @@ def test_pr_comments_preserved_through_real_revision_cli(revision_run, tmp_path,
     assert git(run.dir / "repo.git", "rev-parse", f"{head}^") == gh.head
     assert not gh.labels and len(gh.comments) == 1 and head in gh.comments[0]["body"]
     assert Run.for_change(CHANGE).state.status == "running"
+    gh.label_event("agent:revise", "labeled")
+    daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=run_cli)
+    assert not health.failures and not gh.labels
+    assert [args[1] for args in calls] == ["status", "revise"]
+    assert git(run.dir / "repo.git", "rev-parse", BRANCH) == head != gh.head
+    assert "no unconsumed review feedback" in gh.comments[-1]["body"]
 
 
 @pytest.mark.parametrize("feedback_text", [

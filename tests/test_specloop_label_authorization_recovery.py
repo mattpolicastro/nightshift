@@ -799,19 +799,19 @@ def test_revision_receipt_survives_untrusted_reapplication(repo, tmp_path, stage
     result, = revision_poll(repo, tmp_path, gh, module=restarted_intake(),
                             commands=commands, labels=labels)
     receipt = json.loads(path.read_text())
-    # Revision event IDs define rounds: a new application requests a new round,
-    # rather than delivering the older event's result as this event's work.
-    assert receipt["event"] == authorized_event != original["event"]
-    assert receipt["round_id"] == str(authorized_event) and receipt["delivered"]
+    # Finish the saved round before considering the newer authorized request.
+    assert receipt["event"] == original["event"] != authorized_event
+    assert receipt["round_id"] == original["round_id"] and receipt["delivered"]
     assert result["outcome"] == ("drafted" if stage == "spec-revision" else "revised")
-    dispatch = "propose" if stage == "spec-revision" else "revise"
-    assert sum(c[:2] == ["specloop", dispatch] for c in commands.calls) == 1
+    assert not any(c[0] == "specloop" for c in commands.calls)
     assert gh.comments[0] == rejection and len(gh.comments) == 2
-    assert labels.revise not in gh.labels
+    assert labels.revise in gh.labels
+    assert f"nightshift:revise:{receipt['change']}:{original['round_id']}" in gh.comments[-1]["body"]
     assert all((tmp_path / name).read_bytes() == data for name, data in snapshot.items()
                if name != path.relative_to(tmp_path))
     calls = commands.calls.copy()
-    assert revision_poll(repo, tmp_path, gh, labels=labels) == []
+    assert revision_poll(repo, tmp_path, gh, labels=labels) == [{"outcome": "empty"}]
+    assert labels.revise not in gh.labels
     assert commands.calls == calls
 
 

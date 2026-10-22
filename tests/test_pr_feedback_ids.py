@@ -99,26 +99,28 @@ def test_excluded_bodies_need_no_identity_but_remain_available_to_migration(body
     [[record(created_at="old")], [record(created_at="new")]],
 ])
 def test_failed_read_reaches_item_error_path_without_replacing_snapshot(
-    setup, tmp_path, monkeypatch, source, bad,
+    setup, tmp_path, source, bad,
 ):
-    # Adapt only the selection boundary until intake switches to IDs in its task.
     repo, gh, commands = setup
     reader = FeedbackGh()
     reader.pages[source] = bad
 
-    def feedback(repo, branch, since=None, **kwargs):
-        return [item.block for item in queue.pr_feedback_items(repo, kwargs["number"], runner=reader)]
+    def github(args):
+        if args[0] == "api" and args[1].removeprefix("repos/owner/sample/") in SOURCES:
+            return reader(args)
+        return gh(args)
 
-    monkeypatch.setattr(queue, "pr_feedback", feedback)
     path = tmp_path / "revisions" / "owner__sample" / "8.json"
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     snapshot = {"change": CHANGE, "event": "older", "feedback": ["Saved instructions"],
+                "feedback_state_version": 1,
                 "feedback_ids": ["conversation:42"], "consumed_feedback_ids": ["review:10"],
                 "result": {"outcome": "empty"}, "delivered": True}
     original = json.dumps(snapshot)
     path.write_text(original)
     errors = []
-    assert poll(setup, tmp_path, on_error=lambda number, error: errors.append((number, error))) == []
+    assert poll((repo, github, commands), tmp_path,
+                on_error=lambda number, error: errors.append((number, error))) == []
     assert len(errors) == 1 and errors[0][0] == 8
     assert isinstance(errors[0][1], (ValueError, RuntimeError))
     assert reader.calls  # Authorization succeeded and the strict read was attempted.

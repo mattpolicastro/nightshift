@@ -523,31 +523,36 @@ def revise_pending(
         directory = repo.name.replace("/", "__")
         path = state_dir / "revisions" / directory / f"{number}.json"
         receipt = json.loads(path.read_text()) if path.exists() else None
+        receipt = _initialize_revision_feedback(
+            path, receipt, repo.name, number, pr["headRefOid"], runner=gh)
         if receipt and not _collect(path, receipt, receipt.get("command", "propose")):
             return _PENDING
-        if receipt and (receipt["change"] != change or receipt["event"] != event
-                        or "result" not in receipt
-                        or (receipt.get("delivered")
-                            and receipt["result"]["outcome"] in ("needs_input", "rejected", "refused"))):
+        previous = receipt
+        awaiting_success = (receipt and not receipt.get("delivered")
+                            and receipt.get("result", {}).get("outcome") in ("drafted", "revised"))
+        if receipt and not awaiting_success and (
+                receipt["change"] != change or receipt["event"] != event or "result" not in receipt
+                or (receipt.get("delivered")
+                    and receipt["result"]["outcome"] in ("needs_input", "rejected", "refused"))):
             receipt = None
         git = partial(_bounded_run, runner=git_runner)
         if receipt is None or receipt["result"]["outcome"] in ("needs_input", "rejected", "refused"):
-            tip = json.loads(gh(["api", f"repos/{repo.name}/commits/{pr['headRefOid']}"]))
-            since = tip["commit"]["committer"]["date"]
-            if not since:
-                raise RuntimeError("could not read the PR branch tip date")
-            feedback = queue.pr_feedback(repo.name, branch, since, runner=gh, strict=True, number=number)
-            feedback = [block for block in feedback if queue.has_instructions([block])]
+            items = queue.pr_feedback_items(repo.name, number, runner=gh)
+            consumed = set(previous["consumed_feedback_ids"]) if previous else set()
+            items = [item for item in items if item.id not in consumed]
+            feedback = [item.block for item in items]
             # The needs-human write may have landed despite a lost response,
             # leaving delivered unset. A reviewer answer after clearing the
             # label must retry drafting rather than replay the old questions.
-            if receipt and feedback != receipt["feedback"]:
+            if receipt and (feedback != receipt["feedback"]
+                            or [item.id for item in items] != receipt.get("feedback_ids")):
                 receipt = None
         if receipt is None:
             receipt = {"change": change, "head": pr["headRefOid"], "event": event,
                        "feedback": feedback, "round_id": str(event)}
             if not queue.has_instructions(feedback):
                 receipt["result"] = {"outcome": "empty"}
+                receipt = _save_revision_snapshot(path, previous, items, **receipt)
             else:
                 # Empty feedback needs no CLI call, including status. Only
                 # instructions require choosing between spec and build stages.
@@ -566,6 +571,7 @@ def revise_pending(
                     # Review bodies may contain Markdown separators or YAML
                     # document boundaries. JSON preserves each complete block.
                     feedback_path.write_text(json.dumps(feedback) + "\n")
+                    receipt = _save_revision_snapshot(path, previous, items, **receipt)
                     if not _start(path, receipt, [
                         "revise", change, "--feedback", str(feedback_path),
                         "--feedback-format", "json",
@@ -594,6 +600,7 @@ def revise_pending(
                            capture_output=True, text=True, check=False)
                 if head.returncode or head.stdout.strip() != pr["headRefOid"]:
                     raise RuntimeError(f"{branch} changed during revision; retry on the next poll")
+                receipt = _save_revision_snapshot(path, previous, items, **receipt)
                 if not _start(path, receipt, [
                     "propose", str(repo.manifest), "--change", change, "--branch", branch,
                     "--from-branch", fetched_ref,
@@ -611,14 +618,16 @@ def revise_pending(
             ], capture_output=True, text=True, check=False)
             if pushed.returncode:
                 raise DeliveryError(f"could not push {branch}: {pushed.stderr.strip()}")
+            _acknowledge_revision_feedback(path, receipt)
             body = (f"Revised the spec in {result['commit']} from this review feedback:\n\n"
                     + "\n\n---\n\n".join(receipt["feedback"]))
             if result.get("risks"):
                 body += "\n\nFeasibility risks:\n" + "\n".join(f"- {risk}" for risk in result["risks"])
         elif result["outcome"] == "revised":
+            _acknowledge_revision_feedback(path, receipt)
             body = f"Queued review tasks for {change} in {result['commit']}; the build has resumed."
         elif result["outcome"] == "empty":
-            body = "There is nothing to revise: no new review feedback since the branch tip."
+            body = "There is nothing to revise: no unconsumed review feedback is available."
         else:
             body = "Revision needs human input.\n\n" + "\n".join(
                 "- " + (json.dumps(item, ensure_ascii=False) if isinstance(item, dict) else item)
@@ -626,13 +635,16 @@ def revise_pending(
                 for item in result.get(field, [])
             )
         _comment(repo.name, number, change, body, runner=gh, action="revise", kind="pr",
-                 round_id=receipt["round_id"])
+                 round_id=receipt.get("round_id"))
         edit = ["pr", "edit", str(number), "--repo", repo.name]
         if result["outcome"] in ("drafted", "revised", "empty"):
-            edit += ["--remove-label", labels.revise]
+            latest = _latest_label_events(repo.name, number, {labels.revise}, runner=gh)
+            if latest.get(labels.revise, {}).get("id") == receipt["event"]:
+                edit += ["--remove-label", labels.revise]
         else:
             edit += ["--add-label", labels.needs_human]
-        gh(edit)
+        if len(edit) > 5:
+            gh(edit)
         receipt["delivered"] = True
         _save(path, receipt)
         return result
