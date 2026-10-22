@@ -1,10 +1,11 @@
 """Evidence at a section boundary: did this section's tests cover its scenarios,
 and would they catch a plausible bug in the code it added?
 
-The mutation check is deliberately crude and language-agnostic: single-line
-textual mutations (comparison, equality, boolean, arithmetic operators, integer
-literals) on lines the section added under `mutation_paths`, each rebuilt and
-tested with the manifest's `mutation_steps` under the verify sandbox. A mutant
+The mutation check uses single-line textual mutations (comparison, equality,
+boolean, arithmetic operators, integer literals) on lines the section added
+under `mutation_paths`, excluding Python docstrings and comments using committed
+source context. Each mutant is rebuilt and tested with the manifest's
+`mutation_steps` under the verify sandbox. A mutant
 that does not compile is discarded, not counted. Equivalent mutants exist, so
 the threshold is below 1.
 
@@ -12,10 +13,13 @@ Hand-run on 2026-10-20 against the a sample module core, the same idea separated
 the inherited tests (13/15 planted bugs caught) from the phase-1 tests (15/15).
 """
 
+import ast
+import io
 import json
 import random
 import re
 import shutil
+import tokenize
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -42,6 +46,7 @@ OPERATORS = [
     ("int", re.compile(r"(?<![\w.])([0-9]+)(?![\w.])"), None),  # k -> k+1
 ]
 SKIP = re.compile(r"^\s*(#|//|/\*|\*|import |from |using |template|static_assert)")
+PYTHON_SKIP = re.compile(r"^\s*(import |from |using |template|static_assert)")
 # A human- or agent-written claim, judged by the reviewer, that mutating this
 # line cannot change behaviour. Such mutants are excluded from the score.
 EQUIVALENT = "mutation-equivalent:"
@@ -110,6 +115,10 @@ class Evidence:
         return "\n".join(lines)
 
 
+def _is_python(path: str) -> bool:
+    return Path(path).suffix in (".py", ".pyi")
+
+
 def added_lines(diff: str, paths: tuple[str, ...]) -> list[tuple[str, int, str]]:
     out, path, line = [], None, 0
     for raw in diff.splitlines():
@@ -120,7 +129,8 @@ def added_lines(diff: str, paths: tuple[str, ...]) -> list[tuple[str, int, str]]
         elif path is None:
             continue
         elif raw.startswith("+"):
-            if matches(path, paths) and not SKIP.match(raw[1:]) and raw[1:].strip():
+            skip = PYTHON_SKIP if _is_python(path) else SKIP
+            if matches(path, paths) and not skip.match(raw[1:]) and raw[1:].strip():
                 out.append((path, line, raw[1:]))
             line += 1
         elif not raw.startswith("-"):
@@ -128,14 +138,57 @@ def added_lines(diff: str, paths: tuple[str, ...]) -> list[tuple[str, int, str]]
     return out
 
 
+def _python_protected_spans(path: str, source: str) -> dict[int, list[tuple[int, int]]]:
+    """Map docstrings and comments to physical lines and character offsets."""
+    source_lines = source.split("\n")
+    spans: dict[int, list[tuple[int, int]]] = {}
+
+    def protect(start: tuple[int, int], end: tuple[int, int]) -> None:
+        for line in range(start[0], end[0] + 1):
+            left = start[1] if line == start[0] else 0
+            right = end[1] if line == end[0] else len(source_lines[line - 1])
+            spans.setdefault(line, []).append((left, right))
+
+    def character_column(line: int, byte_column: int) -> int:
+        # AST columns count UTF-8 bytes; tokenize and regex matches count characters.
+        return len(source_lines[line - 1].encode("utf-8")[:byte_column].decode("utf-8"))
+
+    try:
+        tree = ast.parse(source, filename=path)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                first = node.body[0] if node.body else None
+                if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                        and isinstance(first.value.value, str)):
+                    value = first.value
+                    protect((value.lineno, character_column(value.lineno, value.col_offset)),
+                            (value.end_lineno, character_column(value.end_lineno, value.end_col_offset)))
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.type == tokenize.COMMENT:
+                protect(token.start, token.end)
+    except (SyntaxError, ValueError, tokenize.TokenError) as exc:
+        raise ValueError(f"cannot analyze Python source {path}: {exc}") from exc
+    return spans
+
+
 def generate(lines: list[tuple[str, int, str]], count: int, seed: int, *,
+             sources: dict[str, str],
              mutation_skip: tuple[str, ...] = ()) -> list[Mutant]:
+    protected = {}
+    # Analyze each complete file before exclusions, so even an excluded line
+    # cannot turn a source-analysis failure into a successful skip.
+    for path in dict.fromkeys(path for path, _, _ in lines):
+        if path not in sources:
+            raise ValueError(f"missing committed source for {path}")
+        protected[path] = _python_protected_spans(path, sources[path]) if _is_python(path) else {}
     options = []
     for path, n, text in lines:
         if any(pattern in text for pattern in mutation_skip):
             continue
         for name, rx, repl in OPERATORS:
             for m in rx.finditer(text):
+                if any(m.start() < end and m.end() > start for start, end in protected[path].get(n, ())):
+                    continue
                 if name == "int":
                     new = text[:m.start()] + str(int(m.group(1)) + 1) + text[m.end():]
                 else:
@@ -242,8 +295,15 @@ def gather(repo: Path, base: str, head: str, section_scenarios: list[str], seen:
         ev.skipped = "section started before evidence was recorded"
     else:
         diff = git(repo, "diff", "--unified=0", base, head).decode(errors="replace")
-        ev.mutants = generate(added_lines(diff, m.mutation_paths), m.mutation_count, seed=section,
-                              mutation_skip=m.mutation_skip)
+        lines = added_lines(diff, m.mutation_paths)
+        sources = {}
+        for path in dict.fromkeys(path for path, _, _ in lines):
+            try:
+                sources[path] = git(repo, "show", f"{head}:{path}").decode()
+            except (RuntimeError, OSError, UnicodeError) as exc:
+                raise ValueError(f"cannot read committed source {path} at {head}: {exc}") from exc
+        ev.mutants = generate(lines, m.mutation_count, seed=section,
+                              sources=sources, mutation_skip=m.mutation_skip)
         if not ev.mutants:
             ev.skipped = "no mutable lines added under mutation_paths"
         else:

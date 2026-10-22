@@ -88,13 +88,14 @@ def test_mutation_skip_patterns_exclude_matching_lines(seed, count):
         "limit = 5 if x >= 2 else 3",
     ]
     lines = [("src/example.py", n, text) for n, text in enumerate(texts, 1)]
+    sources = {"src/example.py": "\n".join(texts) + "\n"}
     patterns = ("fontWeight", "padding", "cosmetic[0].*")
     # With no configuration every line is mutable, including the cosmetic ones.
-    assert {m.line for m in evidence.generate(lines, 20, seed)} == set(range(1, 7))
-    selected = evidence.generate(lines, count, seed, mutation_skip=patterns)
+    assert {m.line for m in evidence.generate(lines, 20, seed, sources=sources)} == set(range(1, 7))
+    selected = evidence.generate(lines, count, seed, sources=sources, mutation_skip=patterns)
     # The same seeded sample as removing the lines up front proves exclusions
     # neither consume the budget nor perturb the remaining candidates' order.
-    assert selected == evidence.generate(lines[3:], count, seed)
+    assert selected == evidence.generate(lines[3:], count, seed, sources=sources)
     assert len(selected) == min(count, 3)
     assert {m.line for m in selected} <= {4, 5, 6}
     assert all(m.before == texts[m.line - 1] for m in selected)
@@ -117,6 +118,8 @@ def test_gather_applies_manifest_mutation_skip(tmp_path, monkeypatch, skip_all):
 
     def git(repo, *args):
         assert repo == tmp_path
+        if args == ("show", "head:src/example.py"):
+            return b"fontWeight = 600\nenabled = True  # padding\nlimit = 5\n"
         assert args == ("diff", "--unified=0", "base", "head")
         return diff
 

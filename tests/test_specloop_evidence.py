@@ -195,7 +195,14 @@ def test_timeout_results_match_serial_despite_parallel_completion_order(tmp_path
     prepare = (manifest.Step("dependencies", ("/bin/sh", "-c", "true")),) if prepared else ()
     checks = tuple(manifest.Step(name, ("/bin/sh", "-c", "true")) for name in ("build", "check"))
     m = replace(M, prepare=prepare, verify=checks, mutation_steps=("build", "check"))
-    monkeypatch.setattr(evidence, "git", lambda *args: b"+++ b/calc.py\n@@ -0,0 +1 @@\n+x = 1\n")
+
+    def git(repo, *args):
+        if args == ("show", "head:calc.py"):
+            return code.encode()
+        assert args == ("diff", "--unified=0", "base", "head")
+        return b"+++ b/calc.py\n@@ -0,0 +1 @@\n+x = 1\n"
+
+    monkeypatch.setattr(evidence, "git", git)
     monkeypatch.setattr(evidence, "generate", lambda *args, **kwargs: [replace(mut) for mut in selected])
 
     def baseline(repo, head, steps, run_m, out):
@@ -276,13 +283,16 @@ def test_added_lines_tracks_new_line_numbers_and_paths():
     diff = ("+++ b/calc.py\n@@ -0,0 +1,3 @@\n+def f(x):\n+    # note\n+    return x < 1\n"
             "+++ b/tests/t.py\n@@ -0,0 +1 @@\n+assert f(0)\n")
     lines = evidence.added_lines(diff, ("calc.py",))
-    assert lines == [("calc.py", 1, "def f(x):"), ("calc.py", 3, "    return x < 1")]
+    # Python comments need full-source span analysis, not diff-prefix filtering.
+    assert lines == [("calc.py", 1, "def f(x):"), ("calc.py", 2, "    # note"),
+                     ("calc.py", 3, "    return x < 1")]
 
 
 def test_generate_is_deterministic_and_one_mutant_per_line():
-    lines = [("a.py", 1, "if x < lo and y > 2:"), ("a.py", 2, "return a + b")]
-    first = evidence.generate(lines, 5, seed=1)
-    assert [(m.line, m.op) for m in first] == [(m.line, m.op) for m in evidence.generate(lines, 5, seed=1)]
+    source = "def f(x, lo, y, a, b):\n    if x < lo and y > 2:\n        return a + b\n"
+    lines = [("a.py", n, text) for n, text in enumerate(source.splitlines(), 1)][1:]
+    first = evidence.generate(lines, 5, seed=1, sources={"a.py": source})
+    assert first == evidence.generate(lines, 5, seed=1, sources={"a.py": source})
     assert len({m.line for m in first}) == len(first) == 2
 
 
@@ -498,7 +508,8 @@ def test_mutant_timeout_is_recorded_not_killed(tmp_path, monkeypatch, prepared, 
     selected += [evidence.Mutant("calc.py", 2, "mismatch", "wrong original", "unused"),
                  evidence.Mutant("calc.py", 7, "True", code.splitlines()[6], "unused = False")]
 
-    def generate(lines, count, seed, *, mutation_skip):
+    def generate(lines, count, seed, *, sources, mutation_skip):
+        assert sources == {"calc.py": code}
         assert mutation_skip == ()
         assert ("calc.py", 2, before) in lines and seed == 1
         return [replace(mut) for mut in selected]
@@ -1024,7 +1035,8 @@ def test_parallel_mutants_match_serial_results(tmp_path, monkeypatch, prepared, 
 
     # Fix selection to include failures and nonexecuting mutants, but exercise
     # gather, the real dispatcher, private workers, and real command receipts.
-    def generate(lines, count, seed, *, mutation_skip):
+    def generate(lines, count, seed, *, sources, mutation_skip):
+        assert sources == {"calc.py": code}
         assert mutation_skip == ()
         assert ("calc.py", 2, before) in lines and seed == 1
         return [replace(mut) for mut in selected]
