@@ -277,9 +277,11 @@ def test_publication_recovers_through_cli_json(setup, tmp_path, monkeypatch, cap
     run.state.pr = gh.pr_url
     run.pause("ready_to_publish", detail=DETAIL)
     monkeypatch.setattr(cli, "_ctx", lambda run: SimpleNamespace(
-        repo=tmp_path, ref=f"refs/heads/spec/{CHANGE}", head=lambda: HEAD, pause=run.pause,
+        repo=tmp_path, ref=f"refs/heads/spec/{CHANGE}", head=lambda: HEAD, pause=run.pause, run=run,
     ))
     monkeypatch.setattr(cli, "_remote", lambda ctx: "test-origin")
+    # The state-only transport fixture has an unchanged base; exercise push recovery.
+    monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: HEAD)
     monkeypatch.setattr(cli, "_gh", lambda *args: pytest.fail("must reuse the adopted PR"))
     pushes = []
     unavailable = True

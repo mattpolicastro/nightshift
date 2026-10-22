@@ -38,6 +38,10 @@ def env(tmp_path, monkeypatch):
     sh(tmp_path, "git", "init", "-q", "-b", "spec/c", str(src))
     sh(src, "git", "add", "-A")
     sh(src, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+    origin = tmp_path / "origin.git"
+    sh(tmp_path, "git", "init", "-q", "--bare", str(origin))
+    sh(src, "git", "remote", "add", "origin", str(origin))
+    sh(src, "git", "push", "-q", "origin", "HEAD:refs/heads/main")
     data = {
         "run": {"repo": str(src), "change": "c", "branch": "spec/c"},
         "roles": {"implement": "p", "review": "p"},
@@ -321,6 +325,8 @@ def test_publish_then_finish(env, monkeypatch, tmp_path):
     assert run.state.pause.reason == "ready_to_publish"
     github = tmp_path / "github.git"
     subprocess.run(["git", "init", "-q", "--bare", str(github)], check=True)
+    # Publish now fetches the PR base from this separate publication remote.
+    sh(src, "git", "push", "-q", str(github), "HEAD:refs/heads/main")
     calls = []
 
     def gh(*args):

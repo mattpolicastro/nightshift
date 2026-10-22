@@ -67,6 +67,9 @@ class RunState:
     strengthen_rounds: dict[str, int] = field(default_factory=dict)
     evidence_summary: dict[str, str] = field(default_factory=dict)
     evidence_scores: dict[str, float] = field(default_factory=dict)  # section -> score before strengthening
+    # Integration intent/verification: base, previous_head, merged_head,
+    # verified_head, receipts, retry_verify. Keep base for evidence attribution.
+    base_sync: dict = field(default_factory=dict)
 
     def task(self, key: str) -> TaskState:
         return self.tasks.setdefault(key, TaskState())
@@ -130,7 +133,7 @@ class Run:
                         raw.get("coverage_rounds", 0), raw.get("acceptance_rounds", 0), raw.get("pr", ""),
                         raw.get("exhausted", {}), raw.get("section_base", {}), raw.get("evidenced", []),
                         raw.get("strengthen_rounds", {}), raw.get("evidence_summary", {}),
-                        raw.get("evidence_scores", {}))
+                        raw.get("evidence_scores", {}), raw.get("base_sync", {}))
 
     def save(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
