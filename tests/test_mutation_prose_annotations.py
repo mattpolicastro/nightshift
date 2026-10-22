@@ -125,7 +125,7 @@ def annotated_code(request):
     condition = "    if value < lower:"
     annotated = (condition + "  " + annotation if request.param == "inline"
                  else "    " + annotation + "\n" + condition)
-    return "def clamp(value, lower):\n" + annotated + "\n        return lower\n    return value\n"
+    return "def clamp(value, lower):\n" + annotated + "\n        return lower\n    else:\n        return value\n"
 
 
 @pytest.mark.scenario("mutation-selection/prose-equivalence-annotations-removed/real-code-annotations-retained")
