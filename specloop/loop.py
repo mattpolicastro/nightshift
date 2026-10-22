@@ -378,6 +378,40 @@ def _seen_scenarios(ctx: Ctx, head: str, out: Path) -> tuple[bool, set[str], lis
     return verify.ok(receipts, ctx.m.prepare + ctx.m.verify), seen, receipts
 
 
+def _evidence_base(ctx: Ctx, section: int, head: str) -> str | None:
+    """Compare against earlier sections plus integrated base content; never move refs.
+
+    An empty baseline preserves gather's legacy skip. None means construction
+    failed and the evidence gate has paused before generating any mutants.
+    """
+    st = ctx.run.state
+    start = st.section_base.get(str(section), "")
+    base = st.base_sync.get("base", "")
+    if not start or not base:
+        return start
+    out = ctx.run.dir / "gates" / f"section-{section}-{st.strengthen_rounds.get(str(section), 0)}"
+    diagnostic = {"section_base": start, "integrated_base": base, "head": head}
+    try:
+        if not _is_ancestor(ctx.repo, base, head) or _is_ancestor(ctx.repo, base, start):
+            return start
+        comparison = _merge_commits(ctx.repo, start, base)
+        diagnostic["comparison_base"] = comparison
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        diagnostic["error"] = str(exc)
+        if isinstance(exc, _MergeConflict):
+            diagnostic["paths"] = exc.paths
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "comparison-base.json").write_text(json.dumps(diagnostic, indent=2))
+        ctx.pause("gate_evidence", key=f"section:{section}",
+                  detail=f"could not construct section comparison baseline: section base {start}, "
+                  f"integrated base {base}, head {head}\n"
+                  + "\n".join(diagnostic.get("paths", [])) + f"\n{exc}\nDiagnostics: {out}")
+        return None
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "comparison-base.json").write_text(json.dumps(diagnostic, indent=2))
+    return comparison
+
+
 def section_evidence(ctx: Ctx, n: int, head: str, all_tasks: list[tasks.Task]) -> bool:
     """Coverage and mutation evidence for a finished section.
 
@@ -392,7 +426,10 @@ def section_evidence(ctx: Ctx, n: int, head: str, all_tasks: list[tasks.Task]) -
     cited = sorted({s for t in all_tasks if t.section == n for s in t.known_scenarios(known)})
     if not m.coverage_step:
         seen = set(cited)
-    ev = evidence.gather(ctx.repo, st.section_base.get(str(n), ""), head, cited, seen, m, out, n)
+    base = _evidence_base(ctx, n, head)
+    if base is None:
+        return False
+    ev = evidence.gather(ctx.repo, base, head, cited, seen, m, out, n)
     summary = ev.summary()
     ctx.run.event("evidence", section=n, passed=ev.passed(m.mutation_min), score=ev.score,
                   timeouts=sum(x.result == "timeout" for x in ev.mutants),
