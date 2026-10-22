@@ -510,7 +510,11 @@ def poll_specloop(cfg: Config, health: RepoHealth, *, runner=None, specloop_runn
     def gh(args):
         check_running()
         with queue.gh_guard(check_running):
-            return (runner or queue._gh)(args)
+            result = (runner or queue._gh)(args)
+        # A dispatched write may finish during pause. Keep its receipt pending
+        # even when this was the final label/comment operation in delivery.
+        check_running()
+        return result
 
     specloop_job.reap()
     cli = guarded(specloop_runner or subprocess.run)

@@ -107,6 +107,7 @@ def paths(text: str) -> set[str]:
 
 
 # "Do not edit `tests/x.py`": overlap feedback itself makes drafters write this.
+# mutation-equivalent: {0,60} -> {1,60} preserves matches: word boundaries between the negation and edit/chang/touch/modif require at least one separator.
 NEGATED = re.compile(r"\b(?:do not|don't|never|without)\b(?:[^.;]|\.(?=\S)){0,60}?\b(?:edit|chang|touch|modif)"
                      r"|\bleave\b(?:[^.;]|\.(?=\S)){0,60}?\b(?:unchanged|untouched|alone|as is)\b", re.I)
 
