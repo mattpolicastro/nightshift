@@ -284,7 +284,10 @@ def _event_counts(row, reader):
     path, counts = row["events_path"], row["counts"]
     if path is None:
         return
-    pause, auto_resumes, certain = None, {}, True
+    pause, pause_line = None, None
+    # Only observed automatic infra recoveries consume this per-task allowance.
+    # Manual resumes reset attempt counters in the writer, not auto_resumes.
+    auto_resumes, recovery_certain = {}, True
 
     def increment(field, reason):
         counts[field][reason] = counts[field].get(reason, 0) + 1
@@ -295,14 +298,22 @@ def _event_counts(row, reader):
             return
         reason, task = pause["reason"], pause.get("task", "")
         scheduled = bool(pause.get("resume_at", 0))
-        human = not scheduled or resolution in ("resumed", "human_accept")
+        human, uncertainty = False, None
         if reason == "ready_to_publish" or resolution == "auto_resumed":
-            human = False
-        elif scheduled and not human:
-            if reason == "infra" and task and certain:
-                human = auto_resumes.get(task, 0) >= 2
-            elif reason not in ("infra", "usage_limit") or not certain:
-                row["warnings"].append(f"Unclassified scheduled pause ({reason}): {path}")
+            pass
+        elif resolution in ("resumed", "human_accept") or not scheduled:
+            human = True
+        elif reason == "infra" and not task:
+            pass  # The supervisor applies no recovery cap without a task.
+        elif not recovery_certain:
+            uncertainty = "broken event history; recovery allowance is uncertain"
+        elif reason == "infra":
+            human = auto_resumes.get(task, 0) >= 2
+        elif reason != "usage_limit":
+            uncertainty = "unknown scheduling policy"
+        if uncertainty:
+            row["warnings"].append(
+                f"Unclassified scheduled pause ({reason}): {path}:{pause_line}; {uncertainty}")
         if human:
             counts["human_pauses"] += 1
             increment("pauses_by_reason", reason)
@@ -332,7 +343,9 @@ def _event_counts(row, reader):
                     event = json.loads(raw.decode("utf-8"))
                     validate(event)
                 except (ValueError, OverflowError) as exc:
-                    certain = False
+                    # Invalidate before resolving: even an exhausted allowance
+                    # cannot be inferred through a gap in the recorded history.
+                    recovery_certain = False
                     resolve()
                     reader.error(path, exc, line)
                     continue
@@ -340,6 +353,7 @@ def _event_counts(row, reader):
                 if kind == "pause":
                     resolve()
                     pause = event
+                    pause_line = line
                 elif kind in ("resumed", "auto_resumed", "human_accept", "revised", "finished", "aborted"):
                     if kind == "resumed":
                         counts["manual_resumes"] += 1
@@ -362,7 +376,7 @@ def _event_counts(row, reader):
                record["result"].get("outcome") == "admitted" for record in row["records"]):
             reader.error(path, exc)
     except OSError as exc:
-        certain = False
+        recovery_certain = False
         reader.error(path, exc)
     resolve()
     for field in ("pauses_by_reason", "resumes_by_reason"):

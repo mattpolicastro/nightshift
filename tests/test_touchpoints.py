@@ -422,3 +422,115 @@ def test_missing_event_log_is_only_an_error_for_an_admitted_change(tmp_path):
     assert len(history["errors"]) == 1
     assert history["errors"][0]["path"].endswith("r-issue-8-feature/events.jsonl")
     assert history["changes"][0]["counts"]["total"] == 0
+
+
+@pytest.mark.scenario("touchpoint-report/automatic-pause-classification/automatic-recovery-and-exhausted-infra")
+def test_infra_allowance_is_per_task_and_survives_manual_resume(tmp_path):
+    intake_job(tmp_path, "proposals", "draft", "propose", "drafted")
+    infra = dict(event="pause", reason="infra", task="1", resume_at=10)
+    other = dict(infra, task="2")
+    path = event_log(tmp_path, [
+        infra, dict(event="auto_resumed", reason="infra", task="1"),
+        other, dict(event="auto_resumed"),  # Legacy resolution inherits task/reason.
+        infra, dict(event="auto_resumed"),
+        infra, dict(event="resumed", note=""), infra,
+        # Usage recoveries must not consume task 2's remaining infra allowance.
+        dict(event="pause", reason="usage_limit", task="2", resume_at=10),
+        dict(event="auto_resumed", reason="usage_limit", task="2"), other,
+        dict(event="pause", reason="usage_limit", task="2", resume_at=10),
+        dict(event="pause", reason="new unscheduled reason", resume_at=0),
+        dict(event="pause", reason="new scheduled reason", resume_at=10),
+    ])
+    history = collect_events(tmp_path, tmp_path / "runs")
+    assert not history["errors"]
+    row, = history["changes"]
+    counts = row["counts"]
+    assert counts["human_pauses"] == 3
+    assert counts["manual_resumes"] == 1 and counts["human_accepts"] == 0
+    assert counts["total"] == 4
+    assert counts["pauses_by_reason"] == {"infra": 2, "new unscheduled reason": 1}
+    assert counts["resumes_by_reason"] == {"infra": 1}
+    warning, = row["warnings"]
+    assert "Unclassified scheduled pause (new scheduled reason)" in warning
+    assert "unknown scheduling policy" in warning and f"{path}:15" in warning
+
+
+@pytest.mark.scenario("touchpoint-report/automatic-pause-classification/manual-resolution-establishes-a-human-wait")
+@pytest.mark.parametrize("reason", ["usage_limit", "future reason", "infra"])
+@pytest.mark.parametrize("resolution", ["resumed", "human_accept"])
+@pytest.mark.parametrize("task", ["1", ""])
+def test_manual_resolution_counts_scheduled_wait_once(tmp_path, reason, resolution, task):
+    intake_job(tmp_path, "proposals", "draft", "propose", "drafted")
+    event_log(tmp_path, [
+        dict(event="pause", reason=reason, task=task, resume_at=10),
+        dict(event=resolution),
+        dict(event="pause", reason="legacy"), dict(event="auto_resumed"),
+        dict(event="pause", reason="infra", resume_at=10),
+    ])
+    history = collect_events(tmp_path, tmp_path / "runs")
+    assert not history["errors"]
+    row, = history["changes"]
+    counts = row["counts"]
+    assert counts["human_pauses"] == 1 and counts["pauses_by_reason"] == {reason: 1}
+    assert counts["manual_resumes"] == (resolution == "resumed")
+    assert counts["human_accepts"] == (resolution == "human_accept")
+    assert counts["resumes_by_reason"] == ({reason: 1} if resolution == "resumed" else {})
+    assert counts["total"] == 2 and not row["warnings"]
+
+
+@pytest.mark.scenario("touchpoint-report/event-reason-attribution/broken-attribution-stays-explicit")
+@pytest.mark.parametrize("clearing", [None, "revised", "human_accept", "malformed"])
+def test_unpaired_resume_warns_with_unknown_reason(tmp_path, clearing):
+    intake_job(tmp_path, "proposals", "draft", "propose", "drafted")
+    events = [] if clearing is None else [dict(event="pause", reason="blocked")]
+    if clearing not in (None, "malformed"):
+        events.append(dict(event=clearing, commit="revision"))
+    path = event_log(tmp_path, events)
+    with path.open("a") as stream:
+        if clearing == "malformed":
+            stream.write('{"event":\n')
+        stream.write('{"event":"resumed","at":1}\n')
+    history = collect_events(tmp_path, tmp_path / "runs")
+    row, = history["changes"]
+    counts = row["counts"]
+    assert counts["manual_resumes"] == 1 and counts["resumes_by_reason"] == {"unknown": 1}
+    assert counts["human_pauses"] == (clearing is not None)
+    assert counts["human_accepts"] == (clearing == "human_accept")
+    assert counts["build_revisions"] == (clearing == "revised")
+    assert len(history["errors"]) == (clearing == "malformed")
+    warning, = row["warnings"]
+    assert "Unpaired manual resume; reason unknown" in warning
+    assert f"{path}:{1 if clearing is None else 3}" in warning
+
+
+@pytest.mark.scenario("touchpoint-report/event-reason-attribution/broken-attribution-stays-explicit")
+@pytest.mark.parametrize("bad", [b'{"event":', b'\xff',
+                                  b'{"event":"pause","at":true,"reason":"infra"}'])
+def test_broken_history_invalidates_infra_allowance_but_manual_resolution_counts(tmp_path, bad):
+    intake_job(tmp_path, "proposals", "draft", "propose", "drafted")
+    infra = dict(event="pause", reason="infra", task="1", resume_at=10)
+    automatic = dict(event="auto_resumed", reason="infra", task="1")
+    path = event_log(tmp_path, [infra, automatic, infra, automatic, infra])
+    with path.open("ab") as stream:
+        stream.write(bad + b"\n")
+        # Neither a manual intervention nor more automatic recoveries repairs
+        # missing history. Fresh paired manual resolution still establishes a wait.
+        for event in [dict(event="resumed"), infra, dict(event="human_accept"),
+                      infra, dict(event="resumed"),
+                      infra, automatic, infra, automatic, infra]:
+            stream.write((json.dumps(dict(at=1, **event)) + "\n").encode())
+    history = collect_events(tmp_path, tmp_path / "runs")
+    row, = history["changes"]
+    counts = row["counts"]
+    assert counts["human_pauses"] == 2 and counts["pauses_by_reason"] == {"infra": 2}
+    assert counts["manual_resumes"] == 2 and counts["resumes_by_reason"] == {"infra": 1, "unknown": 1}
+    assert counts["human_accepts"] == 1 and counts["total"] == 5
+    error, = history["errors"]
+    assert error["path"] == str(path) and error["line"] == 6
+    assert len(row["warnings"]) == 3
+    uncertain = [warning for warning in row["warnings"] if "Unclassified scheduled pause (infra)" in warning]
+    assert len(uncertain) == 2
+    assert all("broken event history; recovery allowance is uncertain" in warning for warning in uncertain)
+    assert any(f"{path}:5;" in warning for warning in uncertain)
+    assert any(f"{path}:16;" in warning for warning in uncertain)
+    assert any("Unpaired manual resume; reason unknown" in warning for warning in row["warnings"])
