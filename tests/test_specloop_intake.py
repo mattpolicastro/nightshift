@@ -863,13 +863,13 @@ def test_pr_closed_during_delivery_is_not_relabelled(repo, tmp_path, existing):
     with pytest.raises(RuntimeError, match="no longer open"):
         poll(repo, tmp_path, closed_during_delivery, commands)
     assert not calls(gh, "pr", "edit")
-    # New drafting authorizes the actor before dispatch. A closed PR still
-    # prevents any delivery comment reads or writes after that work finishes.
-    assert calls(gh, "api") == ([] if existing else [
+    # Both new drafting and existing-PR recovery authorize the actor. A closed
+    # PR still prevents any delivery comment reads or writes afterward.
+    assert calls(gh, "api") == [
         ["api", "repos/owner/sample/issues/7/events", "--paginate", "--slurp"],
         ["api", "repos/owner/sample"],
         ["api", "repos/owner/sample/collaborators/maintainer", "--include"],
-    ])
+    ]
     assert not calls(gh, "issue", "comment")
     assert gh.labels == {"spec:draft"}
 

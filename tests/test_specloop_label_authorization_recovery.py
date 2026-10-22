@@ -1,18 +1,24 @@
 """Shared label authorization and rejection recovery at injected GitHub boundaries.
 
-Stage-specific placement of the gate is covered by the intake integration tasks.
-Here the real selection, membership, authorization and per-item loop run together.
+Includes proposal receipt, durable job and open-PR delivery recovery through
+the production entry point, selection, membership and per-item loop.
 """
 
 import importlib.util
 import json
+import os
 import subprocess
+from contextlib import ExitStack
 from copy import deepcopy
 from functools import partial
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from nightshift import queue, specloop_intake
+from test_engine_routing import DraftGh
+from test_specloop_intake import BlockedDraftGh, Commands, idea_file, repo
 
 
 pytestmark = pytest.mark.real_trust
@@ -20,6 +26,8 @@ REPO = "owner/sample"
 REPEATED = "issue-intake/rejection-comment-idempotency/repeated-rejection-comments-once"
 LOST = "issue-intake/rejection-comment-idempotency/lost-comment-response-reconciled"
 NEW = "issue-intake/rejection-comment-idempotency/new-rejection-has-separate-explanation"
+RECEIPT = "issue-intake/authorization-preserves-intake-recovery/receipt-cannot-bypass-authorization"
+TRUSTED = "issue-intake/latest-label-actor-authorization/trusted-reapplication-recovers"
 
 
 class GitHub:
@@ -356,3 +364,212 @@ def test_real_gh_failed_comment_lookup_prevents_blind_post(monkeypatch, failure)
     assert poll(gh, module=restarted_intake(), work=work) == []
     assert len(gh.comments[7]) == 2 and len(gh.writes) == 1
     assert work == [8]
+
+
+def forbidden_recovery_work(*args, **kwargs):
+    pytest.fail("recovery must not dispatch work or report rejection as pending/error")
+
+
+def proposal_poll(repo, state, gh, *, module=specloop_intake, git_runner=forbidden_recovery_work):
+    return module.propose_pending(
+        repo, queue.Labels(), state, runner=gh, specloop_runner=forbidden_recovery_work,
+        git_runner=git_runner, launcher=forbidden_recovery_work,
+        on_error=forbidden_recovery_work, on_pending=forbidden_recovery_work,
+    )
+
+
+def files_under(path):
+    return {p.relative_to(path): p.read_bytes() for p in path.rglob("*") if p.is_file()}
+
+
+def reapply(gh, label, actor):
+    gh.label_event(label, "unlabeled", actor)
+    gh.label_event(label, "labeled", actor)
+
+
+def assert_rejection_only(gh, original_comments, label):
+    assert gh.comments[:-1] == original_comments
+    body = gh.comments[-1]["body"]
+    assert body.startswith(queue.SELF_COMMENT_PREFIX)
+    assert f"`{label}`" in body and "`outsider`" in body
+    assert all(association in body for association in queue.TRUSTED_ASSOCIATIONS)
+    assert "trusted actor" in body and "remove and reapply" in body
+    assert len([c for c in gh.calls if c[:2] == ["issue", "comment"]]) == 1
+    assert not any("PATCH" in c or c[:2] in (
+        ["issue", "edit"], ["pr", "edit"], ["pr", "create"],
+    ) for c in gh.calls)
+
+
+@pytest.mark.scenario(RECEIPT)
+@pytest.mark.scenario(REPEATED)
+@pytest.mark.scenario(TRUSTED)
+@pytest.mark.parametrize("recovery", ["receipt", "legacy", "open-pr", "open-pr-with-receipt"])
+@pytest.mark.parametrize("armed,both", [("spec:draft", False), ("agent:ready", False),
+                                        ("agent:ready", True)])
+def test_proposal_recovery_requires_current_actor_and_preserves_completed_work(
+    repo, tmp_path, recovery, armed, both,
+):
+    gh, commands = BlockedDraftGh(armed, {6: "CLOSED"}), Commands()
+    if both:
+        gh.label_event("spec:draft", "labeled")
+    path = tmp_path / "proposals/owner__sample/7.json"
+    if recovery != "open-pr":
+        commands.push_fails = True
+        with pytest.raises(specloop_intake.DeliveryError, match="could not push"):
+            specloop_intake.propose_pending(
+                repo, queue.Labels(), tmp_path, runner=gh,
+                specloop_runner=commands, git_runner=commands,
+            )
+        if recovery == "legacy":
+            legacy = json.loads(path.read_text())
+            legacy.pop("round_id")
+            # Old receipts carry only integer application IDs, never actors.
+            assert legacy["drafting_events"] == {
+                event["label"]["name"]: event["id"] for event in gh.events
+            }
+            path.write_text(json.dumps(legacy))
+    if recovery.startswith("open-pr"):
+        gh.prs = [{"number": 8, "state": "OPEN", "headRefOid": "abc123", "isDraft": True}]
+    commands.push_fails = False
+    commands.calls.clear()
+    gh.calls.clear()
+    gh.blocker_reads.clear()
+    # Neither rejection nor trusted delivery may consult this dependency.
+    gh.states[6] = queue.GhError("blocker lookup unavailable", transient=True)
+    reapply(gh, armed, "outsider")
+    original_labels, original_comments = gh.labels.copy(), deepcopy(gh.comments)
+    original_prs, original_files = deepcopy(gh.prs), files_under(tmp_path)
+
+    for module in (specloop_intake, specloop_intake, restarted_intake()):
+        assert proposal_poll(repo, tmp_path, gh, module=module) == []
+        assert files_under(tmp_path) == original_files
+        assert gh.labels == original_labels and gh.prs == original_prs
+        assert gh.blocker_reads == []
+        assert_rejection_only(gh, original_comments, armed)
+    rejection = deepcopy(gh.comments[-1])
+    assert f"label-authorization-7:{gh.events[-1]['id']}" in rejection["body"]
+
+    reapply(gh, armed, "maintainer")
+    results = proposal_poll(repo, tmp_path, gh, module=restarted_intake(), git_runner=commands)
+    assert gh.comments[-2] == rejection
+    assert gh.pr_url in gh.comments[-1]["body"]
+    assert gh.labels == set() and len(gh.prs) == 1
+    assert gh.blocker_reads == []
+    assert [c[0] for c in commands.calls] == ([] if recovery.startswith("open-pr") else ["git"])
+    if recovery != "open-pr":
+        saved = json.loads(original_files[path.relative_to(tmp_path)])
+        assert results == [saved if recovery.startswith("open-pr") else {**saved, "delivered": True}]
+        assert json.loads(path.read_text()) == results[0]
+    else:
+        assert results == [] and not path.exists()
+    # Delivery cannot overwrite or replace an earlier invocation's idea file.
+    assert {p: data for p, data in files_under(tmp_path).items() if p != path.relative_to(tmp_path)} == {
+        p: data for p, data in original_files.items() if p != path.relative_to(tmp_path)
+    }
+    writes = deepcopy(gh.comments)
+    assert proposal_poll(repo, tmp_path, gh) == []
+    assert gh.comments == writes
+
+
+@pytest.mark.scenario(RECEIPT)
+@pytest.mark.scenario(REPEATED)
+@pytest.mark.scenario(TRUSTED)
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+def test_untrusted_reapplication_holds_running_and_finished_job_and_its_payload(
+    repo, tmp_path, monkeypatch, armed,
+):
+    gh, commands, launches, pending = BlockedDraftGh(armed, {6: "CLOSED"}), Commands(), [], []
+    path = tmp_path / "proposals/owner__sample/7.json"
+    job_module = specloop_intake.specloop_job
+    monkeypatch.setattr(job_module, "_children", {})
+    with ExitStack() as locks:
+        def launch(args, **kwargs):
+            launches.append(args)
+            # Retain the real lifetime lock as a detached worker would, without
+            # starting a subprocess. Collection and persistence remain real.
+            locks.callback(os.close, os.dup(kwargs["pass_fds"][0]))
+            return SimpleNamespace(poll=lambda: None)
+
+        assert specloop_intake.propose_pending(
+            repo, queue.Labels(), tmp_path, runner=gh, launcher=launch,
+            git_runner=forbidden_recovery_work, on_pending=pending.append,
+        ) == []
+        assert pending == [7] and len(launches) == 1
+        saved = json.loads(path.read_text())
+        directory = Path(launches[0][-2])
+        assert directory.name == saved["job"]
+        request = json.loads((directory / "request.json").read_text())
+        payload = idea_file(request["args"])
+        assert payload.read_text() == saved["idea"]
+        reapply(gh, armed, "outsider")
+        gh.states[6] = "OPEN"
+        gh.calls.clear()
+        gh.blocker_reads.clear()
+        original_comments, original_labels = deepcopy(gh.comments), gh.labels.copy()
+
+        for finished in (False, True):
+            if finished:
+                job_module.finalize(directory, {"result": commands.result})
+                locks.close()
+            snapshot = files_under(tmp_path)
+            for module in (specloop_intake, restarted_intake()):
+                assert proposal_poll(repo, tmp_path, gh, module=module) == []
+                assert files_under(tmp_path) == snapshot
+                assert gh.labels == original_labels and not gh.prs
+                assert_rejection_only(gh, original_comments, armed)
+            assert not (directory / "collected.json").exists()
+            assert path.read_text() == json.dumps(saved) + "\n"
+        rejection = deepcopy(gh.comments[-1])
+
+        reapply(gh, armed, "maintainer")
+        receipt, = proposal_poll(repo, tmp_path, gh, module=restarted_intake(), git_runner=commands)
+        assert receipt == {**saved, "result": commands.result, "delivered": True}
+        assert json.loads(path.read_text()) == receipt
+        assert (directory / "collected.json").is_file()
+        assert json.loads((directory / "request.json").read_text()) == request
+        assert payload.read_text() == saved["idea"]
+        assert len(launches) == 1 and [c[0] for c in commands.calls] == ["git"]
+        assert gh.blocker_reads == [] and gh.labels == set()
+        assert gh.comments[-2] == rejection and len(gh.prs) == 1
+        assert proposal_poll(repo, tmp_path, gh) == []
+
+
+@pytest.mark.scenario(RECEIPT)
+@pytest.mark.scenario(REPEATED)
+def test_rejected_open_pr_recovery_does_not_prevent_next_eligible_issue(repo, tmp_path):
+    gh, neighbor = BlockedDraftGh("spec:draft", {6: "OPEN"}), DraftGh(("spec:draft",))
+    gh.prs = [{"number": 8, "state": "OPEN", "headRefOid": "abc123"}]
+    reapply(gh, "spec:draft", "outsider")
+    original_comments = deepcopy(gh.comments)
+    branch = "spec/sample-issue-9-add-a-gate"
+    commands = Commands(branch=branch)
+
+    def github(args):
+        if args[:2] == ["issue", "list"]:
+            return json.dumps(json.loads(gh(args)) + [
+                {**item, "number": 9} for item in json.loads(neighbor(args))
+            ])
+        if (args[:3] in (["issue", "view", "9"], ["issue", "edit", "9"], ["issue", "comment", "9"])
+                or (args[0] == "api" and ("/issues/9/" in args[1] or args[1].endswith("/issues/9")))
+                or (args[:2] == ["pr", "list"] and branch in args)
+                or args[:2] in (["pr", "create"], ["pr", "edit"])
+                or (args[:2] == ["pr", "view"] and args[-1] == "state,url")):
+            # The shared fake models issue 7; route the independent issue's API
+            # identity lookup to that fixture as well as its paginated resources.
+            routed = [arg.replace("/issues/9", "/issues/7") for arg in args]
+            return neighbor(routed)
+        return gh(args)
+
+    for module in (specloop_intake, restarted_intake(), specloop_intake):
+        results = module.propose_pending(
+            repo, queue.Labels(), tmp_path, runner=github,
+            specloop_runner=commands, git_runner=commands, on_error=forbidden_recovery_work,
+        )
+        if results:
+            assert len(results) == 1 and results[0]["issue"] == 9 and results[0]["delivered"]
+        assert_rejection_only(gh, original_comments, "spec:draft")
+    assert [c[0] for c in commands.calls] == ["specloop", "git"]
+    assert neighbor.labels == set() and len(neighbor.prs) == 1
+    assert json.loads((tmp_path / "proposals/owner__sample/9.json").read_text())["delivered"]
+    assert not (tmp_path / "proposals/owner__sample/7.json").exists()
+    assert gh.labels == {"spec:draft"} and gh.blocker_reads == []

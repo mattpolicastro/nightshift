@@ -127,6 +127,24 @@ look like an absent label or an empty set of comments.
         slug = re.sub(r"[^a-z0-9]+", "-", raw["title"].lower()).strip("-")[:40].rstrip("-")
         change = f"{repo.name.split('/')[-1]}-issue-{number}-{slug or 'issue'}"
         receipt = json.loads(path.read_text()) if path.exists() else None
+        drafting_labels = current.intersection((labels.ready, labels.spec_draft))
+        selected_events = None
+        drafting_events = None
+        authorized = False
+
+        def authorize():
+            nonlocal selected_events, drafting_events, authorized
+            if selected_events is None:
+                selected_events = _latest_label_events(repo.name, number, drafting_labels, runner=gh)
+                drafting_events = {label: event["id"] for label, event in selected_events.items()}
+            if not authorized:
+                authorized = _authorize_label_events(repo.name, number, selected_events, runner=gh)
+            return authorized
+
+        # Collection can write the receipt and job records. Hold both intact
+        # on denial, without cancelling the worker or consulting blockers.
+        if receipt and "job" in receipt and "result" not in receipt and not authorize():
+            return None
         if receipt and not _collect(path, receipt, "propose"):
             return _PENDING
         if receipt and "result" not in receipt:
@@ -139,15 +157,13 @@ look like an absent label or an empty set of comments.
         issue_input = "\n\n".join([
             *idea_parts, *(body for body in comments if not body.startswith(queue.SELF_COMMENT_PREFIX)),
         ])
-        drafting_labels = current.intersection((labels.ready, labels.spec_draft))
-        selected_events = None
-        drafting_events = None
         if receipt and receipt["result"]["outcome"] != "drafted":
             # A label write may succeed even when its response is lost. A new
             # label application then starts a new round without an input edit
             # or a locally recorded `delivered` flag.
-            selected_events = _latest_label_events(repo.name, number, drafting_labels, runner=gh)
-            drafting_events = {label: event["id"] for label, event in selected_events.items()}
+            if selected_events is None:
+                selected_events = _latest_label_events(repo.name, number, drafting_labels, runner=gh)
+                drafting_events = {label: event["id"] for label, event in selected_events.items()}
             if (receipt.get("delivered") or issue_input != receipt.get("input", receipt["idea"])
                     or drafting_events != receipt.get("drafting_events", drafting_events)):
                 receipt = None
@@ -171,6 +187,10 @@ look like an absent label or an empty set of comments.
                 pr = None
             elif previous["state"] != "OPEN":
                 return None  # A merged change must not be drafted again.
+        # Receipts (including legacy ID-only records) and open PRs establish
+        # recoverable work, never trust. Recovery still bypasses blockers.
+        if (pr is not None or receipt) and not authorize():
+            return None
         if pr is not None:
             _deliver(repo, labels, number, change, None, current, pr=pr, runner=gh)
             return receipt
@@ -184,12 +204,9 @@ look like an absent label or an empty set of comments.
             log.info("#%s is blocked by %s — not drafting", number,
                      ", ".join(f"#{blocker}" for blocker in blocked))
             return None
-        if selected_events is None:
-            selected_events = _latest_label_events(repo.name, number, drafting_labels, runner=gh)
-            drafting_events = {label: event["id"] for label, event in selected_events.items()}
         # New rounds stay silent while blocked. Once eligible, authorize the
         # same applications used for rearming before replacing any receipt.
-        if not _authorize_label_events(repo.name, number, selected_events, runner=gh):
+        if not authorize():
             return None
         receipt = {"repo": repo.name, "issue": number, "change": change,
                    "title": raw["title"], "idea": idea, "input": issue_input,
