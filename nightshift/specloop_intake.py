@@ -140,12 +140,14 @@ look like an absent label or an empty set of comments.
             *idea_parts, *(body for body in comments if not body.startswith(queue.SELF_COMMENT_PREFIX)),
         ])
         drafting_labels = current.intersection((labels.ready, labels.spec_draft))
+        selected_events = None
         drafting_events = None
         if receipt and receipt["result"]["outcome"] != "drafted":
             # A label write may succeed even when its response is lost. A new
             # label application then starts a new round without an input edit
             # or a locally recorded `delivered` flag.
-            drafting_events = _label_events(repo.name, number, drafting_labels, runner=gh)
+            selected_events = _latest_label_events(repo.name, number, drafting_labels, runner=gh)
+            drafting_events = {label: event["id"] for label, event in selected_events.items()}
             if (receipt.get("delivered") or issue_input != receipt.get("input", receipt["idea"])
                     or drafting_events != receipt.get("drafting_events", drafting_events)):
                 receipt = None
@@ -182,8 +184,13 @@ look like an absent label or an empty set of comments.
             log.info("#%s is blocked by %s — not drafting", number,
                      ", ".join(f"#{blocker}" for blocker in blocked))
             return None
-        if drafting_events is None:
-            drafting_events = _label_events(repo.name, number, drafting_labels, runner=gh)
+        if selected_events is None:
+            selected_events = _latest_label_events(repo.name, number, drafting_labels, runner=gh)
+            drafting_events = {label: event["id"] for label, event in selected_events.items()}
+        # New rounds stay silent while blocked. Once eligible, authorize the
+        # same applications used for rearming before replacing any receipt.
+        if not _authorize_label_events(repo.name, number, selected_events, runner=gh):
+            return None
         receipt = {"repo": repo.name, "issue": number, "change": change,
                    "title": raw["title"], "idea": idea, "input": issue_input,
                    "round_id": uuid.uuid4().hex, "drafting_events": drafting_events}

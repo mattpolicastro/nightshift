@@ -1,13 +1,17 @@
 """Label event selection and real actor relationship resolution."""
 
 import json
+import logging
 import subprocess
+from copy import deepcopy
 
 import pytest
 
-from nightshift import queue, specloop_intake
-from nightshift.config import Repo
+from nightshift import daemon, queue, specloop_intake
+from nightshift.config import Config, Repo
+from test_engine_routing import DraftGh
 from test_specloop_approval import ApprovalGh, Commands
+from test_specloop_intake import BlockedDraftGh, Commands as DraftCommands, poll as poll_draft, repo
 
 
 pytestmark = pytest.mark.real_trust
@@ -342,3 +346,199 @@ def test_repository_404_is_a_lookup_failure_not_negative_membership():
     with pytest.raises(queue.GhError) as raised:
         specloop_intake._label_actor_association("owner/sample", label_event(), runner=gh)
     assert raised.value is failure
+
+
+def prepare_drafting_round(repo, tmp_path, gh, commands, armed, previous):
+    """Rearm real delivered work, keeping its earlier receipt on disk."""
+    if previous is None:
+        return
+    commands.result["outcome"] = previous
+    poll_draft(repo, tmp_path, gh, commands)
+    if previous == "drafted":
+        gh.prs[0]["state"] = "CLOSED"
+    gh.label_event("needs-human", "unlabeled")
+    gh.label_event(armed, "labeled")
+    commands.result["outcome"] = "drafted"
+    commands.calls.clear()
+    gh.calls.clear()
+
+
+@pytest.mark.scenario("issue-intake/latest-label-actor-authorization/untrusted-actor-ignored")
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+@pytest.mark.parametrize("previous", [None, "needs_input", "rejected", "drafted"])
+@pytest.mark.parametrize("actor", [{"login": "outsider"}, None, {}, {"login": "bad/login"}])
+def test_label_from_non_collaborator_is_ignored(repo, tmp_path, armed, previous, actor):
+    gh, commands = DraftGh((armed,)), DraftCommands()
+    prepare_drafting_round(repo, tmp_path, gh, commands, armed, previous)
+    gh.events[-1]["actor"] = actor
+    labels, comments, prs = gh.labels.copy(), deepcopy(gh.comments), deepcopy(gh.prs)
+    files = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unauthorized drafting must not dispatch, deliver, or report pending/error")
+
+    for _ in range(2):
+        assert specloop_intake.propose_pending(
+            repo, queue.Labels(), tmp_path, runner=gh, specloop_runner=forbidden,
+            git_runner=forbidden, launcher=forbidden, on_error=forbidden, on_pending=forbidden,
+        ) == []
+        assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == files
+        assert gh.labels == labels and gh.prs == prs
+        assert gh.comments[:-1] == comments
+        assert len(gh.comments) == len(comments) + 1
+    assert "label-authorization-7:" in gh.comments[-1]["body"]
+    assert not commands.calls
+    assert not any("PATCH" in c or c[:2] in (
+        ["issue", "edit"], ["pr", "edit"], ["pr", "create"],
+    ) for c in gh.calls)
+
+
+@pytest.mark.scenario("issue-intake/latest-label-actor-authorization/trusted-actor-accepted")
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+@pytest.mark.parametrize("relationship", ["OWNER", "COLLABORATOR", "MEMBER"])
+def test_label_from_collaborator_is_acted_on(repo, tmp_path, armed, relationship):
+    gh, commands = DraftGh((armed,)), DraftCommands()
+    actor = "owner" if relationship == "OWNER" else "helper"
+    gh.events[-1]["actor"] = {"login": actor}
+    membership = MembershipGh(
+        owner_type="Organization" if relationship == "MEMBER" else "User",
+        collaborator=NO_CONTENT if relationship == "COLLABORATOR" else NOT_FOUND,
+        member=NO_CONTENT if relationship == "MEMBER" else NOT_FOUND,
+    )
+
+    def github(args):
+        if args == ["api", "repos/owner/sample"] or args[-1] == "--include":
+            return membership(args)
+        return gh(args)
+
+    receipt, = poll_draft(repo, tmp_path, github, commands)
+    assert receipt["drafting_events"] == {armed: 1}
+    assert receipt["delivered"] is True
+    assert [c[0] for c in commands.calls] == ["specloop", "git"]
+    assert gh.labels == set() and len(gh.prs) == 1
+    assert gh.pr_url in gh.comments[-1]["body"]
+    assert not any("label-authorization" in c["body"] for c in gh.comments)
+    assert len(membership.calls) == {"OWNER": 1, "COLLABORATOR": 2, "MEMBER": 3}[relationship]
+    assert sum(c[0] == "api" and c[1].endswith("/events") for c in gh.calls) == 1
+
+
+@pytest.mark.scenario("issue-intake/latest-label-actor-authorization/trusted-actor-accepted")
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+@pytest.mark.parametrize("previous", [None, "needs_input", "rejected", "drafted"])
+def test_pause_after_draft_label_read_preserves_receipts(
+        repo, tmp_path, monkeypatch, armed, previous):
+    gh, commands = DraftGh((armed,)), DraftCommands()
+    prepare_drafting_round(repo, tmp_path, gh, commands, armed, previous)
+    monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
+    files = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    labels, comments, prs = gh.labels.copy(), deepcopy(gh.comments), deepcopy(gh.prs)
+    paused_after = []
+
+    def pause_after_events(args):
+        result = gh(args)
+        if args[0] == "api" and args[1].endswith("/events"):
+            daemon.PAUSE_FILE.touch()
+            paused_after.append(args)
+        return result
+
+    health = daemon.RepoHealth()
+    daemon.poll_specloop(Config(repos=[repo]), health,
+                         runner=pause_after_events, specloop_runner=commands)
+    assert len(paused_after) == 1 and gh.calls[-1] == paused_after[0]
+    assert not commands.calls
+    assert not health.failures and not health.item_failures and not health.announced
+    assert gh.labels == labels and gh.comments == comments and gh.prs == prs
+    # A paused event read cannot create an initial receipt or replace the
+    # previous round's receipt before the actor has been authorized.
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == files
+
+    daemon.PAUSE_FILE.unlink()
+    receipt, = poll_draft(repo, tmp_path, gh, commands)
+    assert receipt["delivered"] is True
+    assert sum(c[0] == "specloop" for c in commands.calls) == 1
+    assert not any("label-authorization" in c["body"] for c in gh.comments)
+
+
+@pytest.mark.scenario("issue-intake/latest-label-actor-authorization/alias-and-configured-names-protected")
+@pytest.mark.scenario("issue-intake/latest-label-actor-authorization/trusted-reapplication-recovers")
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("both", [False, True])
+@pytest.mark.parametrize("trigger", ["spec_draft", "ready"])
+def test_intake_alias_requires_its_own_trusted_application(repo, tmp_path, configured, both, trigger):
+    labels = queue.Labels(spec_draft="custom:draft", ready="custom:ready") if configured else queue.Labels()
+    armed = getattr(labels, trigger)
+    gh = DraftGh((labels.spec_draft, labels.ready) if both else (armed,))
+    commands = DraftCommands()
+    # The newer application must defeat the earlier trusted one, including
+    # when the other intake label is still trusted on another event page.
+    gh.label_event(armed, "unlabeled")
+    gh.label_event(armed, "labeled", actor="outsider")
+    rejected_id = gh.events[-1]["id"]
+    original_labels = gh.labels.copy()
+    files = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    for _ in range(2):
+        assert poll_draft(repo, tmp_path, gh, commands, labels) == []
+    assert not commands.calls and not gh.prs
+    assert gh.labels == original_labels and len(gh.comments) == 2
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == files
+    rejection = deepcopy(gh.comments[-1])
+    assert f"`{armed}`" in rejection["body"]
+    assert f"label-authorization-7:{rejected_id}" in rejection["body"]
+
+    gh.label_event(armed, "unlabeled")
+    gh.label_event(armed, "labeled")
+    expected_events = {label: next(e["id"] for e in reversed(gh.events)
+                                  if e["label"]["name"] == label) for label in gh.labels}
+    gh.calls.clear()
+    receipt, = poll_draft(repo, tmp_path, gh, commands, labels)
+    assert receipt["drafting_events"] == expected_events
+    assert gh.comments[1] == rejection
+    assert gh.labels == set() and len(gh.prs) == 1
+    assert [c[0] for c in commands.calls] == ["specloop", "git"]
+    assert not any("PATCH" in c for c in gh.calls)
+    assert sum(c[0] == "api" and c[1].endswith("/events") for c in gh.calls) == 1
+
+
+@pytest.mark.scenario("issue-intake/authorization-preserves-intake-recovery/blocked-draft-remains-silent")
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+@pytest.mark.parametrize("previous", [None, "needs_input", "rejected", "drafted"])
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_blocked_untrusted_draft_waits_before_authorization(
+        repo, tmp_path, caplog, armed, previous, unreadable):
+    gh, commands = BlockedDraftGh(armed, {6: "CLOSED"}), DraftCommands()
+    prepare_drafting_round(repo, tmp_path, gh, commands, armed, previous)
+    gh.events[-1]["actor"] = {"login": "outsider"}
+    gh.states[6] = queue.GhError("unavailable", transient=True) if unreadable else "OPEN"
+    files = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    labels, comments, prs = gh.labels.copy(), deepcopy(gh.comments), deepcopy(gh.prs)
+    caplog.set_level(logging.INFO, logger=specloop_intake.__name__)
+    for _ in range(2):
+        assert poll_draft(repo, tmp_path, gh, commands) == []
+        assert gh.comments == comments and gh.labels == labels and gh.prs == prs
+        assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == files
+    assert caplog.record_tuples == [
+        (specloop_intake.__name__, logging.INFO, "#7 is blocked by #6 — not drafting"),
+    ] * 2
+    assert not commands.calls
+    assert not any(c == ["api", "repos/owner/sample"] for c in gh.calls)
+
+    gh.states[6] = "CLOSED"
+    assert poll_draft(repo, tmp_path, gh, commands) == []
+    assert not commands.calls and gh.labels == labels and gh.prs == prs
+    assert len(gh.comments) == len(comments) + 1
+    assert "label-authorization-7:" in gh.comments[-1]["body"]
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == files
+    rejection = deepcopy(gh.comments[-1])
+    gh.label_event(armed, "unlabeled")
+    gh.label_event(armed, "labeled")
+    authorized_event = gh.events[-1]["id"]
+    gh.calls.clear()
+    receipt, = poll_draft(repo, tmp_path, gh, commands)
+    assert receipt["delivered"] is True
+    assert receipt["drafting_events"] == {armed: authorized_event}
+    assert sum(c[0] == "api" and c[1].endswith("/events") for c in gh.calls) == 1
+    assert [c[0] for c in commands.calls] == (
+        ["specloop", "git", "git"] if previous == "drafted" else ["specloop", "git"]
+    )
+    assert gh.comments[-2] == rejection
+    assert gh.labels == set()
