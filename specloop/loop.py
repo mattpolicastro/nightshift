@@ -158,6 +158,81 @@ def _merge_publish_base(ctx: Ctx, base: str, head: str) -> str | None:
     return None
 
 
+def prepare_publish(ctx: Ctx) -> bool:
+    """Driver-only gate, under the run lock; True permits final checks.
+
+    Save the integration intent before CAS, and never infer verification from
+    ancestry alone. Each attempt owns its logs even when verification crashes.
+    """
+    recovery = f"Repair, then `specloop resume {ctx.m.change}`."
+    try:
+        base = _fetch_publish_base(ctx, timeout=300)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        ctx.pause("base_fetch", detail=f"{exc}\n{recovery}")
+        return False
+
+    out = None
+    head = ctx.head()
+    sync = ctx.run.state.base_sync
+    try:
+        incorporated = _is_ancestor(ctx.repo, base, head)
+        pending = sync.get("retry_verify") or (
+            (sync.get("base") or sync.get("merged_head")) and sync.get("verified_head") != head)
+        # A saved intent that is not installed must not be overwritten by a
+        # fresh attempt. Recovery must reconcile it before any new advancement.
+        if sync.get("merged_head") and not _is_ancestor(ctx.repo, sync["merged_head"], head):
+            raise RuntimeError(f"integration intent {sync['merged_head']} is not in run head {head}")
+        if incorporated and not pending:
+            return True
+
+        root = ctx.run.dir / "final" / "base-sync"
+        root.mkdir(parents=True, exist_ok=True)
+        out = Path(tempfile.mkdtemp(prefix="attempt-", dir=root))
+        sync.setdefault("receipts", []).append(str(out))
+        ctx.run.save()
+        merged = _merge_publish_base(ctx, base, head)
+        if merged is None:
+            (out / "diagnostic.txt").write_text(ctx.run.state.pause.detail)
+            return False
+        if merged != head:
+            sync.update(base=base, previous_head=head, merged_head=merged,
+                        verified_head="", retry_verify=True)
+            ctx.run.save()
+            git(ctx.repo, "update-ref", ctx.ref, merged, head)
+            head = merged
+        else:
+            # An incorporated base still needs checks after a failed attempt
+            # or a manual conflict repair.
+            sync.update(base=base, verified_head="", retry_verify=True)
+            ctx.run.save()
+        (out / "integration.json").write_text(json.dumps(
+            {"base": base, "head": head, "previous_head": sync.get("previous_head", "")}, indent=2))
+        try:
+            receipts = verify.run_steps(ctx.repo, head, ctx.m.verify, ctx.m, out)
+        finally:
+            verify.cleanup(out)
+        if not verify.ok(receipts, ctx.m.prepare + ctx.m.verify):
+            logs = "\n".join(str(out / f"{r.id}.log") for r in receipts)
+            detail = (f"base {base}; run head {head}\n{verify.summary(receipts)}\n"
+                      f"Receipts: {out / 'receipts.json'}\nLogs:\n{logs}\n{recovery}")
+            (out / "diagnostic.txt").write_text(detail)
+            ctx.pause("base_drift", detail=detail)
+            return False
+        if ctx.head() != head:
+            raise RuntimeError(f"run head changed while verifying {head}")
+        sync.update(verified_head=head, retry_verify=False)
+        ctx.run.save()
+        return True
+    except Exception as exc:
+        detail = f"could not prepare base {base} at run head {head}: {exc}\n"
+        if out is not None:
+            sync.update(verified_head="", retry_verify=True)
+            detail += f"Saved receipts/logs: {out}\n"
+            (out / "diagnostic.txt").write_text(detail)
+        ctx.pause("infra", detail=detail + recovery)
+        return False
+
+
 def run(ctx: Ctx) -> str:
     """Advance until a pause or completion. Returns the final run status."""
     st = ctx.run.state

@@ -1,6 +1,9 @@
 """Current-base transport against an isolated, local bare origin."""
 
+import json
 import subprocess
+from dataclasses import asdict, replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -296,3 +299,181 @@ def test_operational_merge_error_is_not_a_file_conflict(base_env, monkeypatch):
     assert "merge process failed" in ctx.run.state.pause.detail
     assert ctx.head() == head and ctx.run.state.base_sync == {}
     assert not list(ctx.run.dir.glob("base-merge-*"))
+
+
+def forbid_publication(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("driver preparation must not publish or append acceptance-fix tasks")
+    for owner, name in ((cli, "_push"), (cli, "_gh"), (cli, "_existing_pr"), (loop, "_final_fix")):
+        monkeypatch.setattr(owner, name, forbidden)
+
+
+def controlled_verify(monkeypatch, ctx, exit_code=0, error=False):
+    """Portable receipts, with the same retained and transient files as verify."""
+    calls = []
+
+    def check(repo, head, steps, m, out):
+        assert repo == ctx.repo and head == ctx.head()
+        assert steps == m.verify and m is ctx.m
+        saved = state.Run(ctx.run.dir, require_existing=True).state.base_sync
+        assert saved["base"] and saved["merged_head"] == head
+        assert saved["verified_head"] == "" and saved["retry_verify"]
+        assert str(out) in saved["receipts"]
+        calls.append((head, out))
+        for name in ("src", "build"):
+            (out / name).mkdir()
+        (out / "ok.log").write_text("upstream broke the check\n")
+        if error:
+            raise OSError("verifier unavailable")
+        receipt = loop.verify.Receipt("ok", ["check"], 0, exit_code, exit_code == 0, 0.1, "check output")
+        (out / "receipts.json").write_text(json.dumps([asdict(receipt)]))
+        return [receipt]
+
+    monkeypatch.setattr(loop.verify, "run_steps", check)
+    return calls
+
+
+@pytest.mark.scenario("publish-base-sync/verify-integrated-head/merged-head-passes")
+def test_prepare_publish_saves_intent_before_advancing_and_verifies(base_env, monkeypatch):
+    ctx = base_env.ctx
+    old = ctx.head()
+    base = advance_base(base_env)
+    forbid_publication(monkeypatch)
+    calls = controlled_verify(monkeypatch, ctx)
+    real_git = loop.git
+    updates = []
+
+    def checked_git(repo, *args, **kwargs):
+        if args[0] == "update-ref":
+            saved = state.Run(ctx.run.dir, require_existing=True).state.base_sync
+            assert args == ("update-ref", ctx.ref, saved["merged_head"], old)
+            assert saved["base"] == base and saved["previous_head"] == old
+            assert saved["verified_head"] == "" and saved["retry_verify"]
+            assert ctx.head() == old
+            updates.append(args)
+        return real_git(repo, *args, **kwargs)
+
+    monkeypatch.setattr(loop, "git", checked_git)
+    assert loop.prepare_publish(ctx)
+    ctx.run.reload()
+    sync = ctx.run.state.base_sync
+    assert len(updates) == len(calls) == 1
+    assert sync["merged_head"] == sync["verified_head"] == ctx.head() != old
+    assert sync["base"] == base and not sync["retry_verify"]
+    out = Path(sync["receipts"][0])
+    assert out.parent == ctx.run.dir / "final" / "base-sync"
+    assert (out / "receipts.json").is_file() and (out / "ok.log").is_file()
+    assert not (out / "src").exists() and not (out / "build").exists()
+    assert loop.prepare_publish(ctx)
+    assert len(updates) == len(calls) == 1
+
+
+@pytest.mark.scenario("publish-base-sync/verify-integrated-head/drift-breaks-verify")
+@pytest.mark.parametrize("exit_code", [1, None])
+def test_drift_that_breaks_verify_pauses_with_receipts(base_env, monkeypatch, exit_code):
+    ctx = base_env.ctx
+    old, tasks = ctx.head(), ctx.tasks_text(ctx.head())
+    base = advance_base(base_env)
+    forbid_publication(monkeypatch)
+    calls = controlled_verify(monkeypatch, ctx, exit_code)
+    ctx.run.state.pr = "https://example.test/pull/17"
+    for attempt in range(2):
+        ctx.run.state.status, ctx.run.state.pause = "running", None
+        assert not loop.prepare_publish(ctx)
+        ctx.run.reload()
+        pause, sync = ctx.run.state.pause, ctx.run.state.base_sync
+        assert pause.reason == "base_drift" and pause.resume_at == 0
+        assert base in pause.detail and ctx.head() in pause.detail
+        assert "ok: expected exit 0" in pause.detail
+        assert ("timeout" if exit_code is None else "got 1") in pause.detail
+        assert "specloop resume c" in pause.detail
+        out = calls[-1][1]
+        for name in ("receipts.json", "ok.log"):
+            assert (out / name).is_file() and str(out / name) in pause.detail
+        assert sync["receipts"] == [str(out) for _, out in calls]
+        assert sync["verified_head"] == "" and sync["retry_verify"]
+        assert ctx.head() != old and ctx.tasks_text(ctx.head()) == tasks
+        assert ctx.run.state.acceptance_rounds == 0 and ctx.run.state.tasks == {}
+        assert ctx.run.state.pr == "https://example.test/pull/17"
+        assert cli._publish(SimpleNamespace(change="c"), ctx.run) == 1
+    assert calls[0][0] == calls[1][0] and calls[0][1] != calls[1][1]
+    assert (calls[0][1] / "receipts.json").read_bytes() == (calls[1][1] / "receipts.json").read_bytes()
+
+
+@pytest.mark.parametrize("prepare_fails", [
+    pytest.param(False, marks=pytest.mark.scenario("publish-base-sync/verify-integrated-head/merged-head-passes")),
+    pytest.param(True, marks=pytest.mark.scenario("publish-base-sync/verify-integrated-head/preparation-fails")),
+])
+def test_prepare_publish_uses_trusted_prepare_then_verify(base_env, monkeypatch, prepare_fails):
+    ctx = base_env.ctx
+    base = advance_base(base_env)
+    forbid_publication(monkeypatch)
+    # Run the real verifier and its normal sandbox policy, including expected
+    # nonzero exits. Verification depends on preparation and on the merged tree.
+    prepare = manifest.Step("dependencies", ("/bin/sh", "-c", "echo prepared; touch dependency; exit 3"),
+                            expect=0 if prepare_fails else 3)
+    check = manifest.Step("merged-tree", ("/bin/sh", "-c",
+                          'test -f dependency && test "$(cat {src}/base.txt)" = "upstream change"'))
+    ctx.m = replace(ctx.m, prepare=(prepare,), verify=(check,))
+    assert loop.prepare_publish(ctx) is not prepare_fails
+    ctx.run.reload()
+    sync = ctx.run.state.base_sync
+    out = Path(sync["receipts"][-1])
+    receipts = json.loads((out / "receipts.json").read_text())
+    assert receipts[0]["id"] == "dependencies" and receipts[0]["exit"] == 3
+    assert (out / "dependencies.log").read_text().strip() == "prepared"
+    assert not (out / "src").exists() and not (out / "build").exists()
+    assert base == sync["base"] and loop._is_ancestor(ctx.repo, base, ctx.head())
+    if prepare_fails:
+        assert len(receipts) == 1 and not receipts[0]["passed"]
+        assert not (out / "merged-tree.log").exists()
+        assert ctx.run.state.pause.reason == "base_drift"
+        assert "dependencies" in ctx.run.state.pause.detail and str(out) in ctx.run.state.pause.detail
+        assert sync["verified_head"] == "" and sync["retry_verify"]
+    else:
+        assert [r["id"] for r in receipts] == ["dependencies", "merged-tree"]
+        assert all(r["passed"] for r in receipts)
+        assert sync["verified_head"] == ctx.head() and not sync["retry_verify"]
+
+
+def test_prepare_publish_infrastructure_error_retains_obligation_and_logs(base_env, monkeypatch):
+    ctx = base_env.ctx
+    base = advance_base(base_env)
+    calls = controlled_verify(monkeypatch, ctx, error=True)
+    forbid_publication(monkeypatch)
+    assert not loop.prepare_publish(ctx)
+    ctx.run.reload()
+    out = calls[0][1]
+    assert ctx.run.state.pause.reason == "infra" and ctx.run.state.pause.resume_at == 0
+    assert "verifier unavailable" in ctx.run.state.pause.detail and str(out) in ctx.run.state.pause.detail
+    assert "specloop resume c" in ctx.run.state.pause.detail
+    assert ctx.run.state.base_sync["retry_verify"] and not ctx.run.state.base_sync["verified_head"]
+    assert loop._is_ancestor(ctx.repo, base, ctx.head())
+    assert (out / "ok.log").is_file() and (out / "diagnostic.txt").is_file()
+    assert not (out / "src").exists() and not (out / "build").exists()
+
+
+def test_prepare_publish_cas_mismatch_preserves_intent_without_verifying(base_env, monkeypatch):
+    ctx = base_env.ctx
+    old = ctx.head()
+    base = advance_base(base_env)
+    other = seal.commit_files(ctx.repo, old, {"out/other": "concurrent edit\n"}, "other writer")
+    real_git = loop.git
+    calls = controlled_verify(monkeypatch, ctx)
+
+    def concurrent_update(repo, *args, **kwargs):
+        if args[0] == "update-ref":
+            real_git(repo, "update-ref", ctx.ref, other, old)
+        return real_git(repo, *args, **kwargs)
+
+    monkeypatch.setattr(loop, "git", concurrent_update)
+    assert not loop.prepare_publish(ctx)
+    ctx.run.reload()
+    sync = ctx.run.state.base_sync
+    assert ctx.head() == other and calls == []
+    assert sync["base"] == base and sync["previous_head"] == old
+    assert sync["merged_head"] not in (old, other, base)
+    assert sync["retry_verify"] and sync["verified_head"] == ""
+    assert ctx.run.state.pause.reason == "infra" and ctx.run.state.pause.resume_at == 0
+    assert "specloop resume c" in ctx.run.state.pause.detail
+    assert (Path(sync["receipts"][-1]) / "diagnostic.txt").is_file()
