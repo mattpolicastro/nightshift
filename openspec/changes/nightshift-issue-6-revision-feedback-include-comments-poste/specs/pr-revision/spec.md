@@ -20,7 +20,7 @@ Specloop revision feedback SHALL carry a stable source-qualified GitHub ID for e
 
 ### Requirement: Consumption based eligibility
 
-For each repository and PR, revision intake SHALL select eligible IDs absent from its durable consumed set without comparing comment creation or edit timestamps to a branch tip. A PR with no revision receipt SHALL start with an empty consumed set. Consumption SHALL survive new label events, head changes, spec-to-build transitions, and restart, and SHALL remain isolated from other PRs and repositories. Editing a consumed ID SHALL NOT make it eligible again.
+Intake SHALL select unconsumed IDs per repository and PR without timestamp filtering, except for legacy initialization under Feedback state compatibility. A PR without a receipt SHALL start with an empty consumed set. Consumption SHALL survive label events, head changes, spec-to-build transitions and restart, remain isolated by repository and PR, and exclude same-ID edits.
 
 #### Scenario: Comments during revision feed the next round
 - **WHEN** feedback A is selected, comment B is posted during that spec-stage or build-stage revision, the round succeeds, and a trusted actor requests another round after a newer tip is published
@@ -46,7 +46,7 @@ For each repository and PR, revision intake SHALL select eligible IDs absent fro
 
 ### Requirement: Durable round snapshot
 
-Intake SHALL atomically save selected IDs, rendered blocks, and consumed history before dispatch and retain that snapshot through edits and restart. It SHALL durably consume only selected IDs after a validated build revision result with a landed commit or a successful spec push, before notifications or label removal and without waiting for publication. Unsuccessful attempts SHALL consume nothing.
+Intake SHALL atomically save selected IDs, rendered blocks, and consumed history before dispatch and retain that snapshot through edits and restart. It SHALL durably consume only selected IDs after a validated build revision result with a landed commit or a successful spec push, before notifications or label removal and without waiting for publication. Unsuccessful new attempts SHALL consume nothing; legacy baseline initialization SHALL follow Feedback state compatibility.
 
 #### Scenario: Snapshot is fixed before dispatch
 - **WHEN** either revision stage starts, then a selected comment is edited and another comment appears while its job runs across a daemon restart
@@ -75,17 +75,46 @@ Intake SHALL atomically save selected IDs, rendered blocks, and consumed history
 
 ### Requirement: Feedback state compatibility
 
-Intake SHALL validate known feedback-state fields, preserve cumulative IDs and unknown fields across rounds, and reject invalid or unsupported state without resetting history. Legacy receipts SHALL remain readable for existing collection and delivery; new rounds SHALL be deferred with an actionable history-initialization diagnostic, without inferring consumption from timestamps or text.
+Intake SHALL validate state and preserve consumed IDs and unknown fields. Legacy receipts SHALL automatically consume all trusted IDs created at or before their saved time, or the current tip time if no time is recorded. Intake SHALL atomically persist that baseline once before further processing, without operator initialization. Invalid state SHALL fail without resetting history.
 
-#### Scenario: Legacy delivery does not invent history
-- **WHEN** an authorized PR has a legacy receipt lacking feedback-state metadata and its saved job or delivery is pending
-- **THEN** existing collection and delivery can finish with their saved payload and marker under existing pause and cancellation rules
-- **THEN** a subsequent new round is deferred with an actionable initialization diagnostic while preserving the receipt and launching no new command
+#### Scenario: Legacy saved time initializes consumption
+- **WHEN** an authorized legacy receipt records a save time and trusted feedback from all three sources exists before, exactly at, and after that time, with the branch tip now later than all of it
+- **THEN** intake automatically consumes only the IDs at or before the saved time using conversation/inline `created_at` and review `submitted_at`, including blank or self-prefixed trusted records, and persists the baseline without a branch-tip lookup
+- **THEN** later IDs remain eligible, edits do not move the creation cutoff, and restart preserves the same baseline without operator initialization
+
+#### Scenario: Legacy missing time uses tip once
+- **WHEN** an authorized legacy receipt has no recorded save time and trusted feedback exists before, exactly at, and after the current PR head's committer time
+- **THEN** intake initializes consumed IDs at or before that tip time using conversation/inline `created_at` and review `submitted_at`, and persists them before dispatch or delivery
+- **THEN** a later tip advance or daemon restart does not recompute consumption, so remaining IDs still feed the next round
+
+#### Scenario: Legacy recovery preserves saved work
+- **WHEN** an authorized legacy receipt with a pending job or delivery is automatically initialized
+- **THEN** the original payload, job, result, event and marker remain available under existing pause and stop rules, without inferring snapshot IDs from rendered text
+- **THEN** eligible saved work finishes before a newer request starts, adds no IDs beyond the migration baseline, and subsequent new snapshots use exact IDs
+- **THEN** stopped work remains held without delivery or replacement dispatch
+
+#### Scenario: Legacy initialization failure preserves receipt
+- **WHEN** legacy initialization encounters malformed recorded time, missing or invalid required feedback timestamps or IDs, a failed page or fallback commit read, or an atomic save failure
+- **THEN** the original receipt remains unchanged, no revision or delivery starts, and the existing error path retains the request for retry
+- **THEN** malformed recorded time is not treated as absent, and a partial read is not saved as a baseline
 
 #### Scenario: Validated state survives replacement
 - **WHEN** a version-1 receipt contains consumed IDs and unknown fields, and a later empty or refused round replaces the prior round
 - **THEN** the consumed IDs and unknown fields survive and previously consumed feedback stays excluded
 - **THEN** malformed known fields or an unsupported version instead cause an error without overwriting the receipt or launching work
+
+### Requirement: Revision comment retry reconciliation
+
+Revision completion comments SHALL reconcile the original `revise` marker inside `queue._gh` before retrying an ambiguous create, for both legacy and round-qualified markers. Reconciliation SHALL search all comment pages, update the matching comment when found, and allow another create only after confirming absence. Failed reconciliation reads SHALL prevent a blind POST. Existing draft, admit and publish marker behavior and pause guards SHALL remain intact.
+
+#### Scenario: Lost revision comment response reconciled
+- **WHEN** a revision completion POST stores a comment remotely but its response is lost and the production `queue._gh` transient retry runs
+- **THEN** reconciliation finds the original marker even on a later page and PATCHes that comment ID without a second comment-create call
+- **THEN** both legacy and round-qualified markers behave this way, while a distinct round marker remains a separate comment
+
+#### Scenario: Revision reconciliation read fails
+- **WHEN** a revision comment POST has an ambiguous outcome and the production retry cannot read the comment history
+- **THEN** the read error propagates without another POST, consumed IDs and the saved revision result remain intact, and subsequent recovery can reuse the original marker without another revision command
 
 ### Requirement: Worker feedback compatibility
 
