@@ -56,6 +56,7 @@ run = ["/usr/bin/true"]
     ctx.run.save()
     p = SimpleNamespace(env=env, ctx=ctx, gh=gh, calls=[], documents=[], verified=[],
                         merges=[], fetches=[], pushes=[], lose_response=False,
+                        lose_published_response=False,
                         operations=[], push_attempts=[], fail_push=False)
     real_merge, real_run, real_push = loop._merge_commits, subprocess.run, cli._push
 
@@ -130,6 +131,11 @@ run = ["/usr/bin/true"]
             p.lose_response = False
             assert code == 1 and set(document) == {"version", "error"}
             raise OSError("handoff response lost")
+        if args[1] == "publish" and p.lose_published_response:
+            p.lose_published_response = False
+            assert code == 0 and document == {"version": 1, "outcome": "published", "pr": gh.pr_url}
+            assert state.Run.for_change("c").state.pause.reason == "human_checks"
+            raise OSError("stable publish response lost")
         return subprocess.CompletedProcess(args, code, output.out, output.err)
 
     monkeypatch.setattr(loop, "_merge_commits", merge)
@@ -145,9 +151,9 @@ run = ["/usr/bin/true"]
     receipt_path = tmp_path / "publications/owner__sample/8.json"
     p.receipt = lambda: json.loads(receipt_path.read_text())
 
-    def poll():
+    def poll(gh_runner=None):
         errors = []
-        specloop_intake.publish_pending(repo, queue.Labels(), tmp_path, runner=gh,
+        specloop_intake.publish_pending(repo, queue.Labels(), tmp_path, runner=gh_runner or gh,
                                        specloop_runner=runner, on_error=lambda n, e: errors.append(e))
         assert not gh.labels
         assert not any("--add-label" in call for call in gh.calls)
@@ -206,6 +212,123 @@ def finish(p, old_receipt):
     assert len(p.gh.comments) == 1
     events = [json.loads(line) for line in (p.ctx.run.dir / "events.jsonl").read_text().splitlines()]
     assert [e["head"] for e in events if e["event"] == "published"] == [merged]
+
+
+def recover_merged_publication(p, monkeypatch, failure):
+    old, base = p.ctx.head(), advance_base(p.env)
+    assert len(p.poll()) == 1
+    old_receipt = p.receipt()
+    assert old_receipt["head"] == old
+    p.ctx.run.reload()
+    scheduled(p)
+    assert not p.merges and not p.verified
+
+    assert cli.main(["run", "c"]) == 0
+    p.ctx.run.reload()
+    ready = p.status()
+    merged = p.ctx.head()
+    assert ready["head"] == merged != old and ready["pause"]["reason"] == "ready_to_publish"
+    assert sh(p.ctx.repo, "git", "show", "-s", "--format=%P", merged).split() == [old, base]
+    assert p.ctx.run.state.base_sync["verified_head"] == merged
+    assert not p.ctx.run.state.base_sync["retry_verify"]
+    assert p.merges == p.verified == [merged]
+    assert p.receipt() == old_receipt and not p.pushes and not p.gh.comments
+    checks = [f"- [ ] `{sid}`: {why}" for sid, why in sorted(p.ctx.m.coverage_exempt.items())]
+    assert all(check in ready["pause"]["detail"] for check in checks)
+
+    # Inspect the durable M receipt before any external publication effect.
+    real_push, captured = cli._push, []
+
+    def push(*args):
+        receipt = p.receipt()
+        assert (receipt["change"], receipt["head"], receipt["pr"]) == ("c", merged, p.gh.pr_url)
+        assert receipt["checks"] == ready["pause"]["detail"]
+        assert receipt["round_id"] != old_receipt["round_id"]
+        assert not receipt.get("delivered") and "result" not in receipt
+        captured.append(receipt)
+        return real_push(*args)
+
+    monkeypatch.setattr(cli, "_push", push)
+    comment_attempts = []
+
+    def interrupted_comment(args):
+        if args[:2] == ["pr", "comment"]:
+            comment_attempts.append(args)
+            if failure == "comment-after":
+                p.gh(args)  # GitHub accepted the comment before the transport failed.
+            raise queue.GhError("comment delivery interrupted", transient=True)
+        return p.gh(args)
+
+    p.lose_published_response = failure == "publish-response"
+    errors = p.poll(gh_runner=interrupted_comment)
+    assert len(errors) == 1
+    assert ("stable publish response lost" if failure == "publish-response"
+            else "comment delivery interrupted") in str(errors[0])
+    p.ctx.run.reload()
+    status = p.status()
+    assert status["head"] == merged and status["pause"]["reason"] == "human_checks"
+    assert p.ctx.run.state.pause.reason == "human_checks"
+    assert p.push_attempts == p.pushes == [merged]
+    assert sh(p.env.origin, "git", "rev-parse", "spec/c") == merged
+    receipt = p.receipt()
+    assert len(captured) == 1
+    assert all(receipt[key] == value for key, value in captured[0].items())
+    assert not receipt.get("delivered")
+    if failure == "publish-response":
+        assert "result" not in receipt and not comment_attempts
+    else:
+        assert receipt["result"] == {"version": 1, "outcome": "published", "pr": p.gh.pr_url}
+        assert len(comment_attempts) == 1
+    assert len(p.gh.comments) == (1 if failure == "comment-after" else 0)
+    accepted = [dict(comment) for comment in p.gh.comments]
+    operations = list(p.operations)
+    assert operations == [("fetch", 20), ("fetch", 300), ("merge", merged),
+                          ("verify", merged), ("fetch", 20), ("push", merged)]
+    assert p.calls.count("publish") == 2  # One handoff, then one stable publication.
+
+    # New polls reload CLI state and the on-disk receipt, just as after restart.
+    for _ in range(2):
+        p.ctx.run.reload()
+        calls, gh_calls = len(p.calls), len(p.gh.calls)
+        assert p.poll() == []
+        assert p.calls[calls:] == ["status"]  # Delivery must never invoke publish again.
+        delivered = p.receipt()
+        assert all(delivered[key] == value for key, value in captured[0].items())
+        assert delivered["delivered"]
+        assert delivered["result"]["outcome"] == "published"
+        assert delivered["result"]["pr"] == p.gh.pr_url
+        assert p.operations == operations and p.merges == p.verified == p.pushes == [merged]
+        assert p.fetches == [20, 300, 20]
+        assert len(p.gh.comments) == 1
+        if accepted:
+            assert p.gh.comments == accepted  # Reconcile the accepted comment's ID and body.
+        body = p.gh.comments[0]["body"]
+        assert all(check in body for check in checks)
+        assert "hosted CI" in body and p.gh.pr_url in body and merged[:12] in body
+        assert f"<!-- nightshift:publish:c:{receipt['round_id']} -->" in body
+        assert old_receipt["round_id"] not in body and old[:12] not in body
+        assert "specloop publish c" not in body and "specloop finish c" in body
+        if _ == 0 and failure == "comment-after":
+            patches = [call for call in p.gh.calls[gh_calls:] if "PATCH" in call]
+            assert len(patches) == 1
+            assert patches[0][1] == f"repos/owner/sample/issues/comments/{accepted[0]['id']}"
+        if _ == 1:
+            assert p.gh.calls[gh_calls:] == []  # A delivered receipt causes no further writes.
+    creates = [call for call in p.gh.calls if call[:2] == ["pr", "comment"]]
+    assert len(creates) == 1
+    events = [json.loads(line) for line in (p.ctx.run.dir / "events.jsonl").read_text().splitlines()]
+    assert [event["head"] for event in events if event["event"] == "published"] == [merged]
+
+
+@pytest.mark.scenario("publish-base-sync/recover-publication-comment-after-integration/published-response-is-lost")
+def test_lost_stable_publish_response_recovers_merged_receipt(publication, monkeypatch):
+    recover_merged_publication(publication, monkeypatch, "publish-response")
+
+
+@pytest.mark.scenario("publish-base-sync/recover-publication-comment-after-integration/comment-delivery-is-interrupted")
+@pytest.mark.parametrize("failure", ["comment-before", "comment-after"])
+def test_interrupted_comment_recovers_merged_receipt(publication, monkeypatch, failure):
+    recover_merged_publication(publication, monkeypatch, failure)
 
 
 @pytest.mark.scenario("publish-base-sync/driver-preparation-handoff/handoff-survives-interruption")
