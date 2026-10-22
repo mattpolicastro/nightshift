@@ -51,6 +51,9 @@ Rules:
   Your own results are not acceptance evidence; the harness reruns its checks.
   Report them in `summary`, never in a repository file: a task saying "record
   the result" means `summary`, not a doc or log in the change.
+  If a check fails only because your sandbox forbids something (writing outside the
+  workspace, listing processes, the network), say so in `summary` and still report
+  "ready": the harness runs its checks in its own environment. That is not "blocked".
 - Change only: {allowed}
   Never change: {frozen}
   (tasks.md included — the harness ticks tasks). Other changes are reverted.
