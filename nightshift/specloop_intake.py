@@ -533,13 +533,19 @@ def revise_pending(
         # the newer application selects remaining IDs on a later poll.
         awaiting_success = (receipt and not receipt.get("delivered")
                             and receipt.get("result", {}).get("outcome") in ("drafted", "revised"))
-        if receipt and not awaiting_success and (
+        # Legacy results have no exact snapshot IDs. Deliver their saved
+        # outcome before comparing live feedback or replacing their event,
+        # including human-input outcomes that must retain the original marker.
+        awaiting_legacy = (receipt and receipt.get("legacy_snapshot")
+                           and not receipt.get("delivered") and "result" in receipt)
+        if receipt and not (awaiting_success or awaiting_legacy) and (
                 receipt["change"] != change or receipt["event"] != event or "result" not in receipt
                 or (receipt.get("delivered")
                     and receipt["result"]["outcome"] in ("needs_input", "rejected", "refused"))):
             receipt = None
         git = partial(_bounded_run, runner=git_runner)
-        if receipt is None or receipt["result"]["outcome"] in ("needs_input", "rejected", "refused"):
+        if receipt is None or (not awaiting_legacy and receipt["result"]["outcome"] in (
+                "needs_input", "rejected", "refused")):
             items = queue.pr_feedback_items(repo.name, number, runner=gh)
             consumed = set(previous["consumed_feedback_ids"]) if previous else set()
             items = [item for item in items if item.id not in consumed]

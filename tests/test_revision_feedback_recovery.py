@@ -14,8 +14,233 @@ from nightshift import queue, specloop_intake as intake, specloop_job
 from test_revision_feedback_consumption import read, receipt_path, stage_setup
 from test_specloop_spec_revision import setup as spec_setup
 from test_specloop_intake import idea_file
+from test_revision_feedback_state import CUTOFF, ENDPOINTS, LegacyGh
 
 pytestmark = pytest.mark.real_trust
+
+
+def legacy_saved(stage, state, time_field="saved_at", *, job=False):
+    _, gh, commands = stage
+    history = LegacyGh()
+    for name, endpoint in zip(("feedback", "reviews", "inline"), ENDPOINTS):
+        setattr(gh, name, [record for page in history.pages[endpoint] for record in page])
+    saved = {key: read(state)[key] for key in ("change", "head")}
+    saved.update(event=gh.events[-1]["id"], feedback=["Saved λ payload with no recoverable ID"],
+                 command="revise" if commands.result["outcome"] == "revised" else "propose",
+                 future={"nested": [1, 2]})
+    if time_field:
+        saved[time_field] = CUTOFF
+    directory = receipt_path(state).parent / "8.jobs" / "legacy-job"
+    if job:
+        saved["job"] = directory.name
+        directory.mkdir(parents=True)
+        (directory / "payload.txt").write_text(saved["feedback"][0])
+    else:
+        saved["result"] = commands.result
+    specloop_job.save(receipt_path(state), saved)
+    return saved, directory
+
+
+@pytest.mark.scenario("pr-revision/feedback-state-compatibility/legacy-recovery-preserves-saved-work")
+@pytest.mark.scenario("pr-revision/feedback-state-compatibility/legacy-saved-time-initializes-consumption")
+@pytest.mark.scenario("pr-revision/feedback-state-compatibility/legacy-missing-time-uses-tip-once")
+@pytest.mark.parametrize("time_field", ["saved_at", "updated_at", None])
+@pytest.mark.parametrize("recovery", ["running", "delivery", "human_input", "stopped", "paused"])
+def test_legacy_saved_work_finishes_before_exact_snapshot(
+    stage_setup, tmp_path, monkeypatch, time_field, recovery,
+):
+    import fcntl
+    from nightshift import daemon
+    from nightshift.config import Config
+
+    repo, gh, commands = stage_setup
+    saved, directory = legacy_saved(stage_setup, tmp_path, time_field,
+                                    job=recovery in ("running", "stopped", "paused"))
+    if recovery == "human_input":
+        saved["result"] = {"outcome": "refused" if saved["command"] == "revise" else "needs_input",
+                           "reasons": ["Saved question"]}
+        saved["round_id"] = "original-round"
+        specloop_job.save(receipt_path(tmp_path), saved)
+    suffix = ":original-round" if "round_id" in saved else ""
+    marker = f"<!-- nightshift:revise:{saved['change']}{suffix} -->"
+    gh.comments.append({"id": 90, "body": marker})  # Reconcile an earlier ambiguous POST.
+    gh.label_event("agent:revise", "unlabeled")
+    gh.label_event("agent:revise", "labeled")
+    gh.head = commands.result["commit"]  # Current tip differs from the saved receipt's head.
+    current_head = gh.head
+    monkeypatch.setattr("test_specloop_spec_revision.TIP_DATE",
+                        "2026-10-30T00:00:00Z" if time_field else CUTOFF)
+    baseline = sorted(f"{kind}:{i}" for kind in ("conversation", "review", "inline") for i in (1, 2))
+
+    def github(args):
+        if args[:2] in (["pr", "comment"], ["pr", "edit"]) or "PATCH" in args:
+            durable = read(tmp_path)
+            assert durable["consumed_feedback_ids"] == baseline
+            assert durable["legacy_snapshot"] and "feedback_ids" not in durable
+            assert durable["feedback"] == saved["feedback"]
+        return gh(args)
+
+    if recovery == "stopped":
+        specloop_job.save(directory / "stop.json", {"state": "stopped"})
+    if "job" in saved:
+        specloop_job.finalize(directory, {"result": commands.result})
+    if recovery == "running":
+        with (directory / "lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            tick(stage_setup, tmp_path)
+            tick(stage_setup, tmp_path, module=restart())
+            assert "result" not in read(tmp_path)
+            assert not dispatches(commands) and gh.comments[0]["body"] == marker
+    if recovery == "paused":
+        collect = specloop_job.collect
+        pause = tmp_path / "pause"
+
+        def collect_then_pause(*args):
+            result = collect(*args)
+            pause.touch()
+            return result
+
+        with monkeypatch.context() as patch:
+            patch.setattr(specloop_job, "collect", collect_then_pause)
+            patch.setattr(daemon, "STATE_DIR", tmp_path)
+            patch.setattr(daemon, "PAUSE_FILE", pause)
+            patch.setattr(daemon.subprocess, "run", commands)
+            health = daemon.RepoHealth()
+            daemon.poll_specloop(Config(repos=[repo]), health, runner=github, specloop_runner=commands)
+            assert not health.failures and read(tmp_path)["result"] == commands.result
+            assert not read(tmp_path).get("delivered") and gh.comments[0]["body"] == marker
+            daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
+        pause.unlink()
+    errors = []
+    tick(stage_setup, tmp_path, module=restart(), runner=github,
+         on_error=lambda n, e: errors.append(e))
+    migrated = read(tmp_path)
+    assert not errors  # No manual initialization diagnostic.
+    assert all(migrated[key] == value for key, value in saved.items())
+    assert migrated["legacy_snapshot"] and "feedback_ids" not in migrated
+    assert migrated["consumed_feedback_ids"] == baseline
+    assert migrated["feedback_migration"] == {
+        "source": "receipt_saved_at" if time_field else "branch_tip", "cutoff": CUTOFF}
+    assert not dispatches(commands) and len(gh.comments) == 1
+    assert gh.comments[0]["body"].endswith(marker) and "agent:revise" in gh.labels
+    if "job" in saved:
+        assert (directory / "payload.txt").read_text() == saved["feedback"][0]
+    commit_reads = [c for c in gh.calls if c[0] == "api" and "/commits/" in c[1]]
+    assert len(commit_reads) == (not time_field)
+    if commit_reads:
+        assert commit_reads[0][1].endswith(current_head)
+    # Corrupt historical timestamps and advance the tip: migration must never rerun.
+    monkeypatch.setattr("test_specloop_spec_revision.TIP_DATE", "2026-11-01T00:00:00Z")
+    for records in (gh.feedback, gh.reviews, gh.inline):
+        for record in records[:2]:
+            record.update(body="Old ID edited into an instruction", created_at="bad", submitted_at="bad")
+    if recovery == "stopped":
+        tick(stage_setup, tmp_path, module=restart())
+        assert read(tmp_path) == migrated and not dispatches(commands)
+        assert gh.comments[0]["body"] == marker
+        assert json.loads((directory / "stop.json").read_text()) == {"state": "stopped"}
+        return
+    assert migrated["delivered"]
+    gh.label_event("needs-human", "unlabeled")
+    commands.fetch_head = gh.head
+    tick(stage_setup, tmp_path, module=restart())
+    next_round = read(tmp_path)
+    assert next_round["feedback_ids"] == ["conversation:3", "review:3", "inline:3"]
+    assert "legacy_snapshot" not in next_round and next_round["future"] == saved["future"]
+    assert next_round["feedback_migration"] == migrated["feedback_migration"]
+    assert next_round["consumed_feedback_ids"] == sorted([*baseline, *next_round["feedback_ids"]])
+    assert len(dispatches(commands)) == 1
+    gh.label_event("agent:revise", "labeled")
+    assert tick(stage_setup, tmp_path, module=restart()) == [{"outcome": "empty"}]
+    assert len(dispatches(commands)) == 1
+    assert [c for c in gh.calls if c[0] == "api" and "/commits/" in c[1]] == commit_reads
+
+
+@pytest.mark.scenario("pr-revision/feedback-state-compatibility/legacy-initialization-failure-preserves-receipt")
+@pytest.mark.parametrize("failure", ["saved_at", "updated_at", "missing_time", "invalid_time",
+                                    "missing_id", "invalid_id", "page", "commit", "save"])
+@pytest.mark.parametrize("pending_job", [False, True])
+def test_legacy_initialization_failure_prevents_collection_and_delivery(
+    stage_setup, tmp_path, monkeypatch, failure, pending_job,
+):
+    _, gh, commands = stage_setup
+    saved, directory = legacy_saved(stage_setup, tmp_path, None, job=pending_job)
+    if pending_job:
+        specloop_job.finalize(directory, {"result": commands.result})
+    record = gh.reviews[2]  # A later record must also validate before saving any baseline.
+    if failure in ("saved_at", "updated_at"):
+        saved[failure] = "malformed"
+    elif failure == "missing_time":
+        record.pop("submitted_at")
+    elif failure == "invalid_time":
+        record["submitted_at"] = "invalid"
+    elif failure == "missing_id":
+        record.pop("id")
+    elif failure == "invalid_id":
+        record["id"] = True
+    specloop_job.save(receipt_path(tmp_path), saved)
+    before = receipt_path(tmp_path).read_bytes()
+
+    def github(args):
+        if args[0] == "api" and (
+                failure == "page" and args[1].endswith("/pulls/8/comments")
+                or failure == "commit" and "/commits/" in args[1]):
+            raise RuntimeError("read failed")
+        return gh(args)
+
+    def fail_replace(*args):
+        raise OSError("atomic replacement failed")
+
+    errors = []
+    with monkeypatch.context() as patch:
+        if failure == "save":
+            patch.setattr(Path, "replace", fail_replace)
+        tick(stage_setup, tmp_path, runner=github, on_error=lambda n, e: errors.append((n, e)))
+    assert len(errors) == 1 and errors[0][0] == 8
+    assert receipt_path(tmp_path).read_bytes() == before
+    assert not (directory / "collected.json").exists()
+    assert not commands.calls and not gh.comments and "agent:revise" in gh.labels
+    if failure in ("saved_at", "updated_at"):
+        assert not any("/commits/" in c[1] for c in gh.calls)
+    # Repair the failed input and retry the same saved result after restart.
+    for field in ("saved_at", "updated_at"):
+        saved.pop(field, None)
+    record.update(id=3, submitted_at="2026-10-20T10:00:00.000001Z")
+    specloop_job.save(receipt_path(tmp_path), saved)
+    tick(stage_setup, tmp_path, module=restart())
+    assert read(tmp_path)["delivered"] and not dispatches(commands)
+
+
+@pytest.mark.scenario("pr-revision/feedback-state-compatibility/validated-state-survives-replacement")
+@pytest.mark.parametrize("replacement", ["empty", "refused", "bad_version", "bad_ids", "missing_ids"])
+def test_validated_receipt_replacement_through_intake(stage_setup, tmp_path, replacement):
+    _, gh, commands = stage_setup
+    saved = read(tmp_path)
+    saved["future"] = {"nested": [1, 2]}
+    if replacement == "empty":
+        saved["consumed_feedback_ids"].append("conversation:102")
+    elif replacement == "refused":
+        commands.result = {"version": 1, "outcome": "refused" if commands.result["outcome"] == "revised"
+                           else "rejected", "reasons": ["Human input required"]}
+    elif replacement == "bad_version":
+        saved["feedback_state_version"] = 2
+    elif replacement == "bad_ids":
+        saved["consumed_feedback_ids"] = [True]
+    else:
+        saved.pop("feedback_ids")
+    specloop_job.save(receipt_path(tmp_path), saved)
+    before, errors = receipt_path(tmp_path).read_bytes(), []
+    tick(stage_setup, tmp_path, on_error=lambda n, e: errors.append(e))
+    if replacement not in ("empty", "refused"):
+        assert len(errors) == 1 and isinstance(errors[0], ValueError)
+        assert receipt_path(tmp_path).read_bytes() == before
+        assert not commands.calls and not gh.comments
+    else:
+        assert not errors and read(tmp_path)["delivered"]
+        assert read(tmp_path)["future"] == saved["future"]
+        assert read(tmp_path)["consumed_feedback_ids"] == sorted(saved["consumed_feedback_ids"])
+        assert read(tmp_path)["feedback_ids"] == ([] if replacement == "empty" else ["conversation:102"])
+        assert len(dispatches(commands)) == (replacement == "refused")
 
 
 def restart():
