@@ -906,14 +906,16 @@ def test_timeouts_and_invalid_mutants_are_unmeasured():
 @pytest.mark.scenario("parallel-evidence-mutants/timeout-scoring/equivalent-and-skipped-behavior-retained")
 def test_equivalent_and_timeout_mutants_retain_coverage_and_baseline_rules():
     ev = _evidence_with_results("equivalent", "timeout")
-    assert ev.score is None and not ev.unmeasured
-    assert all(ev.passed(minimum) for minimum in (0, 0.5, 0.8, 1))
+    assert ev.score is None and ev.unmeasured
+    assert not any(ev.passed(minimum) for minimum in (0, 0.5, 0.8, 1))
     assert ev.summary().splitlines() == [
         "section 1: 1 scenario(s) covered",
+        "mutation: none of the 2 mutants were killed or survived (1 marked equivalent), "
+        "so nothing was measured; review equivalence annotations and check mutation_steps and any prepare steps",
         "1 of 2 mutants timed out and were not counted",
     ]
     for failed in (replace(ev, uncovered=["c/r/missing"]), replace(ev, baseline_failed=True)):
-        assert failed.score is None and not failed.unmeasured
+        assert failed.score is None and failed.unmeasured
         assert not failed.passed(0)
         assert failed.summary().splitlines().count("1 of 2 mutants timed out and were not counted") == 1
     assert "UNCOVERED: c/r/missing" in replace(ev, uncovered=["c/r/missing"]).summary()
@@ -946,9 +948,11 @@ def test_skipped_mutation_retains_reason_and_coverage_failure(tmp_path, monkeypa
     (("invalid", "invalid", "invalid"),
      "mutation: none of the 3 mutants could be judged (every one was invalid), "
      "so nothing was measured; check mutation_steps and any prepare steps"),
-    (("equivalent",), ""),
+    (("equivalent",),
+     "mutation: none of the 1 mutants were killed or survived (1 marked equivalent), "
+     "so nothing was measured; review equivalence annotations and check mutation_steps and any prepare steps"),
 ])
-def test_zero_timeout_summary_is_unchanged(results, expected):
+def test_zero_timeout_summary_explains_results(results, expected):
     ev = _evidence_with_results(*results)
     assert ev.summary() == "section 1: 1 scenario(s) covered" + (f"\n{expected}" if expected else "")
     if all(result == "invalid" for result in results):

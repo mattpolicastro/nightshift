@@ -78,12 +78,12 @@ class Evidence:
 
     @property
     def unmeasured(self) -> bool:
-        """Mutants were generated but none could be judged: no evidence, not a pass.
+        """Mutants were generated but none were killed or survived: no measurement.
 
         (2026-10-21: a prepare sandbox that could not read a mutant's source made
         every mutant invalid, and two changes passed their gates on nothing.)
         """
-        return bool(self.mutants) and not any(x.result in ("killed", "survived", "equivalent")
+        return bool(self.mutants) and not any(x.result in ("killed", "survived")
                                                 for x in self.mutants)
 
     def passed(self, minimum: float) -> bool:
@@ -95,9 +95,10 @@ class Evidence:
         lines = [f"section {self.section}: {len(self.covered)} scenario(s) covered"
                  + (f", UNCOVERED: {', '.join(self.uncovered)}" if self.uncovered else "")]
         timeouts = sum(x.result == "timeout" for x in self.mutants)
+        equivalent = sum(x.result == "equivalent" for x in self.mutants)
+        pending = sum(x.result == "" for x in self.mutants)
         if self.score is not None:
             valid = [x for x in self.mutants if x.result in ("killed", "survived")]
-            equivalent = sum(x.result == "equivalent" for x in self.mutants)
             lines.append(f"mutation: {sum(x.result == 'killed' for x in valid)}/{len(valid)} caught"
                          + (f" ({equivalent} marked equivalent)" if equivalent else ""))
             lines += [f"  survived: {x.path}:{x.line} {x.op}  `{x.after.strip()[:90]}`"
@@ -105,9 +106,20 @@ class Evidence:
         elif self.baseline_failed:
             lines.append("mutation: the unmutated head fails mutation_steps, so nothing could be measured")
         elif self.unmeasured:
-            outcomes = "invalid or timed out" if timeouts else "invalid"
-            lines.append(f"mutation: none of the {len(self.mutants)} mutants could be judged (every one was "
-                         f"{outcomes}), so nothing was measured; check mutation_steps and any prepare steps")
+            if equivalent or pending:
+                outcomes = []
+                if equivalent:
+                    outcomes.append(f"{equivalent} marked equivalent")
+                if pending:
+                    outcomes.append(f"{pending} pending")
+                lines.append(f"mutation: none of the {len(self.mutants)} mutants were killed or survived "
+                             f"({', '.join(outcomes)}), so nothing was measured; "
+                             + ("review equivalence annotations and " if equivalent else "")
+                             + "check mutation_steps and any prepare steps")
+            else:
+                outcomes = "invalid or timed out" if timeouts else "invalid"
+                lines.append(f"mutation: none of the {len(self.mutants)} mutants could be judged (every one was "
+                             f"{outcomes}), so nothing was measured; check mutation_steps and any prepare steps")
         elif self.skipped:
             lines.append(f"mutation: skipped ({self.skipped})")
         if timeouts:
