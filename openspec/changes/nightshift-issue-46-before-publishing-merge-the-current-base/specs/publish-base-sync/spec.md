@@ -6,7 +6,7 @@ Integrate the current PR base and verify the resulting run head before readiness
 
 ### Requirement: Fetch current base
 
-The harness SHALL fetch the manifest's `pr_base` from the source clone's `origin` into the run repository before declaring `ready_to_publish` and on every eligible `publish` attempt, including retries. It SHALL use the freshly fetched commit, leave the source checkout unchanged, and prevent readiness/publication when fetching fails.
+The harness SHALL fetch the manifest's `pr_base` from the source clone's `origin` into the run repository before declaring `ready_to_publish` and on every eligible `publish` attempt, including retries. It SHALL use the freshly fetched commit, leave the source checkout unchanged, and prevent readiness/publication when fetching fails. Publish SHALL bound its single fetch to 20 seconds and SHALL NOT retry fetching inline.
 
 #### Scenario: Readiness uses origin
 - **WHEN** all tasks are complete and the source clone's local base is stale relative to its origin
@@ -17,12 +17,17 @@ The harness SHALL fetch the manifest's `pr_base` from the source clone's `origin
 - **THEN** the next eligible publish attempt fetches once and checks the newly fetched base before any push or PR operation
 
 #### Scenario: Fetch cannot establish base
-- **WHEN** fetching fails, times out, or the configured base is missing
+- **WHEN** fetching in driver preparation fails, times out, or the configured base is missing
 - **THEN** the run pauses unscheduled as `base_fetch` with a ref-specific diagnostic and resume instructions, the branch remains unchanged, and no stale fetched value permits readiness or publication
+
+#### Scenario: Publish fetch fails retryably
+- **WHEN** a ready run's publish fetch times out at its 20-second limit, fails, or cannot find the configured base
+- **THEN** direct `publish --json` exits 1 with exactly one version-1 top-level `error` document naming the ref and explaining retry, with no outcome or reasons and no stale-base fallback
+- **THEN** the ready pause, checks, branch, PR and pending verification remain unchanged, and no merge, verify, push, PR operation or `base_fetch` pause occurs
 
 ### Requirement: Preserve run history
 
-When the fetched base is not an ancestor of the run head, the harness SHALL create a merge with the previous run head as first parent and fetched base as second parent, using its own commit identity. It SHALL never fast-forward away the run history. A conflicting merge SHALL pause as `base_conflict`, list the conflicting paths, leave the run branch unchanged and perform no publication.
+When the fetched base is not an ancestor of the run head, the driver in `finals` via `prepare_publish` SHALL create a merge with the previous run head as first parent and fetched base as second parent, using its own commit identity. It SHALL never fast-forward away the run history. A conflicting merge SHALL pause as `base_conflict`, list the conflicting paths, leave the run branch unchanged and perform no publication. Publish SHALL NOT construct or install merges.
 
 #### Scenario: Clean moved base
 - **WHEN** the fetched base has commits absent from the run and the merge is clean
@@ -38,11 +43,11 @@ When the fetched base is not an ancestor of the run head, the harness SHALL crea
 
 ### Requirement: Verify integrated head
 
-After a base integration, the harness SHALL run the trusted manifest's prepare and verify pipeline on the resulting head before readiness or publication. Failed checks SHALL pause as `base_drift` with retained receipts and logs, keep the merged head available for repair, and prevent publication. A base already incorporated with no unresolved verification obligation SHALL add only one fetch and no merge or extra verification.
+After integration, only the driver in `finals` via `prepare_publish` SHALL run trusted prepare/verify steps before readiness. Publish SHALL NOT prepare or verify inline. Failed checks SHALL pause as `base_drift`, retaining the merged head, receipts and logs for repair and blocking publication. An incorporated base with no verification obligation SHALL add one fetch and no merge or extra verification.
 
 #### Scenario: Merged head passes
 - **WHEN** integration succeeds and all trusted prepare and verify receipts pass
-- **THEN** readiness may proceed and publication ultimately pushes that verified merged head on an invocation that does not advance it, preserving adopted PR reuse or existing draft PR reconciliation and the human-checks pause
+- **THEN** driver final checks may proceed and restore readiness at the verified merged head; a later publish fetches once and pushes that head if still eligible, preserving adopted PR reuse or existing draft PR reconciliation and the human-checks pause without merging or verifying inline
 
 #### Scenario: Drift breaks verify
 - **WHEN** a clean base merge causes a trusted verify step to fail or time out
@@ -62,7 +67,8 @@ The harness SHALL persist integration intent before advancing the branch and bin
 
 #### Scenario: Interrupted integration
 - **WHEN** execution stops after saving integration intent, after advancing the branch, or after verification before saving success
-- **THEN** a later check fetches again, reconciles the recorded intent with the actual branch, and completes required verification before readiness/publication without duplicating an already applied merge
+- **THEN** later driver preparation fetches again, reconciles the recorded intent with the actual branch, and completes required verification before readiness/publication without duplicating an already applied merge
+- **THEN** any eligible publish with this outstanding obligation only fetches and schedules the driver, leaving the head and obligation intact even if the fetched base is already incorporated
 
 #### Scenario: Repair against unchanged base
 - **WHEN** a human resumes a drift-paused run with an unchanged failing head or a descendant repair, or resumes a conflict-paused run after incorporating the base manually, and the fetched base has not moved
@@ -90,34 +96,40 @@ Section mutation evidence SHALL exclude lines introduced solely through integrat
 
 ### Requirement: Preserve publication contracts
 
-The new gate SHALL retain existing target-repository validation, locking, version-1 command JSON, publication retry reconciliation including delivery of the human-checks comment, and review rules. A gate refusal SHALL expose its diagnostic through the existing publication refusal contract without claiming successful publication. A successfully verified head advance SHALL instead use the retry boundary below.
+The gate SHALL preserve target validation, locking, version-1 JSON, publication/comment recovery and review rules. Wrong-target and not-ready refusals SHALL retain their contracts. Driver pauses SHALL expose diagnostics through status. Publish scheduling and fetch failures SHALL return retryable direct-command errors without claiming publication or producing daemon-cached refusals.
 
 #### Scenario: Wrong publication target
 - **WHEN** publish has no manifest GitHub repository or a hosted source origin mismatches it
 - **THEN** the existing target refusal occurs before the new publication fetch, merge, verification, push or PR operations
 
-#### Scenario: Drift refusal as JSON
-- **WHEN** `publish --json` or `act publish --json` encounters a base conflict or verification drift
-- **THEN** it exits nonzero with exactly one existing-format version-1 refusal document conveying the pause diagnostic, retains the PR identity, and performs no publication
+#### Scenario: Driver pause blocks publication
+- **WHEN** driver preparation pauses as `base_conflict` or `base_drift` and publication is then requested
+- **THEN** status retains the files or receipt diagnostics, direct publish and act publish reject the non-ready state in their existing version-1 refusal formats, retain the PR identity, and perform no fetch, merge, verify or publication
 
-### Requirement: Stable head publication boundary
+### Requirement: Driver preparation handoff
 
-If publication preparation advances the head and verification passes, the invocation SHALL defer external publication, retain `ready_to_publish` and all human checks at the actual merged head, and report a retry instruction. Direct JSON publication SHALL use a retryable error. Each retry SHALL fetch again and publish only if preparation leaves its entry head unchanged and all verification obligations are satisfied.
+If the fetched base is not incorporated or verification remains due, publish SHALL atomically save `running` with a null pause, preserving the branch, tasks, gates, PR and verification state, then return a retryable error before publication effects. The unchanged supervisor SHALL be able to schedule driver preparation. Publish SHALL NOT merge, verify or drive the run inline, including retries and recovery.
 
-#### Scenario: Publish merge defers external effects
-- **WHEN** publish begins at H and clean base integration advances it to M with green verification
-- **THEN** it retains ready state at M with the human checks and performs no push, PR lookup/creation, published event or transition to `human_checks`
-- **THEN** direct `publish --json` exits 1 with exactly one version-1 top-level `error` document and no outcome or reasons; plain publish exits 1 with the retry explanation, and `act publish` keeps its refused/detail format with that explanation
-- **THEN** a subsequent invocation with an unchanged base fetches once, performs no new merge or verification, and publishes M to the same adopted PR or through existing draft PR reconciliation
+#### Scenario: Moved base schedules preparation
+- **WHEN** publish begins at H and fetches a base not incorporated into H
+- **THEN** it leaves H unchanged, saves running status with a null pause, and performs no merge, verify, push, PR lookup/creation, published event or transition to `human_checks`
+- **THEN** direct `publish --json` exits 1 with exactly one version-1 top-level `error` document and no outcome or reasons explaining scheduled preparation and retry after readiness; plain publish exits 1 with the explanation, and `act publish` keeps its refused/detail format
+- **THEN** the supervisor can schedule the run, the driver refetches and merges/verifies in `finals`, successful final checks restore ready state at M with every human check, and a later eligible publish fetches once and publishes M without merging or verifying
 
-#### Scenario: Deferral survives interruption
-- **WHEN** a daemon poll saved an H-keyed receipt and publication stops after advancing H to M, including interruption before verification success is saved or loss of the deferral response
-- **THEN** later status reports actual head M in ready state, existing intake creates its M-keyed receipt with all checks, and pending verification completes before any eventual publication
-- **THEN** the retryable deferral produces no publication-refusal comment or needs-human label and does not mark the H-keyed receipt delivered
+#### Scenario: Pending verification schedules preparation
+- **WHEN** publish fetches an already incorporated base but a pending integration intent, retry flag or changed head leaves verification outstanding
+- **THEN** it saves running status with a null pause and returns the retryable error without reconciling intent, moving the branch, clearing the obligation, verifying or publishing
+- **THEN** only driver preparation completes recovery and verification before the run can regain readiness
+
+#### Scenario: Handoff survives interruption
+- **WHEN** intake saved an H-keyed receipt and publication is interrupted before or after saving running status, loses its handoff response, or subsequent driver preparation crashes after ref advancement before verification success is saved
+- **THEN** a pre-save interruption leaves ready state for another handoff; a post-save interruption leaves schedulable running state, and driver restart recovers any verification obligation before readiness
+- **THEN** intake skips running runs, later status reports actual ready head M with all checks for a new M-keyed receipt, and handoff causes no publication-refusal comment, needs-human label or delivery of the old H-keyed receipt
+- **THEN** every publish invocation performs neither merge nor verify
 
 #### Scenario: Base moves on successive attempts
-- **WHEN** the base advances again after a verified deferral, or after a later push fails before publication completes
-- **THEN** each eligible attempt fetches the current base, merges and verifies if required, and defers again whenever its head advances
+- **WHEN** the base advances again after driver preparation restored readiness, or after a later push fails before publication completes
+- **THEN** each eligible publish fetches once and schedules the driver if needed without merging or verifying inline, and each driver preparation refetches the latest base before integration and verification
 - **THEN** a subsequent stable attempt publishes only the latest verified head with a matching newly captured receipt, without duplicate merge commits or a stale human-checks receipt
 
 ### Requirement: Recover publication comment after integration
@@ -125,7 +137,7 @@ If publication preparation advances the head and verification passes, the invoca
 Publication after integration SHALL preserve human-checks comment recovery using unchanged `(change, head, pr)` matching and round markers. Intake SHALL be able to capture the merged head and checks between integration and external publication. Lost responses or interrupted delivery SHALL NOT lose or duplicate the comment or require another publication solely to deliver it. Status SHALL report the actual branch head.
 
 #### Scenario: Published response is lost
-- **WHEN** intake has refreshed its receipt to M after a base-merge deferral and the stable publish invocation pushes M and enters `human_checks` but its response is lost
+- **WHEN** intake has refreshed its receipt to M after driver preparation restored readiness and the stable publish invocation pushes M and enters `human_checks` but its response is lost
 - **THEN** after restart the receipt still matches actual head M, existing intake recovers the published result and posts the complete human-checks comment exactly once without another publish invocation
 
 #### Scenario: Comment delivery is interrupted

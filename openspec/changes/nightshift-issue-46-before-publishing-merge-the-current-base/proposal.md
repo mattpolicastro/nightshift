@@ -9,10 +9,10 @@ Dependency: blocked-by #14; build on its landed CLI and runtime scenario-referen
 ## What Changes
 
 - Fetch the manifest's `pr_base` from the source clone's `origin` into the run repository before `ready_to_publish` and on every eligible `publish` attempt, including retries.
-- If the fetched base is not already incorporated, create a harness-authored merge commit preserving the run head as first parent, then run the trusted prepare/verify pipeline on the merged head.
-- Pause as `base_conflict` with conflicting paths without moving the run branch, or as `base_drift` with retained verification receipts after a clean merge fails checks. Fetch failures also prevent readiness/publication and retain a diagnostic.
+- In the driver only, `finals` calls `prepare_publish` to create a harness-authored merge commit when needed, preserving the run head as first parent, then run the trusted prepare/verify pipeline on the merged head.
+- Pause as `base_conflict` with conflicting paths without moving the run branch, or as `base_drift` with retained verification receipts after a clean merge fails checks. Driver fetch failures pause as `base_fetch`; publication fetch failures return a retryable error and retain readiness for another attempt.
 - Persist enough integration and verification state to recover safely after interruption. An unchanged, already checked base adds one fetch and no merge or additional verification.
-- If a successful publication-time integration advances the head, leave it `ready_to_publish` and return a retryable error before any push. The next invocation fetches again and publishes if the head stays unchanged during that attempt. This lets the unchanged daemon capture its human-checks receipt at the merged head and recover lost responses or comment delivery.
+- Publish never merges or verifies inline: its base fetch has a 20-second timeout, below the daemon's 30-second command cap. If integration or verification is required, atomically save status `running` with the pause cleared and return a retryable version-1 error before pushing. The supervisor re-enters `finals`, prepares the head, and restores readiness. The unchanged daemon then captures human checks at that head before a later publish attempt. Fetch timeouts are also retryable errors, never domain refusals.
 - Exclude base-only lines from section mutation evidence while retaining the section's own changes and existing coverage, selection, scoring and timeout rules.
 - Add regressions in new test files. Existing tests may change **fixture setup only** to supply a fetchable local base or a fetch-boundary stub where `_remote` is faked. Preserve every assertion and explain each changed fixture in the implementation PR.
 
