@@ -410,6 +410,77 @@ def _newer_than(items: list[dict], since: str | None, key: str) -> list[dict]:
     return [i for i in items if (i.get(key) or "") > since]
 
 
+@dataclass(frozen=True)
+class FeedbackItem:
+    id: str
+    block: str
+
+
+def _feedback_id(source: str, record: dict) -> str:
+    value = record.get("id")
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"invalid {source} feedback ID: {value!r}")
+    return f"{source}:{value}"
+
+
+def _pr_feedback_records(repo: str, number: int, *, runner=_gh) -> list[tuple[str, dict]]:
+    """Read complete trusted REST records, including non-actionable bodies.
+
+    Legacy migration can use these records with `_feedback_id`, validating
+    `created_at` (conversation/inline) or `submitted_at` (review) itself.
+    Ordinary selection does not need timestamps or IDs on excluded bodies.
+    """
+    records = []
+    seen = {}
+    for source, endpoint in (
+        ("conversation", f"issues/{number}/comments"),
+        ("review", f"pulls/{number}/reviews"),
+        ("inline", f"pulls/{number}/comments"),
+    ):
+        pages = json.loads(runner(["api", f"repos/{repo}/{endpoint}", "--paginate", "--slurp"]))
+        if not isinstance(pages, list):
+            raise ValueError(f"invalid {source} feedback pages")
+        for page in pages:
+            if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
+                raise ValueError(f"invalid {source} feedback page")
+            for record in page:
+                if not trusted(record, "author_association"):
+                    continue
+                value = record.get("id")
+                if type(value) is int and value > 0:
+                    identity = _feedback_id(source, record)
+                    if identity in seen:
+                        if seen[identity] != record:
+                            raise ValueError(f"conflicting feedback records for {identity}")
+                        continue
+                    seen[identity] = record
+                records.append((source, record))
+    return records
+
+
+def pr_feedback_items(repo: str, number: int, *, runner=_gh) -> list[FeedbackItem]:
+    """Strict, paginated feedback with stable source-qualified REST IDs.
+
+    Read failures propagate; callers must save only a complete returned list.
+    """
+    items = []
+    for source, record in _pr_feedback_records(repo, number, runner=runner):
+        suffix = ""
+        if source == "review":
+            state = (record.get("state") or "").replace("_", " ").lower()
+            suffix = f" ({state})" if state and state != "commented" else ""
+        elif source == "inline":
+            where = record.get("path") or ""
+            line = record.get("line") or record.get("original_line")
+            if where and line:
+                where = f"{where}:{line}"
+            suffix = f" on `{where}`" if where else ""
+        block = _block(record.get("user"), record.get("body"), suffix=suffix)
+        if block and has_instructions([block]):
+            items.append(FeedbackItem(_feedback_id(source, record), block))
+    return items
+
+
 def pr_feedback(
     repo: str, branch: str, since: str | None = None, *, runner=_gh,
     strict: bool = False, number: int | None = None,
