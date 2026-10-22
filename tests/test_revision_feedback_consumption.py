@@ -181,6 +181,8 @@ def test_relabel_does_not_requeue_consumed_feedback(setup, tmp_path):
         assert module.revise_pending(repo, queue.Labels(), tmp_path, runner=gh,
                                      specloop_runner=commands) == [{"outcome": "empty"}]
         assert read(tmp_path)["consumed_feedback_ids"] == consumed
+        assert read(tmp_path)["feedback_ids"] == read(tmp_path)["feedback"] == []
+        assert read(tmp_path)["delivered"]
         assert not gh.labels and gh.head == HEAD
         assert "no unconsumed review feedback" in gh.comments[-1]["body"]
         assert "branch tip" not in gh.comments[-1]["body"]
@@ -324,7 +326,8 @@ def test_first_selection_includes_historical_ids_without_commit_read(stage_setup
 @pytest.mark.scenario("pr-revision/consumption-based-eligibility/comments-during-revision-feed-the-next-round")
 @pytest.mark.scenario("pr-revision/consumption-based-eligibility/edited-consumed-comment-stays-consumed")
 @pytest.mark.parametrize("source", ["conversation", "review"])
-def test_comments_during_revision_feed_the_next_round(stage_setup, tmp_path, monkeypatch, source):
+@pytest.mark.parametrize("same_body", [False, True])
+def test_comments_during_revision_feed_the_next_round(stage_setup, tmp_path, monkeypatch, source, same_body):
     repo, gh, commands = stage_setup
     a = {**gh.feedback[1], "submittedAt": gh.feedback[1]["createdAt"]}
     gh.feedback = [a] if source == "conversation" else []
@@ -382,7 +385,8 @@ def test_comments_during_revision_feed_the_next_round(stage_setup, tmp_path, mon
     monkeypatch.setattr("test_specloop_spec_revision.TIP_DATE", later_tip_date)
     assert b["createdAt"] < later_tip_date
     commands.fetch_head = REVISED
-    a.update(body=b["body"], createdAt="2026-10-21T12:00:00Z",
+    a.update(body=b["body"] if same_body else "Consumed ID with a new instruction",
+             createdAt="2026-10-21T12:00:00Z",
              submittedAt="2026-10-21T12:00:00Z")  # Same ID stays consumed after another edit.
     gh.label_event("agent:revise", "labeled")
     poll(stage_setup, tmp_path)
@@ -394,6 +398,8 @@ def test_comments_during_revision_feed_the_next_round(stage_setup, tmp_path, mon
     assert len(commands.feedback if isinstance(commands, BuildCommands) else commands.proposals) == 1
     gh.label_event("agent:revise", "labeled")
     assert poll(stage_setup, tmp_path) == [{"outcome": "empty"}]
+    assert read(tmp_path)["consumed_feedback_ids"] == sorted([*consumed, a_id, "conversation:104"])
+    assert read(tmp_path)["feedback_ids"] == []
     assert len(commands.feedback if isinstance(commands, BuildCommands) else commands.proposals) == 1
     assert not any("/commits/" in c[1] for c in gh.calls)
 

@@ -75,6 +75,9 @@ def test_legacy_saved_work_finishes_before_exact_snapshot(
     def github(args):
         if args[:2] in (["pr", "comment"], ["pr", "edit"]) or "PATCH" in args:
             durable = read(tmp_path)
+            assert durable["feedback_state_version"] == 1
+            assert durable["feedback_migration"] == {
+                "source": "receipt_saved_at" if time_field else "branch_tip", "cutoff": CUTOFF}
             assert durable["consumed_feedback_ids"] == baseline
             assert durable["legacy_snapshot"] and "feedback_ids" not in durable
             assert durable["feedback"] == saved["feedback"]
@@ -152,6 +155,8 @@ def test_legacy_saved_work_finishes_before_exact_snapshot(
     assert len(dispatches(commands)) == 1
     gh.label_event("agent:revise", "labeled")
     assert tick(stage_setup, tmp_path, module=restart()) == [{"outcome": "empty"}]
+    assert read(tmp_path)["consumed_feedback_ids"] == next_round["consumed_feedback_ids"]
+    assert read(tmp_path)["feedback_migration"] == migrated["feedback_migration"]
     assert len(dispatches(commands)) == 1
     assert [c for c in gh.calls if c[0] == "api" and "/commits/" in c[1]] == commit_reads
 
