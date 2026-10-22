@@ -3,6 +3,7 @@
 import json
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from specloop import agents, feasibility, verify
@@ -65,6 +66,124 @@ Context limitations:
 """
 
 
+def _sorted_map(files: dict[str, list[str]]) -> dict[str, list[str]]:
+    return {path: sorted(set(labels)) for path, labels in sorted(files.items())}
+
+
+def open_pr_files(github: str, branch: str, *, runner=None) -> tuple[dict[str, list[str]], list[str]]:
+    """Collect filenames only, retaining partial results under a bounded API budget."""
+    if not github:
+        return {}, []
+    runner = runner or subprocess.run
+    parts = github.rstrip("/").split("/")
+    if len(parts) not in (2, 3) or not all(parts):
+        return {}, ["Open PR context unavailable: invalid GitHub repository configuration."]
+    repository = "/".join(parts[-2:])
+    host = ["--hostname", parts[0]] if len(parts) == 3 else []
+    deadline = time.monotonic() + 120
+    files: dict[str, list[str]] = {}
+    notes: list[str] = []
+    budget_note = "Open PR context incomplete: 120-second lookup budget exhausted."
+
+    def note(message):
+        if message not in notes:
+            notes.append(message)
+
+    def page(endpoint, number, scope):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            note(budget_note)
+            return None
+        timeout = min(30, remaining)
+        separator = "&" if "?" in endpoint else "?"
+        argv = ["gh", "api", f"repos/{repository}/{endpoint}{separator}per_page=100&page={number}",
+                *host, "--method", "GET"]
+        try:
+            response = runner(argv, capture_output=True, text=True, check=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            note(f"{scope} incomplete: request timed out after {timeout:g} seconds.")
+            if time.monotonic() >= deadline:
+                note(budget_note)
+            return None
+        except (OSError, subprocess.SubprocessError):
+            note(f"{scope} unavailable: GitHub request failed.")
+            return None
+        if time.monotonic() >= deadline:
+            note(budget_note)
+        # Do not copy error output (or any PR body/patch) into the context.
+        if response.returncode:
+            note(f"{scope} unavailable: GitHub request failed.")
+            return None
+        try:
+            data = json.loads(response.stdout)
+        except (ValueError, TypeError):
+            data = None
+        if not isinstance(data, list) or len(data) > 100:
+            note(f"{scope} incomplete: malformed GitHub page {number}.")
+            return None
+        return data
+
+    seen = set()
+    pr_page = 1
+    while True:
+        prs = page("pulls?state=open", pr_page, "Open PR list")
+        if prs is None:
+            break
+        for pr in prs:
+            if time.monotonic() >= deadline:
+                note(budget_note)
+                break
+            if (not isinstance(pr, dict) or type(pr.get("number")) is not int
+                    or pr["number"] <= 0 or not isinstance(pr.get("html_url"), str) or not pr["html_url"]
+                    or not isinstance(pr.get("head"), dict) or not isinstance(pr["head"].get("ref"), str)):
+                note(f"Open PR list incomplete: malformed PR on page {pr_page}.")
+                continue
+            head_repo = pr["head"].get("repo")
+            # GitHub may return null for a deleted head repository. Such a PR
+            # is not known to be our own and must still contribute its files.
+            if "repo" not in pr["head"] or (head_repo is not None and (
+                    not isinstance(head_repo, dict) or not isinstance(head_repo.get("full_name"), str)
+                    or not head_repo["full_name"])):
+                note(f"Open PR #{pr['number']} context incomplete: malformed head repository.")
+                head_repo = None
+            if (pr["head"]["ref"] == branch and head_repo
+                    and head_repo["full_name"].casefold() == repository.casefold()):
+                continue
+            number = pr["number"]
+            if number in seen:
+                continue
+            seen.add(number)
+            label = f"#{number} {pr['html_url']}"
+            scope = f"Open PR #{number} files"
+            for file_page in range(1, 31):
+                changed = page(f"pulls/{number}/files", file_page, scope)
+                if changed is None:
+                    break
+                for item in changed:
+                    if not isinstance(item, dict):
+                        note(f"{scope} incomplete: malformed file on page {file_page}.")
+                        continue
+                    for key in ("filename", "previous_filename"):
+                        if key == "previous_filename" and key not in item:
+                            continue
+                        path = item.get(key)
+                        if not isinstance(path, str) or not path:
+                            note(f"{scope} incomplete: malformed file on page {file_page}.")
+                            continue
+                        files.setdefault(path, []).append(label)
+                if file_page == 30 and len(changed) == 100:
+                    note(f"{scope} possibly incomplete: reached GitHub's 3000-file-per-PR ceiling.")
+                if len(changed) < 100:
+                    break
+        if time.monotonic() >= deadline:
+            note(budget_note)
+            break
+        if len(prs) < 100:
+            break
+        pr_page += 1
+    return _sorted_map(files), notes
+
+
 def _output_error(output) -> str | None:
     error = agents.validate(output, feasibility.SCHEMA)
     if error:
@@ -98,9 +217,9 @@ def check(repo: Path, rev: str, m: Manifest, out: Path, *, change: str,
         prompt = PROMPT.format(
             change=change, allowed=", ".join(m.allowed) or "(none)",
             frozen=", ".join(m.frozen) or "(none)",
-            planned=json.dumps(planned, indent=2, sort_keys=True),
-            pr_files=json.dumps(pr_files, indent=2, sort_keys=True),
-            pr_state=pr_state, context_notes=json.dumps(context_notes, indent=2),
+            planned=json.dumps(_sorted_map(planned), indent=2),
+            pr_files=json.dumps(_sorted_map(pr_files), indent=2),
+            pr_state=pr_state, context_notes=json.dumps(sorted(set(context_notes)), indent=2),
         )
         profile = (m.chains.get("feasibility") or m.chains.get("review") or (m.roles["review"],))[0]
         call = agents.Call(profile, "read", prompt, checkout, feasibility.SCHEMA,
@@ -112,7 +231,14 @@ def check(repo: Path, rev: str, m: Manifest, out: Path, *, change: str,
         elif error := _output_error(res.output):
             result = {"error": f"invalid_output: {error}"}
         else:
-            result = res.output
+            # Context failures are review notes even when the agent omits them.
+            # Collapse an agent echo with the harness note, with one prefix.
+            limitations = {note.removeprefix("Critic: ") for note in context_notes}
+            risks = [f"Critic: {risk.removeprefix('Critic: ')}"
+                     if risk.removeprefix("Critic: ") in limitations else risk
+                     for risk in res.output["risks"]]
+            risks += [f"Critic: {note.removeprefix('Critic: ')}" for note in context_notes]
+            result = {**res.output, "risks": list(dict.fromkeys(risks))}
     except Exception as exc:
         result = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
     finally:
