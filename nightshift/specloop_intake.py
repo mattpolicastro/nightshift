@@ -364,6 +364,70 @@ def admit_pending(
                  on_error=on_error, on_pending=on_pending)
 
 
+def _validate_revision_feedback(receipt: dict) -> None:
+    """Validate an initialized ledger; legacy receipts must be migrated first."""
+    if not isinstance(receipt, dict):
+        raise ValueError("revision feedback receipt must be an object")
+    version = receipt.get("feedback_state_version")
+    if type(version) is not int or version != 1:
+        raise ValueError("unsupported or missing revision feedback_state_version")
+    if "legacy_snapshot" in receipt and type(receipt["legacy_snapshot"]) is not bool:
+        raise ValueError("invalid revision legacy_snapshot")
+    legacy = receipt.get("legacy_snapshot", False)
+    for field in ("consumed_feedback_ids", "feedback_ids"):
+        if field == "feedback_ids" and legacy and field not in receipt:
+            continue
+        ids = receipt.get(field)
+        if (not isinstance(ids, list) or any(
+                not isinstance(identity, str)
+                or not re.fullmatch(r"(?:conversation|review|inline):[1-9][0-9]*", identity)
+                for identity in ids) or len(set(ids)) != len(ids)):
+            raise ValueError(f"invalid revision {field}")
+    feedback = receipt.get("feedback")
+    if not isinstance(feedback, list) or any(not isinstance(block, str) for block in feedback):
+        raise ValueError("invalid revision feedback")
+    if "feedback_ids" in receipt and (legacy or len(receipt["feedback_ids"]) != len(feedback)):
+        raise ValueError("revision feedback_ids must align with a non-legacy snapshot")
+
+
+def _save_revision_snapshot(path: Path, previous: dict | None,
+                            items: list[queue.FeedbackItem], **round_fields) -> dict:
+    """Replace a finished round, preserving its ledger and unknown fields.
+
+    Callers authorize and recover pending work first, then use this before
+    dispatch (including synchronous runners). No receipt means no baseline.
+    """
+    if previous is not None:
+        _validate_revision_feedback(previous)
+    consumed = set(previous["consumed_feedback_ids"]) if previous is not None else set()
+    selected = [item for item in items if item.id not in consumed]
+    receipt = dict(previous) if previous is not None else {}
+    for field in ("change", "head", "event", "round_id", "command", "job", "result",
+                  "delivered", "feedback", "feedback_ids", "legacy_snapshot"):
+        receipt.pop(field, None)
+    receipt.update(round_fields)
+    receipt.update(feedback_state_version=1, consumed_feedback_ids=sorted(consumed),
+                   feedback_ids=[item.id for item in selected],
+                   feedback=[item.block for item in selected])
+    _validate_revision_feedback(receipt)
+    _save(path, receipt)
+    return receipt
+
+
+def _acknowledge_revision_feedback(path: Path, receipt: dict) -> None:
+    """After validated success (and spec push), consume only the saved IDs.
+
+    Legacy snapshots have no exact IDs and add nothing beyond their baseline.
+    A failed save leaves the caller's receipt unchanged so delivery cannot
+    mistake an in-memory acknowledgement for durable consumption.
+    """
+    _validate_revision_feedback(receipt)
+    updated = {**receipt, "consumed_feedback_ids": sorted(
+        set(receipt["consumed_feedback_ids"]) | set(receipt.get("feedback_ids", [])))}
+    _save(path, updated)
+    receipt.update(updated)
+
+
 def revise_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
     git_runner=None, launcher=None, status_runner=None, on_error=None, on_pending=None,
