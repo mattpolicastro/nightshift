@@ -11,7 +11,6 @@ import subprocess
 
 
 class SpecloopError(RuntimeError):
-    # mutation-equivalent: This docstring is not read by protocol handling; call() checks version 1 independently.
     """An invocation failed or did not speak the version-1 protocol."""
 
 
