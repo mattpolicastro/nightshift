@@ -13,12 +13,13 @@ import subprocess
 import time
 from pathlib import Path
 
+from nightshift.host_paths import tool_path
+
 FALLBACK_SECONDS = 30 * 60
-PATH = "/opt/homebrew/bin:/usr/bin:/bin"
 
 
 def codex_limits(home: Path, timeout: float = 20) -> dict | None:
-    env = {"HOME": str(Path.home()), "PATH": PATH, "CODEX_HOME": str(home)}
+    env = {"HOME": str(Path.home()), "PATH": tool_path("/usr/bin:/bin"), "CODEX_HOME": str(home)}
     try:
         child = subprocess.Popen(["codex", "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                  stderr=subprocess.DEVNULL, env=env, bufsize=0)

@@ -80,12 +80,92 @@ Fixes land through Nightshift's own front door; these gaps remain unresolved.
 
 - **macOS only.** Verification runs under `sandbox-exec`, and the services are
   launchd agents.
-- **Homebrew paths.** The verify sandbox's `PATH` starts at `/opt/homebrew/bin`,
-  and the Paseo plugin runs `/opt/homebrew/bin/uv`.
-- **The Node toolchain is expected under `~/n/bin`.** The `n` version manager
-  puts it there. It's used for the OpenSpec CLI through `npx`, and by the
-  plugin's `PATH`.
-- **Fixed locations.** The Paseo plugin expects the Nightshift checkout at
-  `~/Projects/nightshift`, and worker worktrees default to
-  `~/Projects/nightshift-wt`.
+- **Configurable Python and plugin paths.** The locations below are defaults,
+  with operator-owned process environment overrides
+  ([issue #15](https://github.com/mattpolicastro/nightshift/issues/15)). They do
+  not provide full service-bootstrap portability; see the frozen wrappers below.
 - **The attention page and Factory section need a Paseo host.**
+
+| Setting | Default | Consumers |
+| --- | --- | --- |
+| `NIGHTSHIFT_BIN_DIR` | `/opt/homebrew/bin` | Python preparation, verification, agent subprocesses and Codex quota reads; both plugin command adapters |
+| `NIGHTSHIFT_NODE_BIN` | `~/n/bin` | Plugin Factory, including OpenSpec `npx` calls for finish |
+| `NIGHTSHIFT_UV` | `<resolved NIGHTSHIFT_BIN_DIR>/uv` | Exact executable for both plugin adapters |
+| `NIGHTSHIFT_CHECKOUT` | `~/Projects/nightshift` | Working directory for both plugin adapters and attention's installation check |
+
+Explicit settings override defaults; an unset `NIGHTSHIFT_UV` follows the
+selected bin directory. Python consumes only `NIGHTSHIFT_BIN_DIR`; the other
+settings do not select a Python CLI's checkout or executable. Paths must be
+absolute or begin with `~/`, expanded against the host user's home before
+verification substitutes its isolated `HOME`. Spaces and other filename
+characters stay literal: no `$VAR`, glob or shell-substitution expansion.
+Blank or relative values, unsupported tilde forms, NUL/newline/carriage-return
+characters, and colons in the two PATH directory settings are rejected without
+falling back. Only settings used by a consumer are validated. Resolution does
+not install tools, require paths to exist or create directories.
+
+Preparation, verification, agents and plugin attention use the selected bin
+directory followed by `/usr/bin:/bin:/usr/sbin:/sbin`; quota reads use
+`/usr/bin:/bin`. Factory prepends the selected Node directory before that bin
+directory and the full system suffix. These consumers do not append arbitrary
+inherited PATH entries. `NIGHTSHIFT_NODE_BIN` does not add Node to verification;
+use a suitable tool directory or the trusted manifest's explicit PATH commands.
+Choosing a PATH grants no sandbox read access: home-local tools still need
+manifest variables or `[sandbox].prepare_read`, and credential denials and
+offline verification remain. See [preparation](docs/specloop/prepare.md).
+
+Supply settings in each actual Python service's and Paseo host process's
+environment, then restart the affected daemon, supervisor or Paseo host; there
+is no hot reload. A terminal export cannot reconfigure an already-running
+service, and launchd reads no shell configuration. The existing
+`bin/nightshift-daemon` exports the trusted `~/.config/nightshift/env` file:
+file values win over inherited values for downstream settings after bootstrap.
+`bin/specloop-serve` does not source that file; supply Python settings in its
+service environment. Paseo needs its own host environment, not RPC inputs.
+Candidate files and manifest env files cannot configure the harness resolver.
+See [direct CLI setup](README.md#host-path-setup) and
+[plugin installation](plugins/nightshift/README.md#installation).
+
+Worker placement remains `[daemon].worktree_root` in the selected config file,
+defaulting to `~/Projects/nightshift-wt`; there is no parallel environment key.
+Leading `~/` expands and absolute paths keep their location. Relative values
+now resolve beside the selected config file, instead of the daemon's working
+directory. To retain an old relative location, set its absolute path before
+restarting. Spaces remain literal; wrong types, blank strings, unsupported
+tilde forms and NUL/line breaks are rejected. Loading does not create or migrate
+worktrees. Existing worktrees, state, credentials and manifests do not move;
+this worker root is separate from specloop run state. See
+[the example config](config.example.toml).
+
+**Frozen service wrappers: portability deferred.** `bin/**` is frozen for this
+change. The unchanged wrappers retain these bootstrap commands:
+
+| Wrapper | Checkout | Executable and arguments | PATH |
+| --- | --- | --- | --- |
+| `bin/nightshift-daemon` | `$HOME/Projects/nightshift` | `/opt/homebrew/bin/uv run nightshift run` | `/opt/homebrew/bin:$HOME/n/bin:$PATH` (prepends to incoming PATH) |
+| `bin/specloop-serve` | `$HOME/Projects/nightshift` | `/opt/homebrew/bin/uv run --no-sync specloop serve` | `$HOME/n/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin` |
+
+Neither wrapper consumes the new settings for its own bootstrap. Environment
+settings do not relocate these commands; changing a plist's wrapper pathname
+does not change their internal paths either. No new helper changes this.
+Direct CLI examples select an actual checkout and uv executable explicitly;
+they do not configure bundled service startup. Full daemon rollout on another
+layout remains pending separate wrapper work or an independently provisioned
+operator service with equivalent credential and preflight guards: require the
+trusted credential file and OAuth/GitHub tokens, clear conflicting Anthropic
+API credentials/base URL, check required tools, and preserve startup refusal
+and preflight checks. Do not bypass these guards to relocate the daemon.
+
+**Pending manual validation.** Automated tests check configuration propagation,
+not end-to-end portability. A real second macOS installation with different
+tool, Node, checkout and worktree locations remains unvalidated. Record its
+layout, launch method and results using a direct supervisor invocation or an
+independently provisioned service with equivalent guards. Run disposable
+prepare/verify steps, check agent/quota tool lookup and real sandbox denials,
+and confirm existing worktrees did not move. Check new worker placement when
+a daemon with those guards is available; otherwise leave that rollout check
+pending. In the actual Paseo host, check attention/Factory and a disposable
+action requiring `npx` (finish only after its normal human checks), including
+checkout selection and confirmation/error behavior. These second-install and
+Paseo host integration checks remain pending; a temporary directory on the
+original machine or CI does not establish them or validate wrapper portability.
