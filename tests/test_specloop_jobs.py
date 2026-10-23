@@ -176,6 +176,196 @@ def test_empty_inventory_does_not_create_state(tmp_path, existing):
     assert sorted(tmp_path.rglob("*")) == before
 
 
+@pytest.fixture(params=[("proposals", "propose"), ("admissions", "admit"),
+                       ("revisions", "revise"), ("revisions", "revise-build")])
+def stopped_job(tmp_path, monkeypatch, request):
+    stage, command = request.param
+    directory = attempt(tmp_path, stage)
+    path = directory.parent.with_suffix(".json")
+    input_path = path.with_suffix(".input.json")
+    input_path.write_text('{"feedback": ["original ☃"]}')
+    jobs.save(directory / "request.json", {"args": [command, "--input", str(input_path)]})
+    (directory / "log").write_text("retained output\n")
+    jobs.save(directory / "process.json", identity(directory))
+    jobs.request_stop(directory, verify_identity=lambda: identity(directory))
+    jobs.finish_stop(directory)
+    jobs.save(directory / "result.json", {"result": {"outcome": "late completion"}})
+    jobs.save(path, {"job": directory.name, "delivered": False, "change": "saved-identity",
+                     "consumed_feedback_ids": ["comment:1"], "feedback_ids": ["comment:2"],
+                     "feedback": ["original ☃"], "unknown": {"preserve": True}, "event": 42})
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("release must not inspect processes, signal, launch, or deliver work")
+    for target, name in [(jobs, "process_start_identity"), (jobs, "_verify_process"),
+                         (jobs, "start"), (jobs.specloop_client, "call"), (os, "killpg")]:
+        monkeypatch.setattr(target, name, forbidden)
+    return tmp_path, directory, path
+
+
+def release_snapshot(root):
+    return {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in root.rglob("*") if p.is_file()}
+
+
+@pytest.mark.scenario("background-job-control/explicit-stopped-job-release/release-each-tracked-stage")
+@pytest.mark.scenario("background-job-control/explicit-stopped-job-release/release-while-paused")
+@pytest.mark.parametrize("paused", [False, True])
+def test_release_preserves_stopped_evidence(stopped_job, paused, monkeypatch):
+    root, directory, path = stopped_job
+    if paused:
+        (root / "pause").write_text("operator pause")
+    before = release_snapshot(root)
+    receipt = json.loads(path.read_text())
+    del receipt["job"]
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("release must stay offline"))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("release must not launch"))
+    assert jobs.release_job(root, directory.name) == "released"
+    after = release_snapshot(root)
+    assert json.loads(path.read_text()) == receipt
+    assert set(after) - set(before) == {path.with_suffix(".release.lock")}
+    assert all(after[p] == value for p, value in before.items() if p != path)
+    rows, errors = jobs.list_jobs(root)
+    assert not errors and rows[0].state == "stopped"
+    assert jobs.collect(path, {"job": directory.name}) is None
+
+
+@pytest.mark.scenario("background-job-control/release-safety/refuse-active-or-completed-work")
+@pytest.mark.parametrize("state", ["starting", "running", "stopping", "finished", "failed", "collected",
+                                   "cached-result", "delivered"])
+def test_release_refuses_a_running_job(stopped_job, state):
+    root, directory, path = stopped_job
+    if state in ("starting", "running", "finished", "failed"):
+        (directory / "stop.json").unlink()
+    if state in ("starting", "running", "failed"):
+        (directory / "result.json").unlink()
+    if state == "starting":
+        (directory / "process.json").unlink()
+    if state == "stopping":
+        stop = json.loads((directory / "stop.json").read_text())
+        jobs.save(directory / "stop.json", {**stop, "state": "stopping"})
+    if state == "collected":
+        jobs.save(directory / "collected.json", {"collected_at": "2026-10-21T12:00:00Z"})
+    if state in ("cached-result", "delivered"):
+        receipt = json.loads(path.read_text())
+        receipt.update({"result": {}} if state == "cached-result" else {"delivered": True})
+        jobs.save(path, receipt)
+    before = release_snapshot(root)
+    with (directory / "lock").open("r") as lock:
+        if state in ("starting", "running"):
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(jobs.ReleaseJobError):
+            jobs.release_job(root, directory.name)
+    assert release_snapshot(root) == before
+
+
+@pytest.mark.scenario("background-job-control/release-safety/refuse-unverifiable-records")
+@pytest.mark.parametrize("problem", [
+    "unknown", "ambiguous", "prefix", "path", "uppercase", "busy", "receipt-symlink", "unreadable",
+    "receipt-missing", "receipt-malformed", "receipt-array", "job-null", "job-malformed",
+    "request-missing", "request-malformed", "process-missing", "process-malformed",
+    "stop-missing", "stop-malformed", "timestamp-missing", "timestamp-malformed", "identity-mismatch",
+    "identity-unavailable", "lock-missing", "control-missing", "result-malformed",
+])
+def test_release_refuses_unverifiable_records(stopped_job, monkeypatch, problem):
+    root, directory, path = stopped_job
+    job_id = directory.name
+    if problem in ("unknown", "prefix", "path", "uppercase"):
+        job_id = {"unknown": "b" * 32, "prefix": job_id[:8],
+                  "path": str(directory), "uppercase": job_id.upper()}[problem]
+    elif problem == "ambiguous":
+        attempt(root, number=8)
+    elif problem == "receipt-symlink":
+        target = path.with_suffix(".original")
+        path.rename(target)
+        path.symlink_to(target)
+    elif problem in ("receipt-array", "job-null", "job-malformed"):
+        path.write_text({"receipt-array": "[]", "job-null": '{"job": null}',
+                         "job-malformed": '{"job": "../other"}'}[problem])
+    elif problem.startswith(("timestamp-", "identity-")):
+        stop = json.loads((directory / "stop.json").read_text())
+        if problem == "timestamp-missing":
+            del stop["stopped_at"]
+        elif problem == "timestamp-malformed":
+            stop["stopped_at"] = "unconfirmed"
+        elif problem == "identity-mismatch":
+            stop["process"]["pid"] += 1
+        else:
+            process = {**identity(directory), "start_identity": None, "identity_error": "denied"}
+            jobs.save(directory / "process.json", process)
+            stop["process"] = process
+        jobs.save(directory / "stop.json", stop)
+    elif problem.endswith(("-missing", "-malformed")):
+        record, action = problem.split("-")
+        target = path if record == "receipt" else directory / {
+            "lock": "lock", "control": "control.lock"}.get(record, record + ".json")
+        if action == "missing":
+            target.unlink()
+        else:
+            target.write_text("{")
+    before = release_snapshot(root)
+    with monkeypatch.context() as patch:
+        if problem == "unreadable":
+            read = Path.read_text
+            def denied(p, *args, **kwargs):
+                if p == path:
+                    raise PermissionError("receipt unreadable")
+                return read(p, *args, **kwargs)
+            patch.setattr(Path, "read_text", denied)
+        with (directory / ("lock" if problem == "busy" else "log")).open("r") as held:
+            if problem == "busy":
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with pytest.raises(jobs.ReleaseJobError):
+                jobs.release_job(root, job_id)
+    assert release_snapshot(root) == before
+
+
+@pytest.mark.scenario("background-job-control/release-safety/receipt-save-fails")
+def test_release_atomic_save_failure_can_retry(stopped_job, monkeypatch):
+    root, directory, path = stopped_job
+    before = release_snapshot(root)
+    replace = Path.replace
+    def fail_replace(source, target):
+        if target == path:
+            raise OSError("receipt save failed")
+        return replace(source, target)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", fail_replace)
+        with pytest.raises(jobs.ReleaseJobError, match="receipt save failed"):
+            jobs.release_job(root, directory.name)
+    after = release_snapshot(root)
+    assert all(after[p] == value for p, value in before.items())
+    assert path.with_suffix(".release.lock").exists()
+    assert jobs.collect(path, json.loads(path.read_text())) is None
+    assert jobs.release_job(root, directory.name) == "released"
+
+
+@pytest.mark.scenario("background-job-control/idempotent-release/repeat-after-restart")
+@pytest.mark.scenario("background-job-control/idempotent-release/old-release-cannot-detach-replacement")
+@pytest.mark.parametrize("replacement", [False, True])
+def test_release_is_idempotent(stopped_job, replacement):
+    root, directory, path = stopped_job
+    assert jobs.release_job(root, directory.name) == "released"
+    # Idempotency depends solely on the receipt, even after a crash following
+    # the atomic save, with no release marker or coordination file available.
+    path.with_suffix(".release.lock").unlink()
+    if replacement:
+        new = attempt(root, stage=directory.parents[2].name, job_id="b" * 32)
+        jobs.save(new / "process.json", identity(new))
+        receipt = json.loads(path.read_text())
+        jobs.save(path, {**receipt, "job": new.name, "result": {"replacement": True}, "delivered": True})
+    before = release_snapshot(root)
+    result = subprocess.run(
+        [sys.executable, "-c", "from pathlib import Path; from nightshift.specloop_job import release_job; "
+         "import sys; print(release_job(Path(sys.argv[1]), sys.argv[2]))", str(root), directory.name],
+        capture_output=True, text=True, timeout=10,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
+             "PYTHONPATH": str(Path(jobs.__file__).resolve().parent.parent)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "already released"
+    assert jobs.release_job(root, directory.name) == "already released"
+    assert release_snapshot(root) == before
+
+
 @pytest.mark.scenario("background-job-control/local-job-inventory/legacy-and-unreadable-records")
 @pytest.mark.parametrize("record,contents", [
     ("request.json", "{"), ("request.json", "[]"), ("request.json", '{"args": "propose"}'),

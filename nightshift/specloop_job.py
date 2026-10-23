@@ -2,8 +2,8 @@
 
 The child owns an inherited file lock until its result is on disk. A new
 daemon can therefore distinguish a running job from a dead one without PID
-reuse races. Only the poller writes the intake receipt; children write their
-own atomic result files. Logs use files so a verbose CLI cannot fill a pipe.
+reuse races. The poller and explicit release write intake receipts; children
+write their own atomic result files. Logs use files so a verbose CLI cannot fill a pipe.
 """
 
 from __future__ import annotations
@@ -276,6 +276,84 @@ def finish_stop(directory: Path) -> None:
 
 class StopJobError(RuntimeError):
     """An unknown, unsafe or uncontrollable job (CLI callers should exit 1)."""
+
+
+class ReleaseJobError(RuntimeError):
+    """A job cannot safely be detached (CLI callers should exit 1)."""
+
+
+def release_job(state_dir: Path, job_id: str) -> str:
+    """Detach only a confirmed stopped attempt, retaining all its evidence."""
+    if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise ReleaseJobError("expected an exact full job ID, not a path or prefix")
+    rows, errors = list_jobs(state_dir)
+    matches = [job for job in rows if job.id == job_id]
+    if len(matches) != 1:
+        raise ReleaseJobError(f"{'unknown' if not matches else 'ambiguous'} job ID {job_id}"
+                              + (": " + "; ".join(errors) if errors else ""))
+    job = matches[0]
+    directory = job.directory
+    path = directory.parent.with_suffix(".json")
+
+    def matching_receipt() -> dict | None:
+        if path.is_symlink():
+            raise ValueError("symlinked receipt")
+        receipt = _read_object(path)
+        if "job" not in receipt:
+            return None
+        reference = receipt["job"]
+        if not isinstance(reference, str) or not re.fullmatch(r"[0-9a-f]{32}", reference):
+            raise ValueError("invalid receipt job reference")
+        if reference != job_id:
+            return None
+        if "result" in receipt or receipt.get("delivered", False) is not False:
+            raise ValueError("receipt already contains completion evidence")
+        return receipt
+
+    try:
+        if job.state != "stopped":
+            raise ValueError(f"expected a confirmed stopped job, found {job.state}")
+        # These locks must already exist. Refusal and no-op never create files.
+        with (directory / "control.lock").open("r") as control:
+            fcntl.flock(control, fcntl.LOCK_EX)
+            with (directory / "lock").open("r") as lifetime:
+                fcntl.flock(lifetime, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                process, stop = _read_process(directory), _read_stop(directory)
+                if (process is None or process["start_identity"] is None or stop is None
+                        or stop["state"] != "stopped" or stop.get("process") != process):
+                    raise ValueError("confirmed stop with matching process identity required")
+                for key in ("requested_at", "stopped_at"):
+                    stamp = stop.get(key)
+                    if (not isinstance(stamp, str)
+                            or datetime.fromisoformat(stamp).tzinfo is None):
+                        raise ValueError(f"invalid stop timestamp: {key}")
+                args = _read_object(directory / "request.json").get("args")
+                if not isinstance(args, list) or not args or not all(isinstance(a, str) for a in args):
+                    raise ValueError("invalid request argument list")
+                if (directory / "collected.json").exists():
+                    raise ValueError("job result was already collected")
+                try:
+                    outcome = _read_object(directory / "result.json")
+                except FileNotFoundError:
+                    pass
+                else:
+                    if not (set(outcome) == {"result"} and isinstance(outcome["result"], dict)
+                            or set(outcome) == {"error"} and isinstance(outcome["error"], str)):
+                        raise ValueError("invalid result record")
+                if matching_receipt() is None:
+                    return "already released"
+                # Lock order is job control, then receipt release. Reread after
+                # acquiring the receipt lock so a stale copy cannot be saved.
+                with path.with_suffix(".release.lock").open("a") as release:
+                    fcntl.flock(release, fcntl.LOCK_EX)
+                    receipt = matching_receipt()
+                    if receipt is None:
+                        return "already released"
+                    del receipt["job"]
+                    save(path, receipt)
+                return "released"
+    except (OSError, ValueError) as exc:
+        raise ReleaseJobError(f"cannot release job {job_id}: {exc}; see {job.log_path}") from exc
 
 
 def _verify_process(directory: Path) -> dict:
