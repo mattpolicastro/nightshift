@@ -5,6 +5,7 @@ import json
 import os
 import select
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import specloop_job as jobs
+from nightshift import cli, config, daemon, specloop_job as jobs
 
 
 def attempt(root, stage="proposals", repo="owner__sample", number=7, job_id=None):
@@ -214,6 +215,109 @@ def stopped_job(tmp_path, monkeypatch, request):
 
 def release_snapshot(root):
     return {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in root.rglob("*") if p.is_file()}
+
+
+@pytest.fixture
+def offline_jobs_cli(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("jobs CLI attempted configuration, credentials, network, launch, or signalling")
+    monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
+    for target, name in [(config, "load"), (config, "load_env_file"),
+                         (subprocess, "run"), (subprocess, "Popen"),
+                         (socket.socket, "connect"), (socket, "create_connection"),
+                         (jobs.specloop_client, "call"), (jobs, "start"),
+                         (os, "kill"), (os, "killpg")]:
+        monkeypatch.setattr(target, name, forbidden)
+    return forbidden
+
+
+@pytest.mark.parametrize("broken_config", [False, True])
+def test_cli_release_and_repeat_preserve_history(stopped_job, offline_jobs_cli, capsys, broken_config):
+    root, directory, path = stopped_job
+    config_path = root / "config.toml"
+    if broken_config:
+        config_path.write_text("[broken TOML")
+    args = ["--config", str(config_path), "jobs", "release", directory.name]
+    receipt = json.loads(path.read_text())
+    before = release_snapshot(root)
+    assert cli.main(args) == 0
+    output = capsys.readouterr()
+    assert output.out == f"{directory.name}: released\n" and output.err == ""
+    assert json.loads(path.read_text()) == {k: v for k, v in receipt.items() if k != "job"}
+    after = release_snapshot(root)
+    assert set(after) - set(before) == {path.with_suffix(".release.lock")}
+    assert {p: v for p, v in after.items() if p in before and p != path} == {
+        p: v for p, v in before.items() if p != path}
+    for replacement in (None, "b" * 32):
+        if replacement:
+            jobs.save(path, {**json.loads(path.read_text()), "job": replacement})
+        before = release_snapshot(root)
+        assert cli.main(args) == 0
+        output = capsys.readouterr()
+        assert output.out == f"{directory.name}: already released\n" and output.err == ""
+        assert release_snapshot(root) == before
+    assert cli.main(["jobs"]) == 0
+    output = capsys.readouterr()
+    assert f"{directory.name}  {directory.parent.parent.parent.name}  owner/sample#7  stopped\n" in output.out
+    assert output.err == ""
+    assert cli.main(["jobs", "stop", directory.name]) == 0
+    output = capsys.readouterr()
+    assert output.out == f"{directory.name}: stopped\n" and output.err == ""
+    assert release_snapshot(root) == before
+
+
+@pytest.mark.parametrize("problem", ["stopping", "completed", "unknown"])
+def test_cli_release_refusal(stopped_job, offline_jobs_cli, capsys, problem):
+    root, directory, path = stopped_job
+    job_id = directory.name
+    if problem == "stopping":
+        stop = json.loads((directory / "stop.json").read_text())
+        jobs.save(directory / "stop.json", {**stop, "state": "stopping"})
+    elif problem == "completed":
+        jobs.save(path, {**json.loads(path.read_text()), "delivered": True})
+    else:
+        job_id = "b" * 32
+    before = release_snapshot(root)
+    assert cli.main(["jobs", "release", job_id]) == 1
+    output = capsys.readouterr()
+    assert output.out == "" and job_id in output.err
+    assert ("unknown job ID" if problem == "unknown" else "cannot release job") in output.err
+    assert release_snapshot(root) == before
+
+
+@pytest.mark.scenario("background-job-control/job-command-syntax/reject-malformed-command")
+@pytest.mark.parametrize("args", [
+    ["jobs", "unknown"], ["jobs", "unknown", "a" * 32],
+    ["jobs", "stop"], ["jobs", "release"],
+    ["jobs", "stop", "a" * 32, "extra"], ["jobs", "release", "a" * 32, "extra"],
+])
+def test_cli_jobs_malformed(tmp_path, offline_jobs_cli, monkeypatch, capsys, args):
+    attempt(tmp_path)
+    before = release_snapshot(tmp_path)
+    for name in ("list_jobs", "stop_job", "release_job"):
+        monkeypatch.setattr(jobs, name, offline_jobs_cli)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(args)
+    assert exc.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == "" and "usage: nightshift" in output.err and "error:" in output.err
+    assert release_snapshot(tmp_path) == before
+
+
+@pytest.mark.scenario("background-job-control/job-command-syntax/reject-path-identifier")
+@pytest.mark.parametrize("action", ["stop", "release"])
+@pytest.mark.parametrize("identifier", ["../outside", "/tmp/outside", "./" + "a" * 32,
+                                         "a/../" + "a" * 32, "..", "a" * 8])
+def test_cli_jobs_reject_path_and_prefix(tmp_path, offline_jobs_cli, monkeypatch, capsys, action, identifier):
+    attempt(tmp_path)
+    before = release_snapshot(tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(jobs, "list_jobs", offline_jobs_cli)
+        patch.setattr(Path, "open", offline_jobs_cli)
+        assert cli.main(["jobs", action, identifier]) == 1
+    output = capsys.readouterr()
+    assert output.out == "" and "exact full job ID" in output.err
+    assert release_snapshot(tmp_path) == before
 
 
 @pytest.mark.real_trust

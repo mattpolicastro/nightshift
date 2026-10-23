@@ -101,6 +101,16 @@ def _progress_of(repo: str, number: int) -> str:
 
 
 def _jobs(action: str | None, job_id: str | None) -> int:
+    if action == "release":
+        assert job_id is not None  # Required by argument validation.
+        try:
+            state = specloop_job.release_job(daemon.STATE_DIR, job_id)
+        except specloop_job.ReleaseJobError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(f"{job_id}: {state}")
+        return 0
+
     if action == "stop":
         try:
             state = specloop_job.stop_job(daemon.STATE_DIR, job_id)
@@ -134,8 +144,8 @@ def main(argv: list[str] | None = None) -> int:
         default="status",
         choices=["status", "pause", "resume", "jobs", "run", "reconcile", "preflight", "digest", "attention"],
     )
-    parser.add_argument("action", nargs="?", help="jobs: stop")
-    parser.add_argument("job_id", nargs="?", help="jobs stop: exact full job ID")
+    parser.add_argument("action", nargs="?", help="jobs: stop or release")
+    parser.add_argument("job_id", nargs="?", help="jobs stop/release: exact full job ID")
     parser.add_argument("--json", action="store_true", help="attention: machine-readable tasks and specloop pauses")
     parser.add_argument("--offline", action="store_true", help="attention: use cached records without GitHub or specloop")
     parser.add_argument("--once", action="store_true", help="one task, then exit")
@@ -149,8 +159,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_intermixed_args(argv)
     if args.command == "jobs":
         if not (args.action is None and args.job_id is None
-                or args.action == "stop" and args.job_id is not None):
-            parser.error("expected 'jobs' or 'jobs stop <id>'")
+                or args.action in ("stop", "release") and args.job_id is not None):
+            parser.error("expected 'jobs', 'jobs stop <id>' or 'jobs release <id>'")
     elif args.action is not None or args.job_id is not None:
         parser.error(f"{args.command} does not accept positional arguments")
 
