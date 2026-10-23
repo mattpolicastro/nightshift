@@ -859,13 +859,14 @@ def _status_entry(name: str) -> dict:
         # Like lift_due, a missing task state leaves recovery uncapped.
         auto_resumes_remaining = (max(0, cap - ts.auto_resumes)
                                   if cap is not None and ts is not None else None)
+    done = sum(t.done for t in all_tasks)
     entry = {
         "change": name,
         "status": st.status,
         "pause": {"reason": st.pause.reason, "task": st.pause.task, "detail": st.pause.detail,
                   "auto_resumes_remaining": auto_resumes_remaining, "since": _pause_since(run.dir)}
                  if st.pause else None,
-        "tasks": {"done": sum(t.done for t in all_tasks), "total": len(all_tasks)},
+        "tasks": {"done": done, "total": len(all_tasks)},
         "head": head,
         "pr": st.pr,
         "context": _status_context(run, m, head, task_path, all_tasks),
@@ -877,7 +878,7 @@ def _status_entry(name: str) -> dict:
         message = messages.for_pause(
             m.change, pause.reason, label=task.label if task else "", key=pause.task,
             detail=pause.detail, attempts=ts.attempts if ts else 0,
-            done=entry["tasks"]["done"], pr=st.pr, resume_at=pause.resume_at,
+            done=done, pr=st.pr, resume_at=pause.resume_at,
         )
         entry["action"] = {
             "kind": message.kind,
