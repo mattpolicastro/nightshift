@@ -108,6 +108,39 @@ def test_mutation_ids_cannot_collide(name):
 
 
 @pytest.mark.scenario("mutation-selection/mutation-command-definitions/invalid-definitions-rejected")
+@pytest.mark.parametrize("names, reported", [
+    (["tests"], "['tests']"),
+    (["dependencies"], "['dependencies']"),
+    (["accept"], "['accept']"),
+    (["tests", "dependencies", "accept"], "['accept', 'dependencies', 'tests']"),
+])
+def test_mutation_collision_diagnostic(names, reported):
+    data = tomllib.loads(TEMPLATE)
+    data["mutation_step"].extend({"id": name, "run": ["true"]} for name in names)
+    with pytest.raises(ValueError) as exc:
+        manifest.parse(data)
+    assert str(exc.value) == (
+        "mutation_step ids collide with verify, prepare or acceptance: " + reported
+    )
+
+
+@pytest.mark.scenario("mutation-selection/mutation-command-definitions/invalid-definitions-rejected")
+@pytest.mark.parametrize("references, reported", [
+    (["missing"], "['missing']"),
+    (["tests", "narrow", "missing", "dependencies", "accept", "missing"],
+     "['accept', 'dependencies', 'missing']"),
+])
+def test_unknown_mutation_fallback_diagnostic(references, reported):
+    data = tomllib.loads(TEMPLATE)
+    data["gates"]["mutation_steps"] = references
+    with pytest.raises(ValueError) as exc:
+        manifest.parse(data)
+    assert str(exc.value) == (
+        "gates.mutation_steps names unknown verify or mutation-only steps: " + reported
+    )
+
+
+@pytest.mark.scenario("mutation-selection/mutation-command-definitions/invalid-definitions-rejected")
 @pytest.mark.parametrize("references", [["missing"], ["dependencies"], ["accept"],
                                        "tests", [1], [[]], [""]])
 def test_mutation_references_must_name_defined_checks(references):
@@ -274,6 +307,21 @@ def test_invalid_route_step_references(steps, offending):
     with pytest.raises(ValueError, match=r"gates\.mutation_route\[1\]\.steps") as exc:
         manifest.parse(data)
     assert repr(offending) in str(exc.value)
+
+
+@pytest.mark.scenario("mutation-selection/ordered-mutation-routes/routes-validate-and-round-trip")
+@pytest.mark.parametrize("unknown", ["missing", "dependencies", "accept"])
+def test_unknown_mutation_route_step_diagnostic(unknown):
+    data = tomllib.loads(TEMPLATE)
+    data["gates"]["mutation_route"] = [
+        {"paths": ["src/*.py"], "steps": ["tests", "narrow"]},
+        {"paths": ["plugins/**"], "steps": ["narrow", "tests", unknown]},
+    ]
+    with pytest.raises(ValueError) as exc:
+        manifest.parse(data)
+    assert str(exc.value) == (
+        f"gates.mutation_route[2].steps names unknown verify or mutation-only step {unknown!r}"
+    )
 
 
 @pytest.mark.scenario("mutation-selection/ordered-mutation-routes/routes-validate-and-round-trip")
