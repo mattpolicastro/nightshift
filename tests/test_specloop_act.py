@@ -953,6 +953,8 @@ def test_finish_restarts_from_archive(admitted, tmp_path, monkeypatch, capfd, fa
 @pytest.mark.scenario("specloop-interface/isolated-run-status-failures/read-failures-leave-run-data-untouched")
 @pytest.mark.parametrize("named", [False, True])
 def test_status_after_partial_finish(admitted, template, tmp_path, monkeypatch, capfd, named):
+    # Keep the additive pause timestamp deterministic in exact status assertions.
+    monkeypatch.setattr(state.time, "time", lambda: 1800000000)
     run, source = admitted
     bare = run.dir / "repo.git"
     completed = seal.commit_files(bare, git(bare, "rev-parse", BRANCH), {
@@ -1053,7 +1055,7 @@ def test_status_after_partial_finish(admitted, template, tmp_path, monkeypatch, 
             )
             entry = entries[0]
             if unreadable:
-                assert_status_error(entry, CHANGE, "PermissionError")
+                assert_status_error(entry, CHANGE, "PermissionError", since=1800000000)
                 assert "archive read denied" in entry["error"]
             else:
                 assert "error" not in entry
@@ -1062,6 +1064,7 @@ def test_status_after_partial_finish(admitted, template, tmp_path, monkeypatch, 
                 assert entry["pause"] == {
                     "reason": "human_checks", "task": "", "detail": "Check the PR",
                     "auto_resumes_remaining": 0,
+                    "since": 1800000000,
                 }
                 assert entry["action"]["actions"] == ["finish", "abort"]
                 assert entry["action"]["pause_id"] == "human_checks:"

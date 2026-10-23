@@ -52,6 +52,9 @@ def test_replacements_preserve_cumulative_ids_and_unknown_fields(tmp_path):
 
 
 @pytest.mark.scenario(ISOLATION)
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/revision-feedback-survives-a-long-round"
+)
 def test_first_selection_is_isolated_by_repository_and_pr(tmp_path):
     # The structured boundary has no timestamps: before/at/after tip all qualify.
     items = [queue.FeedbackItem(f"conversation:{i}", when)
@@ -220,6 +223,9 @@ def initialize(path, receipt, gh, head="current-head"):
     ({"saved_at": "2026-10-20T12:00:00+02:00", "updated_at": "invalid"}, "receipt_saved_at"),
     ({"updated_at": CUTOFF}, "receipt_saved_at"), ({}, "branch_tip"),
 ])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/revision-feedback-survives-a-long-round"
+)
 def test_legacy_baseline_is_inclusive_durable_and_uses_creation_time(tmp_path, time_fields, source):
     path, gh = tmp_path / "8.json", LegacyGh()
     receipt = legacy_receipt(path, **time_fields)

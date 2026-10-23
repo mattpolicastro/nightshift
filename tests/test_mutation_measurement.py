@@ -345,6 +345,7 @@ def filtered_measurement(monkeypatch, measurement_manifest):
     return install
 
 
+@pytest.mark.scenario("specloop-documentation/mutation-evidence-guidance/parallel-and-timed-out-mutants-are-interpreted")
 @pytest.mark.scenario("parallel-evidence-mutants/stable-evidence-results/parallel-results-match-serial")
 @pytest.mark.scenario("parallel-evidence-mutants/stable-evidence-results/classification-rules-retained")
 @pytest.mark.parametrize("prepared", [False, True])
@@ -375,6 +376,7 @@ def test_filtered_gather_results_match_serial(tmp_path, filtered_measurement, pr
     assert snapshots[0] == snapshots[1]
 
 
+@pytest.mark.scenario("specloop-documentation/mutation-evidence-guidance/exclusions-do-not-fabricate-evidence")
 @pytest.mark.scenario("parallel-evidence-mutants/unmeasured-equivalence-reporting/unmeasured-equivalents-pause-the-section")
 @pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize("parallel", [1, 2])

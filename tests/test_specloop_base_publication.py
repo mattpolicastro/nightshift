@@ -575,6 +575,7 @@ def retry_explanation(output, mode):
 
 
 @pytest.mark.scenario("publish-base-sync/fetch-current-base/publish-fetch-fails-retryably")
+@pytest.mark.scenario("specloop-documentation/publication-guidance/base-preparation-pauses")
 @pytest.mark.parametrize("failure", ["timeout", "transport", "missing-base", "os-error"])
 @pytest.mark.parametrize("mode", ["json", "plain", "act"])
 @pytest.mark.parametrize("pending", [False, True])
@@ -613,6 +614,7 @@ def test_publish_fetch_failure_retains_readiness(publication, monkeypatch, capfd
 
 
 @pytest.mark.scenario("publish-base-sync/fetch-current-base/publish-fetch-fails-retryably")
+@pytest.mark.scenario("specloop-documentation/publication-guidance/base-preparation-pauses")
 @pytest.mark.parametrize("failure", ["timeout", "transport", "missing-base"])
 def test_daemon_retries_fetch_without_refusal_or_delivery(publication, monkeypatch, failure):
     p = publication

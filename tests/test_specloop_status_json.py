@@ -32,7 +32,16 @@ def home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def admitted(home, tmp_path):
+def admitted(home, tmp_path, monkeypatch):
+    # JSON pause timestamps need stable exact-equality expectations.
+    event = Run.event
+
+    def timed_event(run, kind, **data):
+        data.setdefault("at", 1800000000)
+        event(run, kind, **data)
+
+    monkeypatch.setattr(Run, "event", timed_event)
+
     def make(change, proposal=None, task_text=TASKS, github=""):
         source = tmp_path / change
         task_file = source / "openspec" / "changes" / change / "tasks.md"
@@ -98,7 +107,7 @@ def test_paused_run_reported(admitted, capsys, named):
             "change": "paused-change",
             "status": "paused",
             "pause": {"reason": "stuck", "task": key, "detail": detail,
-                      "auto_resumes_remaining": 0},
+                      "auto_resumes_remaining": 0, "since": 1800000000},
             "tasks": {"done": 1, "total": 3},
             "head": head,
             "pr": "https://github.com/example/repo/pull/7",
@@ -143,6 +152,7 @@ def test_infrastructure_resume_budget(admitted, capsys, named, resume_at, consum
     assert pause == {
         "reason": "infra", "task": key, "detail": "Worker unavailable",
         "auto_resumes_remaining": remaining,
+        "since": 1800000000,
     }
 
 
@@ -265,6 +275,7 @@ def test_resume_allowance_status_is_read_only(admitted, monkeypatch, capsys, nam
                 assert entry["pause"] == {
                     "reason": "infra", "task": key, "detail": "Worker unavailable",
                     "auto_resumes_remaining": 1 if entry["change"] == "budget" else None,
+                    "since": 1800000000,
                 }
                 assert entry["action"]["pause_id"] == f"infra:{key}"
 
@@ -395,7 +406,7 @@ def status_document(capsys, *names, code=0):
     return document
 
 
-def assert_status_error(entry, change, error_class):
+def assert_status_error(entry, change, error_class, since=None):
     error = entry["error"]
     assert error.startswith(f"{error_class}:")
     assert 0 < len(error) <= 500
@@ -404,7 +415,7 @@ def assert_status_error(entry, change, error_class):
         "change": change,
         "status": "paused",
         "pause": {"reason": "status_error", "task": "", "detail": detail,
-                  "auto_resumes_remaining": 0},
+                  "auto_resumes_remaining": 0, "since": since},
         "tasks": {"done": 0, "total": 0},
         "head": "",
         "pr": "",
@@ -432,6 +443,9 @@ def assert_status_error(entry, change, error_class):
     ("message", "AttributeError"),
     ("action", "TypeError"),
 ])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/input-and-status-remain-usable"
+)
 def test_status_reports_broken_run_and_keeps_others(admitted, monkeypatch, capsys, failure, error_class):
     # Each admission has its own source and bare repository. Create out of order.
     last, _ = admitted("z-healthy", proposal="## Why\n\nLast repository.\n")
@@ -514,12 +528,15 @@ def test_status_reports_broken_run_and_keeps_others(admitted, monkeypatch, capsy
     assert entries[0] == before[0]
     assert entries[2] == before[2]
     assert "error" not in entries[0] and "error" not in entries[2]
-    assert_status_error(entries[1], "m-broken", error_class)
+    assert_status_error(entries[1], "m-broken", error_class, since=1800000000)
 
 
 @pytest.mark.scenario("specloop-interface/isolated-run-status-failures/error-rows-remain-compatible-and-non-actionable")
 @pytest.mark.scenario("specloop-interface/isolated-run-status-failures/broken-run-keeps-other-repositories-visible")
 @pytest.mark.parametrize("message", ["", 'private path: /repo\n"failed"', "x" * 1000])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/input-and-status-remain-usable"
+)
 def test_error_row_shape_and_diagnostic(admitted, monkeypatch, capsys, message):
     from nightshift import outcomes, specloop_attention, specloop_client
 
@@ -550,7 +567,7 @@ def test_error_row_shape_and_diagnostic(admitted, monkeypatch, capsys, message):
     monkeypatch.setattr(cli, "_manifest", fail_manifest)
     document = status_document(capsys)
     error = document["runs"][1]
-    assert_status_error(error, "m-broken", "RuntimeError")
+    assert_status_error(error, "m-broken", "RuntimeError", since=1800000000)
     assert error["error"] == f"RuntimeError: {message}"[:500]
     assert document["runs"][0] == before[0]
     assert document["runs"][2] == before[2]
@@ -603,6 +620,9 @@ def test_unsafe_named_status(home, monkeypatch, capsys, change):
 @pytest.mark.parametrize("stage", ["discovery", "supervisor"])
 @pytest.mark.parametrize("error", [PermissionError("unreadable"), TypeError("bad data"),
                                  subprocess.TimeoutExpired("lookup", 60), RuntimeError()])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/input-and-status-remain-usable"
+)
 def test_document_failures(admitted, monkeypatch, capsys, stage, error):
     admitted("healthy")
 
@@ -631,7 +651,7 @@ def test_missing_live_and_archived_tasks(admitted, tmp_path, capsys, named):
         subprocess.run(["git", "-C", str(source), *args], check=True, capture_output=True)
     broken.pause("human_checks", detail="Finish was interrupted")
     entries = status_document(capsys, *(["broken"] if named else []))["runs"]
-    assert_status_error(entries[0], "broken", "RuntimeError")
+    assert_status_error(entries[0], "broken", "RuntimeError", since=1800000000)
     assert "tasks.md" in entries[0]["error"]
     assert entries[1:] == ([] if named else [healthy])
 
@@ -713,7 +733,7 @@ def test_failed_status_is_read_only(admitted, tmp_path, monkeypatch, capsys, nam
 
     monkeypatch.setattr(subprocess, "run", read_only_command)
     entries = status_document(capsys, *(["broken"] if named else []))["runs"]
-    assert_status_error(entries[0], "broken", error_class)
+    assert_status_error(entries[0], "broken", error_class, since=1800000000)
     assert entries[1:] == ([] if named else [healthy_entry])
     assert snapshot() == expected
     if failure == "disappeared":

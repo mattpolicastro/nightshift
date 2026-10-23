@@ -386,6 +386,9 @@ def assert_no_revision_reads(gh):
 
 @pytest.mark.scenario("pr-revision/revision-actor-gate/trusted-label-does-not-trust-feedback")
 @pytest.mark.parametrize("stage", ["spec-revision", "build-revision"])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/dependencies-and-label-actors-gate-work"
+)
 def test_revision_label_trust_keeps_feedback_author_and_consumption_filters(repo, tmp_path, stage):
     gh, commands = revision_case(stage)
     # Exercise each GitHub feedback shape with trusted, untrusted, absent
@@ -521,6 +524,9 @@ def test_label_from_non_collaborator_is_ignored(repo, tmp_path, armed, previous,
         "pr-revision/build-stage-revision/review-comments-become-tasks")),
 ])
 @pytest.mark.parametrize("relationship", ["OWNER", "COLLABORATOR", "MEMBER"])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/dependencies-and-label-actors-gate-work"
+)
 def test_label_from_collaborator_is_acted_on(repo, tmp_path, armed, outcome, relationship):
     admission = armed == "spec:approved"
     revision = armed in ("spec-revision", "build-revision")
@@ -641,6 +647,9 @@ def test_pause_after_draft_label_read_preserves_receipts(
 @pytest.mark.parametrize("configured", [False, True])
 @pytest.mark.parametrize("both", [False, True])
 @pytest.mark.parametrize("trigger", ["spec_draft", "ready"])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/dependencies-and-label-actors-gate-work"
+)
 def test_intake_alias_requires_its_own_trusted_application(repo, tmp_path, configured, both, trigger):
     labels = queue.Labels(spec_draft="custom:draft", ready="custom:ready") if configured else queue.Labels()
     armed = getattr(labels, trigger)

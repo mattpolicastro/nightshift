@@ -16,6 +16,9 @@ from test_specloop_intake import BRANCH, calls, idea_file
 
 
 @pytest.mark.scenario("issue-intake/durable-drafting-payload/delayed-background-read")
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/input-and-status-remain-usable"
+)
 def test_delayed_idea_read_survives_polls_and_restart(background, monkeypatch):
     root, repo, children = background
     monkeypatch.setattr(daemon, "STATE_DIR", Path("relative state with spaces"))

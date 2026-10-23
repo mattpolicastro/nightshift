@@ -71,6 +71,9 @@ def calls(gh, *prefix):
     pytest.param("Add a gate", False, marks=pytest.mark.scenario(
         "issue-intake/file-based-drafting-input/text-and-trust-preserved")),
 ])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/input-and-status-remain-usable"
+)
 def test_long_issue_thread_drafts_via_idea_file(repo, tmp_path, title, large):
     gh, commands = DraftGh(("spec:draft",)), Commands()
     body = "BEGIN café\n\n" + ("detail λ\n" * 140_000 if large else "details")
@@ -184,6 +187,9 @@ class BlockedDraftGh(DraftGh):
 @pytest.mark.scenario("issue-intake/dependency-gated-drafting/unreadable-blocker-defers-round")
 @pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
 @pytest.mark.parametrize("blockers,lookup_failure", [((6,), False), ((5, 6), False), ((6,), True)])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/dependencies-and-label-actors-gate-work"
+)
 def test_blocked_issue_is_not_drafted_until_blockers_close(
     repo, tmp_path, caplog, armed, blockers, lookup_failure,
 ):
@@ -364,6 +370,9 @@ def test_finished_draft_is_delivered_even_if_a_blocker_reopens(repo, tmp_path, c
 
 @pytest.mark.scenario("issue-intake/draft-lifecycle-independent-of-blockers/running-job-is-preserved")
 @pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/dependencies-and-label-actors-gate-work"
+)
 def test_running_draft_is_collected_and_delivered_after_blocker_reopens(
     repo, tmp_path, monkeypatch, caplog, armed,
 ):
