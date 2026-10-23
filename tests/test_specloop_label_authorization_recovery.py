@@ -580,10 +580,10 @@ def test_rejected_open_pr_recovery_does_not_prevent_next_eligible_issue(repo, tm
 
 
 def admission_poll(repo, state, gh, *, module=specloop_intake,
-                   commands=forbidden_recovery_work, labels=queue.Labels()):
+                   commands=forbidden_recovery_work, labels=queue.Labels(), status_runner=None):
     return module.admit_pending(
         repo, labels, state, runner=gh, specloop_runner=commands, git_runner=commands,
-        launcher=forbidden_recovery_work, on_pending=forbidden_recovery_work,
+        launcher=forbidden_recovery_work, on_pending=forbidden_recovery_work, status_runner=status_runner,
     )
 
 
@@ -610,7 +610,10 @@ def test_admission_head_binding_survives_denial_and_requires_trusted_reapproval(
             assert_rejection_only(gh, [], "spec:approved", kind="pr")
     else:
         # The same trusted event cannot cover a later tip, even after restart.
-        assert admission_poll(repo, tmp_path, gh, module=restarted_intake()) == []
+        # Status first distinguishes a committed admission's delivery recovery.
+        status = AdmissionCommands()
+        assert admission_poll(repo, tmp_path, gh, module=restarted_intake(), status_runner=status) == []
+        assert status.calls == [["specloop", "status", "--json"]]
         assert "changed after it was approved" in gh.comments[-1]["body"]
         assert gh.labels == {"spec:review"}
     assert path.read_bytes() == saved

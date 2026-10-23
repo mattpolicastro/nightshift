@@ -343,11 +343,11 @@ def admit_pending(
             return None
         # Bind the receipt and reviewed head to the same authorized application.
         approval_event = events[labels.spec_approved]["id"]
-        # Checked before the revise/needs-human skip, so an approval applied
-        # alongside agent:revise records the head the human actually saw.
-        if not _approval_covers_head(state_dir, repo, number, change, approval_event, pr, labels, gh):
-            return None
         if current.intersection((labels.needs_human, labels.revise)):
+            # Healthy approvals alongside agent:revise still bind the reviewed
+            # head, but a configuration hold must not record a new attempt.
+            _require_manifest(repo, readiness)
+            _approval_covers_head(state_dir, repo, number, change, approval_event, pr, labels, gh)
             return None
         path = state_dir / "admissions" / repo.name.replace("/", "__") / f"{number}.json"
         receipt = json.loads(path.read_text()) if path.exists() else None
@@ -359,6 +359,20 @@ def admit_pending(
         if not isinstance(status.get("runs"), list):
             raise specloop_client.SpecloopError("status returned no runs list")
         existing = next((run for run in status["runs"] if run["change"] == change), None)
+        committed = existing is not None and existing["pr"] == pr["url"]
+        recovering = (receipt and not receipt.get("delivered")
+                      and receipt["result"]["outcome"] in ("admitted", "refused")
+                      and receipt.get("approval_event") == approval_event
+                      and receipt["head"] == pr["headRefOid"] and receipt["change"] == change)
+        if not committed:
+            # A colliding change belongs to another admission, not this PR's
+            # recovery. Hold a new refusal just like a new admit until repair.
+            if existing is not None or not recovering:
+                source = _require_manifest(repo, readiness).repo
+            if not _approval_covers_head(state_dir, repo, number, change, approval_event, pr, labels, gh):
+                return None
+        # Durable run state completes admission even if its response was lost.
+        # Notification recovery needs neither enrollment nor a new approval head.
         if existing is not None:
             if existing["pr"] == pr["url"]:
                 result = {"outcome": "admitted"}
@@ -366,16 +380,12 @@ def admit_pending(
                 result = {"outcome": "refused", "reasons": [
                     f"Change {change} already belongs to a run with PR {existing['pr'] or '(none)'}."
                 ]}
-        elif (receipt and not receipt.get("delivered")
-              and receipt["result"]["outcome"] in ("admitted", "refused")
-              and receipt.get("approval_event") == approval_event
-              and receipt["head"] == pr["headRefOid"] and receipt["change"] == change):
+        elif recovering:
             result = receipt["result"]
         else:
             # Keep the reviewed tip reachable without moving a source branch:
             # it may be checked out, with local edits, or have been rebased.
             # Admission installs this exact commit only in its own bare repo.
-            source = _require_manifest(repo, readiness).repo
             fetched_ref = f"refs/nightshift/admit/{change}"
             git = partial(_bounded_run, runner=git_runner)
             fetched = git([
@@ -395,7 +405,14 @@ def admit_pending(
             ], runner=specloop_runner, launcher=launcher):
                 return _PENDING
             result = receipt["result"]
-        receipt = {"change": change, "head": pr["headRefOid"],
+        head = pr["headRefOid"]
+        if (committed and receipt
+                and receipt["change"] == change and receipt["result"]["outcome"] == "admitted"
+                and receipt.get("approval_event") == approval_event):
+            # A build can advance the PR before a lost notification is retried.
+            # Keep its original delivery marker so recovery updates that comment.
+            head = receipt["head"]
+        receipt = {"change": change, "head": head,
                    "approval_event": approval_event, "result": result}
         _save(path, receipt)
         if result["outcome"] == "admitted":

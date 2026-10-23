@@ -6,10 +6,11 @@ import logging
 import os
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from nightshift import daemon, queue, specloop_intake as intake
+from nightshift import daemon, queue, specloop_intake as intake, specloop_job as jobs
 from nightshift.config import Config, Repo, load
 from specloop import manifest
 from manifest_fixtures import manifest_text
@@ -17,8 +18,10 @@ from test_queue import FakeGh
 from test_specloop_isolation import Pipeline, poll
 from test_engine_routing import DraftGh
 from test_specloop_intake import Commands as DraftCommands
-from test_specloop_approval import ApprovalGh, Commands as AdmissionCommands
-from test_specloop_spec_revision import RevisionGh, Commands as RevisionCommands
+from test_specloop_approval import ApprovalGh, Commands as AdmissionCommands, CHANGE, BRANCH, HEAD
+from test_specloop_spec_revision import RevisionGh, Commands as RevisionCommands, REVISED, seed_consumed
+from test_specloop_build_revision import BuildCommands
+from test_specloop_publication import PublishCommands, DETAIL, CHECKS
 
 
 @pytest.fixture
@@ -325,3 +328,238 @@ def test_readiness_does_not_disguise_programming_errors(enrollment, monkeypatch)
     monkeypatch.setattr(manifest, "template", broken)
     with pytest.raises(RuntimeError, match="parser bug"):
         intake.manifest_readiness(Repo("o/r", engine="specloop", manifest=path))
+
+
+def stage_fakes(stage):
+    if stage == "propose":
+        return DraftGh(("spec:draft",)), DraftCommands()
+    if stage == "admit":
+        return ApprovalGh(), AdmissionCommands()
+    gh = RevisionGh()
+    return gh, RevisionCommands(gh)
+
+
+@pytest.mark.scenario("config-resilience/repository-manifest-health/dispatch-uses-actual-change-identity")
+@pytest.mark.parametrize("stage", ["propose", "admit", "revise"])
+@pytest.mark.parametrize("omitted", [(), ("change",), ("branch",), ("change", "branch")])
+def test_template_readiness_preserves_dispatch_identity(enrollment, monkeypatch, stage, omitted):
+    path, _ = enrollment
+    defaults = {"change": "unrelated-default", "branch": "spec/unrelated-default"}
+    path.write_text(path.read_text().replace("[run]\n", "[run]\n" + "".join(
+        f'{key} = "{value}"\n' for key, value in defaults.items() if key not in omitted)))
+    before = path.read_bytes()
+    repo = Repo("owner/sample", engine="specloop", manifest=path)
+    gh, commands = stage_fakes(stage)
+    parsed = []
+
+    def cli(args, **kwargs):
+        if args[1] in ("propose", "admit"):
+            effective, _ = manifest.template(
+                Path(args[2]), change=args[args.index("--change") + 1],
+                branch=args[args.index("--branch") + 1])
+            assert (effective.change, effective.branch) == (CHANGE, BRANCH)
+            parsed.append(effective)
+        return commands(args, **kwargs)
+
+    monkeypatch.setattr(daemon.subprocess, "run", commands)
+    health = daemon.RepoHealth()
+    daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=cli)
+    assert not health.failures and len(parsed) == 1
+    assert path.read_bytes() == before
+    evidence = json.dumps([gh.calls, commands.calls]) + "".join(
+        receipt.read_text() for receipt in daemon.STATE_DIR.rglob("*.json"))
+    assert CHANGE in evidence and BRANCH in evidence
+    assert "readiness-probe" not in evidence and "unrelated-default" not in evidence
+
+
+@pytest.mark.scenario("issue-intake/approval-admits/unhealthy-enrollment-retains-approval")
+@pytest.mark.scenario("pr-revision/revision-health-isolation/spec-drafting-waits-for-repair")
+@pytest.mark.scenario("pr-revision/spec-stage-revision/spec-revised-from-review")
+@pytest.mark.parametrize("stage", ["admit", "revise"])
+@pytest.mark.parametrize("saved", [False, True])
+def test_new_work_waits_without_recording_attempt(enrollment, monkeypatch, stage, saved):
+    path, _ = enrollment
+    valid = path.read_bytes()
+    path.unlink()
+    repo = Repo("owner/sample", engine="specloop", manifest=path)
+    gh, commands = stage_fakes(stage)
+    if saved:
+        if stage == "revise":
+            seed_consumed(daemon.STATE_DIR)
+        else:
+            jobs.save(daemon.STATE_DIR / "approvals/owner__sample/8.json", {"event": 0, "head": HEAD})
+            jobs.save(daemon.STATE_DIR / "admissions/owner__sample/8.json", {
+                "change": CHANGE, "head": HEAD, "approval_event": 0,
+                "result": {"outcome": "refused"}, "delivered": True})
+    before = {p: p.read_bytes() for p in daemon.STATE_DIR.rglob("*.json")}
+    labels = gh.labels.copy()
+    monkeypatch.setattr(daemon.subprocess, "run", commands)
+    health = daemon.RepoHealth()
+    for _ in range(3):
+        daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
+    assert health.failures == {repo.name: 3} and not health.item_failures
+    assert gh.labels == labels and not gh.comments
+    assert all(c[:2] == ["specloop", "status"] for c in commands.calls)
+    assert {p: p.read_bytes() for p in daemon.STATE_DIR.rglob("*.json")} == before
+    path.write_bytes(valid)
+    for _ in range(2):
+        daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
+    assert not health.failures and len(gh.comments) == 1
+    assert len([c for c in commands.calls if c[1] in ("propose", "admit")]) == 1
+    if stage == "revise":
+        receipt = json.loads((daemon.STATE_DIR / "revisions/owner__sample/8.json").read_text())
+        assert "conversation:102" in receipt["consumed_feedback_ids"]
+        assert gh.head == REVISED and gh.labels == {"spec:review"}
+    else:
+        assert "build has started" in gh.comments[0]["body"] and not gh.labels
+
+
+@pytest.mark.scenario("issue-intake/approval-admits/unhealthy-enrollment-retains-approval")
+@pytest.mark.parametrize("other_pr", ["https://github.com/other/sample/pull/8",
+                                       "https://github.com/owner/sample/pull/9", None])
+@pytest.mark.parametrize("saved", [False, True])
+@pytest.mark.parametrize("failure", ["absent", "invalid"])
+def test_colliding_run_does_not_bypass_admission_hold(enrollment, other_pr, saved, failure):
+    path, _ = enrollment
+    valid = path.read_bytes()
+    path.write_text("[broken")
+    repo = Repo("owner/sample", engine="specloop", manifest=None if failure == "absent" else path)
+    gh, commands = ApprovalGh(), AdmissionCommands()
+    commands.runs = [{"change": CHANGE, "pr": other_pr, "status": "running"}]
+    if saved:
+        # Even a retained result must not authorize a new collision refusal.
+        event = intake._approval_event(repo.name, 8, "spec:approved", runner=gh)
+        jobs.save(daemon.STATE_DIR / "approvals/owner__sample/8.json", {"event": event, "head": HEAD})
+        jobs.save(daemon.STATE_DIR / "admissions/owner__sample/8.json", {
+            "change": CHANGE, "head": HEAD, "approval_event": event,
+            "result": {"outcome": "admitted"}})
+    before = {p: p.read_bytes() for p in daemon.STATE_DIR.rglob("*.json")}
+    labels = gh.labels.copy()
+    health = daemon.RepoHealth()
+    for _ in range(2):
+        daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
+    assert health.failures == {repo.name: 2} and not health.item_failures
+    assert gh.labels == labels and not gh.comments
+    assert commands.calls and all(c == ["specloop", "status", "--json"] for c in commands.calls)
+    assert {p: p.read_bytes() for p in daemon.STATE_DIR.rglob("*.json")} == before
+    path.write_bytes(valid)
+    repaired = Repo(repo.name, engine="specloop", manifest=path)
+    daemon.poll_specloop(Config(repos=[repaired]), health, runner=gh, specloop_runner=commands)
+    assert not health.failures and not commands.admissions
+    assert gh.labels == {"spec:review", "needs-human"}
+    assert len(gh.comments) == 1 and "already belongs to a run" in gh.comments[0]["body"]
+
+
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/unhealthy-repository-still-publishes")
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/pause-and-stop-still-prevail")
+@pytest.mark.parametrize("failure", ["missing", "invalid", "absent"])
+@pytest.mark.parametrize("name", ["owner/sample", "owner/widget..js"])
+def test_unhealthy_repo_still_publishes_admitted_run(enrollment, failure, name):
+    path, _ = enrollment
+    if failure == "invalid":
+        path.write_text("[broken")
+    else:
+        path.unlink()
+    repo = Repo(name, engine="specloop", manifest=None if failure == "absent" else path)
+    gh, commands = ApprovalGh(labels=()), PublishCommands()
+    gh.pr_url = f"https://github.com/{name}/pull/8"
+    commands.runs = [{"change": CHANGE, "pr": gh.pr_url, "status": "paused", "head": HEAD,
+                      "pause": {"reason": "ready_to_publish", "detail": DETAIL}}]
+    directory = name.replace("/", "__")
+    jobs.save(daemon.STATE_DIR / "admissions" / directory / "8.json",
+              {"change": CHANGE, "result": {"outcome": "admitted"}})
+    health = daemon.RepoHealth()
+    daemon.PAUSE_FILE.touch()
+    daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
+    assert not commands.calls and not gh.calls
+    daemon.PAUSE_FILE.unlink()
+    for _ in range(2):
+        daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
+    assert health.failures == {name: 2} and not health.item_failures
+    assert commands.publications == [["specloop", "publish", CHANGE, "--json"]]
+    assert not commands.admissions
+    assert len(gh.comments) == 1 and CHECKS in gh.comments[0]["body"]
+    assert gh.pr_url in gh.comments[0]["body"] and not gh.labels
+    receipt = json.loads((daemon.STATE_DIR / "publications" / directory / "8.json").read_text())
+    assert receipt["delivered"] and receipt["change"] == CHANGE
+
+
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/unhealthy-repository-still-takes-build-feedback")
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/pause-and-stop-still-prevail")
+def test_build_feedback_does_not_read_enrollment(enrollment, monkeypatch):
+    path, _ = enrollment
+    path.unlink()
+    repo = Repo("owner/sample", engine="specloop", manifest=path)
+    gh = RevisionGh()
+    commands = BuildCommands(gh)
+    seed_consumed(daemon.STATE_DIR)
+    monkeypatch.setattr(manifest, "template", lambda *a, **k: pytest.fail("enrollment read"))
+    health = daemon.RepoHealth()
+    daemon.PAUSE_FILE.touch()
+    daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
+    assert not commands.calls and not gh.calls
+    daemon.PAUSE_FILE.unlink()
+    for _ in range(2):
+        daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
+    assert health.failures == {repo.name: 2} and not health.item_failures
+    assert [c[1] for c in commands.calls] == ["status", "revise"]
+    assert json.loads(commands.feedback[0]) == ["**reviewer:**\n\nHandle empty input"]
+    receipt = json.loads((daemon.STATE_DIR / "revisions/owner__sample/8.json").read_text())
+    assert receipt["consumed_feedback_ids"] == ["conversation:101", "conversation:102"]
+    assert receipt["delivered"] and gh.head == HEAD
+    assert gh.labels == {"spec:review"} and len(gh.comments) == 1
+    assert REVISED in gh.comments[0]["body"]
+
+
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/saved-work-survives-a-hold")
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/pause-and-stop-still-prevail")
+@pytest.mark.parametrize("stage", ["propose", "admit", "revise"])
+@pytest.mark.parametrize("stopped", [False, True])
+def test_finished_jobs_survive_hold(enrollment, monkeypatch, stage, stopped):
+    path, _ = enrollment
+    valid = path.read_bytes()
+    repo = Repo("owner/sample", engine="specloop", manifest=path)
+    gh, commands = stage_fakes(stage)
+    launched = []
+
+    def launch(args, **kwargs):
+        launched.append(Path(args[3]))
+        return SimpleNamespace(poll=lambda: 0)
+
+    kwargs = {"status_runner": commands} if stage != "propose" else {}
+    getattr(intake, stage + "_pending")(
+        repo, queue.Labels(), daemon.STATE_DIR, runner=gh, git_runner=commands,
+        launcher=launch, **kwargs)
+    job, = launched
+    if stopped:
+        jobs.save(job / "stop.json", {"state": "stopping"})
+    jobs.finalize(job, {"result": commands.result})
+    path.unlink()
+    if stage == "admit":
+        commands.runs = [{"change": CHANGE, "pr": gh.pr_url, "status": "running"}]
+    commands.calls.clear()
+    gh.calls.clear()
+    monkeypatch.setattr(daemon.subprocess, "run", commands)
+    health = daemon.RepoHealth()
+    for _ in range(3):
+        daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
+    assert health.failures == {repo.name: 3} and not health.item_failures
+    assert not any(c[0] == "git" or c[1] in ("propose", "admit") for c in commands.calls)
+    folder = {"propose": "proposals", "admit": "admissions", "revise": "revisions"}[stage]
+    receipt_path = daemon.STATE_DIR / folder / "owner__sample" / ("7.json" if stage == "propose" else "8.json")
+    receipt = json.loads(receipt_path.read_text())
+    assert bool(receipt.get("delivered")) == (stage == "admit" and not stopped)
+    if stage != "admit" or stopped:
+        assert not any(c[1] in ("comment", "edit", "create") for c in gh.calls)
+    if stage == "revise":
+        assert receipt["consumed_feedback_ids"] == []
+    assert (job / "result.json").is_file() and len(launched) == 1
+    if not stopped:
+        assert receipt["result"]["outcome"] == commands.result["outcome"]
+    else:
+        assert "result" not in receipt and not (job / "collected.json").exists()
+    path.write_bytes(valid)
+    daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
+    assert not health.failures
+    assert bool(json.loads(receipt_path.read_text()).get("delivered")) == (not stopped)
+    assert not any(c[:2] in (["specloop", "propose"], ["specloop", "admit"]) for c in commands.calls)
