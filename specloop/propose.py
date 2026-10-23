@@ -70,6 +70,17 @@ MODIFIED or REMOVED delta.
 - `tasks.md` with `## N. Title` sections and `- [ ] N.M ...` tasks.
   - Each task is a single session's work: about 300 changed lines at most, one
     concern.
+  - Combine work touching the same file for one concern into one task within
+    that ceiling. Split when distinct concerns, dependencies or the ceiling
+    require it, not by document heading.
+  - For documentation-only changes (documentation updates without changing
+    executable behavior), use one or two tasks in one section, subject to the
+    same single-session task ceiling.
+  - Most changes should use six tasks or fewer and as few sections as
+    dependencies allow. Six is a normal target, not a hard rejection limit.
+    Every task incurs a full implement, verify and review cycle; every section
+    incurs an evidence gate. Size boundaries by risk and dependencies to avoid
+    paying those costs for unnecessary splits.
   - Each task names the scenario IDs it covers, in backticks, as
     `capability/requirement-slug/scenario-slug`. A slug is the name lowercased,
     with every run of other characters replaced by `-`.
@@ -118,9 +129,9 @@ NEGATED = re.compile(r"\b(?:do not|don't|never|without)\b(?:[^.;]|\.(?=\S)){0,60
                      r"|\bleave\b(?:[^.;]|\.(?=\S)){0,60}?\b(?:unchanged|untouched|alone|as is)\b", re.I)
 
 
-def edited_paths(text: str) -> set[str]:
+def edited_paths(text: str, root: Path | None = None) -> set[str]:
     """Paths a task names, minus those in a clause telling the implementer to leave them alone."""
-    return set().union(*(paths(c) for c in re.split(r"(?<=[.;])\s+", text) if not NEGATED.search(c)))
+    return set().union(*(paths(c, root=root) for c in re.split(r"(?<=[.;])\s+", text) if not NEGATED.search(c)))
 
 
 def is_test(path: str) -> bool:
@@ -144,7 +155,8 @@ def in_flight(source: Path, change: str) -> dict[str, list[str]]:
             text = git(d / "repo.git", "show", f"{m.branch}:openspec/changes/{m.change}/tasks.md").decode()
         except Exception:
             continue  # an unreadable run must not stop drafting
-        for path in paths(text, root=root):
+        # A "Do not edit X" list names X but plans no edit to it.
+        for path in edited_paths(text, root=root):
             planned.setdefault(path, []).append(d.name)
     return planned
 
