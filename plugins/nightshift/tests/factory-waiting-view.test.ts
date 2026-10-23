@@ -43,6 +43,7 @@ function assertRow(page: Page, candidate: FactoryRun, waiting: string | null, wa
     assert.equal(block.props.style.flexDirection, 'row');
     assert.equal(block.props.style.flexWrap, 'wrap');
     assert.ok(block.props.style.gap > 0);
+    assert.equal(block.props.style.gap, 8, 'waiting text retains the eight-pixel spacing beside status/progress');
     assert.deepEqual(block.children, [sentence, indicators[0]], 'waiting is a separate sibling after the unchanged sentence');
     assert.equal(page.text(indicators[0].children), waiting);
     assert.deepEqual({ ...indicators[0].props.style }, { color: warning ? tokens.statusWarning : tokens.foregroundMuted });
