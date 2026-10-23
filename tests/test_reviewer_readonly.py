@@ -13,6 +13,8 @@ import json
 
 from pathlib import Path
 
+import pytest
+
 from nightshift import worker
 from nightshift.config import Config, Endpoint, Repo
 
@@ -20,6 +22,15 @@ LOCAL = Endpoint(
     name="local", base_url="http://local-host:11434", auth_env="NIGHTSHIFT_LOCAL_TOKEN",
     models=("glm-4.7-flash",), context_tokens={"glm-4.7-flash": 203_000},
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_probe_scratch(monkeypatch, tmp_path):
+    # Keep escapes outside the probe worktree but inside the test sandbox.
+    # A shared /tmp/verdict.txt also races with other probes under pytest-xdist.
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(worker, "SCRATCH_DIR", str(scratch))
 
 
 def result_event(denials=(), turns=6):
@@ -167,6 +178,7 @@ def test_a_write_outside_the_worktree_is_still_a_breach(monkeypatch, tmp_path):
     escaped = Path(worker.SCRATCH_DIR) / worker._PROBE_TARGET
 
     def run(worktree, prompt, model, max_turns, allowed, denied, *a, **k):
+        assert not escaped.is_relative_to(worktree)
         escaped.write_text("escaped\n")
         return worker.Run(returncode=0, events=result_event(denials=[("Write", "")]))
 

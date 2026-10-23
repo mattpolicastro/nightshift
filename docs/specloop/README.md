@@ -724,8 +724,28 @@ Both operators retain added-line/path selection, prose/comment protection,
 `mutation_skip`, equivalence handling, seeded sampling and one mutant per line;
 eligibility does not guarantee selection.
 
-**Usage limits** move a role to the next profile in its fallback chain, or
-pause with a resume time that `serve` honours.
+**Usage limits** move implementation, candidate review or section-gate review
+to the first usable profile in the role's configured fallback chain.
+Recognized authentication or inactive/expired/cancelled plan failures do so
+immediately; ordinary infrastructure failures, including offline local
+backends, retry the same profile until failures exceed `max_infra`. Retry
+budgets belong to each task/profile pair, shared across roles; a new fallback
+gets its own allowance. An unavailable profile has a 15-minute cooldown,
+shared across roles and retained across restarts. At expiry it becomes eligible
+in the original chain order with a fresh retry allowance. The same task,
+pending candidate or gate continues without charging a coding attempt; an
+`unavailable` event records the diagnostic and an FYI names the successor.
+Provider recovery pauses only when every profile in that role's chain is
+blocked, with its earliest deadline as the retry time. Quota-only chains use
+`usage_limit`, with uncapped automatic resumes by `serve`; any unavailable
+profile, including a mix with quota blocks, uses `infra`, still limited to two
+automatic resumes per task. Cooldown expiry alone cannot lift a pause once
+that allowance is spent. A manual resume can retry a single unavailable
+profile early; multi-profile chains retain their deadlines, and quota
+deadlines and the automatic-resume cap remain unchanged. This recovery applies
+to admitted build work; drafting, feasibility, the spec critic and the one-shot
+arbiter keep their existing behavior
+([issue #72](https://github.com/mattpolicastro/nightshift/issues/72)).
 
 **Providers are pluggable.** Two adapters: `codex` (`codex exec`) and `claude`
 (`claude -p`). Each can use its CLI's subscription login or a local
