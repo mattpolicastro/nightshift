@@ -10,4 +10,4 @@
 
 ## 3. Document the report and finish validation
 
-- [ ] 3.1 Insert only the short build-timing subsection beside the touchpoint paragraph in `README.md`, preserving existing content and concurrent arming guidance; budget about 20 lines. Honor all file exclusions in design.md. Run `uv run pytest` and `uv run python scripts/check_types.py`, keeping existing assertions and the type baseline unchanged. Covers `build-timing-report/operator-guidance/discover-the-timing-command`.
+- [x] 3.1 Insert only the short build-timing subsection beside the touchpoint paragraph in `README.md`, preserving existing content and concurrent arming guidance; budget about 20 lines. Honor all file exclusions in design.md. Run `uv run pytest` and `uv run python scripts/check_types.py`, keeping existing assertions and the type baseline unchanged. Covers `build-timing-report/operator-guidance/discover-the-timing-command`.
