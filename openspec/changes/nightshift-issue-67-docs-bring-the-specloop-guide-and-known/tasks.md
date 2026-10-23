@@ -1,7 +1,7 @@
 ## 1. Publication
 
 - [x] 1.1 Update publication in `docs/specloop/README.md` and the specloop flow in `README.md` from the landed base-sync behavior: driver preparation, publish handoff, pauses and recovery, same-PR delivery, and PR #59 citation. Keep this session below 150 changed lines. Covers `specloop-documentation/publication-guidance/base-moves-before-publication`, `specloop-documentation/publication-guidance/base-preparation-pauses`.
-- [ ] 1.2 Add tagged tests covering `specloop-documentation/publication-guidance/base-moves-before-publication`, `specloop-documentation/publication-guidance/base-preparation-pauses`, fixing the code where a scenario does not hold
+- [x] 1.2 Add tagged tests covering `specloop-documentation/publication-guidance/base-moves-before-publication`, `specloop-documentation/publication-guidance/base-preparation-pauses`, fixing the code where a scenario does not hold
 
 ## 2. Spec stage
 
