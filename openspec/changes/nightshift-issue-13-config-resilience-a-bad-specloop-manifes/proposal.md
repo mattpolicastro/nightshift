@@ -6,7 +6,7 @@ Blocked by #6, #8 and #67. This draft builds on their landed feedback, pause/job
 
 ## What Changes
 
-- Resolve manifest paths in configuration, but validate availability, regular-file status and manifest contents per poll. Report failures as repository health; healthy repositories continue.
+- Resolve manifest paths in configuration, but validate availability, regular-file status and manifest template contents per poll. Use `manifest.template()` with safe representative change/branch overrides, accepting templates that omit either per-change field. Report failures as repository health; healthy repositories continue.
 - Hold new drafting, including spec-stage re-drafting, and admission while enrollment is unhealthy. Already-admitted runs keep publishing and taking build-stage revisions using their copied manifest and recorded branch.
 - Reconcile leftover worker claims on specloop enrollment and restart without launching workers or discarding surviving work.
 - Name new changes `<owner>__<repository>-issue-<number>-<title-slug>`. Preserve spelling; if the generated branch fails existing validation, report unsupported repository health and dispatch no new work. Do not encode names or relax safety checks.

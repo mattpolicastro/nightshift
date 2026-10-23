@@ -10,7 +10,7 @@ Keep the three scoped operator documents consistent with repository health, swit
 
 #### Scenario: Operator repairs enrollment
 - **WHEN** an operator consults enrollment and recovery guidance
-- **THEN** the docs explain regular-file validation, repository-local health, retained triggers, retry after file repair, config-restart requirements and continued publication/build revisions of admitted runs
+- **THEN** the docs explain regular-file template validation, optional `run.change` and `run.branch` fields supplied by intake, repository-local health, retained triggers, retry after file repair, config-restart requirements and continued publication/build revisions of admitted runs
 - **THEN** they explain release of orphaned working issues and human inspection of surviving worker work without claiming those tasks resume automatically
 
 #### Scenario: Operator understands names and limits

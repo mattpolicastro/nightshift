@@ -6,7 +6,7 @@ Isolate specloop enrollment failures and recover leftover worker claims without 
 
 ### Requirement: Repository manifest health
 
-Configuration loading SHALL retain repositories whose specloop manifest is omitted, missing, unreadable, non-regular or invalid. Polling SHALL validate each specloop repository's manifest with the existing schema and report failures as repository health, preserving worker defaults and configuration-shape errors. Every enrollment-manifest read SHALL first require a regular file; FIFOs and devices SHALL NOT be opened. File repairs SHALL take effect on a later poll without configuration reload.
+Omitted or unusable manifests SHALL cause repository health failures, not config-load failures. Every enrollment-manifest read SHALL require a regular file first. Readiness SHALL use `specloop.manifest.template()` with safe change/branch overrides, accepting omitted per-change fields without persisting probe values. Other schema and configuration-shape checks SHALL remain strict; worker defaults SHALL remain unchanged. File repair SHALL clear the hold on a later eligible poll.
 
 #### Scenario: Bad manifest isolates the repository
 - **WHEN** configuration enrolls a healthy worker, a healthy specloop repository and a specloop repository with an absent, missing, unreadable, malformed or schema-invalid manifest
@@ -15,6 +15,16 @@ Configuration loading SHALL retain repositories whose specloop manifest is omitt
 #### Scenario: Nonregular manifest is never read
 - **WHEN** the configured manifest is a directory, FIFO or device, or a valid path is replaced by one before the next poll
 - **THEN** validation rejects it before opening or reading it and other repositories can complete that poll
+
+#### Scenario: Template omits per change fields
+- **WHEN** an otherwise valid regular-file template omits `run.change`, `run.branch` or both
+- **THEN** readiness applies safe representative overrides before parsing, reports no configuration health failure and leaves the template bytes unchanged
+- **THEN** an unrelated missing required field such as `run.repo` still causes repository-local health failure
+
+#### Scenario: Dispatch uses actual change identity
+- **WHEN** an authorized eligible issue draft, new admission or spec-stage revision uses a healthy template with omitted or default per-change fields
+- **THEN** dispatch passes the actual new or recorded change and branch as overrides, and that effective template passes the same parser
+- **THEN** no receipt, PR lookup, command or saved run identity uses readiness probe values or unrelated template defaults
 
 #### Scenario: Repair clears the hold
 - **WHEN** an invalid manifest is repaired at the same configured path between polls
