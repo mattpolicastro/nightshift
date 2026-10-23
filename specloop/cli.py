@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import json
+import math
 import os
 import re
 import shutil
@@ -819,6 +820,25 @@ def _status_context(run: Run, m: manifest.Manifest, head: str, task_path: str,
                 "detail": "", "recent": [], "github": ""}
 
 
+def _pause_since(directory: Path) -> int | float | None:
+    """Best-effort time of the last appended pause, independent of context limits."""
+    try:
+        lines = (directory / "events.jsonl").read_text().splitlines()
+    except (OSError, UnicodeError):
+        return None
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(event, dict) and event.get("event") == "pause":
+            at = event.get("at")
+            # A recognizable pause with no usable time supersedes older pauses.
+            # Exact types exclude bool, which Python otherwise treats as an int.
+            return at if type(at) is int or (type(at) is float and math.isfinite(at)) else None
+    return None
+
+
 def _status_entry(name: str) -> dict:
     from specloop import serve
 
@@ -843,7 +863,7 @@ def _status_entry(name: str) -> dict:
         "change": name,
         "status": st.status,
         "pause": {"reason": st.pause.reason, "task": st.pause.task, "detail": st.pause.detail,
-                  "auto_resumes_remaining": auto_resumes_remaining}
+                  "auto_resumes_remaining": auto_resumes_remaining, "since": _pause_since(run.dir)}
                  if st.pause else None,
         "tasks": {"done": sum(t.done for t in all_tasks), "total": len(all_tasks)},
         "head": head,
@@ -879,7 +899,7 @@ def _status_error_entry(name: str, error: Exception) -> dict:
         "change": name,
         "status": "paused",
         "pause": {"reason": "status_error", "task": "", "detail": detail,
-                  "auto_resumes_remaining": 0},
+                  "auto_resumes_remaining": 0, "since": _pause_since(runs_dir() / name)},
         "tasks": {"done": 0, "total": 0},
         "head": "",
         "pr": "",
