@@ -11,7 +11,7 @@
 
 ## 3. Finish eligible runs and resume partial landing
 
-- [ ] 3.1 Wire refreshed run eligibility, plain finish invocation, post-finish head validation and done-run continuation behind the human-check gate. Add `test_land_finishes_only_at_human_checks`, `test_land_direct_pr_skips_finish`, and tests for failed/partial finish and retry after successful finish followed by CI, update or merge failure. Cover `reviewed-pr-landing/eligible-run-state/finish-at-human-checks`, `reviewed-pr-landing/eligible-run-state/wrong-state-refused`, `reviewed-pr-landing/eligible-run-state/finish-fails-safely`, `reviewed-pr-landing/reliable-run-discovery/direct-pr-skips-finish`, `reviewed-pr-landing/done-run-continuation/retry-after-finish`.
+- [x] 3.1 Wire refreshed run eligibility, plain finish invocation, post-finish head validation and done-run continuation behind the human-check gate. Add `test_land_finishes_only_at_human_checks`, `test_land_direct_pr_skips_finish`, and tests for failed/partial finish and retry after successful finish followed by CI, update or merge failure. Cover `reviewed-pr-landing/eligible-run-state/finish-at-human-checks`, `reviewed-pr-landing/eligible-run-state/wrong-state-refused`, `reviewed-pr-landing/eligible-run-state/finish-fails-safely`, `reviewed-pr-landing/reliable-run-discovery/direct-pr-skips-finish`, `reviewed-pr-landing/done-run-continuation/retry-after-finish`.
 
 ## 4. Establish CI verdicts and deadlines
 
