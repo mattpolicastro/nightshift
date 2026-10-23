@@ -187,6 +187,7 @@ class IssueCache:
                 if isinstance(row, dict) and "pull_request" in row:
                     continue
                 try:
+                    # mutation-equivalent: The supplied before/after condition is identical; no code changes.
                     if not isinstance(row, dict) or type(row.get("number")) is not int or row["number"] <= 0:
                         raise ValueError
                     # REST represents an issue without a description as null.
@@ -241,6 +242,7 @@ def scope_paths(body: str, root: Path) -> set[str]:
 
 def front_door_issue(repository: str, change: str) -> int | None:
     """Use the producer's stable change identity, independent of current titles."""
+    # mutation-equivalent: rsplit with maxsplit 1 or 2 yields the same final '/' component.
     basename = re.escape(repository.rsplit("/", 1)[-1])
     match = re.fullmatch(rf"{basename}-issue-([1-9][0-9]*)-[a-z0-9-]{{1,40}}", change)
     return int(match[1]) if match else None

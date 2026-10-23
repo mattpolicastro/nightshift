@@ -593,6 +593,24 @@ def context_reader(responses, repository="org/repo"):
     return arm.IssueCache(runner=runner), calls
 
 
+@pytest.mark.scenario("issue-arming/concurrent-path-collection/pagination-identity-and-self-exclusion")
+@pytest.mark.parametrize("number", [1, 10, 100])
+def test_front_door_pr_numbers_starting_with_one_keep_file_evidence(number):
+    pr = pr_record(number, 77)
+    cache, calls = context_reader({
+        ("helper", "pulls?state=open&per_page=100&page=1"): [pr],
+        ("metadata", "pulls?state=open&per_page=100&page=1"): [pr],
+        ("helper", f"pulls/{number}/files?per_page=100&page=1"):
+            [{"filename": "src/shared.py", "status": "modified"}],
+    })
+    context = cache.open_prs("org/repo")
+    assert context.evidence == [arm.PathEvidence(
+        "src/shared.py", 77, f"PR #{number} https://github.example/org/repo/pull/{number}",
+    )]
+    assert context.notes == []
+    assert len(calls) == 3
+
+
 @pytest.mark.scenario("issue-arming/concurrent-path-collection/all-three-sources-contribute")
 def test_all_concurrent_sources_preserve_attribution(concurrent_checkout, monkeypatch):
     root, add_run = concurrent_checkout
@@ -840,6 +858,33 @@ def test_cycle_search_does_not_cache_partial_negative_proofs(issue_reader):
     assert cache.reaches("org/repo", 2, 4) == (True, ())
     assert cache.reaches("other/repo", 2, 4) == (True, ())
     assert len(calls) == len(set(calls)) == 6
+
+
+@pytest.mark.parametrize("outcome", ["reachable", "unreachable", "failed"])
+def test_reachability_cache_avoids_repeating_graph_traversal(issue_reader, monkeypatch, outcome):
+    cache, calls = issue_reader({
+        ("org/repo", 1): issue_record(1, body="blocked-by: #2"),
+        ("org/repo", 2): (OSError("unavailable") if outcome == "failed" else
+                         issue_record(2, body="blocked-by: #3" if outcome == "reachable" else "")),
+    })
+    parsed = []
+    original = arm.blockers
+
+    def blockers(body):
+        parsed.append(body)
+        return original(body)
+
+    monkeypatch.setattr(arm, "blockers", blockers)
+    expected = (outcome == "reachable",
+                ((2, "Issue #2 lookup failed."),) if outcome == "failed" else ())
+    assert cache.reaches("org/repo", 1, 3) == expected
+    assert parsed == (["blocked-by: #2"] if outcome == "failed" else
+                      ["blocked-by: #2", "blocked-by: #3" if outcome == "reachable" else ""])
+    parsed.clear()
+    assert cache.reaches("org/repo", 1, 3) == expected
+    # Issue reads alone cannot detect retraversal: the issue cache masks it.
+    assert parsed == []
+    assert calls == [("org/repo", 1), ("org/repo", 2)]
 
 
 @pytest.mark.scenario("issue-arming/dependency-aware-overlap-decisions/cycles-terminate-and-failures-do-not-exempt")
