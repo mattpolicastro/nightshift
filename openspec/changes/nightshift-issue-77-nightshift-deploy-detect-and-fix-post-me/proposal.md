@@ -17,6 +17,13 @@ after PR #69. Sandboxed verification depends on that environment.
   reload, and idle-only daemon/supervisor restarts. `--force` overrides busy
   restart guards, not checkout refusals. Repeated successful application is a
   no-op when nothing changed.
+- Persist plugin reload intent before replacement so interruption cannot leave
+  matching deployed files masking an unreloaded Paseo plugin. Retry reconciles
+  the saved transaction before treating that component as current.
+- Recover a service stopped by this command's restart with one non-killing
+  launchctl start, bounded confirmation, and durable restart intent. This
+  accommodates the daemon's clean SIGTERM exit and existing launchd policy
+  without changing either plist or starting arbitrary stopped services.
 - Add isolated command-runner tests in `tests/test_deploy.py` and an operator
   guide in `docs/deploy.md`, including the post-merge host checklist.
 - Implementation may create only those three files. Every existing file is

@@ -24,6 +24,11 @@ Available interfaces:
   `~/.specloop/serve.json`.
 - Existing status tolerates isolated run errors and unknown fields. Deployment
   must not reinterpret error rows as evidence that the supervisor is idle.
+- The daemon converts SIGTERM to `SystemExit(0)` and removes its heartbeat.
+  Its existing plist has `KeepAlive.SuccessfulExit = false`; a successful
+  `kickstart -k` can therefore leave it stopped. The supervisor plist records
+  this failure and uses unconditional KeepAlive. Both have a 300-second
+  throttle, so command acceptance and passive polling cannot prove recovery.
 
 ## Goals / Non-Goals
 
@@ -86,7 +91,9 @@ exit 1 for drift, pending restarts, refused application, command failure, or
 inconclusive observations. Continue independent checks after a failed probe.
 Check mode never pulls, syncs, copies, reloads, restarts, or writes application
 state. Fetch may update Git metadata; observational commands may use tool
-caches. No deploy receipt is needed merely to check.
+caches. Check reads existing deployment receipts without creating or updating
+them; pending reload or restart recovery is a nonzero result even when deployed
+bytes or process age alone appear current.
 
 The literal requested `uv run python -m nightshift.deploy` works, but outer
 `uv run` may synchronize before Python starts. `docs/deploy.md` must recommend
@@ -140,7 +147,7 @@ the source checkout. This prevents swapping a checkout or accidentally
 deploying onto the in-tree plugin. Read symlinks without following them and
 reject archive paths/links that escape the export. No npm install is needed.
 
-Only when plugin drift exists, export the pinned post-pull HEAD to a unique
+When plugin file drift exists and no transaction is pending, export the pinned post-pull HEAD to a unique
 sibling staging directory on the same filesystem, verify it against the
 manifest, move the old destination to a uniquely named sibling rollback, then
 rename staging to the unchanged destination path. Export only tracked source
@@ -159,6 +166,55 @@ most recent successful previous copies and prune only older owned copies.
 No-op applications neither create backups nor prune them. Document how to
 restore a named copy and reload; a separate rollback CLI is out of scope.
 
+### Durable plugin reload intent
+
+Use `<plugin-parent>/.<plugin-name>.nightshift-deploy/pending.json`, outside the
+live tree, for a version-1 transaction record. Store the canonical checkout and
+destination, transaction ID, pinned commit and plugin manifest digest, old
+manifest digest (or absent), owned staging/backup paths, reload argv (or skip),
+and phase. Validate paths and known fields; ignore unknown fields. Before the
+first rename, atomically write and fsync the record and its parent directory.
+Failure to persist intent prevents replacement. Apply the same atomic-write
+helper to subsequent phase changes. Phases are `prepared`, `installed`,
+`reload_confirmed`, and `rollback_pending`; filesystem observations take
+precedence over a phase that may lag a completed rename.
+
+Check reports `plugin reload pending` for an unfinished transaction, including
+when live bytes match HEAD. At the plugin stage of apply, reconcile the record
+before the ordinary file-drift shortcut:
+
+- If live matches the recorded candidate, run the pending reload without
+  re-exporting, swapping, or making another backup, even if phase is still
+  `prepared`. Use recorded argv unless this invocation explicitly supplies
+  `--reload-cmd`; an empty override explicitly acknowledges skipping reload.
+- If live still matches the recorded old copy and verified staging remains,
+  complete the recorded swap. If live is absent and the recorded backup exists,
+  restore it and report the interrupted swap; never overwrite unexpected bytes.
+- For malformed records, missing required copies, or mismatched destinations
+  or manifests, exit 1 with recovery paths and preserve evidence. Do not claim
+  success or prune backups. A changed HEAD does not discard pending work:
+  finish the recorded transaction first, then compare with post-pull HEAD.
+- Persist `reload_confirmed` only after reload exit 0 or explicit skip; then
+  finalize owned backup retention and remove the record. If interrupted after
+  confirmation, retry only finalization. If interrupted after reload succeeds
+  but before confirmation persists, retry reload: delivery is at least once,
+  since Paseo supplies no transactional acknowledgement. This exception is
+  distinct from a successful second apply, which performs no reload.
+- On reload failure persist `rollback_pending` before restoration. Restore the
+  recorded previous copy and reload it once; retry an interrupted rollback by
+  inspecting the saved old digest, without installing another candidate.
+  This phase takes precedence over the candidate-matches-live shortcut above.
+  Clear the record only after rollback and its reload succeed (or first-install
+  removal completes); still exit 1 for the failed deployment. If recovery
+  fails, retain the record, backups, and diagnostics and stop later repairs.
+
+Test process interruption immediately after candidate rename and before reload
+using a fresh command context on retry. Check must expose pending reload,
+apply must reload the installed candidate once without another swap, and a
+third invocation after success must be a no-op. Also inject failure before
+intent persistence, after reload but before acknowledgement, and during
+finalization and rollback. Use simulated interruptions, never real Paseo.
+
 ### Process age and restart guards
 
 For each code tree, use `git log -1 --format=%ct HEAD -- nightshift/` or
@@ -175,7 +231,9 @@ equal/newer is current. Missing history is inconclusive rather than zero.
 Missing/malformed heartbeat, missing/dead PID, unsupported status, command
 failure, or unreadable process start is reported as unavailable/inconclusive
 and exits 1. Do not turn unknown process identity into a restart target.
-Starting a stopped service is outside this command's automatic repairs.
+Starting an already stopped service without a matching pending restart record
+is outside automatic repairs. The bounded recovery below is the exception for
+a service this command previously identified and attempted to restart.
 
 Restart only a stale process, using argv
 `launchctl kickstart -k gui/<uid>/<label>`. Re-read identity and activity just
@@ -196,10 +254,69 @@ it cannot override checkout, staging, dependency, or identity failures.
 
 Deferred daemon restart does not prevent checking/restarting an idle stale
 supervisor; one busy service does not block the other's independent repair.
-After each kickstart, poll through the same runner and state readers for up to
-30 seconds at one-second intervals for a new live process start at least as
-new as its code commit. Timeout remains pending and exits 1; do not repeatedly
-kickstart within the same invocation or record success from command exit alone.
+
+### Restart confirmation and bounded recovery
+
+Before issuing `kickstart -k`, inspect `launchctl print gui/<uid>/<label>`
+through the runner to establish that the service is loaded and owns the
+identified heartbeat/status process. The launchd PID may be uv's parent:
+accept a matching PID or a verified ancestry chain using runner-mediated
+`ps -o ppid=` (at most eight ancestors). Unknown output, missing service, or
+unrelated PID refuses mutation even with force. Keep this separate from the
+read-only age check, which does not require launchctl.
+
+Persist a version-1 restart record under
+`~/.nightshift/deploy/restarts/<sha256(checkout-and-service-target)>.json` before
+the destructive command. Store canonical checkout, UID/label, service kind,
+old service and application PID/start identities, code commit/time, and
+`restart_requested`/`recovery_requested` phase. Use the atomic persistence
+helper above. State roots remain injectable. No receipt is created for a
+current or activity-blocked service. A receipt binds recovery to this exact
+target; changing labels does not authorize starting another service.
+
+The common daemon/supervisor helper performs this bounded sequence:
+
+1. After fresh identity/activity guards and persisted `restart_requested`,
+   send `launchctl kickstart -k gui/<uid>/<label>` once. Poll service state,
+   heartbeat/status, and actual process start at one-second intervals, with a
+   30-second monotonic deadline beginning at dispatch. Command timeouts count
+   toward this bound.
+2. If the old process is gone and `launchctl print` positively reports the
+   same loaded service with no running PID, persist `recovery_requested` and
+   issue exactly one `launchctl kickstart gui/<uid>/<label>` **without `-k`**.
+   This explicitly starts the stopped loaded job despite clean-exit KeepAlive
+   policy. Recheck immediately before dispatch; if a replacement already
+   exists, only observe it. Missing heartbeat alone never proves stopped.
+   Do not bootout/bootstrap, edit a plist, kill another process, or start an
+   unloaded service. Failure/timeout of the destructive command still runs
+   this reconciliation, because it may already have stopped the old process.
+3. Confirm success only when a new live application process is owned by the
+   same launchd service, its start is at least its code commit time, and its
+   heartbeat/status identifies that replacement. Then remove the receipt.
+   A clean command exit alone is insufficient. If launchd starts a replacement
+   normally, do not send the recovery start. A new PID/start identity must
+   differ from the original even if its timestamp would otherwise pass.
+4. At deadline, or on failed recovery/unknown service identity, retain the
+   receipt, report pending recovery and observed service state, and exit 1.
+   A failed launchctl command stops later repair stages even if reconciliation
+   restores availability. Never issue another destructive restart in this
+   transaction. The recovery-start budget is one across retries, persisted
+   before dispatch; an interruption in that narrow dispatch gap may require
+   manual start rather than an unsafe unbounded loop.
+
+A later apply reconciles the receipt at that service's normal stage, even if
+its heartbeat disappeared. If a current replacement exists, clear the receipt
+without signalling it. If the same loaded service is confirmed stopped and
+the recovery budget is unused, issue the one non-killing start and poll for up
+to 30 seconds. If that budget was used, only poll and report recovery advice;
+do not silently reset it. An unchanged old process, unavailable identity, or
+unloaded service stays pending without another kill. Malformed or mismatched
+receipts fail visibly. Check only reports the pending receipt and observations.
+Reconcile against recorded code first, then current HEAD; if newer code still
+requires a restart, use fresh activity guards and a new transaction. Recovery
+of the stopped service does not require the lost heartbeat to prove idleness;
+the persisted original guard and positive launchd identity authorize restoring
+availability, without changing job, pause, or run state.
 
 ### Ordered application and repeatability
 
@@ -208,7 +325,9 @@ daemon restart, supervisor restart. Skip each current component. Hard command
 or filesystem failures stop later repair effects and exit 1; a busy restart
 is a deferred action, not a hard failure. Preserve completed earlier repairs
 and report them; the next invocation observes actual state and resumes only
-remaining work. A clean second invocation prints `Nothing to do.` and does not
+remaining work, including pending plugin reloads and owned restart recovery.
+Pending receipts prevent the no-op shortcut and exit 0 until reconciled.
+A clean second invocation prints `Nothing to do.` and does not
 pull, sync, write deployment state, create/prune backups, reload, or kickstart.
 Fetch and probes still run, so a no-op excludes normal observation metadata.
 
@@ -227,7 +346,9 @@ do not update the baseline. Test success is an implementation acceptance
 condition, not a claim that this proposal has implemented the command.
 
 `docs/deploy.md` documents invocation directory, flags, exit codes, uv bootstrap,
-plugin path and rollback layout, pending restarts, force limitations, failure
+plugin path and rollback layout, durable pending records, at-least-once reload,
+the bounded non-killing start and manual recovery after its budget is exhausted,
+pending restarts, force limitations, failure
 recovery, and the distinction between a verified command result and real host
 behavior. It contains this human checklist for the implementation PR, not
 agent tasks:
@@ -237,6 +358,11 @@ agent tasks:
 - Confirm the daemon heartbeat advances and its PID/start reflects current
   code; confirm the supervisor is live and expected runs remain visible. If
   either restart was deferred, retry when idle and confirm it completes.
+- Confirm that a clean daemon exit under the installed plist is followed by a
+  live replacement, including the non-killing recovery start if needed. Check
+  launchd state and logs; CI simulations cannot prove real launchd scheduling
+  or throttle behavior. If recovery exhausts its bound, restore the loaded
+  service manually, then rerun apply to reconcile its retained record.
 - Open the Factory page on the real Paseo host and confirm it loads current
   runs and existing controls. CI cannot establish host reload or presentation.
 - Run apply again and confirm `Nothing to do.` with no new service restart or
@@ -260,8 +386,16 @@ agent tasks:
   restart guards do not make the whole deployment transaction isolated. A
   maintenance window remains the recommended host practice.
 - Plugin replacement has a brief gap between renames. Handled failures restore
-  the old path; process death/power loss in that gap may need manual restoration
-  from the preserved backup. Backup pruning happens only after success.
+  the old path; retry reconciles preserved copies and durable intent after
+  interruption. Ambiguous filesystem state still requires manual restoration.
+  Installed-but-unreloaded copies remain visibly pending until acknowledged;
+  a crash before acknowledgement can repeat reload. Backup pruning happens
+  only after durable reload success or explicit skip.
+- Existing launchd policies can stop a service on clean exit or delay startup.
+  The single explicit non-killing start prevents relying solely on KeepAlive;
+  a 30-second deadline still cannot guarantee availability under throttle or
+  startup failures. Retained restart records permit safe reconciliation, not
+  an unlimited restart loop. No general stopped-service repair is introduced.
 - This is a sequential operator command. Concurrent apply invocations and
   edits to the live checkout during deployment are unsupported; the guide must
   state this. No durable global transaction or rollback for Git/uv is promised.

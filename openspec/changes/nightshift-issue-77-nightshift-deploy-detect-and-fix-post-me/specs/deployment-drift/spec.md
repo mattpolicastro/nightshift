@@ -25,6 +25,8 @@ It SHALL preserve all existing CLI and service interfaces.
 Check SHALL report checkout, environment, plugin, daemon, and supervisor results
 independently. It SHALL exit 1 for any drift or inconclusive result and 0 when
 all configured checks pass. An unconfigured plugin SHALL be an explicit skip.
+Existing pending deployment records SHALL be reported without being changed;
+matching files or process age alone SHALL NOT hide unfinished work.
 
 #### Scenario: Multiple drifts remain visible
 - **WHEN** checkout fetch fails and environment, plugin, or process drift can still be observed locally
@@ -104,10 +106,12 @@ swap failure, and never prune unrelated directories.
 
 ### Requirement: Plugin reload and recovery
 
-After a changed plugin is installed, apply SHALL run `paseo plugin reload
-nightshift`, or the shell-free argv override from `--reload-cmd`. An empty
-override SHALL skip reload explicitly. Reload failure SHALL stop later repairs,
-restore the previous copy when available, and attempt to reload that copy once.
+Apply SHALL persist reload intent before replacement and reconcile it before
+skipping matching files. It SHALL reload using `paseo plugin reload nightshift`
+or shell-free `--reload-cmd` argv; empty overrides SHALL explicitly skip reload.
+It SHALL clear intent only after reload/skip and finalization or completed
+rollback. Reload failure SHALL restore and reload the previous copy when
+available, stop later repairs, and retain unresolved recovery evidence.
 
 #### Scenario: Reload default override and skip
 - **WHEN** apply installs a changed plugin with the default reload setting, a quoted override, or an empty override
@@ -116,6 +120,23 @@ restore the previous copy when available, and attempt to reload that copy once.
 #### Scenario: Reload failure restores previous plugin
 - **WHEN** reload of the new copy fails
 - **THEN** apply restores and attempts one reload of the previous copy, reports both outcomes, exits 1, and does not restart services; if no previous copy exists it removes the failed live candidate and reports that rollback was unavailable
+
+#### Scenario: Interrupted swap retains reload intent
+- **WHEN** application is interrupted after the candidate becomes live but before reload, and deployed files already match HEAD
+- **THEN** check reports `plugin reload pending` and exits 1 without changing the record, and a fresh apply reloads the installed candidate using its recorded transaction without another export, swap, or backup
+- **THEN** successful reload and finalization clear the record, and a further apply with no drift is a no-op
+
+#### Scenario: Reload acknowledgement survives retry
+- **WHEN** interruption occurs after reload returns success but before durable confirmation, or after confirmation but before finalization
+- **THEN** retry respectively repeats reload at least once or only finishes retention and record removal, never creates another rollback generation, and cannot report success while unfinished work remains
+
+#### Scenario: Pending transaction reconciliation
+- **WHEN** intent persistence fails, a pending record is malformed or conflicts with filesystem state, or HEAD advances while a valid transaction remains pending
+- **THEN** failed persistence prevents any swap, inconsistent state preserves evidence and exits 1, and a valid pending transaction completes against its pinned manifest before new HEAD drift is repaired
+
+#### Scenario: Interrupted rollback remains recoverable
+- **WHEN** application is interrupted during restoration or rollback reload after a candidate reload fails
+- **THEN** retry reconciles the saved old manifest and rollback intent without installing a new candidate, retains evidence on recovery failure, and stops later repairs with exit 1 for the failed deployment
 
 ### Requirement: Process age drift
 
@@ -131,7 +152,7 @@ and missing, malformed, dead, or unreadable process identity as inconclusive.
 
 #### Scenario: Process identity cannot be established
 - **WHEN** a heartbeat is missing or malformed, a PID is dead, status is unsupported, or process start/history cannot be read
-- **THEN** the component is reported unavailable or inconclusive, exit is 1, and apply does not guess a restart target even with `--force`
+- **THEN** the component is reported unavailable or inconclusive and check exits 1; apply does not guess a restart target even with `--force`, and only the bounded recovery requirement may start a stopped service bound to an existing restart record
 
 ### Requirement: Guarded daemon restart
 
@@ -168,15 +189,48 @@ run, and no activity uncertainty unless `--force` overrides this guard.
 
 Apply SHALL re-read identity and activity immediately before each restart and
 SHALL wait at most 30 seconds for a new live process start no older than its
-code commit. Command acceptance alone SHALL NOT prove restart success.
+code commit. It SHALL establish launchd ownership, persist restart intent
+before `kickstart -k`, and confirm the replacement belongs to the same loaded
+service. Command acceptance alone SHALL NOT prove restart success.
 
 #### Scenario: Activity changes before restart
 - **WHEN** a service appeared idle during the first check but becomes busy before kickstart
 - **THEN** apply defers that restart unless forced, using the fresh activity observation
 
 #### Scenario: Restart becomes current or times out
-- **WHEN** kickstart succeeds and subsequent observations show a new current process, or the 30-second deadline expires first
-- **THEN** apply respectively reports a confirmed restart or pending restart with exit 1, without a second kickstart in that invocation
+- **WHEN** subsequent observations show a new current process owned by the same service, or the 30-second deadline expires first
+- **THEN** apply respectively confirms restart and clears its record, or reports pending recovery with exit 1 and retains the record; it never repeats the destructive `kickstart -k` within that transaction
+
+#### Scenario: Restart target is unverified
+- **WHEN** launchd ownership cannot be linked to the stale heartbeat/status process, the target is unloaded, or restart intent cannot be persisted
+- **THEN** apply exits 1 without signalling a service, even with `--force`, and does not create an actionable recovery record for an unverified target
+
+### Requirement: Bounded service recovery
+
+Apply SHALL recover a recorded restart's confirmed stopped, loaded service
+with at most one `launchctl kickstart gui/<uid>/<label>` without `-k` per
+transaction, persisting the budget before dispatch and confirming within 30
+seconds. Retries SHALL reconcile intent without killing replacements or
+starting unrelated, unloaded, or previously stopped services. Recovery SHALL
+NOT edit plists, install services, or change job/pause/run state.
+
+#### Scenario: Clean exit receives explicit start
+- **WHEN** the recorded stale daemon exits cleanly after `kickstart -k` and launchd reports the same loaded service stopped with no running PID
+- **THEN** apply sends one non-killing kickstart, confirms the new owned process and heartbeat before clearing the record, and does not depend on KeepAlive to restart it
+- **THEN** the same recovery sequence is available for the supervisor, and a normal automatic replacement receives no extra start
+
+#### Scenario: Retry recovers service stopped by deployment
+- **WHEN** a fresh apply finds a valid pending restart record, the old process is gone, the same loaded service is stopped, and the recovery-start budget is unused
+- **THEN** it sends only the non-killing start, polls for at most 30 seconds, and clears the record only after confirming the owned replacement; an already current replacement is reconciled without signalling it
+
+#### Scenario: Recovery is bounded and target specific
+- **WHEN** recovery fails or times out, its persisted start budget is already spent, or service ownership or record identity is unavailable or mismatched
+- **THEN** apply exits 1 with retained evidence and recovery guidance, performs no repeated kill or extra recovery start, and never starts an unrelated or unloaded service
+- **THEN** an initially stopped service without a matching pending record receives no start, and check never performs recovery or modifies records
+
+#### Scenario: Failed restart still reconciles availability
+- **WHEN** destructive kickstart fails or times out after stopping its previously identified service
+- **THEN** apply attempts the same bounded recovery before returning exit 1 for the command failure, reports both outcomes, and performs no later repair stages
 
 ### Requirement: Ordered repeatable application
 
@@ -184,11 +238,13 @@ Apply SHALL repair checkout, environment, plugin, reload, daemon, and supervisor
 in that order, skipping current components. Hard repair failures SHALL stop
 later effects; busy-service deferral SHALL allow the other service's independent
 repair. A subsequent invocation SHALL observe actual state rather than repeat
-completed work. With no work required, it SHALL say `Nothing to do.` and exit 0.
+completed work, and SHALL reconcile pending plugin/restart records before
+declaring a component current. With no work required, it SHALL say
+`Nothing to do.` and exit 0.
 
 #### Scenario: Failure stops later repair effects
 - **WHEN** pull, sync, export, reload, or a kickstart command fails
-- **THEN** apply exits 1, reports completed and failed steps, and performs no later repair effects; retry observes any earlier successful repairs and does not repeat them unnecessarily
+- **THEN** apply exits 1, reports completed and failed steps, performs only the affected component's specified rollback or bounded recovery, and performs no later repair stages; retry observes successful repairs and reconciles pending records
 
 #### Scenario: Second application is a no op
 - **WHEN** a successful apply is followed by another with no new commits, dependency drift, plugin changes, or stale processes
