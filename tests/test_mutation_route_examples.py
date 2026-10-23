@@ -170,3 +170,118 @@ def test_example_adapter_argv_and_exit(example_command, mutant_path, targets, ex
         "cwd": str(build.resolve()),
     }
     assert m.vars["mutant_path"] == ""
+
+
+def guide_evidence():
+    guide = EXAMPLE.parents[2] / "docs/specloop/README.md"
+    section = guide.read_text().split("### Section evidence\n", 1)[1]
+    return guide, section.split("**Usage limits**", 1)[0]
+
+
+@pytest.mark.scenario(
+    "specloop-documentation/routed-evidence-guidance/reader-configures-routed-evidence"
+)
+def test_guide_explains_routed_execution_and_decision_receipts():
+    _, section = guide_evidence()
+    prose = " ".join(section.split())
+    for instruction in (
+        "trusted `{checks}` directory beside `scenario_plugin.py` and `negative_control.py`",
+        "first matching table wins",
+        "required nonempty `mutation_steps` fallback",
+        "Each distinct ordered step sequence",
+        "Identical sequences share a baseline",
+        "Unused routes get none",
+        "prepare or selected step's timeout",
+        "max(30 seconds, 3 * baseline step seconds)",
+        "separate argv element, including the empty string",
+        "Confirmation reruns even steps without the placeholder",
+        "Narrowed timeout or invalid results trigger no confirmation",
+        "mutation-runs.json",
+        "mutant-N/receipts.json",
+        "mutant-N/confirmation/receipts.json",
+        "baseline-2/receipts.json",
+        "expanded argv, expected/actual exits, durations and diagnostics",
+    ):
+        assert instruction in prose
+    for phase in ("full", "narrowed", "confirmation", "precheck", "baseline"):
+        assert f"`{phase}`" in prose
+
+
+@pytest.mark.scenario(
+    "specloop-documentation/routed-evidence-guidance/example-fallback-runs-the-whole-suite"
+)
+@pytest.mark.parametrize("uncertainty", ["unsupported", "escape", "parse"])
+def test_documented_uncertainty_runs_full_example_command(example_command, uncertainty):
+    _, section = guide_evidence()
+    prose = " ".join(section.split())
+    for instruction in (
+        "unsupported or escaping path",
+        "any scan read/parse failure",
+        "does not chase transitive or dynamic imports",
+        "Only this full confirmation can establish survival",
+        "Scoring and classifications stay unchanged",
+    ):
+        assert instruction in prose
+    m, values, build = example_command
+    src = Path(values["src"])
+    path = "nightshift/core.py"
+    if uncertainty == "parse":
+        (src / "tests/test_broken.py").write_text("def broken(\n")
+    else:
+        path = "nightshift/core.ts" if uncertainty == "unsupported" else "../outside.py"
+        (src / path).write_text("import nightshift.core\n")
+    values = {**values, "mutant_path": path}
+    result = subprocess.run(
+        [verify.expand(arg, values) for arg in m.mutation_step[0].run],
+        cwd=build, capture_output=True, text=True, timeout=15,
+        env={**os.environ, "FIXTURE_PYTEST_EXIT": "5"},
+    )
+    assert result.returncode == 5, result.stderr
+    recorded = json.loads(result.stdout)
+    full_argv = [verify.expand(arg, values) for arg in m.verify[0].run]
+    assert recorded["args"] == full_argv[full_argv.index("pytest") + 1:]
+    assert recorded["pythonpath"] == values["src"] + ":" + values["checks"]
+    assert recorded["bytecode"] == "1"
+
+
+@pytest.mark.scenario(
+    "specloop-documentation/documentation-integrity/scope-and-regression-checks-remain-intact"
+)
+def test_evidence_links_resolve_and_commands_remain_separate():
+    # Diff scope and unchanged existing assertions are also checked in review;
+    # do not pin unrelated guide prose that another change may legitimately edit.
+    guide, section = guide_evidence()
+    local = [target for target in re.findall(r"\]\(([^)]+)\)", section)
+             if not target.startswith("https://")]
+    assert local
+    for target in local:
+        assert (guide.parent / target).is_file(), target
+    m = manifest.load(EXAMPLE)
+    assert {s.id for s in m.mutation_step}.isdisjoint(s.id for s in m.verify)
+    assert m.coverage_step == "unit-tests"
+    assert [s.id for s in m.verify] == ["unit-tests", "negative-control"]
+
+
+@pytest.mark.scenario(
+    "specloop-documentation/documentation-integrity/references-and-reader-checks-are-reviewable"
+)
+def test_evidence_citations_and_pending_human_rollout_are_reviewable():
+    _, section = guide_evidence()
+    references = dict(re.findall(r"\[((?:issue|PR) #\d+)\]\(([^)]+)\)", section))
+    expected = {"issue": (4, 21, 31, 33, 73), "PR": (27, 44, 48, 63, 64)}
+    assert set(references) == {f"{kind} #{n}" for kind, nums in expected.items() for n in nums}
+    for label, url in references.items():
+        kind, number = label.split(" #")
+        endpoint = "issues" if kind == "issue" else "pull"
+        assert url == f"https://github.com/mattpolicastro/nightshift/{endpoint}/{number}"
+    prose = " ".join(section.split())
+    for instruction in (
+        "After merge, Matt copies the reviewed selector",
+        "combined verify step and a full fallback",
+        "human rollout remains pending",
+        "approximately 14-minute baseline using the existing timing report",
+        "mutant counts, route mix, narrowed kills and confirmations",
+        "Extra baselines, survivors and machine load",
+        "CI cannot prove the real-gate speed-up",
+    ):
+        assert instruction in prose

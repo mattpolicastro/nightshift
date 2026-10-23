@@ -486,7 +486,9 @@ mutant has an isolated source copy and build directory. The default is
 ([issue #4](https://github.com/mattpolicastro/nightshift/issues/4),
 [PR #27](https://github.com/mattpolicastro/nightshift/pull/27)).
 
-**Routed commands.** The [self-hosting manifest](../../examples/specloop/self-hosting.toml)
+**Routed commands.** Routing addresses
+[issue #73](https://github.com/mattpolicastro/nightshift/issues/73).
+The [self-hosting manifest](../../examples/specloop/self-hosting.toml)
 routes `specloop/**` and `nightshift/**` to `python-mutation`. Copy the
 [selector](../../examples/specloop/select_tests.py) into the trusted `{checks}`
 directory beside `scenario_plugin.py` and `negative_control.py`, then adjust
@@ -496,6 +498,9 @@ verification, negative-control and coverage commands stay intact.
 Mutation-only steps use the verify-step shape (`id`, argv `run`, `expect`
 defaulting to `0`, and `timeout` defaulting to `300` seconds); they do not join
 normal verification, preparation, acceptance or coverage.
+Give mutation-only steps IDs distinct from verify, prepare and acceptance IDs.
+Route `paths` and `steps` are nonempty arrays; each step ID must be defined
+and may occur only once in that route.
 
 Routes are ordered: the first matching table wins, with steps in listed order.
 Patterns match repository-relative POSIX paths using case-sensitive
@@ -531,44 +536,63 @@ Each distinct ordered step sequence used by selected mutants gets one full
 baseline, including a used fallback. Identical sequences share a baseline;
 reversed sequences do not. Unused routes get none. Baselines run serially in
 first-use order, with ordinary preparation and manifest timeouts; any failure
-stops all mutants as invalid. Each mutant step's timeout comes from its own
-full baseline: the lesser of its manifest timeout and
+stops all mutants as invalid. Each mutant prepare or selected step's timeout
+comes from its own full baseline: the lesser of its manifest timeout and
 `max(30 seconds, 3 * baseline step seconds)`. A missing or zero duration uses
-the manifest timeout. Narrowed timings do not reduce confirmation budgets.
+the manifest timeout. Both phases reuse these limits; neither narrowed timings
+nor queue waiting reduces confirmation budgets. One worker slot holds a mutant
+through narrowing and confirmation.
 
 **Selection and confirmation.** `{mutant_path}` is the repository-relative
 mutated path during narrowing and an empty argv value for baselines, ordinary
-verification and full confirmation. Do not configure a nonempty override.
+verification and full confirmation. It can appear in selected verify or
+mutation-only commands. Do not configure a nonempty override. Pass it as a
+separate argv element, including the empty string; commands must interpret
+empty input as the full suite, never zero tests.
 The example's Python argv adapter preserves spaces, prefixes selected paths
 with `{src}`, and substitutes `{src}/tests` when selection is empty. It
 propagates pytest's exit status. Empty or unresolvable input, no matches, a
-missing test tree or any scan read/parse failure therefore runs all tests.
+missing test tree, unsupported or escaping path, or any scan read/parse failure
+therefore runs all tests.
 
 The selector parses direct Python imports without executing repository code.
-It supports repository-root modules/packages, aliases and resolvable relative
-imports, but does not chase transitive or dynamic imports or guess arbitrary
+It scans `tests/**/test_*.py` and `tests/**/*_test.py`, including imports inside
+functions. It supports repository-root modules/packages, aliases and resolvable
+relative imports; package initializers include imports of descendants.
+It does not chase transitive or dynamic imports or guess arbitrary
 `src/` layouts. A narrowed pass reruns the entire selected sequence with empty
 `{mutant_path}`, the same mutation and a freshly prepared build. Only this
-full confirmation can establish survival. A narrowed test failure kills;
-timeout or invalid results trigger no confirmation. Sequences without the
-placeholder run once in full mode. Scoring and classifications stay unchanged.
+full confirmation can establish survival. Confirmation reruns even steps
+without the placeholder. In either phase, expected exits pass; the first
+unexpected test exit, including signal termination, kills and stops the
+sequence. Narrowed timeout or invalid results trigger no confirmation.
+Sequences without the placeholder run once in full mode. Scoring and
+classifications stay unchanged.
 
 Inspect `mutation-runs.json` at the gate output root for each mutant's route
-index (or null fallback), ordered steps, baseline, result and `decided_by`
-phase. Its relative receipt links identify the deciding run. Initial receipts
-remain in `mutant-N/receipts.json`; confirmation uses
-`mutant-N/confirmation/receipts.json`. The first baseline uses the gate root;
-additional baselines use `baseline-2/`, etc. `precheck` and `baseline` decisions
-have no mutant runs. Existing evidence JSON and step receipts retain their
-shape.
+index (one-based, or null fallback), ordered steps, baseline, result and
+`decided_by` (`full`, `narrowed`, `confirmation`, `precheck` or `baseline`).
+Entries remain in mutant selection order. Their relative receipt links identify
+the deciding run; step receipts supply expanded argv, expected/actual exits,
+durations and diagnostics. Initial receipts remain in
+`mutant-N/receipts.json`; confirmation uses
+`mutant-N/confirmation/receipts.json`. The first baseline uses the gate root's
+`receipts.json`; additional baselines use `baseline-2/receipts.json`, etc.
+`precheck` decisions (equivalents or source mismatches) and `baseline` failures
+have no mutant runs. The index identifies the failed baseline on abort.
+Source/build trees are cleaned after use; receipts and artifacts remain.
+Existing evidence JSON and step receipts retain their shape.
 
-After merge, the human rollout copies the reviewed selector and updates the
-private trusted manifest, checks language boundaries and verifies that empty
-input runs each complete routed suite. Compare the next few real section gates
+After merge, Matt copies the reviewed selector to his trusted checks directory
+and updates his private manifest with Python and plugin routes, retaining the
+combined verify step and a full fallback. This human rollout remains pending:
+check actual language boundaries and verify that empty selector input runs
+each complete routed suite. Compare the next few real section gates
 with the approximately 14-minute baseline using the existing timing report;
 record mutant counts, route mix, narrowed kills and confirmations alongside
 timings. Extra baselines, survivors and machine load affect the result. This
-does not claim a measured speed-up or add a timing-report command.
+does not claim a measured speed-up, promise a fixed percentage improvement or
+add a timing-report command; CI cannot prove the real-gate speed-up.
 
 Only `killed` and `survived` results enter the score:
 `killed / (killed + survived)`. A selected-test timeout is `timeout`, excluded
