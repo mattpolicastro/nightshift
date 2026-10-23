@@ -6,7 +6,7 @@ Allow an operator to select host tool, checkout and worker worktree locations wh
 
 ### Requirement: Trusted host path settings
 
-Host consumers SHALL read `NIGHTSHIFT_BIN_DIR`, `NIGHTSHIFT_NODE_BIN`, `NIGHTSHIFT_UV` and `NIGHTSHIFT_CHECKOUT` from their trusted process environment as applicable. Defaults SHALL be `/opt/homebrew/bin`, `~/n/bin`, the resolved bin directory plus `/uv`, and `~/Projects/nightshift`, respectively. Explicit values SHALL override defaults. These settings SHALL NOT be obtained from RPC requests, candidate files or candidate-controlled environment files.
+The Python engine and plugin consumers SHALL read `NIGHTSHIFT_BIN_DIR`, `NIGHTSHIFT_NODE_BIN`, `NIGHTSHIFT_UV` and `NIGHTSHIFT_CHECKOUT` from their trusted process environment as applicable. Defaults SHALL be `/opt/homebrew/bin`, `~/n/bin`, the resolved bin directory plus `/uv`, and `~/Projects/nightshift`, respectively. Explicit values SHALL override defaults. These settings SHALL NOT be obtained from RPC requests, candidate files or candidate-controlled environment files.
 
 #### Scenario: Unconfigured host retains defaults
 - **WHEN** the four host settings are unset
@@ -64,24 +64,6 @@ Both plugin execution adapters and the attention installation check SHALL use se
 #### Scenario: Configuration failures preserve plugin errors
 - **WHEN** a consumed host setting is invalid or the configured checkout/executable is unavailable
 - **THEN** the plugin uses its existing unavailable, stale-cache or refused-action response as applicable, without exposing raw host paths or errors or reporting a healthy empty list
-
-### Requirement: Configurable service wrappers
-
-Both service wrappers SHALL use the host settings for their checkout and uv executable, with quoted literal paths and no eval. The daemon SHALL prepend configured bin then Node directories to its incoming PATH; the supervisor SHALL use configured Node then bin directories followed by `/usr/bin:/bin:/usr/sbin:/sbin`. Existing credential loading/checks, secret unsets, executable preflight and uv argument lists SHALL remain unchanged. Invalid settings SHALL exit 78 before command execution.
-
-#### Scenario: Wrappers use alternate locations
-- **WHEN** either wrapper starts with configured tool, Node, checkout and uv locations, including paths with spaces
-- **THEN** it invokes the selected uv executable once from the selected checkout with the existing command arguments and the specified PATH order
-- **THEN** with settings unset it retains today's locations and PATH ordering
-
-#### Scenario: Daemon credentials retain precedence and guards
-- **WHEN** the daemon wrapper sources its trusted env file containing host settings and required credentials
-- **THEN** file values override inherited values, required-token checks and preflight still run, and Anthropic API-key/base-url/auth-token variables are removed before uv execution
-- **THEN** missing env files or required credentials still refuse startup with exit 78, while the supervisor does not start sourcing the daemon credential file
-
-#### Scenario: Invalid wrapper paths refuse startup
-- **WHEN** a wrapper consumes an invalid host setting, including an explicitly empty value
-- **THEN** it exits 78 with a setting-name diagnostic and does not invoke uv or silently choose a default
 
 ### Requirement: Configured worker worktree root
 
