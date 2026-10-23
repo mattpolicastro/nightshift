@@ -15,6 +15,17 @@ import pytest
 from specloop import evidence, manifest, verify
 
 
+@pytest.fixture(autouse=True)
+def _unwrapped_steps(monkeypatch):
+    """Run fixture steps directly, as inside specloop's own verify sandbox.
+
+    These tests cover mutation routing and decisions, not sandbox enforcement.
+    Outside an enclosing sandbox (CI, a plain pytest run), sandbox-exec would
+    apply each fixture manifest's profile, which cannot read the test venv.
+    """
+    monkeypatch.setattr(verify, "already_sandboxed", lambda: True)
+
+
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples/specloop/self-hosting.toml"
 
 
