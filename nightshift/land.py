@@ -384,7 +384,9 @@ def discover_run(identity: Identity, operations: Operations) -> LandingRun | Non
     Validate the version-1 fields used for classification and lifecycle gates;
     status presentation fields (tasks, context, action) are not landing inputs.
     """
-    data = operations.read_json(["specloop", "status", "--json"], stage="run discovery")
+    data = operations.read_json(
+        [sys.executable, "-m", "specloop.cli", "status", "--json"], stage="run discovery",
+    )
     if type(data.get("version")) is not int or data["version"] != 1:
         raise Refusal("run discovery: unsupported status version; expected version 1")
     if "error" in data:
@@ -676,7 +678,8 @@ def finish_run(
     if current is not None and run is not None and run.status != "done":
         if current.status == "paused":
             operations.run(
-                ["specloop", "finish", current.change], timeout=FINISH_TIMEOUT,
+                [sys.executable, "-m", "specloop.cli", "finish", current.change],
+                timeout=FINISH_TIMEOUT,
                 stage=f"finish {current.change}; rerun land to recover",
             )
             current = refresh_run(pr.identity, current, operations)
