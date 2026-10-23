@@ -1,6 +1,7 @@
 ## 1. Isolate infrastructure retry allowances
 
 - [x] 1.1 In `specloop/loop.py`, introduce loop-local event-backed task/profile retry accounting, preserve the legacy `ts.infra` display/pause scalar and reset semantics, and add focused restart, independent-task and cross-role tests in new `tests/test_provider_retry_accounting.py`. Keep state schemas and all existing tests unchanged. Limit this session to the counter concern (about 300 changed lines maximum). Cover `provider-fallback/task-and-profile-retry-allowance/fallback-has-its-own-allowance`, `provider-fallback/task-and-profile-retry-allowance/tasks-and-roles-preserve-counter-identity`, and `provider-fallback/task-and-profile-retry-allowance/restart-retains-partial-allowance`.
+- [ ] 1.2 Strengthen the tests so each of these single-line mutations of code added in section 1 makes a test fail; where a mutation genuinely cannot change behaviour, say why in a comment on the line above it starting `mutation-equivalent:` (the reviewer judges it): specloop/loop.py:774 `if isinstance(profile, str) and profile and type(count) is i` -> `if isinstance(profile, str) or profile and type(count) is in`; specloop/loop.py:803 `default = profile if len(_chain(ctx, role)) == 1 else ""` -> `default = profile if len(_chain(ctx, role)) != 1 else ""`; specloop/loop.py:796 `if previous and saved:` -> `if previous or saved:`
 
 ## 2. Continue roles after provider unavailability
 
