@@ -1,7 +1,7 @@
 import { execFile, type ChildProcess } from 'node:child_process';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { z } from 'zod';
+import { resolveHostPaths } from './host-paths';
 import {
   factoryRunSchema, factoryActInputSchema, factoryActResultSchema,
   type FactoryRun, type FactorySnapshot, type FactoryActInput, type FactoryActResult,
@@ -140,18 +140,19 @@ export function createFactory(execute: FactoryExecute, clock = () => Date.now(),
   return { read, act, dispose() { disposed = true; invalidate(); cached = undefined; } };
 }
 
-// Fixed host configuration; RPC callers supply neither executable nor cwd.
+// Trusted host configuration; RPC callers supply neither executable nor cwd.
 export function factoryPath() {
-  return [join(homedir(), 'n', 'bin'), '/opt/homebrew/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
+  return resolveHostPaths('factory').path;
 }
 const children = new Set<ChildProcess>();
 const execute: FactoryExecute = args => new Promise((resolve, reject) => {
-  const child = execFile('/opt/homebrew/bin/uv', ['run', '--no-sync', 'specloop', ...args], {
-    cwd: join(homedir(), 'Projects', 'nightshift'), shell: false,
+  const { cwd, uv, path } = resolveHostPaths('factory');
+  const child = execFile(uv, ['run', '--no-sync', 'specloop', ...args], {
+    cwd, shell: false,
     // act may push (publish, finish): specloop allows 300 s for a push.
     timeout: args[0] === 'act' ? 330_000 : 60_000, maxBuffer: 2 * 1024 * 1024,
     // ~/n/bin: finish archives the change through OpenSpec's npx, which lives there.
-    env: { ...process.env, PATH: factoryPath() },
+    env: { ...process.env, PATH: path },
   }, (error, stdout) => {
     children.delete(child);
     if (error && (error.killed || typeof error.code !== 'number')) reject(error);
