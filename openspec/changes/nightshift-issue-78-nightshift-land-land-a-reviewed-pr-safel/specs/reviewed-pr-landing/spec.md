@@ -67,7 +67,7 @@ Landing SHALL skip finish for a matching `done` run whose PR remains open and SH
 
 ### Requirement: Human check sources
 
-Landing SHALL gate unchecked Markdown task-list items in the PR body and, for a front-door PR, its newest trusted daemon publication comment. It SHALL preserve historical and unrelated comments and SHALL report when neither selected source lists checks.
+Landing SHALL gate unchecked task-list lines, recognized by a line rule wherever they appear, in the PR body and, for a front-door PR, its newest trusted daemon publication comment. It SHALL preserve historical and unrelated comments and SHALL report when neither selected source lists checks.
 
 #### Scenario: Unticked checks refuse
 - **WHEN** either the body or the selected publication comment contains an unticked `- [ ]` item and `--checks-done` is absent
@@ -76,7 +76,7 @@ Landing SHALL gate unchecked Markdown task-list items in the PR body and, for a 
 #### Scenario: Publication selection
 - **WHEN** paginated comments include multiple rounds, unrelated comments, and untrusted marker lookalikes
 - **THEN** only the newest trusted `**nightshift** —` publication comment for the matching change is selected alongside the body, accepting round-qualified and legacy markers
-- **THEN** fenced code examples do not count as task-list items, and older publication rounds are not edited or used to block landing
+- **THEN** task-list lines count wherever they appear, including fenced code examples, and older publication rounds are not edited or used to block landing
 
 #### Scenario: No listed checks
 - **WHEN** neither selected source contains task-list checks, including when no publication comment exists
