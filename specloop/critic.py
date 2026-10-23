@@ -27,6 +27,17 @@ Work through all eight checklist items:
    problem (for example, a JS lexer for a Python docstring problem). A blocker
    must identify the mismatch and a sufficient simpler approach; preference
    alone is a risk.
+   Count task entries across the whole plan, not headings or scenarios. More
+   than eight tasks (nine or more), or more than two tasks (three or more) in
+   a documentation-only plan, warrants a non-blocking risk. Documentation-only
+   means changing documentation without changing executable behavior. Name
+   concrete task labels that could merge and their shared concern; if necessary
+   boundaries prevent a safe merge, explain why rather than inventing a merge.
+   Exactly eight general tasks or exactly two documentation-only tasks do not
+   trigger a count finding. The drafter's usual six-task target is not a critic
+   rejection threshold. Task count alone never belongs in contradictions,
+   requires correction or rejects a proposal. Independently evidenced unsafe
+   designs still qualify as contradictions under the existing blocking criteria.
 2. File collisions and hidden instructions: inspect colliding production or
    test files and restrictions referring to context the implementing agent
    never receives. Avoidance instructions must name files in the draft itself.
@@ -49,6 +60,15 @@ Work through all eight checklist items:
 7. Retry and idempotency gaps: an external write the change adds or alters (a
    GitHub comment, label, push or PR edit) that a lost response or retried
    call could duplicate or drop. Cite the write and the retry path.
+   Scale remedies to blast radius. For an operator-attended local command,
+   safe re-runs that re-check actual current state satisfy this item. In that
+   case, demanding durable journals, transaction records or interrupted-run
+   reconciliation is over-engineering; their absence is not itself a gap.
+   State checks must make the re-run safe: operator attendance alone does not
+   excuse unsafe effects. Unattended daemon operations and GitHub writes
+   (comments, labels, pushes and PR edits), even when invoked from a local CLI,
+   retain strict scrutiny of lost responses and retry paths that can duplicate
+   or drop effects. Cite the write and the retry path for those findings.
 8. Stale operator docs and manual steps: documentation the change makes false
    (README, operator guides) with no task updating it, and rollout steps that
    need a person when they could be automated. Cite the doc line or step.
