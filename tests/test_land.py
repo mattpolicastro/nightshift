@@ -137,7 +137,7 @@ def test_module_help(monkeypatch, capsys):
         runpy.run_module("nightshift.land", run_name="__main__")
     assert error.value.code == 0
     output = capsys.readouterr()
-    assert ("Land a reviewed PR in an enrolled repository (CI and merge currently disabled)."
+    assert ("Land a reviewed PR in an enrolled repository (base updates and merge currently disabled)."
             in " ".join(output.out.split()))
     for flag in ["--repo", "--config", "--checks-done", "--timeout"]:
         assert flag in output.out
@@ -154,8 +154,8 @@ def test_default_subprocess_runner_and_config(
     monkeypatch.setattr(sys, "argv", ["nightshift.land", URL, "--timeout", "20",
                                      *(["--checks-done"] if checks_done else [])])
     scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF).expect(STATUS, EMPTY_STATUS)
-    expect_finish_gate(scripted_runner)
-    assert land.main() == 1
+    expect_finish_gate(scripted_runner, ci_timeout=20)
+    assert land.main(monotonic=lambda: 100.0) == 1
     output = capsys.readouterr()
     assert "mutations disabled" in output.err
     assert output.out == "No human checks listed\n"
@@ -536,8 +536,9 @@ def expect_check_sources(runner, body, comments=None):
         runner.expect(COMMENTS, comments)
 
 
-def expect_finish_gate(runner, body="", comments=None, *, row=None, head=HEAD, draft=False):
-    """Explicitly script the new gate for existing checklist/identity tests."""
+def expect_finish_gate(runner, body="", comments=None, *, row=None, head=HEAD, draft=False,
+                       ci=True, ci_timeout=30):
+    """Script finish and green CI for existing checklist/identity tests."""
     if row is None and comments is not None:
         row = RUN
     runner.expect(STATUS, {**EMPTY_STATUS, "runs": [row] if row else []})
@@ -549,6 +550,10 @@ def expect_finish_gate(runner, body="", comments=None, *, row=None, head=HEAD, d
             runner.expect(STATUS, {**EMPTY_STATUS, "runs": [
                 {**row, "status": "done", "pause": None, "head": FINISHED_HEAD}]})
             runner.expect(VIEW, {**PR, "body": body, "headRefOid": FINISHED_HEAD})
+            head, draft = FINISHED_HEAD, False
+    if ci and not draft:
+        expect_ci_poll(runner, [ci_check()], pr={**PR, "body": body, "headRefOid": head},
+                       timeout=ci_timeout)
 
 
 @pytest.mark.real_trust
@@ -720,7 +725,7 @@ def test_no_listed_checks_reaches_remaining_gates(
     assert output.out == "No human checks listed\n"
     assert "mutations disabled" in output.err
     assert "unticked" not in output.err
-    assert len(scripted_runner.calls) == (5 if kind == "direct" else 10)
+    assert len(scripted_runner.calls) == (8 if kind == "direct" else 13)
 
 
 @pytest.mark.real_trust
@@ -969,7 +974,7 @@ def test_land_checks_done_ticks_once_and_comments(config_path, scripted_runner, 
     assert calls.count(check_patch(completed_body)) == 1
     assert calls.count(check_patch(completed_comment["body"], 42)) == 1
     assert sum("POST" in argv for argv in calls) == 1
-    assert calls[-7] == check_patch(updated["body"], existing["id"])
+    assert calls[-10] == check_patch(updated["body"], existing["id"])
 
 
 @pytest.mark.real_trust
@@ -1089,7 +1094,7 @@ def test_attestation_lost_response_reconciles_later_page(
     assert "mutations disabled" in capsys.readouterr().err
     assert len(remote) == 101
     assert sum("POST" in argv for argv, _ in scripted_runner.calls) == 1
-    assert scripted_runner.calls[-3][0] == check_patch(body, 501)
+    assert scripted_runner.calls[-6][0] == check_patch(body, 501)
 
 
 @pytest.mark.real_trust
@@ -1195,8 +1200,8 @@ def test_existing_attestation_on_later_page_uses_production_trust(
     assert not any("POST" in argv for argv, _ in scripted_runner.calls)
 
 
-# CI/update/merge belong to subsequent tasks. These lifecycle tests inject that
-# downstream boundary, while keeping discovery, human checks, finish, and all
+# These lifecycle tests inject the downstream CI/update/merge boundary, while
+# keeping discovery, human checks, finish, and all
 # external calls on the real production path and the strict scripted runner.
 CHECKS = ["gh", "pr", "checks", "78", "--repo", REPO, "--json", "name,bucket,state,link"]
 
@@ -1337,6 +1342,313 @@ def test_land_rechecks_human_inputs_before_finish(config_path, scripted_runner, 
             "land: human check sources changed during landing; inspect checks and rerun land\n"
         )
     assert not any(argv == FINISH for argv, _ in scripted_runner.calls)
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 100.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        assert 0 < seconds <= 10
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def ci_check(bucket="pass", *, name="unit tests", state=None):
+    states = {"pass": "SUCCESS", "pending": "IN_PROGRESS", "fail": "FAILURE",
+              "cancel": "CANCELLED", "skipping": "SKIPPED"}
+    return {"name": name, "bucket": bucket, "state": state or states[bucket],
+            "link": "https://github.com/owner/project/actions/runs/123"}
+
+
+def expect_ci_poll(runner, checks, *, code=0, pr=None, timeout=30):
+    pr = PR if pr is None else pr
+    response = subprocess.CompletedProcess(CHECKS, code, json.dumps(checks), "")
+    runner.expect(VIEW, pr, timeout=timeout)
+    runner.expect(CHECKS, response, timeout=timeout)
+    runner.expect(VIEW, pr, timeout=timeout)
+
+
+def expect_ci_entry(runner):
+    expect_check_sources(runner, "")
+    expect_finish_gate(runner, ci=False)
+
+
+def invoke_ci(config_path, runner, clock, timeout=1800):
+    return land.main([URL, "--config", str(config_path), "--timeout", str(timeout)],
+                     runner=runner, sleep=clock.sleep, monotonic=clock.monotonic)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/bounded-ci-wait/pending-then-green")
+@pytest.mark.parametrize("pending_exit", [0, 8])
+def test_land_ci_pending_then_green(
+    config_path, scripted_runner, monkeypatch, capsys, pending_exit,
+):
+    clock = FakeClock()
+    expect_ci_entry(scripted_runner)
+    expect_ci_poll(scripted_runner, [ci_check("pending"), ci_check(name="lint")], code=pending_exit)
+    expect_ci_poll(scripted_runner, [ci_check(), ci_check("skipping", name="optional"),
+                                      ci_check("skipping", name="neutral", state="NEUTRAL")])
+    # The later final-revalidation/base gate is still a boundary for subsequent
+    # tasks. Exercise its read helpers here to prove CI hands control onward.
+    scripted_runner.expect(STATUS, EMPTY_STATUS).expect(VIEW, PR).expect(MAIN, MAIN_REF)
+    reached = []
+
+    def final_gate(pr, run, snapshot, operations):
+        reached.append(snapshot.head)
+        assert operations.deadline == 1900
+        assert operations.remaining() == 1790
+        current = land.refresh_run(pr.identity, run, operations)
+        latest = land.read_pr(pr.identity, operations)
+        land.validate_run_eligibility(latest, current)
+        land.revalidate_check_sources(latest, current, snapshot, operations)
+        assert land.read_main(pr.identity, operations) == BASE
+        raise land.Refusal("reached final revalidation and base comparison")
+
+    monkeypatch.setattr(land, "after_ci", final_gate)
+    assert invoke_ci(config_path, scripted_runner, clock) == 1
+    assert "reached final revalidation and base comparison" in capsys.readouterr().err
+    assert reached == [HEAD]
+    assert clock.sleeps == [10]
+    calls = [argv for argv, _ in scripted_runner.calls]
+    assert calls[5:11] == [VIEW, CHECKS, VIEW, VIEW, CHECKS, VIEW]
+    assert not any("merge" in argv for argv in calls)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/bounded-ci-wait/failing-ci-refused")
+@pytest.mark.parametrize("bucket", ["fail", "cancel"])
+@pytest.mark.parametrize("code", [0, 1, 8])
+def test_land_refuses_failing_ci(config_path, scripted_runner, capsys, bucket, code):
+    clock = FakeClock()
+    expect_ci_entry(scripted_runner)
+    # Failure takes precedence over a different check still being pending.
+    checks = [ci_check(), ci_check(bucket, name="integration"), ci_check("pending", name="slow")]
+    expect_ci_poll(scripted_runner, checks, code=code)
+    assert invoke_ci(config_path, scripted_runner, clock) == 1
+    error = capsys.readouterr().err
+    assert f"CI check integration: {bucket}" in error
+    assert checks[1]["state"] in error and checks[1]["link"] in error
+    assert clock.sleeps == []
+    assert not any("merge" in argv for argv, _ in scripted_runner.calls)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/bounded-ci-wait/failing-ci-refused")
+@pytest.mark.parametrize("checks, reason", [
+    (None, "expected a JSON array"), ({"checks": []}, "expected a JSON array"),
+    ([None], "malformed check result"), (["success"], "malformed check result"),
+    ([{}], "malformed check result"),
+    *[([{key: value for key, value in ci_check().items() if key != missing}],
+       "malformed check result") for missing in ("name", "bucket", "state", "link")],
+    *[([{**ci_check(), key: value}], "malformed check result")
+      for key, value in [("name", ""), ("name", 1), ("bucket", []), ("bucket", " "),
+                         ("state", None), ("state", ""), ("link", 42)]],
+    ([{**ci_check(), "bucket": "success"}], "unit tests: unknown classification 'success'"),
+    ([ci_check(), {**ci_check(), "bucket": "mystery"}], "unknown classification 'mystery'"),
+])
+def test_land_ci_malformed_results(config_path, scripted_runner, capsys, checks, reason):
+    clock = FakeClock()
+    expect_ci_entry(scripted_runner)
+    expect_ci_poll(scripted_runner, checks)
+    assert invoke_ci(config_path, scripted_runner, clock) == 1
+    assert reason in capsys.readouterr().err
+    assert clock.sleeps == []
+
+
+@pytest.mark.scenario("reviewed-pr-landing/bounded-ci-wait/failing-ci-refused")
+@pytest.mark.parametrize("code", [0, 1, 8])
+@pytest.mark.parametrize("stdout", ["", "not JSON", "[{\"name\":"])
+def test_land_ci_invalid_json(config_path, scripted_runner, capsys, code, stdout):
+    clock = FakeClock()
+    expect_ci_entry(scripted_runner)
+    scripted_runner.expect(VIEW, PR)
+    scripted_runner.expect(CHECKS, subprocess.CompletedProcess(CHECKS, code, stdout, "read error"))
+    scripted_runner.expect(VIEW, PR)
+    assert invoke_ci(config_path, scripted_runner, clock) == 1
+    assert f"CI checks: malformed JSON response (exit {code}): read error" in capsys.readouterr().err
+    assert clock.sleeps == []
+
+
+@pytest.mark.scenario("reviewed-pr-landing/bounded-ci-wait/failing-ci-refused")
+@pytest.mark.parametrize("code, checks", [
+    (1, [ci_check()]), (1, [ci_check("pending")]), (1, []),
+    (8, [ci_check()]), (8, []), (8, [ci_check("skipping")]),
+])
+def test_land_ci_inconsistent_exit_status(config_path, scripted_runner, capsys, code, checks):
+    clock = FakeClock()
+    expect_ci_entry(scripted_runner)
+    expect_ci_poll(scripted_runner, checks, code=code)
+    assert invoke_ci(config_path, scripted_runner, clock) == 1
+    assert f"inconsistent exit status and check results (exit {code})" in capsys.readouterr().err
+    assert clock.sleeps == []
+
+
+@pytest.mark.scenario("reviewed-pr-landing/bounded-ci-wait/failing-ci-refused")
+@pytest.mark.parametrize("response, reason", [
+    (subprocess.CompletedProcess(CHECKS, 2, json.dumps([ci_check()]), "transport error"),
+     "transport error (exit 2)"),
+    (subprocess.CompletedProcess(CHECKS, 4, "", "authentication required"), "authentication required"),
+    (OSError("cannot execute gh"), "cannot execute gh"),
+])
+def test_land_ci_command_error(config_path, scripted_runner, capsys, response, reason):
+    clock = FakeClock()
+    expect_ci_entry(scripted_runner)
+    scripted_runner.expect(VIEW, PR).expect(CHECKS, response)
+    assert invoke_ci(config_path, scripted_runner, clock) == 1
+    assert f"CI checks: {reason}" in capsys.readouterr().err
+    assert clock.sleeps == []
+
+
+@pytest.mark.scenario("reviewed-pr-landing/bounded-ci-wait/shared-deadline-expires")
+@pytest.mark.parametrize("checks, code", [
+    ([ci_check("pending")], 8), ([], 0),
+    ([ci_check("skipping"), ci_check("skipping", name="neutral", state="NEUTRAL")], 0),
+])
+def test_land_ci_timeout(config_path, scripted_runner, capsys, checks, code):
+    clock = FakeClock()
+    expect_ci_entry(scripted_runner)
+    for remaining in (25, 15, 5):
+        expect_ci_poll(scripted_runner, checks, code=code, timeout=remaining)
+    assert invoke_ci(config_path, scripted_runner, clock, timeout=25) == 1
+    assert "shared CI deadline expired" in capsys.readouterr().err
+    assert clock.sleeps == [10, 10, 5]
+    assert clock.now == 125
+    assert sum(argv == CHECKS for argv, _ in scripted_runner.calls) == 3
+    assert not any("merge" in argv for argv, _ in scripted_runner.calls)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/bounded-ci-wait/shared-deadline-expires")
+@pytest.mark.parametrize("position", ["before", "checks", "after"])
+def test_land_ci_subprocess_timeout(config_path, scripted_runner, capsys, position):
+    clock = FakeClock()
+    expect_ci_entry(scripted_runner)
+    if position != "before":
+        scripted_runner.expect(VIEW, PR, timeout=4)
+    if position == "after":
+        scripted_runner.expect(CHECKS, [ci_check()], timeout=4)
+    argv = CHECKS if position == "checks" else VIEW
+    scripted_runner.expect(argv, subprocess.TimeoutExpired(argv, 4), timeout=4)
+    assert invoke_ci(config_path, scripted_runner, clock, timeout=4) == 1
+    assert "command timed out after 4" in capsys.readouterr().err
+    assert clock.sleeps == []
+
+
+@pytest.mark.scenario("reviewed-pr-landing/bounded-ci-wait/shared-deadline-expires")
+@pytest.mark.parametrize("elapsed", [3, 7])
+def test_land_ci_command_time_consumes_budget(config_path, scripted_runner, capsys, elapsed):
+    clock = FakeClock()
+    expect_ci_entry(scripted_runner)
+    scripted_runner.expect(VIEW, PR, timeout=7)
+
+    def slow_check_read():
+        clock.now += elapsed
+        return [ci_check() if elapsed == 7 else ci_check("pending")]
+
+    scripted_runner.expect(CHECKS, slow_check_read, timeout=7)
+    if elapsed < 7:
+        scripted_runner.expect(VIEW, PR, timeout=4)
+    assert invoke_ci(config_path, scripted_runner, clock, timeout=7) == 1
+    assert "shared CI deadline expired" in capsys.readouterr().err
+    assert clock.sleeps == ([4] if elapsed < 7 else [])
+    assert clock.now == 107
+
+
+@pytest.mark.scenario("reviewed-pr-landing/bounded-ci-wait/pending-then-green")
+@pytest.mark.parametrize("position", ["before", "after", "next-poll"])
+def test_land_ci_refuses_head_change(config_path, scripted_runner, capsys, position):
+    clock = FakeClock()
+    expect_ci_entry(scripted_runner)
+    if position == "next-poll":
+        expect_ci_poll(scripted_runner, [ci_check("pending")], code=8)
+    if position == "after":
+        scripted_runner.expect(VIEW, PR).expect(CHECKS, [ci_check()])
+    scripted_runner.expect(VIEW, {**PR, "headRefOid": FINISHED_HEAD})
+    assert invoke_ci(config_path, scripted_runner, clock) == 1
+    assert f"PR head changed during CI: expected {HEAD}, found {FINISHED_HEAD}" in capsys.readouterr().err
+    assert clock.sleeps == ([10] if position == "next-poll" else [])
+    assert not any("merge" in argv for argv, _ in scripted_runner.calls)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/bounded-ci-wait/failing-ci-refused")
+@pytest.mark.parametrize("patch, reason", [
+    ({"state": "CLOSED"}, "PR must be open"),
+    ({"isDraft": True}, "PR became draft during CI"),
+    ({"headRefOid": None}, "malformed PR metadata"),
+])
+def test_land_ci_refuses_changed_pr_metadata(config_path, scripted_runner, capsys, patch, reason):
+    clock = FakeClock()
+    expect_ci_entry(scripted_runner)
+    scripted_runner.expect(VIEW, PR).expect(CHECKS, [ci_check()])
+    scripted_runner.expect(VIEW, {**PR, **patch})
+    assert invoke_ci(config_path, scripted_runner, clock) == 1
+    assert reason in capsys.readouterr().err
+
+
+@pytest.mark.scenario("reviewed-pr-landing/bounded-ci-wait/shared-deadline-expires")
+@pytest.mark.parametrize("update_exhausts", [False, True])
+def test_land_ci_rounds_and_update_observation_share_deadline(
+    config_path, scripted_runner, monkeypatch, capsys, update_exhausts,
+):
+    clock = FakeClock()
+    expect_ci_entry(scripted_runner)
+    expect_ci_poll(scripted_runner, [ci_check("pending")], code=8, timeout=25)
+    expect_ci_poll(scripted_runner, [ci_check()], timeout=15)
+    scripted_runner.expect(VIEW, PR, timeout=15)
+    updated = {**PR, "headRefOid": FINISHED_HEAD}
+    scripted_runner.expect(VIEW, PR if update_exhausts else updated, timeout=5)
+    if not update_exhausts:
+        # Green from round one is not reused for the new expected head.
+        expect_ci_poll(scripted_runner, [ci_check("pending")], code=8, pr=updated, timeout=5)
+
+    def next_round(pr, run, snapshot, operations):
+        # Model time spent observing an asynchronous update at the later gate's
+        # boundary. The actual PUT/parent-validation protocol is a separate task.
+        assert operations.deadline == 125
+        assert land.read_pr(pr.identity, operations).head == HEAD
+        operations.poll_sleep()
+        observed = land.read_pr(pr.identity, operations)
+        if update_exhausts:
+            operations.poll_sleep()
+            pytest.fail("update observation must exhaust the shared deadline")
+        assert observed.head == FINISHED_HEAD
+        land.wait_for_ci(pr.identity, observed.head, operations)
+        pytest.fail("another CI round must not reset the deadline")
+
+    monkeypatch.setattr(land, "after_ci", next_round)
+    assert invoke_ci(config_path, scripted_runner, clock, timeout=25) == 1
+    assert "shared CI deadline expired" in capsys.readouterr().err
+    assert clock.now == 125 and clock.sleeps == [10, 10, 5]
+
+
+@pytest.mark.scenario("reviewed-pr-landing/bounded-ci-wait/pending-then-green")
+def test_land_ci_budget_starts_after_finish(config_path, scripted_runner, monkeypatch, capsys):
+    clock = FakeClock()
+    expect_initial_run(scripted_runner, PR, RUN)
+    expect_before_finish(scripted_runner, PR)
+
+    def finish():
+        clock.now += 200
+        return {}
+
+    scripted_runner.expect(FINISH, finish, timeout=300)
+    done = {**RUN, "status": "done", "pause": None, "head": FINISHED_HEAD}
+    scripted_runner.expect(STATUS, status_rows(done))
+    finished = {**PR, "headRefOid": FINISHED_HEAD}
+    scripted_runner.expect(VIEW, finished)
+    expect_ci_poll(scripted_runner, [ci_check()], pr=finished, timeout=5)
+
+    def final_gate(pr, run, snapshot, operations):
+        assert snapshot.head == pr.head == run.head == FINISHED_HEAD
+        assert operations.deadline == 305 and operations.remaining() == 5
+        raise land.Refusal("CI passed for the finished head")
+
+    monkeypatch.setattr(land, "after_ci", final_gate)
+    assert invoke_ci(config_path, scripted_runner, clock, timeout=5) == 1
+    assert "CI passed for the finished head" in capsys.readouterr().err
+    assert clock.sleeps == []
 
 
 @pytest.mark.scenario("reviewed-pr-landing/eligible-run-state/finish-fails-safely")
@@ -1525,7 +1837,7 @@ def test_land_done_run_retry_after_downstream_failure(
 
     expect_initial_run(scripted_runner, remote["pr"], remote["run"])
     expect_finish_gate(scripted_runner, remote["pr"]["body"], [[]],
-                       row=remote["run"], head=remote["pr"]["headRefOid"])
+                       row=remote["run"], head=remote["pr"]["headRefOid"], ci=False)
     scripted_runner.expect(CHECKS, {})
     scripted_runner.expect(merge(remote["pr"]["headRefOid"]), {})
     assert invoke(config_path, scripted_runner, URL) == 0
@@ -1590,6 +1902,8 @@ def test_land_concurrent_done_refresh_still_requires_finished_head(
     expect_initial_run(scripted_runner, PR, RUN)
     done = {**RUN, "status": "done", "pause": None, "head": finished_head}
     expect_before_finish(scripted_runner, PR, row=done)
+    if accepted:
+        expect_ci_poll(scripted_runner, [ci_check()])
     assert invoke(config_path, scripted_runner, URL) == 1
     error = capsys.readouterr().err
     assert ("mutations disabled beyond run completion" if accepted

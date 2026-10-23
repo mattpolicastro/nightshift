@@ -1,7 +1,7 @@
 """Explicit operator entry point for landing an enrolled, reviewed PR.
 
-Identity, human checks, and run completion are wired so far.
-CI and merge remain disabled until subsequent gates are implemented.
+Identity, human checks, run completion, and bounded CI polling are wired so far.
+Base synchronization and merge remain disabled until subsequent gates are implemented.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from . import config, queue
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 READ_TIMEOUT = 30
 FINISH_TIMEOUT = 300
+CI_POLL_INTERVAL = 10
 PR_FIELDS = "number,url,state,isDraft,headRefOid,baseRefName,body"
 _REPO = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9_.-]+")
 _PR_URL = re.compile(r"https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)/?")
@@ -116,7 +117,7 @@ class LandingRun:
 class Operations:
     """Single process and clock boundary, shared by command helpers.
 
-    The clocks are injected here for later bounded polling. Identity reads do
+    The clocks are injected for bounded polling. Identity reads do
     not wait or retry; an unresolved read fails closed. In particular, never
     retry a comment POST here: only marker reconciliation can resolve a lost
     response, and that belongs to the attestation helper, even in production.
@@ -125,10 +126,26 @@ class Operations:
     runner: Runner
     sleep: Callable[[float], None]
     monotonic: Callable[[], float]
+    deadline: float | None = None
+
+    def remaining(self) -> float:
+        """One absolute budget, retained across CI rounds and update observation."""
+        if self.deadline is None:
+            return math.inf
+        remaining = self.deadline - self.monotonic()
+        if remaining <= 0:
+            raise Refusal("shared CI deadline expired; inspect checks and rerun land")
+        return remaining
+
+    def poll_sleep(self) -> None:
+        self.sleep(min(CI_POLL_INTERVAL, self.remaining()))
+        self.remaining()
 
     def run(
         self, argv: list[str], *, stage: str, timeout: float = READ_TIMEOUT,
+        allowed_returncodes: tuple[int, ...] = (0,),
     ) -> subprocess.CompletedProcess[str]:
+        timeout = min(timeout, self.remaining())
         try:
             result = self.runner(
                 argv, capture_output=True, text=True, check=False,
@@ -138,7 +155,10 @@ class Operations:
             raise Refusal(f"{stage}: command timed out after {timeout}s") from exc
         except (OSError, subprocess.SubprocessError) as exc:
             raise Refusal(f"{stage}: {exc}") from exc
-        if result.returncode:
+        # A command that used up its budget cannot authorize further progress,
+        # even if it returned a successful result just as the deadline elapsed.
+        self.remaining()
+        if result.returncode not in allowed_returncodes:
             detail = (result.stderr or result.stdout or "command failed").strip()
             raise Refusal(f"{stage}: {detail} (exit {result.returncode})")
         return result
@@ -177,7 +197,7 @@ def _positive_timeout(value: str) -> float:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="python -m nightshift.land",
-        description="Land a reviewed PR in an enrolled repository (CI and merge currently disabled).",
+        description="Land a reviewed PR in an enrolled repository (base updates and merge currently disabled).",
         allow_abbrev=False,
     )
     result.add_argument("pr", help="GitHub.com HTTPS pull URL or positive PR number")
@@ -587,7 +607,74 @@ def continue_landing(
     pr: PullRequest, run: LandingRun | None, snapshot: CheckSnapshot, operations: Operations,
     *, timeout: float,
 ) -> int:
-    """Boundary for the subsequent CI, base-update and merge gates."""
+    """Start the shared budget only after finish/continuation validation.
+
+    Later base-update rounds must reuse this bounded Operations instance; the
+    polling helper never creates or resets a deadline of its own.
+    """
+    bounded = replace(operations, deadline=operations.monotonic() + timeout)
+    wait_for_ci(pr.identity, snapshot.head, bounded)
+    return after_ci(pr, run, snapshot, bounded)
+
+
+def ci_is_green(result: subprocess.CompletedProcess[str]) -> bool:
+    """Decode gh's JSON together with its special failure/pending exit codes."""
+    try:
+        checks = json.loads(result.stdout)
+    except (ValueError, TypeError) as exc:
+        detail = (result.stderr or "").strip()
+        raise Refusal(f"CI checks: malformed JSON response (exit {result.returncode})"
+                      + (f": {detail}" if detail else "")) from exc
+    if not isinstance(checks, list):
+        raise Refusal("CI checks: expected a JSON array")
+    for check in checks:
+        if (not isinstance(check, dict)
+                or any(not isinstance(check.get(key), str) or not check[key].strip()
+                       for key in ("name", "bucket", "state"))
+                or not isinstance(check.get("link"), str)):
+            raise Refusal(f"CI checks: malformed check result: {check!r}")
+        if check["bucket"] not in {"pass", "fail", "pending", "skipping", "cancel"}:
+            raise Refusal(f"CI check {check['name']}: unknown classification {check['bucket']!r}")
+    for check in checks:
+        if check["bucket"] in {"fail", "cancel"}:
+            raise Refusal(f"CI check {check['name']}: {check['bucket']} ({check['state']})"
+                          + (f" — {check['link']}" if check["link"] else ""))
+    buckets = {check["bucket"] for check in checks}
+    # Exit 1 is meaningful only with a failing/cancelled check, and exit 8
+    # only with pending checks. Neither may turn contradictory JSON green.
+    if result.returncode == 1 or (result.returncode == 8 and "pending" not in buckets):
+        detail = (result.stderr or "inconsistent exit status and check results").strip()
+        raise Refusal(f"CI checks: {detail} (exit {result.returncode})")
+    return "pass" in buckets and buckets <= {"pass", "skipping"}
+
+
+def wait_for_ci(identity: Identity, expected_head: str, operations: Operations) -> None:
+    """Require green checks bracketed by reads of the same reviewed head."""
+    def check_head() -> None:
+        pr = read_pr(identity, operations)
+        if pr.head != expected_head:
+            raise Refusal(f"PR head changed during CI: expected {expected_head}, found {pr.head}; "
+                          "review the current head and rerun land")
+        if pr.draft:
+            raise Refusal("PR became draft during CI; inspect it before retrying land")
+
+    while True:
+        check_head()
+        result = operations.run(
+            ["gh", "pr", "checks", str(identity.number), "--repo", identity.repo,
+             "--json", "name,bucket,state,link"],
+            stage="CI checks", allowed_returncodes=(0, 1, 8),
+        )
+        check_head()
+        if ci_is_green(result):
+            return
+        operations.poll_sleep()
+
+
+def after_ci(
+    pr: PullRequest, run: LandingRun | None, snapshot: CheckSnapshot, operations: Operations,
+) -> int:
+    """Boundary for final revalidation, base synchronization and merge gates."""
     raise Refusal(f"{pr.identity.url}: mutations disabled beyond run completion until all landing "
                   f"gates are wired (checks read at head {snapshot.head})")
 
