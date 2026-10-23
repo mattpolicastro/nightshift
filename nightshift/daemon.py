@@ -15,7 +15,7 @@ import subprocess
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
@@ -256,6 +256,129 @@ class RepoHealth:
             log.info("%s is healthy again", repo)
 
 
+def _reconcile_engine_switch(repo: Repo, labels: queue.Labels, *, runner=None) -> None:
+    """Retire worker claims without executing or discarding surviving work.
+
+    Journals outlive labels and claims: a lost write response must never turn
+    the final pointer to interrupted work into queue.reconcile's litter.
+    """
+    def check():
+        if paused():
+            raise specloop_intake.Paused()
+
+    read_errors: list[Exception] = []
+
+    def gh(args):
+        try:
+            check()
+            with queue.gh_guard(check):
+                result = (runner or queue._gh)(args)
+            check()
+            if args[:2] == ["issue", "view"]:
+                data = json.loads(result)
+                if not isinstance(data.get("labels"), list):
+                    raise ValueError("missing recovery labels")
+            return result
+        except Exception as exc:
+            # labels_of deliberately hides RuntimeError for its worker callers.
+            read_errors.append(exc)
+            raise
+
+    check()
+    claims, unreadable = queue.in_flight(repo.name)
+    if unreadable:
+        raise ValueError(f"unreadable worker claims: {', '.join(unreadable)}")
+    by_number = {claim.number: claim for claim in claims}
+    root = STATE_DIR / "engine-switch" / repo.name.replace("/", "__")
+    journals = {}
+    for path in sorted(root.glob("*.json")):
+        journal = json.loads(path.read_text())
+        if journal["version"] != 1 or journal["action"] not in {"release", "hold"}:
+            raise ValueError(f"unknown recovery journal: {path}")
+        journals[int(path.stem)] = journal
+    working = {issue.number for issue in queue._list(repo.name, labels.working, runner=gh)}
+    for number in sorted(working | set(by_number) | set(journals)):
+        journal = journals.get(number)
+        claim = by_number.get(number)
+        if journal and journal.get("done") and claim is None and number not in working:
+            continue
+        current = queue.labels_of(repo.name, number, runner=gh)
+        if read_errors:
+            raise read_errors[-1]
+        path = root / f"{number}.json"
+        if journal and journal.get("done"):
+            if claim is None and labels.working not in current:
+                continue  # A stale search result does not start another recovery.
+            if (labels.working not in current
+                    or (claim is not None and asdict(claim) == journal["claim"])):
+                raise ValueError(f"completed recovery #{number} conflicts with its claim; inspect {path}")
+            # Completion applies to one attempt, not every future worker claim
+            # on this issue. Retain its evidence before saving a fresh intent.
+            specloop_job.save(root / "completed" / f"{number}-{journal['id']}.json", journal)
+            journal = None
+        if (journal is not None
+                and (asdict(claim) if claim else None) != journal["claim"]
+                and (claim is not None or labels.working in current)):
+            # An unfinished intent belongs to its original attempt too. A
+            # worker may have reclaimed the issue while outcome saving failed.
+            # Only a missing claim after the transition can be our own cleanup
+            # interrupted before the final journal save; keep that replayable.
+            raise ValueError(f"unfinished recovery #{number} conflicts with its claim; inspect {path}")
+        if journal is None:
+            if labels.working not in current:
+                if number in by_number:
+                    raise ValueError(f"worker claim #{number} has conflicting labels; inspect it")
+                continue  # Stale search result, already transitioned elsewhere.
+            survives = False
+            if claim:
+                try:
+                    Path(claim.worktree).stat()
+                    survives = True
+                except FileNotFoundError:
+                    pass
+            detail = (f"phase `{claim.phase}`, branch `{claim.branch}`, location `{claim.worktree}`"
+                      if claim else "no worker claim file")
+            journal = {"version": 1, "id": uuid4().hex,
+                       "action": "hold" if survives else "release",
+                       "claim": asdict(claim) if claim else None,
+                       "detail": f"interrupted worker recovery after switch to specloop: {detail}",
+                       "done": False}
+            journal["marker"] = f"<!-- nightshift:draft:engine-switch-{number}:{journal['id']} -->"
+            specloop_job.save(path, journal)
+        hold = journal["action"] == "hold"
+        target = labels.needs_human if hold else labels.ready
+        conflicts = {labels.ready, labels.revise, labels.needs_human, labels.done} - {target}
+        if current & conflicts or (labels.working not in current and target not in current):
+            raise ValueError(f"recovery #{number} has conflicting labels; inspect {path}")
+        if hold:
+            pages = json.loads(gh([
+                "api", f"repos/{repo.name}/issues/{number}/comments", "--paginate", "--slurp",
+            ]))
+            if not any(journal["marker"] in c["body"] for page in pages for c in page):
+                gh(["issue", "comment", str(number), "--repo", repo.name, "--body",
+                    f"{queue.SELF_COMMENT_PREFIX} {journal['detail']}. "
+                    f"Work is preserved for human inspection.\n\n{journal['marker']}"])
+            journal["commented"] = True
+            specloop_job.save(path, journal)
+        if labels.working in current:
+            queue._relabel(repo.name, number, add=[target], remove=[labels.working], runner=gh)
+        journal["transitioned"] = True
+        specloop_job.save(path, journal)
+        # record() is best effort. Verify its durable result before cleanup and
+        # recognize it after a crash between the database and journal writes.
+        def recorded():
+            return any(item.get("engine_switch_id") == journal["id"] for item in outcomes.tasks())
+
+        if not recorded():
+            outcomes.record(repo.name, number, state="needs_decision", reason=journal["detail"],
+                            summary="", escalated=hold, engine_switch_id=journal["id"])
+        if not recorded():
+            raise OSError(f"recovery outcome not persisted for {repo.name}#{number}")
+        queue.claim_path(repo.name, number).unlink(missing_ok=True)
+        journal["done"] = True
+        specloop_job.save(path, journal)
+
+
 def startup(cfg: Config, repo_dirs: dict[str, Path],
             health: "RepoHealth | None" = None) -> list[queue.Reconciliation]:
     """Repair crash state before claiming anything new.
@@ -268,6 +391,15 @@ def startup(cfg: Config, repo_dirs: dict[str, Path],
     repairs: list[queue.Reconciliation] = []
     for repo in cfg.repos:
         if repo.engine != "worker":
+            if not paused():
+                try:
+                    _reconcile_engine_switch(repo, cfg.labels)
+                except specloop_intake.Paused:
+                    pass
+                except Exception as exc:
+                    log.warning("engine-switch recovery %s failed — %s", repo.name, exc)
+                    if health is not None:
+                        health.record(repo.name, exc, cfg.slack_webhook)
             continue
         # Per repo, and non-fatal. This call was unguarded until 2026-09-05,
         # so one `gh issue list` failing ended the process BEFORE the loop had
@@ -533,6 +665,15 @@ def poll_specloop(cfg: Config, health: RepoHealth, *, runner=None, specloop_runn
         readiness = specloop_intake.manifest_readiness(repo)
         if isinstance(readiness, specloop_intake.ConfigurationError):
             errors.append(readiness)
+        try:
+            _reconcile_engine_switch(repo, cfg.labels, runner=gh)
+        except specloop_intake.Paused:
+            return
+        except Exception as exc:
+            log.warning("engine-switch recovery %s failed — %s", repo.name, exc)
+            errors.append(exc)
+            readiness = specloop_intake.ConfigurationError(
+                f"{repo.name}: worker recovery incomplete; inspect retained claims/journals: {exc}")
         failed_items = set()
         pending_items = set()
 

@@ -254,6 +254,7 @@ def test_specloop_poll_is_independent_of_worker_cap(isolated, monkeypatch, manif
 def test_mixed_repos_keep_worker_recovery_and_claims(isolated, monkeypatch, manifest):
     cfg = Config(repos=[Repo("o/spec", engine="specloop", manifest=manifest), Repo("o/worker", "true")])
     recovered, claimed = [], []
+    monkeypatch.setattr(queue, "_gh", FakeGh())
     monkeypatch.setattr(queue, "reconcile", lambda name, labels: recovered.append(name) or [])
     monkeypatch.setattr(queue, "claim", lambda name, *a: claimed.append(name))
     dirs = {repo.name: isolated for repo in cfg.repos}

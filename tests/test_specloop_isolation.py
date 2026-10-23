@@ -61,7 +61,10 @@ class Pipeline:
         kind, action = args[:2]
         items = self.issues if kind == "issue" else self.prs
         if action == "list":
-            if self.fail == f"{kind}-list" and "--label" in args:
+            # This fixture injects intake discovery failures. Worker-recovery
+            # discovery now has its own repository hold and focused tests.
+            if (self.fail == f"{kind}-list" and "--label" in args
+                    and args[args.index("--label") + 1] != "agent:working"):
                 raise queue.GhError("discovery unavailable", transient=True)
             if "--label" in args:
                 label = args[args.index("--label") + 1]
