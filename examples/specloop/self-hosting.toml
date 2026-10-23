@@ -48,6 +48,11 @@ mutation_paths = ["specloop/**", "nightshift/**"]
 mutation_count = 10
 mutation_min = 0.8
 
+# First matching route wins; unmatched files use the full unit-tests fallback.
+[[gates.mutation_route]]
+paths = ["specloop/**", "nightshift/**"]
+steps = ["python-mutation"]
+
 [limits]
 max_attempts = 3
 max_infra = 3
@@ -64,7 +69,9 @@ deny_read = ["~/.codex", "~/.claude", "~/.specloop/homes", "~/.ssh", "~/.config"
 
 [vars]
 venv = "/path/to/nightshift/.venv"
-checks = "/path/to/manifests/nightshift"   # where you keep scenario_plugin.py and negative_control.py
+# Copy examples/specloop/select_tests.py here beside scenario_plugin.py and
+# negative_control.py. This directory holds the trusted checks outside the repo.
+checks = "/path/to/manifests/nightshift"
 
 [[verify]]
 id = "unit-tests"
@@ -79,6 +86,29 @@ run = ["/usr/bin/env", "PYTHONDONTWRITEBYTECODE=1", "{venv}/bin/python", "-m", "
        "-p", "no:cacheprovider", "{checks}/negative_control.py"]
 expect = 1
 timeout = 120
+
+[[mutation_step]]
+id = "python-mutation"
+# Empty input (baseline/full confirmation) or no selection runs all tests.
+# Pass paths as argv values, including paths with spaces, never as shell source.
+run = ["/usr/bin/env", "PYTHONPATH={src}:{checks}", "PYTHONDONTWRITEBYTECODE=1",
+       "{venv}/bin/python", "-c", '''
+import subprocess
+import sys
+from pathlib import Path
+
+src, checks, mutant_path = sys.argv[1:]
+sys.path.insert(0, checks)
+from select_tests import select_tests
+
+selected = select_tests(Path(src), mutant_path)
+targets = [str(Path(src) / path) for path in selected] or [str(Path(src) / "tests")]
+raise SystemExit(subprocess.call([
+    sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider",
+    "-p", "scenario_plugin", "--rootdir=" + src, *targets,
+]))
+''', "{src}", "{checks}", "{mutant_path}"]
+timeout = 900
 
 [coverage]
 step = "unit-tests"
