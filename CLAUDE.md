@@ -35,6 +35,9 @@ harness, never taken from the agent.
   feasibility review read those requirements. A rule that lives only in code
   gets broken by the next spec: spec PR #26 hid the action results that PR #23
   had just made visible.
+- **New type errors fail CI.** `uv run python scripts/check_types.py` runs mypy
+  against `mypy-baseline.txt`; fix an existing error and run it with `--update`
+  to shrink the baseline, but never grow it by hand.
 - **State written by newer code must still load in older code.** Loaders ignore
   unknown fields, because a supervisor may still be running yesterday's code.
 
