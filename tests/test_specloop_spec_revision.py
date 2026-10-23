@@ -497,10 +497,11 @@ def test_async_revision_is_collected_before_delivery(setup, tmp_path, monkeypatc
                         "--from-branch", f"refs/nightshift/revise/{CHANGE}", "--idea-file", str(payload)]
         jobs.append(args)
         receipt["job"] = "pending"
+        (path.parent / f"{path.stem}.jobs" / receipt["job"]).mkdir(parents=True, exist_ok=True)
         specloop_job.save(path, receipt)
 
     monkeypatch.setattr(specloop_job, "start", start)
-    monkeypatch.setattr(specloop_job, "collect", lambda *a: None)
+    monkeypatch.setattr(specloop_job, "_collect_locked", lambda *a: None)
     pending = []
     for _ in range(2):
         specloop_intake.revise_pending(repo, queue.Labels(), tmp_path, runner=gh,
@@ -510,7 +511,7 @@ def test_async_revision_is_collected_before_delivery(setup, tmp_path, monkeypatc
     assert list(payload.parent.glob("idea-*.txt")) == [payload]
     assert payload.read_bytes() == expected.encode("utf-8")
     assert gh.head == HEAD and not gh.comments
-    monkeypatch.setattr(specloop_job, "collect", lambda *a: commands.result)
+    monkeypatch.setattr(specloop_job, "_collect_locked", lambda *a: commands.result)
     poll(setup, tmp_path)
     assert not commands.proposals and gh.head == REVISED and gh.labels == {"spec:review"}
     assert payload.read_bytes() == expected.encode("utf-8")

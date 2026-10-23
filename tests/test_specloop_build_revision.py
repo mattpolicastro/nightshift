@@ -187,17 +187,18 @@ def test_background_revision_waits_for_landed_commit(setup, tmp_path, monkeypatc
         jobs.append(args)
         assert Path(args[3]).read_text().count("**reviewer on") == 2
         receipt["job"] = "pending"
+        (path.parent / f"{path.stem}.jobs" / receipt["job"]).mkdir(parents=True, exist_ok=True)
         specloop_job.save(path, receipt)
 
     monkeypatch.setattr(specloop_job, "start", start)
-    monkeypatch.setattr(specloop_job, "collect", lambda *a: None)
+    monkeypatch.setattr(specloop_job, "_collect_locked", lambda *a: None)
     pending = []
     for _ in range(2):
         specloop_intake.revise_pending(repo, queue.Labels(), tmp_path, runner=gh,
                                       status_runner=commands, on_pending=pending.append)
     assert len(jobs) == 1 and jobs[0][:2] == ["revise", CHANGE]
     assert pending == [8, 8] and not gh.comments and "agent:revise" in gh.labels
-    monkeypatch.setattr(specloop_job, "collect", lambda *a: commands.result)
+    monkeypatch.setattr(specloop_job, "_collect_locked", lambda *a: commands.result)
     poll(setup, tmp_path)
     assert not commands.feedback and not gh.labels
     assert REVISED in gh.comments[0]["body"]

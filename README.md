@@ -424,6 +424,7 @@ uv run nightshift run --once  # claim and run one task
 uv run nightshift pause       # hold new work and completion delivery
 uv run nightshift jobs        # list local background attempts, including history
 uv run nightshift jobs stop <id>  # replace <id> with the full ID from jobs
+uv run nightshift jobs release <id>  # after confirmed stop and inspection
 uv run nightshift resume      # resume eligible delivery; stopped jobs stay held
 ```
 
@@ -498,9 +499,10 @@ without rerunning the job, including after a daemon restart. An external
 operation already dispatched when pause appears may finish. Pause does not
 roll back git or GitHub effects, or terminate current worker-engine tasks.
 
-`nightshift jobs` and `nightshift jobs stop <id>` work offline without a running
-daemon or valid repository configuration. Inventory includes proposal,
-admission and revision attempts, with full ID, repository/item, command,
+`nightshift jobs`, `nightshift jobs stop <id>` and `nightshift jobs release <id>`
+work offline without a running daemon, valid repository configuration or
+credentials. Inventory includes proposal, admission and revision attempts,
+with full ID, repository/item, command,
 execution state, available PID/PGID and log path. `finished` means execution
 completed; delivery may still be pending. States also include `starting`,
 `running`, `failed`, `stopping`, `stopped` and `unknown`. Unreadable entries
@@ -529,17 +531,17 @@ job is still awaiting metadata, inspect it and retry. If signalling or exit
 confirmation fails after stop intent was accepted, the job stays `stopping`
 and delivery remains held; inspect the diagnostic and log before retrying.
 
-**Stopped jobs stay held.** Logs, requests, results and receipts remain on
-disk. The intake receipt retains its job reference, so polling, daemon
-restart, resume and label removal/reapplication do not deliver that result or
-start a replacement attempt. Intentional cancellation does not count as a
-health failure or trigger escalation. Internally the receipt remains pending;
-`nightshift jobs` is the authoritative view of its stopped state. There is no
-job retry command.
+**Stopped jobs stay held until explicit release.** Logs, requests, results and
+receipts remain on disk. The intake receipt retains its job reference, so
+polling, daemon restart, resume and label removal/reapplication do not deliver
+that result or start a replacement attempt. Intentional cancellation does not
+count as a health failure or trigger escalation. Internally the receipt remains pending;
+`nightshift jobs` is the authoritative view of its stopped state.
 
-Manual receipt recovery is an operator decision: **pause first**, then inspect
-the job log, request/result, stop record and parent intake receipt, the local
-checkout and committed specloop admission/run state, and remote refs, PRs,
+For recovery, **pause first**, list jobs, stop the selected full ID and confirm
+`stopped` in inventory. Then inspect the job log, request/result, stop record
+and parent intake receipt, the local checkout and committed specloop
+admission/run state, and remote refs, PRs,
 comments and labels. Admission can commit runnable state before returning a
 result. Nightshift pause or job termination leaves that state intact, and the
 independent `specloop serve` supervisor may start or continue the build even
@@ -548,14 +550,36 @@ run processes separately if they must stop; unloading a supervisor alone is
 not proof that detached run processes exited. Job control does not cancel
 worker-engine tasks or already-admitted runs.
 
-Only after inspecting local and remote state, and ensuring relevant writers
-are quiescent, back up the receipts and evidence and decide whether to repair
-the receipt or deliberately enable another attempt. Do not blindly remove a
-job reference or stop record to retry: SIGKILL may leave partial artifacts,
-and remote effects or admission may already have committed. Neither pause,
-stop nor receipt recovery promises rollback. Resume only when the intended
-delivery/retry is safe. The [manual host checks](docs/validation.md#manual-host-checks)
-cover launchd unload and stopping during a push to a disposable remote.
+After inspection, run `nightshift jobs release <id>` with that exact full ID
+([issue #34](https://github.com/mattpolicastro/nightshift/issues/34)). Release
+requires durable stop confirmation with matching recorded process identity,
+an idle lifetime lock and a readable, consistent intake receipt. It atomically
+removes only the matching receipt's `job` reference, retaining every other
+field and all attempt evidence. The historical attempt remains `stopped`;
+its result is never delivered, even if it arrived after stop intent.
+
+| Release outcome | Output | Exit |
+| --- | --- | --- |
+| Matching confirmed stop detached | `<id>: released` | 0 |
+| Valid receipt no longer references this stopped attempt | `<id>: already released` | 0 |
+| Running, starting, stopping, finishing/completed, failed, collected or unverifiable work; invalid/unknown/ambiguous ID; write failure | Diagnostic on stderr | 1 |
+| Invalid command syntax, missing ID or extra arguments | Usage on stderr | 2 |
+
+Repeating an old release writes nothing and cannot detach a replacement
+attempt. Release launches nothing and leaves pause unchanged. After safe
+resume, a later poll can start new work only for an open, armed, authorized
+and otherwise eligible item: `needs-human`, applicable dependencies,
+repository health and approval-head checks still apply. Release requires no
+fresh label event; existing PR or committed-admission recovery takes precedence
+over duplicate work. Resume or relabeling alone never clears a stopped hold.
+
+Release is explicit recovery, not automatic retry or rollback. SIGKILL can
+leave partial artifacts; remote effects and admission may already have
+committed. A revision can commit before saving its result, so a later attempt
+can append a duplicate round. Job evidence and inputs have no automatic
+cleanup. See [remaining limits](KNOWN-LIMITATIONS.md#open-gaps) and the
+[manual host checks](docs/validation.md#manual-host-checks) for launchd unload
+and stopping during a push to a disposable remote.
 
 ### What needs you
 

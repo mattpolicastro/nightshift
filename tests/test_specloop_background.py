@@ -423,6 +423,7 @@ def test_cancelled_jobs_remain_pending_after_restart_and_resume(
     specloop_job.finish_stop(directory)
     stopped = (directory / "stop.json").read_bytes()
     assert json.loads(stopped)["stopped_at"]
+    assert specloop_job.stop_job(daemon.STATE_DIR, directory.name) == "stopped"
     evidence = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
     # Restart while paused, resume with the original arming labels, then
     # restart once more. None of these transitions releases a confirmed stop.
@@ -609,6 +610,83 @@ def _finish_delivery_job(job):
     assert (job.root / "finished").exists()
     assert not (job.root / "timed-out").exists()
     assert json.loads(job.result_path.read_text())["result"] == job.result
+
+
+def _release_delivery_job(job):
+    process = json.loads((job.directory / "process.json").read_text())
+    # Identity probing/signalling is covered separately. This lifecycle fixture
+    # uses a fixed identity even where the sandbox forbids the wrapper's ps.
+    process["start_identity"] = "controlled wrapper identity"
+    specloop_job.save(job.directory / "process.json", process)
+    assert specloop_job.request_stop(job.directory, verify_identity=lambda: process) == "stopping"
+    _finish_delivery_job(job)  # A late success must remain ineligible for delivery.
+    specloop_job.finish_stop(job.directory)
+    assert specloop_job.release_job(daemon.STATE_DIR, job.directory.name) == "released"
+    (job.root / "release").unlink()  # Hold the replacement at the same CLI barrier.
+
+
+@pytest.mark.scenario("issue-intake/released-item-intake/armed-released-issue-starts-once")
+@pytest.mark.scenario("issue-intake/released-item-intake/ineligible-released-item-waits")
+@pytest.mark.scenario("pr-revision/released-revision-selection/same-event-permits-replacement")
+@pytest.mark.parametrize("stage", ["draft", "admit", "spec_revision", "build_revision"])
+def test_released_stopped_job_allows_a_new_round(delivery_job, stage):
+    job = delivery_job(stage)
+    original = json.loads(job.path.read_text())
+    if "revision" in stage:
+        original.update(consumed_feedback_ids=["inline:1000"], future={"keep": True})
+        specloop_job.save(job.path, original)
+    effects = deepcopy((job.gh.labels, job.gh.comments, job.gh.prs, job.gh.events))
+    _release_delivery_job(job)
+    evidence = {p.name: p.read_bytes() for p in job.directory.iterdir() if p.is_file()}
+    daemon.PAUSE_FILE.touch()
+    job.poll()
+    assert len(job.children) == 1 and "job" not in json.loads(job.path.read_text())
+    assert (job.gh.labels, job.gh.comments, job.gh.prs, job.gh.events) == effects
+    daemon.PAUSE_FILE.unlink()
+    for _ in range(3):
+        specloop_job._children.clear()
+        job.health = daemon.RepoHealth()
+        job.poll()
+        assert len(job.children) == 2
+        assert (job.gh.labels, job.gh.comments, job.gh.prs, job.gh.events) == effects
+        assert not job.health.failures and not job.health.item_failures
+    replacement = json.loads(job.path.read_text())
+    assert replacement["job"] != original["job"]
+    assert "result" not in replacement and not replacement.get("delivered")
+    assert specloop_job.release_job(daemon.STATE_DIR, job.directory.name) == "already released"
+    assert json.loads(job.path.read_text()) == replacement
+    if "revision" in stage:
+        assert replacement["event"] == original["event"]
+        assert replacement["feedback_ids"] == original["feedback_ids"]
+        assert replacement["consumed_feedback_ids"] == ["inline:1000"]
+        assert replacement["future"] == {"keep": True}
+    if stage in ("draft", "spec_revision"):
+        requests = [json.loads(p.read_text())["args"] for p in job.directory.parent.glob("*/request.json")]
+        inputs = [Path(args[args.index("--idea-file") + 1]) for args in requests]
+        assert len(set(inputs)) == 2 and inputs[0].read_bytes() == inputs[1].read_bytes()
+    rows, errors = specloop_job.list_jobs(daemon.STATE_DIR)
+    assert not errors and len(rows) == 2
+    assert next(row for row in rows if row.id == original["job"]).state == "stopped"
+    assert {p.name: p.read_bytes() for p in job.directory.iterdir() if p.is_file()} == evidence
+    assert not (job.directory / "collected.json").exists()
+
+
+@pytest.mark.scenario("issue-intake/released-item-intake/recovery-precedes-replacement")
+def test_released_admission_recovers_committed_run(delivery_job):
+    job = delivery_job("admit")
+    original = json.loads(job.path.read_text())
+    committed = {"change": original["change"], "pr": job.gh.pr_url, "status": "running"}
+    job.runs.append(committed.copy())
+    _release_delivery_job(job)
+    job.gh.head = "b" * 40  # The independent build has already advanced the PR.
+    for _ in range(2):
+        specloop_job._children.clear()
+        job.poll()
+    assert job.runs == [committed] and len(job.children) == 1
+    assert json.loads(job.path.read_text())["delivered"]
+    assert "build has started" in job.gh.comments[-1]["body"]
+    assert "spec:approved" not in job.gh.labels
+    assert not (job.directory / "collected.json").exists()
 
 
 def test_jobs_ignores_drafting_idea_file(delivery_job, capsys):
