@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import subprocess
@@ -6,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from threading import Barrier, Event, Lock
+from textwrap import indent
 
 import pytest
 
@@ -294,6 +296,463 @@ def test_generate_is_deterministic_and_one_mutant_per_line():
     first = evidence.generate(lines, 5, seed=1, sources={"a.py": source})
     assert first == evidence.generate(lines, 5, seed=1, sources={"a.py": source})
     assert len({m.line for m in first}) == len(first) == 2
+
+
+@pytest.mark.scenario("mutation-selection/bare-condition-negation/if-and-while-names-are-negated")
+@pytest.mark.scenario("mutation-selection/bare-condition-negation/condition-formatting-is-preserved")
+@pytest.mark.parametrize("suffix", ["py", "pyi"])
+@pytest.mark.parametrize("keyword,name", [("if", "blocked"), ("while", "active")])
+@pytest.mark.parametrize("indent,template", [
+    ("    ", "{keyword} {name}:"),
+    ("\t", "{keyword}\t{name}  :  # café True 42  "),
+    ("    ", "{keyword} ({name}):"),
+    ("\t", "{keyword}  ((  {name}  )) :\t# retained\t"),
+    ("    ", "{keyword} ((é{name}界)):  "),
+    ("    ", "{keyword} K{name}:  # normalized AST name differs from source"),
+])
+def test_bare_condition_is_negated(suffix, keyword, name, indent, template):
+    path = f"condition.{suffix}"
+    name = ("é" + name + "界" if "é" in template else "K" + name if "K" in template else name)
+    template = template.replace("é{name}界", "{name}").replace("K{name}", "{name}")
+    header = indent + template.format(keyword=keyword, name=name)
+    source = (f"def choose({name}):\n{header}\n"
+              f"{indent}{indent}return 'entered'\n{indent}return 'outside'\n")
+    mutants = evidence.generate([(path, 2, header)], 10, 1, sources={path: source})
+    expected_header = header.replace(name, "not " + name, 1)
+    assert mutants == [evidence.Mutant(path, 2, "negate-condition", header, expected_header)]
+    lines = source.splitlines(keepends=True)
+    lines[mutants[0].line - 1] = mutants[0].after + "\n"
+    changed = "".join(lines)
+    assert changed == source.replace(header, expected_header, 1)
+    original, mutated = {}, {}
+    exec(compile(source, path, "exec"), original)
+    exec(compile(changed, path, "exec"), mutated)
+    # Returning from the loop body bounds both versions to at most one iteration.
+    for value in (False, True):
+        assert original["choose"](value) == ("entered" if value else "outside")
+        assert mutated["choose"](value) == ("outside" if value else "entered")
+
+
+@pytest.mark.scenario("mutation-selection/bare-condition-negation/other-condition-forms-retain-existing-eligibility")
+@pytest.mark.parametrize("header,operators", [
+    ("if not blocked:", set()),
+    ("if blocked < active:", {"<"}),
+    ("if blocked and active:", {"and"}),
+    ("if blocked or active:", {"or"}),
+    ("if True:", {"True"}),
+    ("if 1:", {"int"}),
+    ("if None:", set()),
+    ("if blocked.active:", set()),
+    ("if blocked[0]:", {"int"}),
+    ("if blocked():", set()),
+    ("while not active:", set()),
+    ("while blocked == active:", {"=="}),
+    ("while active():", set()),
+    ("while (active\n    ):", set()),
+    ("while active: return True\n    if not blocked:", {"True"}),
+    ("if (blocked := active):", set()),
+    ("if blocked: return True\n    if not active:", {"True"}),
+    ("if not active:\n        pass\n    elif blocked:", set()),
+    ("if (\n        blocked\n    ):", set()),
+    ("if (blocked\n    ):", set()),
+    ("if \\\n        blocked:", set()),
+    ("if blocked \\\n        :", set()),
+    ("if blocked: \\\n        return None\n    if not active:", set()),
+])
+def test_other_conditions_retain_existing_operators(header, operators):
+    source = f"def choose(blocked, active):\n    {header}\n        return None\n"
+    lines = [("calc.py", n, line) for n, line in enumerate(source.splitlines(), 1)]
+    mutants = evidence.generate(lines, 100, 1, sources={"calc.py": source})
+    assert {mut.op for mut in mutants} == operators
+    assert all(mut.before == source.splitlines()[mut.line - 1] for mut in mutants)
+
+
+@pytest.mark.scenario("mutation-selection/guard-return-replacement/bare-and-valued-guard-returns-are-dropped")
+@pytest.mark.parametrize("suffix", ["py", "pyi"])
+@pytest.mark.parametrize("async_prefix", ["", "async "])
+@pytest.mark.parametrize("branch", ["if", "elif", "else"])
+@pytest.mark.parametrize("logging", [False, True])
+@pytest.mark.parametrize("statement", ["return", "return None", "return ('é界')"])
+@pytest.mark.parametrize("tab", ["    ", "\t"])
+def test_early_return_is_dropped(suffix, async_prefix, branch, logging, statement, tab):
+    path = f"guard.{suffix}"
+    header = "if blocked:" if branch == "if" else (
+        f"if not blocked:\n{tab}{tab}pass\n{tab}"
+        + ("elif blocked:" if branch == "elif" else "else:"))
+    before = tab * 2 + statement + "  \t# café: True 42  \t"
+    source = (f"{async_prefix}def choose(blocked, events):\n{tab}{header}\n"
+              + (tab * 2 + "events.append('logged')\n" if logging else "")
+              + before + f"\n{tab}events.append('continued')\n{tab}return 'fallback'\n")
+    n = source.splitlines().index(before) + 1
+    mutants = evidence.generate([(path, n, before)], 100, 1, sources={path: source})
+    after = tab * 2 + "pass  \t# café: True 42  \t"
+    assert mutants == [evidence.Mutant(path, n, "drop-return", before, after)]
+    changed = source.splitlines(keepends=True)
+    changed[n - 1] = after + "\n"
+    assert "".join(changed) == source.replace(before, after)
+    for code, expected in [(source, "é界" if "é界" in statement else None),
+                           ("".join(changed), "fallback")]:
+        namespace, events = {}, []
+        exec(compile(code, path, "exec"), namespace)
+        result = namespace["choose"](True, events)
+        assert (asyncio.run(result) if async_prefix else result) == expected
+        assert events == (["logged"] if logging else []) + (["continued"] if code != source else [])
+
+
+@pytest.mark.scenario("mutation-selection/guard-return-replacement/non-guard-returns-stay-intact")
+@pytest.mark.scenario("mutation-selection/guard-return-replacement/branch-ownership-determines-continuation")
+@pytest.mark.parametrize("body,eligible", [
+    ("return None\npass", False),
+    ("if flag:\n    return None\n    log()\npass", False),
+    ("if flag:\n    return None\n\n# only a comment", False),
+    ("if flag:\n    return None\nelse:\n    log()", False),
+    ("if flag:\n    pass\nelif other:\n    return None\npass", True),
+    ("if flag:\n    pass\nelif other:\n    pass\nelse:\n    return None\npass", True),
+    ("if flag:\n    pass\nelif other:\n    return None\nelse:\n    pass", False),
+    ("if flag:\n    pass\nelse:\n    if other:\n        return None\n    log()", True),
+    ("if flag:\n    pass\nelse:\n    if other:\n        return None\nlog()", False),
+    ("if flag:\n    if other:\n        return None\n    log()", True),
+    ("if flag:\n    if other:\n        return None\nlog()", False),
+    ("while flag:\n    if other:\n        return None\n    break", True),
+    ("while flag:\n    if other:\n        return None\nlog()", False),
+    ("while flag:\n    return None\nlog()", False),
+    ("try:\n    if flag:\n        return None\n    log()\nfinally:\n    pass", True),
+    ("try:\n    log()\nexcept Exception:\n    if flag:\n        return None\n    log()", True),
+    ("try:\n    log()\nfinally:\n    if flag:\n        return None\n    log()", True),
+    ("try:\n    return None\nfinally:\n    pass\nlog()", False),
+    ("try:\n    log()\nexcept Exception:\n    return None\nlog()", False),
+    ("try:\n    log()\nfinally:\n    return None\nlog()", False),
+    ("match flag:\n    case None:\n        if other:\n            return None\n        log()", True),
+    ("match flag:\n    case None:\n        return None\nlog()", False),
+    ("def nested():\n    if flag:\n        return None\nlog()", False),
+    ("if flag:\n    def nested():\n        if other:\n            return None\n    log()", False),
+])
+def test_return_branch_ownership(body, eligible):
+    source = "def choose(flag, other):\n" + indent(body, "    ") + "\n"
+    n, before = next((n, line) for n, line in enumerate(source.splitlines(), 1) if "return" in line)
+    mutants = evidence.generate([("calc.py", n, before)], 100, 1, sources={"calc.py": source})
+    assert mutants == ([evidence.Mutant("calc.py", n, "drop-return", before,
+                                       before.replace("return None", "pass"))] if eligible else [])
+    compile(source, "calc.py", "exec")
+    for mut in mutants:
+        compile(source.replace(mut.before, mut.after), "calc.py", "exec")
+
+
+@pytest.mark.scenario("mutation-selection/guard-return-replacement/unsupported-return-layouts-are-untouched")
+@pytest.mark.parametrize("branch", [
+    "if flag: return True",
+    "if flag:\n    log(); return True",
+    "if flag:\n    return True; log()",
+    "if flag:\n    return True;",
+    "if flag:\n    return (\n        True\n    )",
+    'if flag:\n    return """True\ntext"""',
+    "if flag:\n    return \\\n        True",
+    "if flag:\n    return True \\\n        # continued",
+    "if flag: \\\n    return True",
+])
+def test_unsupported_return_layouts_keep_existing_operators(branch):
+    source = "def choose(flag):\n" + indent(branch, "    ") + "\n    log()\n"
+    # Omit the unchanged header unless it shares the return's physical line.
+    lines = [("calc.py", n, line) for n, line in enumerate(source.splitlines(), 1)
+             if "return" in line or "True" in line]
+    mutants = evidence.generate(lines, 100, 1, sources={"calc.py": source})
+    assert len(mutants) == 1 and mutants[0].op == "True"
+    assert mutants[0].after == mutants[0].before.replace("True", "False")
+    compile(source, "calc.py", "exec")
+
+
+@pytest.mark.scenario("mutation-selection/guard-return-replacement/committed-continuation-determines-return-eligibility")
+@pytest.mark.parametrize("continuation", [False, True])
+def test_return_candidates_use_committed_continuation(tmp_path, monkeypatch, continuation):
+    repo, _, _ = project(tmp_path, STRONG)
+    source = "def choose(blocked):\n    if blocked:\n        pass\n"
+    tail = "    return 'fallback'\n"
+    (repo / "calc.py").write_text(source + (tail if continuation else ""))
+    sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "before")
+    base = sh(repo, "git", "rev-parse", "HEAD")
+    source = source.replace("pass", "return None")
+    (repo / "calc.py").write_text(source + (tail if continuation else ""))
+    sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "return")
+    head = sh(repo, "git", "rev-parse", "HEAD")
+    dirty = source + ("" if continuation else tail)
+    (repo / "calc.py").write_text(dirty)
+    expected = [evidence.Mutant("calc.py", 3, "drop-return", "        return None", "        pass")]
+    calls = []
+
+    def mutate(source_repo, revision, mutants, effective, out):
+        assert (source_repo, revision, effective) == (repo, head, M)
+        assert mutants == expected
+        calls.append(mutants)
+        return True
+
+    monkeypatch.setattr(evidence, "mutate", mutate)
+    ev = evidence.gather(repo, base, head, [], set(), M, tmp_path / "out", 1)
+    assert ev.mutants == (expected if continuation else [])
+    assert len(calls) == int(continuation)
+    assert ev.skipped == ("" if continuation else "no mutable lines added under mutation_paths")
+    assert (repo / "calc.py").read_text() == dirty
+
+
+@pytest.mark.scenario("mutation-selection/control-flow-candidate-compatibility/existing-exclusions-cover-new-operators")
+@pytest.mark.parametrize("count,seed", [(1, 0), (2, 7), (100, 1)])
+def test_return_exclusions_precede_sampling(count, seed):
+    source = ('"""if documented:\n    return None\n"""\n'
+              '# if commented: return None\ntext = "if quoted: return None"\n'
+              'text = """if quoted:\n    return None\n"""\n'
+              'def choose(blocked):\n    if blocked:  # skip\n        return None  # skip\n'
+              '    if blocked:\n        return None\n    return None\n')
+    unchanged = 'def unchanged(blocked):\n    if blocked:\n        return None\n    log()\n'
+    sources = {path: source + unchanged for path in ("calc.py", "calc.pyi", "notes.txt", "outside.py")}
+    diff = "".join(f"+++ b/{path}\n@@ -0,0 +1 @@\n"
+                   + "".join("+" + line + "\n" for line in source.splitlines()) for path in sources)
+    lines = evidence.added_lines(diff, ("calc.py", "calc.pyi", "notes.txt"))
+    mutants = evidence.generate(lines, count, seed, sources=sources, mutation_skip=("# skip",))
+    eligible = [line for line in lines if line[0] != "notes.txt" and line[1] in (12, 13)]
+    assert mutants == evidence.generate(eligible, count, seed, sources=sources)
+    assert len(mutants) == min(count, 4)
+    assert {mut.op for mut in mutants} <= {"negate-condition", "drop-return"}
+
+
+@pytest.mark.scenario("mutation-selection/control-flow-candidate-compatibility/mixed-operators-retain-stable-spreading")
+def test_mixed_control_flow_operators_retain_stable_spreading():
+    source = "def choose(blocked):\n    if blocked:\n        return True\n    return 7\n"
+    lines = [(path, n, line) for path in ("a.py", "b.py")
+             for n, line in enumerate(source.splitlines(), 1)]
+    sources = {"a.py": source, "b.py": source}
+    seen_ops = set()
+    for seed in range(20):
+        for count in (1, 3, 100):
+            mutants = evidence.generate(lines, count, seed, sources=sources)
+            assert mutants == evidence.generate(lines, count, seed, sources=sources)
+            assert len(mutants) == len({(mut.path, mut.line) for mut in mutants}) == min(count, 6)
+            for mut in mutants:
+                assert mut.before == sources[mut.path].splitlines()[mut.line - 1]
+                compile(source.replace(mut.before, mut.after), mut.path, "exec")
+                seen_ops.add(mut.op)
+    assert seen_ops == {"negate-condition", "drop-return", "True", "int"}
+    old = "def f(x):\n    return x < 2 and x + 1\nflag = True\n"
+    lines = [("calc.py", n, line) for n, line in enumerate(old.splitlines(), 1)]
+    assert evidence.generate(lines, 100, 7, sources={"calc.py": old}) == [
+        evidence.Mutant("calc.py", 2, "int", lines[1][2], "    return x < 2 and x + 2"),
+        evidence.Mutant("calc.py", 3, "True", "flag = True", "flag = False")]
+
+
+def test_condition_analysis_parses_and_tokenizes_each_file_once(monkeypatch):
+    source = "if blocked:\n    pass\nwhile active:\n    break\n"
+    calls = {"parse": 0, "tokens": 0}
+    parse, tokens = evidence.ast.parse, evidence.tokenize.generate_tokens
+
+    def track_parse(*args, **kwargs):
+        calls["parse"] += 1
+        return parse(*args, **kwargs)
+
+    def track_tokens(*args, **kwargs):
+        calls["tokens"] += 1
+        return tokens(*args, **kwargs)
+
+    monkeypatch.setattr(evidence.ast, "parse", track_parse)
+    monkeypatch.setattr(evidence.tokenize, "generate_tokens", track_tokens)
+    lines = [("calc.py", n, line) for n, line in enumerate(source.splitlines(), 1)]
+    mutants = evidence.generate(lines, 100, 1, sources={"calc.py": source})
+    assert {(mut.line, mut.op) for mut in mutants} == {(1, "negate-condition"), (3, "negate-condition")}
+    assert calls == {"parse": 1, "tokens": 1}
+
+
+@pytest.mark.scenario("mutation-selection/control-flow-candidate-compatibility/existing-exclusions-cover-new-operators")
+@pytest.mark.parametrize("count", [1, 2, 100])
+@pytest.mark.parametrize("seed", [0, 1, 7])
+def test_condition_exclusions_precede_sampling(count, seed):
+    source = ('"""\nif documented:\n    return None\nTrue\n"""\n'
+              '# if commented: return True\n'
+              'text = """\nwhile quoted:\n    return None\n"""\n'
+              'literal = "if quoted: return True"\n'
+              'if excluded:  # configured skip\n    pass\n'
+              'if blocked:  # True stays protected\n    pass\n'
+              'while active:\n    break\n')
+    unchanged = 'if unchanged:\n    pass\n'
+    paths = ("calc.py", "calc.pyi", "notes.txt", "outside.py")
+    sources = {path: source + unchanged for path in paths}
+    sources["notes.txt"] = ('if blocked:\n    pass\nwhile active:\n    break\n'
+                            'literal = "if quoted: return True"\n' + unchanged)
+    diff = "".join(f"+++ b/{path}\n@@ -0,0 +1 @@\n"
+                   + "".join("+" + line + "\n" for line in sources[path].removesuffix(unchanged).splitlines())
+                   for path in paths)
+    lines = evidence.added_lines(diff, ("calc.py", "calc.pyi", "notes.txt"))
+    mutants = evidence.generate(lines, count, seed, sources=sources, mutation_skip=("configured skip",))
+    eligible = [line for line in lines if line[2].startswith('literal =') or (
+        line[0] != "notes.txt" and line[2].startswith(("if blocked:", "while active:")))]
+    assert mutants == evidence.generate(eligible, count, seed, sources=sources)
+    assert len(mutants) == min(count, 7)
+    assert len({(mut.path, mut.line) for mut in mutants}) == len(mutants)
+    for mut in mutants:
+        assert mut.before == sources[mut.path].splitlines()[mut.line - 1]
+        if mut.before.startswith('literal ='):
+            assert mut.op == "True" and mut.after == mut.before.replace("True", "False")
+        else:
+            assert mut.op == "negate-condition" and mut.path in ("calc.py", "calc.pyi")
+
+
+@pytest.mark.scenario("mutation-selection/control-flow-candidate-compatibility/analysis-failures-still-propagate")
+@pytest.mark.parametrize("failure", ["missing", "parse", "tokenize"])
+@pytest.mark.parametrize("excluded", [False, True])
+def test_condition_analysis_errors_abort_generation_and_gather(tmp_path, monkeypatch, failure, excluded):
+    source = "if blocked:\n    pass\n"
+    bad_source = "if active:\n    pass\n" if failure != "parse" else "if active:\n"
+    sources = {"a.py": source, "calc.py": bad_source}
+    lines = [(path, 1, text.splitlines()[0]) for path, text in sources.items()]
+    skip = ("if ",) if excluded else ()
+    real_tokens = evidence.tokenize.generate_tokens
+
+    def tokens(readline):
+        if failure == "tokenize" and readline.__self__.getvalue() == bad_source:
+            raise evidence.tokenize.TokenError("broken token stream", (1, 0))
+        return real_tokens(readline)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("analysis errors must precede sampling and execution")
+
+    monkeypatch.setattr(evidence.tokenize, "generate_tokens", tokens)
+    monkeypatch.setattr(evidence.random.Random, "shuffle", unexpected)
+    monkeypatch.setattr(evidence, "mutate", unexpected)
+    available = {"a.py": source} if failure == "missing" else sources
+    with pytest.raises(ValueError, match=r"calc\.py"):
+        evidence.generate(lines, 1, 1, sources=available, mutation_skip=skip)
+
+    # Exercise gather's committed-source boundary without starting any workers.
+    diff = "".join(f"+++ b/{path}\n@@ -0,0 +1 @@\n+{text}\n" for path, _, text in lines)
+
+    def git(repo, *args):
+        if args == ("diff", "--unified=0", "base", "head"):
+            return diff.encode()
+        assert args[0] == "show"
+        path = args[1].removeprefix("head:")
+        if path not in available:
+            raise RuntimeError("committed source unavailable")
+        return available[path].encode()
+
+    monkeypatch.setattr(evidence, "git", git)
+    out = tmp_path / "evidence"
+    with pytest.raises(ValueError, match=r"calc\.py"):
+        evidence.gather(tmp_path, "base", "head", [], set(),
+                        replace(M, mutation_paths=("a.py", "calc.py"), mutation_skip=skip), out, 1)
+    assert not (out / "evidence.json").exists()
+
+
+@pytest.mark.scenario("mutation-selection/control-flow-candidate-compatibility/existing-exclusions-cover-new-operators")
+def test_condition_candidates_use_committed_source(tmp_path, monkeypatch):
+    repo, _, _ = project(tmp_path, STRONG)
+    source = ("def choose(blocked, active):\n"
+              "    if not blocked:\n        return None\n"
+              "    while active:\n        break\n")
+    (repo / "calc.py").write_text(source)
+    sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "before")
+    base = sh(repo, "git", "rev-parse", "HEAD")
+    source = source.replace("if not blocked:", "if blocked:")
+    (repo / "calc.py").write_text(source)
+    sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "condition")
+    head = sh(repo, "git", "rev-parse", "HEAD")
+    # The working copy hides the header inside a runtime string.
+    dirty = 'text = """\n    if blocked:\n"""\n'
+    (repo / "calc.py").write_text(dirty)
+    expected = evidence.Mutant("calc.py", 2, "negate-condition",
+                               "    if blocked:", "    if not blocked:")
+
+    def mutate(source_repo, revision, mutants, effective, out):
+        assert source_repo == repo and revision == head and effective == M
+        assert mutants == [expected]  # The unchanged while header is ineligible.
+        mutants[0].result = "killed"
+        return True
+
+    monkeypatch.setattr(evidence, "mutate", mutate)
+    ev = evidence.gather(repo, base, head, [], set(), M, tmp_path / "out", 1)
+    assert ev.mutants == [replace(expected, result="killed")]
+    assert ev.skipped == "" and ev.score == 1.0
+    assert (repo / "calc.py").read_text() == dirty
+
+
+@pytest.mark.scenario("mutation-selection/guard-clause-diffs-produce-evidence/guard-only-change-is-measured")
+def test_gate_measures_a_guard_clause_change(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    base_source = "def choose(blocked, fallback):\n    return fallback\n"
+    source = base_source.replace("    return fallback\n",
+                                 "    if blocked:\n        return None\n    return fallback\n")
+    (repo / "calc.py").write_text(base_source)
+    sh(repo, "git", "init", "-q", "-b", "main")
+    sh(repo, "git", "add", "calc.py")
+    sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+    base = sh(repo, "git", "rev-parse", "HEAD")
+    (repo / "calc.py").write_text(source)
+    sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "guard")
+    head = sh(repo, "git", "rev-parse", "HEAD")
+    diff = sh(repo, "git", "diff", "--unified=0", base, head)
+    assert sh(repo, "git", "diff", "--numstat", base, head) == "2\t0\tcalc.py"
+    assert evidence.added_lines(diff, ("calc.py",)) == [
+        ("calc.py", 2, "    if blocked:"),
+        ("calc.py", 3, "        return None"),
+    ]
+    m = replace(M, mutation_count=2, mutation_parallel=2, mutation_skip=())
+    out = tmp_path / "out"
+    observed = {}
+    fallback = "available"
+
+    def run(src, sha, steps, run_m, run_out):
+        assert sha == head and src == run_out / "src" and src != repo
+        assert not run_m.prepare and [step.id for step in steps] == ["test"]
+        private_source = (src / "calc.py").read_text()
+        namespace = {}
+        exec(compile(private_source, str(src / "calc.py"), "exec"), namespace)
+        # Check both inputs even when the first assertion fails. Receipts come
+        # from behavior, independently of mutant identity and worker number.
+        checks = []
+        for blocked, expected in ((True, None), (False, fallback)):
+            actual = namespace["choose"](blocked, fallback)
+            try:
+                assert actual == expected
+            except AssertionError:
+                checks.append(False)
+            else:
+                checks.append(True)
+        passed = all(checks)
+        step = steps[0]
+        receipts = [verify.Receipt(step.id, list(step.run), step.expect,
+                                   0 if passed else 1, passed, 0.01, "")]
+        observed[run_out] = (private_source, checks)
+        (run_out / "receipts.json").write_text(json.dumps([asdict(r) for r in receipts]))
+        return receipts
+
+    monkeypatch.setattr(verify, "run_extracted", run)
+    ev = evidence.gather(repo, base, head, ["guard"], {"guard"}, m, out, 1)
+    assert len(ev.mutants) == 2
+    assert {mut.op for mut in ev.mutants} == {"negate-condition", "drop-return"}
+    expected = {
+        "negate-condition": evidence.Mutant(
+            "calc.py", 2, "negate-condition", "    if blocked:", "    if not blocked:", "killed"),
+        "drop-return": evidence.Mutant(
+            "calc.py", 3, "drop-return", "        return None", "        pass", "killed"),
+    }
+    assert {mut.op: mut for mut in ev.mutants} == expected
+    assert observed[out] == (source, [True, True])
+    assert set(observed) == {out, out / "mutant-1", out / "mutant-2"}
+    for number, mut in enumerate(ev.mutants, 1):
+        worker = out / f"mutant-{number}"
+        checks = [False, False] if mut.op == "negate-condition" else [False, True]
+        assert observed[worker] == (source.replace(mut.before, mut.after), checks)
+        receipts = json.loads((worker / "receipts.json").read_text())
+        assert receipts[0]["exit"] == 1 and receipts[0]["passed"] is False
+    baseline = json.loads((out / "receipts.json").read_text())
+    assert baseline[0]["exit"] == 0 and baseline[0]["passed"] is True
+    assert ev.skipped == "" and not ev.baseline_failed and not ev.unmeasured
+    assert ev.covered == ["guard"] and ev.uncovered == []
+    assert ev.score == 1.0 and ev.passed(1.0)
+    assert "no mutable lines added under mutation_paths" not in ev.summary()
+    assert "mutation: 2/2 caught" in ev.summary()
+    saved = json.loads((out / "evidence.json").read_text())
+    assert saved == {**asdict(ev), "score": 1.0}
+    assert {mut["op"]: mut for mut in saved["mutants"]} == {
+        op: asdict(mut) for op, mut in expected.items()
+    }
+    assert (repo / "calc.py").read_text() == source
 
 
 @pytest.mark.parametrize("tests,expect_pass", [(WEAK, False), (STRONG, True)])

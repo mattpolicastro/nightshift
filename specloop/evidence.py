@@ -150,10 +150,19 @@ def added_lines(diff: str, paths: tuple[str, ...]) -> list[tuple[str, int, str]]
     return out
 
 
-def _python_protected_spans(path: str, source: str) -> dict[int, list[tuple[int, int]]]:
+@dataclass
+class _PythonAnalysis:
+    protected: dict[int, list[tuple[int, int]]]
+    conditions: dict[int, tuple[int, int]]
+    returns: dict[int, tuple[int, int]]
+
+
+def _python_protected_spans(path: str, source: str) -> _PythonAnalysis:
     """Map docstrings and comments to physical lines and character offsets."""
     source_lines = source.split("\n")
     spans: dict[int, list[tuple[int, int]]] = {}
+    conditions: dict[int, tuple[int, int]] = {}
+    returns: dict[int, tuple[int, int]] = {}
 
     def protect(start: tuple[int, int], end: tuple[int, int]) -> None:
         for line in range(start[0], end[0] + 1):
@@ -167,6 +176,19 @@ def _python_protected_spans(path: str, source: str) -> dict[int, list[tuple[int,
 
     try:
         tree = ast.parse(source, filename=path)
+        tokens_by_line = {}
+        standalone_returns = set()
+        previous_type = None
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.string == "return" and previous_type in (
+                    tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT):
+                standalone_returns.add(token.start[0])
+            if token.type not in (tokenize.COMMENT, tokenize.NL):
+                previous_type = token.type
+            if token.type == tokenize.COMMENT:
+                protect(token.start, token.end)
+            elif token.type not in (tokenize.INDENT, tokenize.DEDENT, tokenize.NL):
+                tokens_by_line.setdefault(token.start[0], []).append(token)
         for node in ast.walk(tree):
             if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
                 first = node.body[0] if node.body else None
@@ -175,12 +197,47 @@ def _python_protected_spans(path: str, source: str) -> dict[int, list[tuple[int,
                     value = first.value
                     protect((value.lineno, character_column(value.lineno, value.col_offset)),
                             (value.end_lineno, character_column(value.end_lineno, value.end_col_offset)))
-        for token in tokenize.generate_tokens(io.StringIO(source).readline):
-            if token.type == tokenize.COMMENT:
-                protect(token.start, token.end)
+            if (isinstance(node, (ast.If, ast.While)) and isinstance(node.test, ast.Name)
+                    and node.lineno == node.test.lineno == node.test.end_lineno
+                    and node.body[0].lineno > node.lineno):
+                header = tokens_by_line.get(node.lineno, [])
+                # The real keyword excludes elif; a colon followed by NEWLINE
+                # on this physical line excludes continued and inline suites.
+                if (len(header) >= 3 and header[0].string in ("if", "while")
+                        and header[0].start[1] == character_column(node.lineno, node.col_offset)
+                        and header[-2].string == ":" and header[-1].type == tokenize.NEWLINE):
+                    conditions[node.lineno] = (
+                        character_column(node.lineno, node.test.col_offset),
+                        character_column(node.lineno, node.test.end_col_offset))
+            # Each suite supplies only its own immediate continuation. An elif
+            # belongs to the initial if; an ordinary if inside else does not.
+            for _, suite in ast.iter_fields(node):
+                if not isinstance(suite, list):
+                    continue
+                for guard in suite[:-1]:
+                    if not isinstance(guard, ast.If):
+                        continue
+                    branches = [guard.body]
+                    while (len(guard.orelse) == 1 and isinstance(guard.orelse[0], ast.If)
+                           and tokens_by_line[guard.orelse[0].lineno][0].string == "elif"):
+                        guard = guard.orelse[0]
+                        branches.append(guard.body)
+                    branches.append(guard.orelse)
+                    for branch in branches:
+                        ret = branch[-1] if branch else None
+                        if (not isinstance(ret, ast.Return) or ret.lineno != ret.end_lineno
+                                or ret.lineno not in standalone_returns):
+                            continue
+                        start = character_column(ret.lineno, ret.col_offset)
+                        end = character_column(ret.lineno, ret.end_col_offset)
+                        line = source_lines[ret.lineno - 1]
+                        suffix = line[end:].lstrip()
+                        if (not line[:start].strip() and (not suffix or suffix.startswith("#"))
+                                and tokens_by_line[ret.lineno][-1].type == tokenize.NEWLINE):
+                            returns[ret.lineno] = (start, end)
     except (SyntaxError, ValueError, tokenize.TokenError) as exc:
         raise ValueError(f"cannot analyze Python source {path}: {exc}") from exc
-    return spans
+    return _PythonAnalysis(spans, conditions, returns)
 
 
 def _non_python_protected_spans(source: str) -> dict[int, list[tuple[int, int]]]:
@@ -216,13 +273,19 @@ def generate(lines: list[tuple[str, int, str]], count: int, seed: int, *,
              sources: dict[str, str],
              mutation_skip: tuple[str, ...] = ()) -> list[Mutant]:
     protected = {}
+    conditions = {}
+    returns = {}
     # Analyze each complete file before exclusions, so even an excluded line
     # cannot turn a source-analysis failure into a successful skip.
     for path in dict.fromkeys(path for path, _, _ in lines):
         if path not in sources:
             raise ValueError(f"missing committed source for {path}")
-        protected[path] = (_python_protected_spans(path, sources[path]) if _is_python(path)
-                           else _non_python_protected_spans(sources[path]))
+        if _is_python(path):
+            analysis = _python_protected_spans(path, sources[path])
+            protected[path], conditions[path] = analysis.protected, analysis.conditions
+            returns[path] = analysis.returns
+        else:
+            protected[path] = _non_python_protected_spans(sources[path])
     options = []
     for path, n, text in lines:
         if any(pattern in text for pattern in mutation_skip):
@@ -239,6 +302,15 @@ def generate(lines: list[tuple[str, int, str]], count: int, seed: int, *,
                 else:
                     new = text[:m.start()] + repl + text[m.end():]
                 options.append(Mutant(path, n, name, text, new))
+        if n in conditions.get(path, {}):
+            start, end = conditions[path][n]
+            if not any(start < right and end > left for left, right in protected[path].get(n, ())):
+                options.append(Mutant(path, n, "negate-condition", text,
+                                      text[:start] + "not " + text[start:]))
+        if n in returns.get(path, {}):
+            start, end = returns[path][n]
+            if not any(start < right and end > left for left, right in protected[path].get(n, ())):
+                options.append(Mutant(path, n, "drop-return", text, text[:start] + "pass" + text[end:]))
     random.Random(seed).shuffle(options)
     seen, picked = set(), []
     for mut in options:  # at most one mutant per line, spread across the diff
