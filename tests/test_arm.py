@@ -1223,3 +1223,97 @@ def test_arm_resolution_failure_stops_before_collection(monkeypatch, tmp_path, c
     assert arm.main(["76"]) == 1
     assert len(calls) == (1 if stage == "git" else 2)
     assert capsys.readouterr().err == "Could not resolve the checkout and GitHub repository.\n"
+
+
+@pytest.fixture
+def arming_guide_blocks():
+    import re
+    from pathlib import Path
+
+    guide = (Path(__file__).resolve().parents[1] / "docs" / "arming.md").read_text()
+
+    def blocks(section, language="markdown"):
+        text = guide.split(f"## {section}\n", 1)[1].split("\n## ", 1)[0]
+        return re.findall(rf"```{language}\n(.*?)\n```", text, re.DOTALL)
+
+    return blocks
+
+
+@pytest.mark.scenario("issue-arming/issue-body-lint/named-tests-are-required")
+def test_guide_template_and_named_test_examples(arming_guide_blocks):
+    template, = arming_guide_blocks("Issue template")
+    assert arm.lint_body(76, template) == []
+    prefix, done = template.split("**Definition of done:**", 1)
+    _, human = done.split("**What CI cannot prove:**", 1)
+    accepted, rejected = arming_guide_blocks("Named tests", "text")
+    for examples, valid in ((accepted.splitlines(), True), (rejected.splitlines() + [""], False)):
+        for example in examples:
+            # A valid name outside Done cannot rescue a rejected example.
+            body = (f"{prefix}**Definition of done:** {example}\n"
+                    f"**What CI cannot prove:** {human}\n`test_outside_done`")
+            assert [f.code for f in arm.lint_body(76, body)] == (
+                [] if valid else ["named-test"]), example
+
+
+@pytest.mark.scenario("issue-arming/dependency-aware-overlap-decisions/transitive-chains-work-in-both-directions")
+@pytest.mark.parametrize("numbers", [[76, 77], [77, 76]])
+def test_guide_dependency_chain_keeps_unrelated_findings(
+        arming_guide_blocks, batch_reader, tmp_path, numbers):
+    template, = arming_guide_blocks("Issue template")
+    first, intermediate = arming_guide_blocks("Dependencies and overlap")
+    records = {("org/repo", n): unarmed_record(n, template) for n in numbers}
+    records["org/repo", 76]["body"] = (
+        template.replace("Run `uv run pytest`.", "Manually run `uv run pytest`.")
+        + f"\n{first}\nblocked-by: #91")
+    records["org/repo", 90] = unarmed_record(90, intermediate)
+    records["org/repo", 91] = issue_record(91, state="CLOSED", reason="NOT_PLANNED")
+    cache, calls, _ = batch_reader(records)
+    results = arm.check_candidates("org/repo", numbers, tmp_path, cache)
+    assert list(results) == numbers
+    assert [f.code for f in results[76]] == ["dependency-completion", "manual-check"]
+    assert results[76][0].related_issue == 91
+    assert results[77] == []
+    assert ("org/repo", 90) in calls
+    assert len(calls) == len(set(calls)) == 4
+
+
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/check-mode-never-labels")
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("failing", [False, True])
+def test_guide_check_commands(arming_guide_blocks, command_reader, capsys, force, failing):
+    template, = arming_guide_blocks("Issue template")
+    commands, = arming_guide_blocks("Invocation", "sh")
+    body = template.replace("`test_arm_check_mode_never_labels`", "uv run pytest") if failing else template
+    records = {76: unarmed_record(76, body),
+               77: unarmed_record(77, template + "\nblocked-by: #76")}
+    calls, _, _ = command_reader(records)
+    assert arm.main(commands.splitlines()[3 if force else 1].split()[5:]) == int(failing)
+    assert not any(call[:3] == ["gh", "issue", "edit"] for call in calls)
+    assert all(row["labels"] == [{"name": "bug"}] for row in records.values())
+    output = capsys.readouterr().out
+    assert output.count("[named-test]") == int(failing)
+    assert output.count("[") == int(failing)
+    assert f"#76: check {'failed' if failing else 'clean'}\n" in output
+    assert output.endswith("#77: check clean\n")
+
+
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/force-labels-and-reports")
+def test_guide_force_command_keeps_all_diagnostics(arming_guide_blocks, command_reader, capsys):
+    template, = arming_guide_blocks("Issue template")
+    commands, = arming_guide_blocks("Invocation", "sh")
+    body = template.replace("`test_arm_check_mode_never_labels`", "uv run pytest")
+    records = {76: unarmed_record(76, body + "\nblocked-by: #90"),
+               77: unarmed_record(77, template), 90: OSError("unavailable")}
+    calls, _, _ = command_reader(records)
+    assert arm.main(commands.splitlines()[2].split()[5:]) == 0
+    assert [call for call in calls if call[:3] == ["gh", "issue", "edit"]] == [
+        ["gh", "issue", "edit", str(n), "--repo", "org/repo", "--add-label", "spec:draft"]
+        for n in (76, 77)]
+    output = capsys.readouterr().out
+    assert output.count("[named-test]") == 1
+    assert output.count("[incomplete-context]") == 2
+    assert output.count("[overlap]") == 4
+    assert output.count(": forced arming\n") == 2
+    for text in ("nightshift/arm.py", "tests/test_arm.py", "blocked-by: #76", "blocked-by: #77",
+                 "Issue #90 lookup failed.", "Name a test"):
+        assert text in output
