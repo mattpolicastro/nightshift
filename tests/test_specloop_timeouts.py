@@ -36,6 +36,7 @@ def test_origin_timeout_allows_worker_claim_heartbeat_harvest_and_retry(
         pipeline.issue(1)
         if operation == "ls-remote":
             pipeline.approved(1)
+            pipeline.prs[1]["headRefName"] = "spec/owner__spec-issue-1-gate"
             pipeline.prs[1]["state"] = "CLOSED"
     else:
         pipeline.approved(1)

@@ -545,7 +545,7 @@ def test_rejected_open_pr_recovery_does_not_prevent_next_eligible_issue(repo, tm
     gh.prs = [{"number": 8, "state": "OPEN", "headRefOid": "abc123"}]
     reapply(gh, "spec:draft", "outsider")
     original_comments = deepcopy(gh.comments)
-    branch = "spec/sample-issue-9-add-a-gate"
+    branch = "spec/owner__sample-issue-9-add-a-gate"
     commands = Commands(branch=branch)
 
     def github(args):

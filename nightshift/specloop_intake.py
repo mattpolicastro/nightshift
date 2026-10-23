@@ -39,8 +39,45 @@ class ConfigurationError(RuntimeError):
     transient = False
 
 
-def manifest_readiness(repo: Repo) -> manifests.Manifest | ConfigurationError:
+class UnsupportedName(ConfigurationError):
+    """New identities are unsafe; recorded safe identities remain usable."""
+
+
+def _safe_change(change: str) -> bool:
+    """The shared admission/revision path and branch component predicate."""
+    return (re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*", change) is not None
+            and ".." not in change and not change.endswith((".", ".lock")))
+
+
+def _change_name(repository: str, number: int, title: str) -> str:
+    parts = repository.split("/", 1)
+    if len(parts) != 2 or not all(parts) or "/" in parts[1]:
+        raise UnsupportedName(
+            f"{repository}: unsupported repository spelling; expected owner/repository. "
+            "Correct the repository name in configuration and restart. "
+            "Recorded safe branches remain usable."
+        )
+    owner, name = parts
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40].rstrip("-")
+    return f"{owner}__{name}-issue-{number}-{slug or 'issue'}"
+
+
+def _require_supported_name(repo: Repo, change: str) -> None:
+    if not _safe_change(change):
+        raise UnsupportedName(
+            f"{repo.name}: unsupported repository spelling for new branch spec/{change}. "
+            "Use a repository spelling that passes branch validation and update enrollment; "
+            "restart after configuration changes. Recorded safe branches remain usable."
+        )
+
+
+def manifest_readiness(repo: Repo, *, new_work: bool = True) -> manifests.Manifest | ConfigurationError:
     """Validate an enrollment template without changing it or executing work."""
+    if new_work:
+        try:
+            _require_supported_name(repo, _change_name(repo.name, 7, "Add a gate"))
+        except UnsupportedName as exc:
+            return exc
     location = str(repo.manifest) if repo.manifest is not None else "(not configured)"
     repair = ("Set the manifest path in configuration and restart." if repo.manifest is None
               else "Repair the manifest at this path; the next poll will retry.")
@@ -81,8 +118,12 @@ def manifest_readiness(repo: Repo) -> manifests.Manifest | ConfigurationError:
 
 def _require_manifest(
     repo: Repo, readiness: manifests.Manifest | ConfigurationError | None = None,
+    *, new_work: bool = True,
 ) -> manifests.Manifest:
-    result = manifest_readiness(repo) if readiness is None else readiness
+    # Saved-result delivery needs a valid template, but creates no identity.
+    if not new_work and isinstance(readiness, UnsupportedName):
+        readiness = None
+    result = manifest_readiness(repo, new_work=new_work) if readiness is None else readiness
     if isinstance(result, ConfigurationError):
         raise result
     return result
@@ -181,8 +222,7 @@ look like an absent label or an empty set of comments.
         if current.intersection((labels.working, labels.needs_human, labels.revise)):
             return None
         path = state_dir / "proposals" / repo.name.replace("/", "__") / f"{number}.json"
-        slug = re.sub(r"[^a-z0-9]+", "-", raw["title"].lower()).strip("-")[:40].rstrip("-")
-        change = f"{repo.name.split('/')[-1]}-issue-{number}-{slug or 'issue'}"
+        change = _change_name(repo.name, number, raw["title"])
         receipt = json.loads(path.read_text()) if path.exists() else None
         drafting_labels = current.intersection((labels.ready, labels.spec_draft))
         selected_events = None
@@ -267,6 +307,7 @@ look like an absent label or an empty set of comments.
         if not authorize():
             return None
         _require_manifest(repo, readiness)
+        _require_supported_name(repo, change)
         receipt = {"repo": repo.name, "issue": number, "change": change,
                    "title": raw["title"], "idea": idea, "input": issue_input,
                    "round_id": uuid.uuid4().hex, "drafting_events": drafting_events}
@@ -335,8 +376,7 @@ def admit_pending(
         change = branch.removeprefix("spec/")
         # Drafting preserves the repository name, including dots, underscores
         # and hyphens. Keep it a single safe path/ref component.
-        if (not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*", change)
-                or ".." in change or change.endswith((".", ".lock"))):
+        if not _safe_change(change):
             return None
         events = _latest_label_events(repo.name, number, {labels.spec_approved}, runner=gh)
         if not _authorize_label_events(repo.name, number, events, runner=gh, kind="pr"):
@@ -588,8 +628,7 @@ def revise_pending(
                 or not branch.startswith("spec/")):
             return None
         change = branch.removeprefix("spec/")
-        if (not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*", change)
-                or ".." in change or change.endswith((".", ".lock"))):
+        if not _safe_change(change):
             return None
         events = _latest_label_events(repo.name, number, {labels.revise}, runner=gh)
         if not _authorize_label_events(repo.name, number, events, runner=gh, kind="pr"):
@@ -696,7 +735,7 @@ def revise_pending(
 
         result = receipt["result"]
         if result["outcome"] == "drafted":
-            source = _require_manifest(repo, readiness).repo
+            source = _require_manifest(repo, readiness, new_work=False).repo
             if pr["headRefOid"] not in (receipt["head"], result["commit"]):
                 raise DeliveryError(f"{branch} moved while its revision was drafted; review the branch before retrying")
             pushed = git([
@@ -1117,7 +1156,7 @@ def _deliver(repo: Repo, labels: queue.Labels, number: int, change: str,
         branch = f"spec/{change}"
         # Propose places its commit in the manifest's source repository, which
         # need not be the worker clone configured by Repo.dir.
-        source = _require_manifest(repo, readiness).repo
+        source = _require_manifest(repo, readiness, new_work=False).repo
         git = partial(_bounded_run, runner=git_runner)
         push_options = []
         if receipt.get("replaces_pr"):

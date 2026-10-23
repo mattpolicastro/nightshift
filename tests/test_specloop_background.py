@@ -282,6 +282,8 @@ def test_long_propose_allows_worker_claim_heartbeat_and_harvest(background, monk
 def test_jobs_survive_polls_and_restart_then_deliver_once(background, monkeypatch, command, outcome):
     root, repo, children = background
     change = "sample-issue-7-add-a-gate"
+    if command == "propose":
+        change = "owner__" + change
     result = {"version": 1, "outcome": outcome, "branch": f"spec/{change}",
               "commit": HEAD, "head": HEAD, "questions": ["Which voltage?"],
               "reasons": ["Contradictory voltage."], "risks": []}
@@ -554,6 +556,8 @@ def delivery_job(background, monkeypatch):
         gh = (DraftGh(("spec:draft",)) if stage == "draft" else
               ApprovalGh() if stage == "admit" else RevisionGh())
         change = "sample-issue-7-add-a-gate"
+        if stage == "draft":
+            change = "owner__" + change
         result = {"version": 1, "outcome": "admitted" if stage == "admit" else "drafted",
                   "branch": f"spec/{change}", "commit": HEAD, "head": HEAD}
         runs = []

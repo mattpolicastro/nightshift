@@ -18,7 +18,7 @@ from test_queue import FakeGh
 from test_specloop_isolation import Pipeline, poll
 from test_engine_routing import DraftGh
 from test_specloop_intake import Commands as DraftCommands
-from test_specloop_approval import ApprovalGh, Commands as AdmissionCommands, CHANGE, BRANCH, HEAD
+from test_specloop_approval import ApprovalGh, Commands as AdmissionCommands, CHANGE, HEAD
 from test_specloop_spec_revision import RevisionGh, Commands as RevisionCommands, REVISED, seed_consumed
 from test_specloop_build_revision import BuildCommands
 from test_specloop_publication import PublishCommands, DETAIL, CHECKS
@@ -287,8 +287,9 @@ def test_home_resolution_recovery_reaches_cli_template(enrollment, tmp_path, mon
                 branch=args[args.index("--branch") + 1],
             )
             assert Path(args[2]) == path
-            assert effective.change == "sample-issue-7-add-a-gate"
-            assert effective.branch == "spec/sample-issue-7-add-a-gate"
+            expected = "owner__" + CHANGE if stage == "propose" else CHANGE
+            assert effective.change == expected
+            assert effective.branch == f"spec/{expected}"
             parsed.append(effective)
         return commands(args, **kwargs)
 
@@ -357,7 +358,8 @@ def test_template_readiness_preserves_dispatch_identity(enrollment, monkeypatch,
             effective, _ = manifest.template(
                 Path(args[2]), change=args[args.index("--change") + 1],
                 branch=args[args.index("--branch") + 1])
-            assert (effective.change, effective.branch) == (CHANGE, BRANCH)
+            expected = "owner__" + CHANGE if stage == "propose" else CHANGE
+            assert (effective.change, effective.branch) == (expected, f"spec/{expected}")
             parsed.append(effective)
         return commands(args, **kwargs)
 
@@ -368,7 +370,8 @@ def test_template_readiness_preserves_dispatch_identity(enrollment, monkeypatch,
     assert path.read_bytes() == before
     evidence = json.dumps([gh.calls, commands.calls]) + "".join(
         receipt.read_text() for receipt in daemon.STATE_DIR.rglob("*.json"))
-    assert CHANGE in evidence and BRANCH in evidence
+    expected = "owner__" + CHANGE if stage == "propose" else CHANGE
+    assert expected in evidence and f"spec/{expected}" in evidence
     assert "readiness-probe" not in evidence and "unrelated-default" not in evidence
 
 
@@ -452,13 +455,16 @@ def test_colliding_run_does_not_bypass_admission_hold(enrollment, other_pr, save
 
 @pytest.mark.scenario("config-resilience/health-gates-new-work-only/unhealthy-repository-still-publishes")
 @pytest.mark.scenario("config-resilience/health-gates-new-work-only/pause-and-stop-still-prevail")
-@pytest.mark.parametrize("failure", ["missing", "invalid", "absent"])
-@pytest.mark.parametrize("name", ["owner/sample", "owner/widget..js"])
+@pytest.mark.scenario("issue-intake/owner-qualified-new-identities/unsafe-spelling-holds-new-work")
+@pytest.mark.parametrize("failure,name", [
+    (failure, name) for failure in ("missing", "invalid", "absent")
+    for name in ("owner/sample", "owner/widget..js")
+] + [("unsupported-name", "owner/widget..js")])
 def test_unhealthy_repo_still_publishes_admitted_run(enrollment, failure, name):
     path, _ = enrollment
     if failure == "invalid":
         path.write_text("[broken")
-    else:
+    elif failure != "unsupported-name":
         path.unlink()
     repo = Repo(name, engine="specloop", manifest=None if failure == "absent" else path)
     gh, commands = ApprovalGh(labels=()), PublishCommands()
@@ -486,13 +492,20 @@ def test_unhealthy_repo_still_publishes_admitted_run(enrollment, failure, name):
 
 @pytest.mark.scenario("config-resilience/health-gates-new-work-only/unhealthy-repository-still-takes-build-feedback")
 @pytest.mark.scenario("config-resilience/health-gates-new-work-only/pause-and-stop-still-prevail")
-def test_build_feedback_does_not_read_enrollment(enrollment, monkeypatch):
+@pytest.mark.scenario("issue-intake/owner-qualified-new-identities/unsafe-spelling-holds-new-work")
+@pytest.mark.parametrize("name", ["owner/sample", "owner/widget..js"])
+def test_build_feedback_does_not_read_enrollment(enrollment, monkeypatch, name):
     path, _ = enrollment
-    path.unlink()
-    repo = Repo("owner/sample", engine="specloop", manifest=path)
+    if name == "owner/sample":
+        path.unlink()
+    repo = Repo(name, engine="specloop", manifest=path)
     gh = RevisionGh()
+    gh.pr_url = f"https://github.com/{name}/pull/8"
     commands = BuildCommands(gh)
     seed_consumed(daemon.STATE_DIR)
+    directory = name.replace("/", "__")
+    if directory != "owner__sample":
+        (daemon.STATE_DIR / "revisions/owner__sample").rename(daemon.STATE_DIR / "revisions" / directory)
     monkeypatch.setattr(manifest, "template", lambda *a, **k: pytest.fail("enrollment read"))
     health = daemon.RepoHealth()
     daemon.PAUSE_FILE.touch()
@@ -504,7 +517,7 @@ def test_build_feedback_does_not_read_enrollment(enrollment, monkeypatch):
     assert health.failures == {repo.name: 2} and not health.item_failures
     assert [c[1] for c in commands.calls] == ["status", "revise"]
     assert json.loads(commands.feedback[0]) == ["**reviewer:**\n\nHandle empty input"]
-    receipt = json.loads((daemon.STATE_DIR / "revisions/owner__sample/8.json").read_text())
+    receipt = json.loads((daemon.STATE_DIR / "revisions" / directory / "8.json").read_text())
     assert receipt["consumed_feedback_ids"] == ["conversation:101", "conversation:102"]
     assert receipt["delivered"] and gh.head == HEAD
     assert gh.labels == {"spec:review"} and len(gh.comments) == 1

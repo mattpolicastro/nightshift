@@ -15,7 +15,7 @@ from nightshift.config import Config, Repo
 from test_engine_routing import DraftGh
 
 
-CHANGE = "sample-issue-7-add-a-gate"
+CHANGE = "owner__sample-issue-7-add-a-gate"
 BRANCH = f"spec/{CHANGE}"
 
 
@@ -213,7 +213,7 @@ def test_blocked_issue_is_not_drafted_until_blockers_close(
         if (args[:3] in (["issue", "view", "9"], ["issue", "edit", "9"],
                         ["issue", "comment", "9"])
                 or (args[0] == "api" and "/issues/9/" in args[1])
-                or (args[:2] == ["pr", "list"] and "spec/sample-issue-9-add-a-gate" in args)
+                or (args[:2] == ["pr", "list"] and "spec/owner__sample-issue-9-add-a-gate" in args)
                 or (args[:2] in (["pr", "view"], ["pr", "edit"])
                     and args[2] in ("19", neighbor.pr_url))):
             return neighbor(args)
@@ -506,7 +506,7 @@ def test_body_without_dependencies_drafts_without_blocker_lookups(repo, tmp_path
 def test_blocked_skip_allows_another_eligible_issue_to_draft(repo, tmp_path, caplog, armed):
     gh = BlockedDraftGh(armed, {6: "OPEN"})
     neighbor = DraftGh((armed,))
-    neighbor_branch = "spec/sample-issue-9-add-a-gate"
+    neighbor_branch = "spec/owner__sample-issue-9-add-a-gate"
     commands = Commands(branch=neighbor_branch)
     caplog.set_level(logging.INFO, logger=specloop_intake.__name__)
     blocked_state = json.dumps([sorted(gh.labels), gh.comments, gh.prs, gh.events])
@@ -584,7 +584,7 @@ def test_draft_pr_opened(repo, tmp_path, armed):
 
 def test_draft_change_and_branch_preserve_all_title_digits(repo, tmp_path):
     gh = DraftGh(("spec:draft",))
-    change = "sample-issue-7-gate-0123456789"
+    change = "owner__sample-issue-7-gate-0123456789"
     branch = f"spec/{change}"
     commands = Commands(branch=branch)
 
@@ -615,6 +615,7 @@ def test_questions_posted(repo, tmp_path):
     questions = ["Which gate voltage?", "Should it retrigger?"]
     commands = Commands(outcome="needs_input", commit="", questions=questions)
     poll(repo, tmp_path, gh, commands)
+    assert commands.calls[0][commands.calls[0].index("--change") + 1] == CHANGE
     assert all(question in gh.comments[-1]["body"] for question in questions)
     assert gh.labels == {"needs-human"}
     assert not calls(gh, "pr", "create")
@@ -632,6 +633,7 @@ def test_questions_posted(repo, tmp_path):
 def test_unfixable_draft_escalated(repo, tmp_path, findings):
     gh, commands = DraftGh(("spec:draft",)), Commands(outcome="rejected", **findings)
     poll(repo, tmp_path, gh, commands)
+    assert commands.calls[0][commands.calls[0].index("--change") + 1] == CHANGE
     body = gh.comments[-1]["body"]
     for items in findings.values():
         for item in items:
