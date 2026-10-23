@@ -33,6 +33,19 @@ RUN = {"change": "reviewed-change", "pr": URL, "head": HEAD,
        "status": "paused", "pause": {"reason": "human_checks"}}
 FINISH = ["specloop", "finish", "reviewed-change"]
 FINISHED_HEAD = "c" * 40
+CONFIRM_MERGED = ["gh", "pr", "view", "78", "--repo", REPO, "--json", "number,url,state"]
+
+
+def merge_command(head=HEAD):
+    return ["gh", "pr", "merge", "78", "--repo", REPO,
+            "--merge", "--match-head-commit", head]
+
+
+def expect_merge_refusal(runner, *, head=HEAD):
+    """Earlier gate tests now reach a real, explicitly scripted merge refusal."""
+    runner.expect(merge_command(head), subprocess.CompletedProcess(
+        [], 1, "", "branch protection requires approval"))
+    runner.expect(CONFIRM_MERGED, {"number": 78, "url": URL, "state": "OPEN"})
 
 
 class ScriptedRunner:
@@ -137,7 +150,7 @@ def test_module_help(monkeypatch, capsys):
         runpy.run_module("nightshift.land", run_name="__main__")
     assert error.value.code == 0
     output = capsys.readouterr()
-    assert ("Land a reviewed PR in an enrolled repository (base updates and merge currently disabled)."
+    assert ("Land a reviewed PR in an enrolled repository."
             in " ".join(output.out.split()))
     for flag in ["--repo", "--config", "--checks-done", "--timeout"]:
         assert flag in output.out
@@ -157,7 +170,7 @@ def test_default_subprocess_runner_and_config(
     expect_finish_gate(scripted_runner, ci_timeout=20)
     assert land.main(monotonic=lambda: 100.0) == 1
     output = capsys.readouterr()
-    assert "mutations disabled" in output.err
+    assert "merge not confirmed" in output.err
     assert output.out == "No human checks listed\n"
 
 
@@ -176,7 +189,7 @@ def test_repository_resolves(config_path, scripted_runner, capsys, argv, inferre
     scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF).expect(STATUS, EMPTY_STATUS)
     expect_finish_gate(scripted_runner)
     assert invoke(config_path, scripted_runner, *argv) == 1
-    assert f"{URL}: mutations disabled" in capsys.readouterr().err
+    assert f"merge not confirmed for {URL}" in capsys.readouterr().err
 
 
 @pytest.mark.scenario("reviewed-pr-landing/enrolled-pr-identity/invalid-target-refused")
@@ -288,7 +301,7 @@ def test_uncertain_discovery_refused(config_path, scripted_runner, capsys, respo
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     output = capsys.readouterr()
     assert "run discovery" in output.err and reason in output.err
-    assert "mutations disabled" not in output.err
+    assert "merge not confirmed" not in output.err
     assert output.out == ""
     assert [argv for argv, _ in scripted_runner.calls] == [VIEW, MAIN, STATUS]
 
@@ -321,7 +334,7 @@ def test_every_status_row_must_be_readable(
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     error = capsys.readouterr().err
     assert "run discovery: status row" in error
-    assert "mutations disabled" not in error
+    assert "merge not confirmed" not in error
     assert [argv for argv, _ in scripted_runner.calls] == [VIEW, MAIN, STATUS]
 
 
@@ -356,7 +369,7 @@ def test_discovery_uses_pr_identity_regardless_of_engine(
         scripted_runner.expect(COMMENTS, [[]])
     expect_finish_gate(scripted_runner, comments=[[]] if matching else None)
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
-    assert "mutations disabled" in capsys.readouterr().err
+    assert "merge not confirmed" in capsys.readouterr().err
 
 
 @pytest.mark.scenario("reviewed-pr-landing/eligible-run-state/wrong-state-refused")
@@ -395,7 +408,7 @@ def test_eligible_run_reaches_remaining_gates(config_path, scripted_runner, caps
     expect_finish_gate(scripted_runner, comments=[[]], row=row, draft=draft)
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     error = capsys.readouterr().err
-    assert ("PR remains draft" if status == "done" and draft else "mutations disabled") in error
+    assert ("PR remains draft" if status == "done" and draft else "merge not confirmed") in error
 
 
 def test_direct_draft_refused_after_successful_discovery(config_path, scripted_runner, capsys):
@@ -557,6 +570,7 @@ def expect_finish_gate(runner, body="", comments=None, *, row=None, head=HEAD, d
         expect_round_start(runner, head=head, timeout=ci_timeout)
         expect_ci_poll(runner, [ci_check()], pr=pr, timeout=ci_timeout)
         expect_round_end(runner, pr=pr, row=row, comments=comments, timeout=ci_timeout)
+        expect_merge_refusal(runner, head=head)
 
 
 @pytest.mark.real_trust
@@ -577,7 +591,7 @@ def test_land_refuses_unticked_human_checks(config_path, scripted_runner, capsys
     assert ("publication comment 1: Check the publication requirement" in output.err) == (
         source in {"comment", "both"})
     assert "Already done" not in output.err and "Completed comment check" not in output.err
-    assert "mutations disabled" not in output.err
+    assert "merge not confirmed" not in output.err
     assert output.out == ""
     # The exact script allows only reads: no edits, finish, CI, or merge.
     assert len(scripted_runner.calls) == (3 if source == "direct" else 4)
@@ -606,7 +620,7 @@ def test_latest_publication_across_pages(config_path, scripted_runner, capsys, l
     expect_finish_gate(scripted_runner, "Body prose\r\n- [X] Body complete\r\n", pages)
     assert invoke(config_path, scripted_runner, URL) == 1
     output = capsys.readouterr()
-    assert "mutations disabled" in output.err  # The human-check gate passed.
+    assert "merge not confirmed" in output.err  # The human-check gate passed.
     assert "unticked" not in output.err
     assert output.out == ""
     assert json.dumps(pages) == original
@@ -632,7 +646,7 @@ def test_publication_trust_uses_production_policy(
     assert invoke(config_path, scripted_runner, URL) == 1
     output = capsys.readouterr()
     assert ("publication comment 1: Inspect the UI" in output.err) == trusted
-    assert ("mutations disabled" in output.err) == (not trusted)
+    assert ("merge not confirmed" in output.err) == (not trusted)
     assert output.out == ("" if trusted else "No human checks listed\n")
 
 
@@ -707,7 +721,7 @@ def test_container_task_lines_block_landing(config_path, scripted_runner, capsys
     error = capsys.readouterr().err
     assert "Count this example too" in error
     assert "unticked human checks remain" in error
-    assert "mutations disabled" not in error
+    assert "merge not confirmed" not in error
 
 
 @pytest.mark.real_trust
@@ -726,9 +740,9 @@ def test_no_listed_checks_reaches_remaining_gates(
     assert invoke(config_path, scripted_runner, URL, *(["--checks-done"] if checks_done else [])) == 1
     output = capsys.readouterr()
     assert output.out == "No human checks listed\n"
-    assert "mutations disabled" in output.err
+    assert "merge not confirmed" in output.err
     assert "unticked" not in output.err
-    assert len(scripted_runner.calls) == (13 if kind == "direct" else 19)
+    assert len(scripted_runner.calls) == (15 if kind == "direct" else 21)
 
 
 @pytest.mark.real_trust
@@ -745,7 +759,7 @@ def test_missing_publication_still_checks_body(config_path, scripted_runner, cap
     assert invoke(config_path, scripted_runner, URL, *(["--checks-done"] if checks_done else [])) == 1
     output = capsys.readouterr()
     assert ("PR body: Body check remains" in output.err) == (not checks_done)
-    assert ("mutations disabled" in output.err) == checks_done
+    assert ("merge not confirmed" in output.err) == checks_done
     assert output.out == ""
 
 
@@ -767,7 +781,7 @@ def test_comment_discovery_fails_closed(config_path, scripted_runner, capsys, re
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     output = capsys.readouterr()
     assert "publication comment discovery" in output.err and reason in output.err
-    assert "mutations disabled" not in output.err
+    assert "merge not confirmed" not in output.err
     assert output.out == ""
 
 
@@ -850,7 +864,7 @@ def test_checks_done_ticks_each_source_once_and_retains_snapshot(
     recorded = expect_attestation(scripted_runner, check_items)
     expect_finish_gate(scripted_runner, ticked_body, [[{**comment, "body": ticked_comment}]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
-    assert "mutations disabled" in capsys.readouterr().err
+    assert "merge not confirmed" in capsys.readouterr().err
     assert snapshots == [land.CheckSnapshot(HEAD, (
         land.CheckSource(ticked_body), land.CheckSource(ticked_comment, 42)), "operator")]
     assert json.dumps(pages) == original_pages
@@ -862,7 +876,7 @@ def test_checks_done_ticks_each_source_once_and_retains_snapshot(
     expect_attestation(scripted_runner, check_items, actor="second-operator", existing=recorded)
     expect_finish_gate(scripted_runner, ticked_body, [[{**comment, "body": ticked_comment}]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
-    assert "mutations disabled" in capsys.readouterr().err
+    assert "merge not confirmed" in capsys.readouterr().err
     assert snapshots[1].actor == "second-operator"
     assert snapshots[1].sources == snapshots[0].sources
     assert snapshots[1].head == HEAD
@@ -899,7 +913,7 @@ def test_partial_check_edits_recover_from_remote_state(
     assert ("permission denied" if failure == "rejected" else "timed out") in reason
     assert ("authenticated actor lookup" if failed_stage == "actor" else
             "PR body" if failed_stage == "body" else "publication comment 42") in reason
-    assert "mutations disabled" not in reason  # Stopped at the failed operation.
+    assert "merge not confirmed" not in reason  # Stopped at the failed operation.
     assert not scripted_runner.steps
     if failed_stage == "comment":
         assert remote["body"] == complete["body"]
@@ -917,7 +931,7 @@ def test_partial_check_edits_recover_from_remote_state(
                                         ("publication comment 42", ["Inspect the UI"])])
     expect_finish_gate(scripted_runner, complete["body"], [[publication(42, body=complete["comment"])]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
-    assert "mutations disabled" in capsys.readouterr().err
+    assert "merge not confirmed" in capsys.readouterr().err
     assert remote == complete
 
 
@@ -945,7 +959,7 @@ def test_complete_direct_sources_only_lookup_actor_when_recording(
         expect_attestation(scripted_runner, [("PR body", ["Complete"])])
     expect_finish_gate(scripted_runner, "- [X] Complete\r\n")
     assert invoke(config_path, scripted_runner, URL, *(["--checks-done"] if checks_done else [])) == 1
-    assert "mutations disabled" in capsys.readouterr().err
+    assert "merge not confirmed" in capsys.readouterr().err
 
 
 @pytest.mark.real_trust
@@ -964,20 +978,20 @@ def test_land_checks_done_ticks_once_and_comments(config_path, scripted_runner, 
     existing = expect_attestation(scripted_runner, sources)
     expect_finish_gate(scripted_runner, completed_body, [[completed_comment]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
-    assert "mutations disabled" in capsys.readouterr().err
+    assert "merge not confirmed" in capsys.readouterr().err
 
     expect_check_sources(scripted_runner, completed_body, [[completed_comment, existing]])
     scripted_runner.expect(ACTOR, {"login": "next-operator"})
     updated = expect_attestation(scripted_runner, sources, actor="next-operator", existing=existing)
     expect_finish_gate(scripted_runner, completed_body, [[completed_comment, updated]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
-    assert "mutations disabled" in capsys.readouterr().err
+    assert "merge not confirmed" in capsys.readouterr().err
     assert "@next-operator recorded completion through `land`." in updated["body"]
     calls = [argv for argv, _ in scripted_runner.calls]
     assert calls.count(check_patch(completed_body)) == 1
     assert calls.count(check_patch(completed_comment["body"], 42)) == 1
     assert sum("POST" in argv for argv in calls) == 1
-    assert calls[-16] == check_patch(updated["body"], existing["id"])
+    assert calls[-18] == check_patch(updated["body"], existing["id"])
 
 
 @pytest.mark.real_trust
@@ -1012,7 +1026,7 @@ def test_attestation_quoted_markers_cannot_replace_publication(
     scripted_runner.expect(attestation_post(recorded["body"]), recorded)
     expect_finish_gate(scripted_runner, completed_body, [[completed_comment], [recorded]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
-    assert "mutations disabled" in capsys.readouterr().err
+    assert "merge not confirmed" in capsys.readouterr().err
     assert publish_marker not in recorded["body"]
     assert recorded["body"].count(land_marker) == 1
 
@@ -1024,7 +1038,7 @@ def test_attestation_quoted_markers_cannot_replace_publication(
     scripted_runner.expect(check_patch(recorded["body"], 501), {})
     expect_finish_gate(scripted_runner, completed_body, [[completed_comment], [recorded]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
-    assert "mutations disabled" in capsys.readouterr().err
+    assert "merge not confirmed" in capsys.readouterr().err
 
     # An operator unticks the original publication after recording checks.
     # The attestation must never hide that check on the next invocation.
@@ -1033,7 +1047,7 @@ def test_attestation_quoted_markers_cannot_replace_publication(
     error = capsys.readouterr().err
     assert "unticked human checks remain" in error
     assert "publication comment 42:" in error
-    assert "mutations disabled" not in error
+    assert "merge not confirmed" not in error
     assert sum("POST" in argv for argv, _ in scripted_runner.calls) == 1
 
 
@@ -1055,7 +1069,7 @@ def test_attestation_changed_head_creates_distinct_marker(config_path, scripted_
         scripted_runner.expect(attestation_post(body), create)
         expect_finish_gate(scripted_runner, "- [X] Complete", head=head)
         assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
-        assert "mutations disabled" in capsys.readouterr().err
+        assert "merge not confirmed" in capsys.readouterr().err
     assert len(remote) == 2
     assert remote[0]["body"].endswith(f"<!-- nightshift:land-checks:78:{HEAD} -->")
     assert remote[1]["body"].endswith(f"<!-- nightshift:land-checks:78:{'c' * 40} -->")
@@ -1094,10 +1108,10 @@ def test_attestation_lost_response_reconciles_later_page(
     else:
         result = invoke(config_path, scripted_runner, URL, "--checks-done")
     assert result == 1
-    assert "mutations disabled" in capsys.readouterr().err
+    assert "merge not confirmed" in capsys.readouterr().err
     assert len(remote) == 101
     assert sum("POST" in argv for argv, _ in scripted_runner.calls) == 1
-    assert scripted_runner.calls[-11][0] == check_patch(body, 501)
+    assert scripted_runner.calls[-13][0] == check_patch(body, 501)
 
 
 @pytest.mark.real_trust
@@ -1134,7 +1148,7 @@ def test_uncertain_attestation_refuses_without_retry_or_later_mutations(
     scripted_runner.expect(COMMENTS, responses[problem])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     error = capsys.readouterr().err
-    assert "attestation" in error and "mutations disabled" not in error
+    assert "attestation" in error and "merge not confirmed" not in error
     if after_post or problem == "absent":
         assert "reconcil" in error
     if problem in {"duplicate", "repeated-marker"}:
@@ -1166,7 +1180,7 @@ def test_attestation_failure_after_check_edits_recovers_on_next_invocation(
         scripted_runner.expect(COMMENTS, [[]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     error = capsys.readouterr().err
-    assert "permission denied" in error and "mutations disabled" not in error
+    assert "permission denied" in error and "merge not confirmed" not in error
 
     expect_check_sources(scripted_runner, "- [x] Check")
     scripted_runner.expect(ACTOR, {"login": "new-operator"})
@@ -1174,7 +1188,7 @@ def test_attestation_failure_after_check_edits_recovers_on_next_invocation(
                        existing=existing if failed_method == "PATCH" else None)
     expect_finish_gate(scripted_runner, "- [x] Check")
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
-    assert "mutations disabled" in capsys.readouterr().err
+    assert "merge not confirmed" in capsys.readouterr().err
     assert sum(argv == check_patch("- [x] Check") for argv, _ in scripted_runner.calls) == 1
 
 
@@ -1199,7 +1213,7 @@ def test_existing_attestation_on_later_page_uses_production_trust(
     scripted_runner.expect(check_patch(body, 501), {})
     expect_finish_gate(scripted_runner, "- [X] Complete")
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
-    assert "mutations disabled" in capsys.readouterr().err
+    assert "merge not confirmed" in capsys.readouterr().err
     assert not any("POST" in argv for argv, _ in scripted_runner.calls)
 
 
@@ -1830,14 +1844,15 @@ def test_land_initial_stale_base_updates_before_ci(config_path, scripted_runner,
     expect_ci_poll(scripted_runner, [ci_check("pending")], code=8, pr=updated)
     expect_ci_poll(scripted_runner, [ci_check()], pr=updated)
     expect_round_end(scripted_runner, pr=updated, base=fresh_base)
+    expect_merge_refusal(scripted_runner, head=UPDATED_HEAD)
     assert invoke_ci(config_path, scripted_runner, clock) == 1
     error = capsys.readouterr().err
-    assert "mutations disabled" in error and UPDATED_HEAD in error
+    assert "merge not confirmed" in error and UPDATED_HEAD in error
     calls = [argv for argv, _ in scripted_runner.calls]
     assert calls.index(UPDATE) < calls.index(UPDATED_COMMIT) < calls.index(CHECKS)
     assert calls.count(UPDATE) == 1 and calls.count(CHECKS) == 2
     assert clock.sleeps == [10]
-    assert not any("merge" in argv for argv in calls)
+    assert [argv for argv in calls if "merge" in argv] == [merge_command(UPDATED_HEAD)]
 
 
 @pytest.mark.scenario("reviewed-pr-landing/main-movement-restarts-ci/main-moved-while-waiting")
@@ -1854,16 +1869,18 @@ def test_land_updates_branch_when_main_moved(config_path, scripted_runner, capsy
     expect_ci_poll(scripted_runner, [ci_check(new_ci)], pr=updated)
     if new_ci == "pass":
         expect_round_end(scripted_runner, pr=updated, base=freshest)
+        expect_merge_refusal(scripted_runner, head=UPDATED_HEAD)
     assert invoke_ci(config_path, scripted_runner, clock) == 1
     error = capsys.readouterr().err
-    assert ("mutations disabled" if new_ci == "pass" else "CI check unit tests: fail") in error
+    assert ("merge not confirmed" if new_ci == "pass" else "CI check unit tests: fail") in error
     if new_ci == "pass":
         assert UPDATED_HEAD in error
     calls = [argv for argv, _ in scripted_runner.calls]
     assert calls.count(CHECKS) == 3 and calls.count(UPDATE) == 1
     assert calls.index(CHECKS) < calls.index(UPDATE) < len(calls) - 1
     assert clock.sleeps == [10]
-    assert not any("merge" in argv for argv in calls)
+    assert [argv for argv in calls if "merge" in argv] == (
+        [merge_command(UPDATED_HEAD)] if new_ci == "pass" else [])
 
 
 @pytest.mark.scenario("reviewed-pr-landing/main-movement-restarts-ci/main-moved-while-waiting")
@@ -1890,13 +1907,14 @@ def test_land_base_moves_during_update_observation(config_path, scripted_runner,
     expect_ci_poll(scripted_runner, [ci_check("pending")], code=8, pr=updated)
     expect_ci_poll(scripted_runner, [ci_check()], pr=updated)
     expect_round_end(scripted_runner, pr=updated, base=moved)
+    expect_merge_refusal(scripted_runner, head=later_head)
     assert invoke_ci(config_path, scripted_runner, clock) == 1
     error = capsys.readouterr().err
-    assert "mutations disabled" in error and later_head in error
+    assert "merge not confirmed" in error and later_head in error
     calls = [argv for argv, _ in scripted_runner.calls]
     assert sum("PUT" in argv for argv in calls) == 2
     assert calls.count(CHECKS) == 3 and clock.sleeps == [10, 10]
-    assert not any("merge" in argv for argv in calls)
+    assert [argv for argv in calls if "merge" in argv] == [merge_command(later_head)]
 
 
 @pytest.mark.scenario("reviewed-pr-landing/three-round-limit/three-moves-refuse")
@@ -2374,7 +2392,7 @@ def test_land_interrupted_finish_uses_existing_recovery(
     expect_initial_run(scripted_runner, remote["pr"], remote["run"])
     expect_finish_gate(scripted_runner, comments=[[]], row=remote["run"], head=FINISHED_HEAD)
     assert invoke(config_path, scripted_runner, URL) == 1
-    assert "mutations disabled beyond run completion" in capsys.readouterr().err
+    assert "merge not confirmed" in capsys.readouterr().err
     assert sum(argv == FINISH for argv, _ in scripted_runner.calls) == (1 if saved_done else 2)
 
 
@@ -2507,8 +2525,168 @@ def test_land_concurrent_done_refresh_still_requires_finished_head(
         expect_round_start(scripted_runner)
         expect_ci_poll(scripted_runner, [ci_check()])
         expect_round_end(scripted_runner, row=done)
+        expect_merge_refusal(scripted_runner)
     assert invoke(config_path, scripted_runner, URL) == 1
     error = capsys.readouterr().err
-    assert ("mutations disabled beyond run completion" if accepted
+    assert ("merge not confirmed" if accepted
             else "does not equal remote PR head") in error
     assert not any(argv == FINISH for argv, _ in scripted_runner.calls)
+
+
+def expect_ready_to_merge(runner, *, kind="direct", timeout=30):
+    """Exercise real discovery, finish/continuation, CI and final validation."""
+    pr = {**PR, "body": "- [x] Reviewed the current head"}
+    row = None
+    if kind == "direct":
+        expect_check_sources(runner, pr["body"])
+    else:
+        row = (RUN if kind == "finish" else
+               {**RUN, "status": "done", "pause": None, "head": FINISHED_HEAD})
+        expect_initial_run(runner, pr, row)
+    expect_finish_gate(runner, pr["body"], row=row, ci=False)
+    if kind == "finish":
+        pr = {**pr, "headRefOid": FINISHED_HEAD}
+        row = {**RUN, "status": "done", "pause": None, "head": FINISHED_HEAD}
+    expect_round_start(runner, head=pr["headRefOid"], timeout=timeout)
+    expect_ci_poll(runner, [ci_check()], pr=pr, timeout=timeout)
+    expect_round_end(runner, pr=pr, row=row, timeout=timeout)
+    return pr["headRefOid"]
+
+
+def assert_guarded_merge(runner, head=HEAD):
+    calls = [argv for argv, _ in runner.calls]
+    assert [argv for argv in calls if argv[:3] == ["gh", "pr", "merge"]] == [merge_command(head)]
+    assert calls[-3:] == [MAIN, merge_command(head), CONFIRM_MERGED]
+    forbidden = {"--admin", "--auto", "--squash", "--rebase", "--delete-branch",
+                 "-s", "-r", "-d"}
+    assert not any(forbidden.intersection(argv) for argv in calls)
+    assert not any("deploy" in arg for argv in calls for arg in argv)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/head-conditioned-merge/verified-pr-merged")
+@pytest.mark.parametrize("kind", ["direct", "finish", "done"])
+def test_land_stable_base_confirmed_merge(config_path, scripted_runner, capsys, kind):
+    head = expect_ready_to_merge(scripted_runner, kind=kind)
+    scripted_runner.expect(merge_command(head), subprocess.CompletedProcess([], 0, "Merged!", ""))
+    scripted_runner.expect(CONFIRM_MERGED, {"number": 78, "url": URL, "state": "MERGED"})
+    assert invoke(config_path, scripted_runner, URL) == 0
+    output = capsys.readouterr()
+    assert output.out == f"Merged {URL}\n" and output.err == ""
+    assert "deploy" not in output.out + output.err
+    assert_guarded_merge(scripted_runner, head)
+    assert sum(argv == FINISH for argv, _ in scripted_runner.calls) == (kind == "finish")
+
+
+@pytest.mark.scenario("reviewed-pr-landing/head-conditioned-merge/merge-not-confirmed")
+@pytest.mark.scenario("reviewed-pr-landing/actionable-refusal-output/operator-can-recover")
+@pytest.mark.parametrize("failure", ["competing-push", "protection", "queued"])
+def test_land_merge_rejected_or_queued(config_path, scripted_runner, capsys, failure):
+    expect_ready_to_merge(scripted_runner)
+    remote = {"head": HEAD, "state": "OPEN"}
+    reason = {"competing-push": "head commit changed", "protection": "branch protection requires approval",
+              "queued": "queue admission is not a confirmed merge"}[failure]
+
+    def merge():
+        if failure == "competing-push":
+            # The push happens after the last head/base reads, at the server.
+            remote["head"] = FINISHED_HEAD
+            assert remote["head"] != merge_command()[-1]
+        return subprocess.CompletedProcess([], 0 if failure == "queued" else 1,
+                                           "Added to merge queue" if failure == "queued" else "",
+                                           "" if failure == "queued" else reason)
+
+    scripted_runner.expect(merge_command(), merge)
+    scripted_runner.expect(CONFIRM_MERGED, lambda: {"number": 78, "url": URL, "state": remote["state"]})
+    assert invoke(config_path, scripted_runner, URL) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "merge not confirmed" in output.err and reason in output.err
+    assert "rerun land" in output.err and "do not reset a done run" in output.err
+    assert "deploy" not in output.err
+    assert remote["state"] == "OPEN"
+    assert_guarded_merge(scripted_runner)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/head-conditioned-merge/merge-not-confirmed")
+@pytest.mark.parametrize("response, reason", [
+    ({"number": 78, "url": URL, "state": "CLOSED"}, "CLOSED"),
+    ({"number": 78, "url": URL, "state": "UNKNOWN"}, "UNKNOWN"),
+    ({"number": 78, "url": URL}, "missing"),
+    ({"number": 79, "url": URL, "state": "MERGED"}, "contradictory PR identity"),
+    ({"number": 78, "url": URL + "0", "state": "MERGED"}, "contradictory PR identity"),
+    ([], "expected a JSON object"),
+    (subprocess.CompletedProcess([], 0, "not JSON", ""), "malformed JSON"),
+    (subprocess.CompletedProcess([], 1, "", "GitHub unavailable"), "GitHub unavailable"),
+    (subprocess.TimeoutExpired(CONFIRM_MERGED, 30), "timed out"),
+    (OSError("gh unavailable"), "gh unavailable"),
+])
+def test_land_merge_confirmation_required(config_path, scripted_runner, capsys, response, reason):
+    expect_ready_to_merge(scripted_runner)
+    scripted_runner.expect(merge_command(), subprocess.CompletedProcess([], 0, "Merged!", ""))
+    scripted_runner.expect(CONFIRM_MERGED, response)
+    assert invoke(config_path, scripted_runner, URL) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "merged-state confirmation" in output.err and reason in output.err
+    assert "deploy" not in output.err
+    assert_guarded_merge(scripted_runner)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/head-conditioned-merge/merge-not-confirmed")
+@pytest.mark.parametrize("lost", ["timeout", "transport", "process"])
+@pytest.mark.parametrize("outcome", ["merged", "open", "unreadable"])
+def test_land_lost_merge_response_reconciled_once(
+    config_path, scripted_runner, capsys, lost, outcome,
+):
+    clock = FakeClock()
+    expect_ready_to_merge(scripted_runner, timeout=1)
+    remote = {"state": "OPEN"}
+
+    def merge():
+        remote["state"] = "MERGED" if outcome != "open" else "OPEN"
+        # Even a timeout past the CI deadline must permit a bounded confirmation.
+        clock.now += 30
+        if lost == "timeout":
+            return subprocess.TimeoutExpired(merge_command(), 30)
+        if lost == "process":
+            return OSError("connection lost")
+        return subprocess.CompletedProcess([], 1, "", "connection reset (EOF)")
+
+    scripted_runner.expect(merge_command(), merge)
+    scripted_runner.expect(CONFIRM_MERGED, lambda: (
+        subprocess.CompletedProcess([], 1, "", "confirmation unavailable") if outcome == "unreadable"
+        else {"number": 78, "url": URL, "state": remote["state"]}))
+    assert invoke_ci(config_path, scripted_runner, clock, timeout=1) == (0 if outcome == "merged" else 1)
+    output = capsys.readouterr()
+    if outcome == "merged":
+        assert output.out == f"Merged {URL}\n" and output.err == ""
+    else:
+        assert output.out == ""
+        assert "merge request" in output.err and "merged-state confirmation" in output.err
+        assert ("confirmation unavailable" if outcome == "unreadable" else "OPEN") in output.err
+    assert "deploy" not in output.out + output.err
+    assert_guarded_merge(scripted_runner)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/actionable-refusal-output/operator-can-recover")
+@pytest.mark.scenario("reviewed-pr-landing/head-conditioned-merge/verified-pr-merged")
+def test_land_real_merge_retry_keeps_done_run(config_path, scripted_runner, capsys):
+    expect_ready_to_merge(scripted_runner, kind="finish")
+    expect_merge_refusal(scripted_runner, head=FINISHED_HEAD)
+    assert invoke(config_path, scripted_runner, URL) == 1
+    output = capsys.readouterr()
+    assert "branch protection requires approval" in output.err
+    assert "rerun land" in output.err and "do not reset a done run" in output.err
+    assert output.out == ""
+
+    # The explicit retry reviews the current remote head, which can differ from
+    # the done run's local finished head. Fresh gates run without another finish.
+    expect_ready_to_merge(scripted_runner, kind="done")
+    scripted_runner.expect(merge_command(), {})
+    scripted_runner.expect(CONFIRM_MERGED, {"number": 78, "url": URL, "state": "MERGED"})
+    assert invoke(config_path, scripted_runner, URL) == 0
+    output = capsys.readouterr()
+    assert output.out == f"Merged {URL}\n" and output.err == ""
+    calls = [argv for argv, _ in scripted_runner.calls]
+    assert calls.count(FINISH) == 1 and calls.count(CHECKS) == 2
+    assert [argv for argv in calls if "merge" in argv] == [merge_command(FINISHED_HEAD), merge_command()]

@@ -1,7 +1,7 @@
 """Explicit operator entry point for landing an enrolled, reviewed PR.
 
-Identity, human checks, run completion, and bounded CI/base synchronization are wired.
-Merge remains disabled until the final landing gate is implemented.
+Human checks, run completion, and bounded CI/base synchronization precede a
+head-conditioned merge, whose result must be confirmed by GitHub.
 """
 
 from __future__ import annotations
@@ -197,7 +197,7 @@ def _positive_timeout(value: str) -> float:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="python -m nightshift.land",
-        description="Land a reviewed PR in an enrolled repository (base updates and merge currently disabled).",
+        description="Land a reviewed PR in an enrolled repository.",
         allow_abbrev=False,
     )
     result.add_argument("pr", help="GitHub.com HTTPS pull URL or positive PR number")
@@ -795,9 +795,47 @@ def wait_for_ci(identity: Identity, expected_head: str, operations: Operations) 
 def after_ci(
     pr: PullRequest, run: LandingRun | None, snapshot: CheckSnapshot, operations: Operations,
 ) -> int:
-    """Boundary for the remaining merge gate, after validated CI/base rounds."""
-    raise Refusal(f"{pr.identity.url}: mutations disabled beyond run completion until all landing "
-                  f"gates are wired (checks read at head {snapshot.head})")
+    """Merge the verified head once, then reconcile even a lost acknowledgement.
+
+    The CI budget ends at the final base comparison. Merge and confirmation
+    each have the ordinary bounded call timeout, so a slow/lost merge response
+    cannot consume the subsequent read's opportunity to establish the result.
+    Head conditioning does not lock main against another merge in this window.
+    """
+    operations.remaining()
+    operations = replace(operations, deadline=None)
+    identity = pr.identity
+    merge_error: Refusal | None = None
+    try:
+        operations.run(
+            ["gh", "pr", "merge", str(identity.number), "--repo", identity.repo,
+             "--merge", "--match-head-commit", snapshot.head],
+            stage="merge request",
+        )
+    except Refusal as exc:
+        # Never repeat the mutation: the server may have completed it already.
+        merge_error = exc
+
+    try:
+        result = operations.read_json(
+            ["gh", "pr", "view", str(identity.number), "--repo", identity.repo,
+             "--json", "number,url,state"],
+            stage="merged-state confirmation",
+        )
+        if (type(result.get("number")) is not int or result["number"] != identity.number
+                or _url_identity(result.get("url")) != identity):
+            raise Refusal("merged-state confirmation: contradictory PR identity")
+        if result.get("state") != "MERGED":
+            raise Refusal("merged-state confirmation: "
+                          f"PR state is {result.get('state', 'missing')!r}; "
+                          "queue admission is not a confirmed merge")
+    except Refusal as exc:
+        reason = f"{merge_error}; {exc}" if merge_error is not None else str(exc)
+        raise Refusal(f"merge not confirmed for {identity.url} at head {snapshot.head}: "
+                      f"{reason}; inspect the PR and protection/check results, then rerun land "
+                      "if it remains open; do not reset a done run") from exc
+    print(f"Merged {identity.url}")
+    return 0
 
 
 def main(
