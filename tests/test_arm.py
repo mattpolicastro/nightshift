@@ -432,6 +432,13 @@ def armed_reader(pages, repository="org/repo"):
         assert kwargs == dict(capture_output=True, text=True, check=True, timeout=30)
         host, repo = (repository.split("/", 1) if repository.count("/") == 2
                       else ("github.com", repository))
+        if any("/pulls?" in arg for arg in argv):
+            endpoint = f"repos/{repo}/pulls?state=open&per_page=100&page=1"
+            assert argv in (["gh", "api", "--hostname", host, endpoint],
+                            ["gh", "api", endpoint,
+                             *(["--hostname", host] if host != "github.com" else []),
+                             "--method", "GET"])
+            return subprocess.CompletedProcess(argv, 0, "[]")
         assert argv == ["gh", "api", "--hostname", host,
                         f"repos/{repo}/issues?state=open&labels=spec%3Adraft&per_page=100&page={len(calls) + 1}"]
         calls.append(argv)
@@ -550,3 +557,158 @@ def test_armed_pages_are_cached_and_retain_evidence(concurrent_checkout, tail):
 ])
 def test_front_door_identity_requires_full_producer_name(change, expected):
     assert arm.front_door_issue("github.example/org/r.po", change) == expected
+
+
+def pr_record(number, issue, *, repo="org/repo", branch=None):
+    return {"number": number, "html_url": f"https://github.example/org/repo/pull/{number}",
+            "head": {"ref": branch or f"spec/repo-issue-{issue}-old-title",
+                     "repo": {"full_name": repo}}}
+
+
+def context_reader(responses, repository="org/repo"):
+    """Serve separate helper/metadata snapshots; reject any mutation or extra read."""
+    calls = []
+
+    def runner(argv, **kwargs):
+        assert argv[:2] == ["gh", "api"]
+        assert kwargs == dict(capture_output=True, text=True, check=True, timeout=30)
+        helper = "--method" in argv
+        host, repo = (repository.split("/", 1) if repository.count("/") == 2
+                      else ("github.com", repository))
+        endpoint = argv[2] if helper else argv[4]
+        assert argv == (["gh", "api", endpoint,
+                         *(["--hostname", host] if host != "github.com" else []),
+                         "--method", "GET"] if helper else
+                        ["gh", "api", "--hostname", host, endpoint])
+        assert endpoint.startswith(f"repos/{repo}/")
+        key = ("helper" if helper else "metadata", endpoint.split(f"repos/{repo}/", 1)[1])
+        calls.append(key)
+        result = responses[key]
+        if isinstance(result, Exception):
+            raise result
+        if isinstance(result, subprocess.CompletedProcess):
+            return result
+        return subprocess.CompletedProcess(argv, 0, json.dumps(result))
+
+    return arm.IssueCache(runner=runner), calls
+
+
+@pytest.mark.scenario("issue-arming/concurrent-path-collection/all-three-sources-contribute")
+def test_all_concurrent_sources_preserve_attribution(concurrent_checkout, monkeypatch):
+    root, add_run = concurrent_checkout
+    paths = ["src/shared.py", "docs/new.md", "docs/old.md", "tests/shared.py"]
+    body = "**Scope:** " + " ".join(f"`{p}`" for p in paths)
+    target = arm.Issue(76, body, "OPEN", None, frozenset())
+    add_run("repo-issue-77-running", "`src/shared.py` `docs/new.md`")
+    add_run("repo-issue-78-paused", "`tests/shared.py`", status="paused")
+    pr = pr_record(901, 77)
+    cache, calls = context_reader({
+        ("metadata", "issues?state=open&labels=spec%3Adraft&per_page=100&page=1"):
+            [issue_record(77, body=body)],
+        ("helper", "pulls?state=open&per_page=100&page=1"): [pr],
+        ("metadata", "pulls?state=open&per_page=100&page=1"): [pr],
+        ("helper", "pulls/901/files?per_page=100&page=1"):
+            [{"filename": p} for p in paths if p != "docs/old.md"]
+            + [{"filename": "docs/new.md", "previous_filename": "docs/old.md"}],
+    })
+    original = arm.critic.open_pr_files
+    helper_calls = []
+
+    def open_pr_files(repository, branch, *, runner):
+        helper_calls.append((repository, branch, runner))
+        return original(repository, branch, runner=runner)
+
+    monkeypatch.setattr(arm.critic, "open_pr_files", open_pr_files)
+    context = arm.collect_concurrent("org/repo", root, [target], cache)
+    overlaps = arm.concurrent_overlaps(target, root, context)
+    assert set(overlaps) == {
+        *(arm.PathEvidence(p, 77, "issue #77") for p in paths),
+        *(arm.PathEvidence(p, 77, f"PR #901 {pr['html_url']}") for p in paths),
+        arm.PathEvidence("src/shared.py", 77, "run repo-issue-77-running"),
+        arm.PathEvidence("docs/new.md", 77, "run repo-issue-77-running"),
+        arm.PathEvidence("tests/shared.py", 78, "run repo-issue-78-paused"),
+    }
+    assert len(overlaps) == 11 and not context.notes
+    assert cache.open_prs("org/repo") is cache.open_prs("org/repo")
+    assert helper_calls == [("org/repo", "", cache.runner)] and len(calls) == 4
+
+
+@pytest.mark.scenario("issue-arming/concurrent-path-collection/pagination-identity-and-self-exclusion")
+def test_paginated_context_uses_source_issue_identity(concurrent_checkout):
+    root, add_run = concurrent_checkout
+    body = "**Scope:** `src/shared.py`"
+    target = arm.Issue(76, body, "OPEN", None, frozenset())
+    add_run("repo-issue-76-old-title", "`src/shared.py`")
+    prs = [pr_record(900, 76), pr_record(901, 77, branch="feature/ordinary"),
+           pr_record(902, 78, repo="fork/repo"),
+           pr_record(903, 79, branch="spec/repo-issue-79-Invalid")]
+    prs += [pr_record(903, 79, branch="ordinary")] * 96
+    later = pr_record(76, 80, repo="ORG/REPO")  # PR #76 is not source issue #76.
+    issues = [issue_record(76, body=body)] + [{"pull_request": {}}] * 99
+    responses = {
+        ("metadata", "issues?state=open&labels=spec%3Adraft&per_page=100&page=1"): issues,
+        ("metadata", "issues?state=open&labels=spec%3Adraft&per_page=100&page=2"):
+            [issue_record(81, body=body)],
+    }
+    for source in ("helper", "metadata"):
+        responses[source, "pulls?state=open&per_page=100&page=1"] = prs
+        responses[source, "pulls?state=open&per_page=100&page=2"] = [later]
+    for number in (900, 901, 902, 903):
+        responses["helper", f"pulls/{number}/files?per_page=100&page=1"] = [{"filename": "src/shared.py"}]
+    responses["helper", "pulls/76/files?per_page=100&page=1"] = [{"filename": "unrelated/file.py"}] * 100
+    responses["helper", "pulls/76/files?per_page=100&page=2"] = [{"filename": "src/shared.py"}]
+    cache, calls = context_reader(responses, "github.example/org/repo")
+    context = arm.collect_concurrent("github.example/org/repo", root, [target], cache)
+    assert arm.concurrent_overlaps(target, root, context) == [
+        arm.PathEvidence("src/shared.py", 80, f"PR #76 {later['html_url']}"),
+        arm.PathEvidence("src/shared.py", 81, "issue #81"),
+    ]
+    assert not context.notes
+    assert len(calls) == 12 and len(set(calls)) == 12
+
+
+@pytest.mark.scenario("issue-arming/concurrent-path-collection/partial-context-retains-evidence")
+@pytest.mark.parametrize("failure", [
+    subprocess.TimeoutExpired(["gh"], 30), OSError("private diagnostic"),
+    subprocess.CompletedProcess(["gh"], 1, "private diagnostic"),
+    subprocess.CompletedProcess(["gh"], 0, "not JSON"), {},
+])
+def test_partial_context_keeps_evidence_and_distinct_findings(concurrent_checkout, failure):
+    root, add_run = concurrent_checkout
+    body = "**Scope:** `docs/shared.md`"
+    target = arm.Issue(76, body, "OPEN", None, frozenset())
+    add_run("repo-issue-78-running", "`docs/shared.md`")
+    known, missing, malformed = pr_record(901, 77), pr_record(902, 79), pr_record(903, 80)
+    malformed["head"]["repo"] = None
+    cache, calls = context_reader({
+        ("metadata", "issues?state=open&labels=spec%3Adraft&per_page=100&page=1"):
+            [issue_record(77, body=body)] * 100,
+        ("metadata", "issues?state=open&labels=spec%3Adraft&per_page=100&page=2"): failure,
+        ("helper", "pulls?state=open&per_page=100&page=1"): [known, missing, malformed],
+        ("helper", "pulls/901/files?per_page=100&page=1"): [{"filename": "docs/shared.md"}] * 100,
+        ("helper", "pulls/901/files?per_page=100&page=2"): OSError("private diagnostic"),
+        ("helper", "pulls/902/files?per_page=100&page=1"): [{"filename": "docs/shared.md"}],
+        ("helper", "pulls/903/files?per_page=100&page=1"): [{"filename": "docs/shared.md"}],
+        ("metadata", "pulls?state=open&per_page=100&page=1"): [known] * 99 + [malformed],
+        ("metadata", "pulls?state=open&per_page=100&page=2"): failure,
+    })
+    context = arm.collect_concurrent("org/repo", root, [target], cache)
+    assert set(arm.concurrent_overlaps(target, root, context)) == {
+        arm.PathEvidence("docs/shared.md", 77, "issue #77"),
+        arm.PathEvidence("docs/shared.md", 77, f"PR #901 {known['html_url']}"),
+        arm.PathEvidence("docs/shared.md", 78, "run repo-issue-78-running"),
+    }
+    findings = arm.context_findings(76, context)
+    assert {f.message for f in findings} == {
+        "Armed issue page 2 could not be read.",
+        "Open PR #901 files unavailable: GitHub request failed.",
+        "Open PR metadata page 2 could not be read.",
+        "Open PR #903 metadata has an unknown head repository or branch.",
+        f"Open PR metadata unavailable for #902 {missing['html_url']}.",
+        f"Open PR metadata unavailable for #903 {malformed['html_url']}.",
+    }
+    assert len(findings) == 6
+    assert all(f.code == "incomplete-context" and f.issue == 76 and f.suggestion for f in findings)
+    assert "private diagnostic" not in str(context)
+    assert findings == sorted(findings, key=arm.Finding.sort_key)
+    assert cache.open_prs("org/repo") is cache.open_prs("org/repo") and len(calls) == 9

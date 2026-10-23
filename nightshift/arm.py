@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from nightshift.queue import blockers
-from specloop import propose
+from specloop import critic, propose
 
 REQUIRED_SECTIONS = ("Scope", "What to do", "Definition of done", "What CI cannot prove")
 _SECTION_NAMES = {name.casefold(): name for name in REQUIRED_SECTIONS}
@@ -121,6 +121,12 @@ class IssueCache:
         self.runner = runner
         self._issues: dict[tuple[str, int], Issue | IssueLookupError] = {}
         self._armed: dict[str, tuple[list[Issue], list[str]]] = {}
+        self._prs: dict[str, ConcurrentContext] = {}
+
+    def open_prs(self, repository: str) -> ConcurrentContext:
+        if repository not in self._prs:
+            self._prs[repository] = read_pr_context(repository, runner=self.runner)
+        return self._prs[repository]
 
     def armed(self, repository: str) -> tuple[list[Issue], list[str]]:
         """Cache all open intake issues, keeping earlier pages on a failed read."""
@@ -208,6 +214,66 @@ def front_door_issue(repository: str, change: str) -> int | None:
     return int(match[1]) if match else None
 
 
+def read_pr_context(repository: str, *, runner=None) -> ConcurrentContext:
+    """Join the critic's filenames/URLs to front-door source issue identities.
+
+    The two reads are a best-effort snapshot: an absent metadata row is unknown,
+    not evidence that a PR is unrelated. Keep earlier pages on lookup failure.
+    """
+    files, helper_notes = critic.open_pr_files(repository, "", runner=runner)
+    notes = list(helper_notes)
+    identities: dict[int, int | None] = {}
+    parts = repository.split("/")
+    host, repo = (parts[0], "/".join(parts[1:])) if len(parts) == 3 else ("github.com", repository)
+    page = 1
+    while True:
+        argv = ["gh", "api", "--hostname", host,
+                f"repos/{repo}/pulls?state=open&per_page=100&page={page}"]
+        try:
+            response = (runner or subprocess.run)(
+                argv, capture_output=True, text=True, check=True, timeout=30)
+            if response.returncode:
+                raise ValueError
+            rows = json.loads(response.stdout)
+            if not isinstance(rows, list) or len(rows) > 100:
+                raise ValueError
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+            notes.append(f"Open PR metadata page {page} could not be read.")
+            break
+        for row in rows:
+            if (not isinstance(row, dict) or type(row.get("number")) is not int
+                    or row["number"] <= 0):
+                notes.append(f"Open PR metadata page {page} contains an unreadable PR.")
+                continue
+            number = row["number"]
+            head = row.get("head")
+            if (not isinstance(head, dict) or not isinstance(head.get("ref"), str)
+                    or not isinstance(head.get("repo"), dict)
+                    or not isinstance(head["repo"].get("full_name"), str)
+                    or not head["repo"]["full_name"]):
+                notes.append(f"Open PR #{number} metadata has an unknown head repository or branch.")
+                continue
+            source_issue = None
+            if head["repo"]["full_name"].casefold() == repo.casefold() and head["ref"].startswith("spec/"):
+                source_issue = front_door_issue(repository, head["ref"][5:])
+            identities[number] = source_issue
+        if len(rows) < 100:
+            break
+        page += 1
+    evidence = set()
+    for path, labels in files.items():
+        for label in labels:
+            match = re.match(r"#([1-9][0-9]*) ", label)
+            if not match or int(match[1]) not in identities:
+                notes.append(f"Open PR metadata unavailable for {label}.")
+                continue
+            source_issue = identities[int(match[1])]
+            if source_issue is not None:
+                evidence.add(PathEvidence(path, source_issue, f"PR {label}"))
+    return ConcurrentContext(sorted(evidence, key=lambda e: (e.path, e.issue or 0, e.source)),
+                             list(dict.fromkeys(notes)))
+
+
 def collect_concurrent(repository: str, root: Path, targets: list[Issue],
                        cache: IssueCache) -> ConcurrentContext:
     """Collect one shared snapshot; candidates participate even before labelling."""
@@ -218,7 +284,14 @@ def collect_concurrent(repository: str, root: Path, targets: list[Issue],
     for path, changes in propose.in_flight(root, "").items():
         for change in changes:
             evidence.append(PathEvidence(path, front_door_issue(repository, change), f"run {change}"))
-    return ConcurrentContext(evidence, list(notes))
+    prs = cache.open_prs(repository)
+    return ConcurrentContext([*evidence, *prs.evidence], list(dict.fromkeys([*notes, *prs.notes])))
+
+
+def context_findings(issue: int, context: ConcurrentContext) -> list[Finding]:
+    return sorted((Finding("incomplete-context", issue, note,
+                           "Restore concurrent context access, then rerun.")
+                   for note in dict.fromkeys(context.notes)), key=Finding.sort_key)
 
 
 def concurrent_overlaps(issue: Issue, root: Path, context: ConcurrentContext) -> list[PathEvidence]:
