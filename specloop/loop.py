@@ -254,7 +254,7 @@ def prepare_publish(ctx: Ctx) -> bool:
 def run(ctx: Ctx) -> str:
     """Advance until a pause or completion. Returns the final run status."""
     # The CLI constructs Ctx before writing its resume event.
-    ctx.infra_retries = _InfraRetries(ctx.run)
+    ctx.infra_retries = _InfraRetries(ctx)
     st = ctx.run.state
     while st.status == "running":
         if ctx.run.pause_requested():
@@ -751,21 +751,42 @@ INFRA_COOLDOWN = 15 * 60
 class _InfraRetries:
     """Task/profile allowances recovered once per driver, without a state schema change."""
 
-    def __init__(self, run: Run):
+    def __init__(self, ctx: Ctx):
+        run = ctx.run
         self.counts: dict[tuple[str, str], int] = {}
         self.legacy = {key: ts.infra for key, ts in run.state.tasks.items()}
         self.previous: dict[str, str] = {}
         paused = ""
+        block: dict = {}
+        recover: dict = {}
+        cleared: dict[str, float] = {}
         for event in agents.read_jsonl(run.dir / "events.jsonl"):
             if not isinstance(event, dict):
                 continue
             kind, key = event.get("event"), event.get("task", "")
             if not isinstance(key, str):
                 continue
-            if kind == "pause":
+            if kind in ("exhausted", "unavailable"):
+                profile = event.get("profile")
+                if isinstance(profile, str):
+                    cleared.pop(profile, None)  # A later block supersedes an old manual resume.
+            elif kind == "unavailable_pause":
+                block = event
+            elif kind == "pause":
                 paused = key
+                role = block.get("role")
+                recover = block if (event.get("reason") == "infra"
+                                    and block.get("task") == key
+                                    and block.get("until") == event.get("resume_at")
+                                    and isinstance(role, str) and (role in ctx.m.chains or role in ctx.m.roles)
+                                    and len(_chain(ctx, role)) == 1
+                                    and _chain(ctx, role)[0].name == block.get("profile")) else {}
+                block = {}
             elif kind == "resumed" or (kind == "auto_resumed" and event.get("reason") == "infra"):
                 key = paused if kind == "resumed" else key
+                if kind == "resumed" and recover:
+                    cleared[recover["profile"]] = recover["until"]
+                recover = {}
                 self.counts = {pair: n for pair, n in self.counts.items() if pair[0] != key}
                 self.previous.pop(key, None)
                 paused = ""
@@ -781,6 +802,12 @@ class _InfraRetries:
                 self.previous.pop(key, None)
                 if isinstance(profile, str) and profile:
                     self.previous[key] = profile
+        # Manual recovery may probe a repaired single provider before its cooldown.
+        # Reconcile after replay so an old resume cannot clear a newer block.
+        for profile, until in cleared.items():
+            if run.state.exhausted.get(profile) == until:
+                del run.state.exhausted[profile]
+                run.save()
 
     def record(self, ctx: Ctx, key: str, profile: str, role: str, count: int) -> int:
         self.counts[key, profile] = count
@@ -809,7 +836,7 @@ class _InfraRetries:
 
 def _infra_retries(ctx: Ctx) -> _InfraRetries:
     if ctx.infra_retries is None:
-        ctx.infra_retries = _InfraRetries(ctx.run)
+        ctx.infra_retries = _InfraRetries(ctx)
     return ctx.infra_retries
 
 
@@ -834,10 +861,24 @@ def _infra(ctx: Ctx, task: tasks.Task | None, ts: TaskState, res: agents.Result,
     if res.disposition == "infra":
         count = retries.count(ctx, key, call.profile.name, role) + 1
         ts.infra = retries.record(ctx, key, call.profile.name, role, count)
-        if ts.infra > ctx.m.max_infra:
-            ctx.pause("infra", task, res.detail, key=key, resume_at=time.time() + INFRA_COOLDOWN)
-        else:
+        if ts.infra <= ctx.m.max_infra:
             ctx.run.save()
+            return True
+    if res.disposition in ("infra", "unavailable"):
+        p = call.profile
+        until = time.time() + INFRA_COOLDOWN
+        ctx.run.state.exhausted[p.name] = until
+        ctx.run.event("unavailable", task=key, role=role, profile=p.name, until=until,
+                      disposition=res.disposition, detail=res.detail[:300])
+        ctx.run.save()
+        nxt = _pick(ctx, role)
+        if nxt is None:
+            _all_exhausted(ctx, task, role, key, detail=res.detail)
+        else:
+            ts.infra = retries.count(ctx, key, nxt.name, role)
+            ctx.run.save()
+            ctx.notify(messages.fyi(ctx.m.change, f"{p.name} unavailable: {messages.first_line(res.detail)}; "
+                                    f"{role} continues on {nxt.name}"))
         return True
     return False
 
@@ -847,22 +888,46 @@ def _chain(ctx: Ctx, role: str) -> tuple:
 
 
 def _pick(ctx: Ctx, role: str):
-    """The first profile in the role's chain that is not usage-limited right now."""
+    """The first profile with no active quota or unavailable deadline."""
     retries = _infra_retries(ctx)  # Snapshot legacy attribution before the next call is recorded.
     now = time.time()
     for p in _chain(ctx, role):
         if ctx.run.state.exhausted.get(p.name, 0) <= now:
             if ctx.run.state.exhausted.pop(p.name, None) is not None:
                 retries.reset_profile(ctx, p.name, role)
+                ctx.run.save()
             return p
     return None
 
 
-def _all_exhausted(ctx: Ctx, task: tasks.Task | None, role: str, key: str = "") -> None:
-    until = min(ctx.run.state.exhausted.get(p.name, 0) for p in _chain(ctx, role))
-    names = ", ".join(p.name for p in _chain(ctx, role))
-    ctx.pause("usage_limit", task, f"every {role} profile is usage-limited ({names}); usable again "
-              f"{time.strftime('%a %H:%M', time.localtime(until))}", key=key, resume_at=until)
+def _all_exhausted(ctx: Ctx, task: tasks.Task | None, role: str, key: str = "", detail: str = "") -> None:
+    deadlines = {p.name: ctx.run.state.exhausted.get(p.name, 0) for p in _chain(ctx, role)}
+    until = min(deadlines.values())
+    causes: dict[str, dict] = {}
+    # Append order wins, but only events for the saved deadline describe its cause.
+    # Missing history is a legacy quota block, never evidence of unavailability.
+    for event in agents.read_jsonl(ctx.run.dir / "events.jsonl"):
+        if not isinstance(event, dict) or event.get("event") not in ("exhausted", "unavailable"):
+            continue
+        name = event.get("profile")
+        if isinstance(name, str) and name in deadlines and event.get("until") == deadlines[name]:
+            causes[name] = event
+    unavailable = {name for name, event in causes.items() if event["event"] == "unavailable"}
+    if unavailable:
+        if len(deadlines) == 1:
+            name = next(iter(unavailable))
+            detail = detail or causes[name].get("detail", "")
+            # Recovery belongs to this paused role, even if another role blocked the profile.
+            ctx.run.event("unavailable_pause", task=task.key if task else key, role=role,
+                          profile=name, until=until)
+        else:
+            detail = "; ".join(f"{name} unavailable: {causes[name].get('detail', '')}"
+                               if name in unavailable else f"{name} usage-limited" for name in deadlines)
+        ctx.pause("infra", task, detail, key=key, resume_at=until)
+    else:
+        names = ", ".join(deadlines)
+        ctx.pause("usage_limit", task, f"every {role} profile is usage-limited ({names}); usable again "
+                  f"{time.strftime('%a %H:%M', time.localtime(until))}", key=key, resume_at=until)
 
 
 def _failed(ctx: Ctx, task: tasks.Task, ts: TaskState, why: str, verified: bool = False) -> None:

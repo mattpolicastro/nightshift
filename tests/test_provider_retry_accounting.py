@@ -1,4 +1,4 @@
-"""Counter tests inject profile changes; fallback routing is a separate concern."""
+"""Task/profile counter tests, including continuation onto usable fallbacks."""
 
 import pytest
 
@@ -39,10 +39,9 @@ def test_fallback_budget_is_independent(tmp_path, limit):
     ctx = context(tmp_path, limit=limit)
     for _ in range(limit + 1):
         ts = result(ctx)
-    assert ts.infra == limit + 1 and ts.attempts == 0
-    assert ctx.run.state.pause.reason == "infra"
-    # Select B without a resume/reset, isolating accounting from fallback routing.
-    ctx.run.state.status, ctx.run.state.pause = "running", None
+    assert ts.infra == 0 and ts.attempts == 0
+    assert ctx.run.state.status == "running" and ctx.run.state.pause is None
+    assert loop._pick(ctx, "implement") == B
     assert loop._infra_retries(ctx).count(ctx, TASK.key, B.name, "implement") == 0
     for count in range(1, limit + 1):
         ts = result(ctx, B)
@@ -81,8 +80,9 @@ def test_restart_replays_append_order_and_ignores_bad_lines(tmp_path):
     ctx = restart(ctx)
     assert result(ctx, B).infra == 1
     assert ctx.run.state.status == "running"
-    assert result(ctx, A).infra == 3
-    assert ctx.run.state.pause.reason == "infra"
+    assert result(ctx, A).infra == 1  # B retains its own previously spent retry.
+    assert loop._infra_retries(ctx).count(ctx, TASK.key, A.name, "implement") == 3
+    assert ctx.run.state.status == "running" and loop._pick(ctx, "implement") == B
     assert (ctx.run.dir / "events.jsonl").read_text().startswith(before)
 
 
@@ -93,8 +93,9 @@ def test_restart_keeps_the_remaining_retry(tmp_path):
     ctx = restart(ctx)
     assert result(ctx).infra == 2
     assert ctx.run.state.status == "running"
-    assert result(ctx).infra == 3
-    assert ctx.run.state.pause.reason == "infra"
+    assert result(ctx).infra == 0
+    assert loop._infra_retries(ctx).count(ctx, TASK.key, A.name, "implement") == 3
+    assert ctx.run.state.status == "running" and loop._pick(ctx, "implement") == B
 
 
 @pytest.mark.scenario("provider-fallback/task-and-profile-retry-allowance/restart-retains-partial-allowance")
