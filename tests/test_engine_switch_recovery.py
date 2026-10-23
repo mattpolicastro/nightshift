@@ -222,6 +222,7 @@ def test_unknown_recovery_retains_evidence_and_isolates_intake(switched, tmp_pat
     assert any(c[:2] == ["specloop", "propose"] for c in independent.calls)
 
 
+@pytest.mark.scenario("config-resilience/durable-switch-recovery/partial-recovery-retries-safely")
 def test_outcome_failure_keeps_claim_and_journal(switched, tmp_path, monkeypatch):
     claim = working(switched, 1, tmp_path, survives=True)
     with monkeypatch.context() as patch:
@@ -287,3 +288,216 @@ def test_unfinished_recovery_cannot_retire_a_new_claim(
     assert not any(c[:2] == ["specloop", "propose"] for c in switched.calls)
     assert any(c[:2] == ["specloop", "publish"] for c in switched.calls)
     assert any(c[:2] == ["specloop", "propose"] for c in independent.calls)
+
+
+def recovery_path():
+    return daemon.STATE_DIR / "engine-switch/owner__switched/1.json"
+
+
+def recovery_writes(pipeline):
+    return [c for c in pipeline.calls
+            if c[:2] in (["issue", "edit"], ["issue", "comment"]) and c[2] == "1"]
+
+
+@pytest.mark.scenario("config-resilience/durable-switch-recovery/lost-transition-response-recovers")
+@pytest.mark.scenario("config-resilience/durable-switch-recovery/partial-recovery-retries-safely")
+@pytest.mark.parametrize("operation,applied,survives", [
+    ("comment", False, True), ("comment", True, True), ("edit", False, True),
+    ("edit", True, True), ("edit", False, False), ("edit", True, False),
+])
+def test_remote_write_failure_recovers_on_restart(
+    switched, tmp_path, monkeypatch, survives, operation, applied,
+):
+    claim = working(switched, 1, tmp_path, survives=survives)
+    # Keep the released issue available for assertions across later polls.
+    monkeypatch.setattr(daemon.specloop_intake, "propose_pending", lambda *a, **k: None)
+    original = switched.gh
+
+    def failing(args):
+        if args[:2] == ["issue", operation]:
+            if applied:
+                original(args)
+            raise queue.GhError("write response lost", transient=True)
+        return original(args)
+
+    health = daemon.RepoHealth()
+    switched.gh = failing
+    poll([switched], health)
+    assert health.failures == {switched.repo.name: 1}
+    assert claim.path.exists() and not outcomes.tasks()
+    saved = json.loads(recovery_path().read_text())
+    assert not saved["done"] and saved["claim"]["worktree"] == claim.worktree
+    if operation == "comment":
+        assert labels(switched, 1) == {"agent:working", "keep-me"}
+        assert not any(c[:2] == ["issue", "edit"] for c in recovery_writes(switched))
+    elif applied:
+        assert "agent:working" not in labels(switched, 1)
+
+    switched.gh = original
+    monkeypatch.setattr(queue, "reconcile", lambda *a, **k: pytest.fail("discarded switch evidence"))
+    daemon.startup(Config(repos=[switched.repo]), {}, daemon.RepoHealth())
+    poll([switched], health)
+    assert not health.failures and not claim.path.exists()
+    assert json.loads(recovery_path().read_text())["done"]
+    outcome, = outcomes.tasks()
+    assert outcome["engine_switch_id"] == saved["id"] and outcome["state"] == "needs_decision"
+    writes = recovery_writes(switched)
+    assert sum(c[:2] == ["issue", "edit"] for c in writes) == 1
+    assert len(switched.issues[1]["comments"]) == int(saved["action"] == "hold")
+    assert sum(c[:2] == ["issue", "comment"] for c in writes) == int(saved["action"] == "hold")
+
+
+@pytest.mark.scenario("config-resilience/durable-switch-recovery/partial-recovery-retries-safely")
+@pytest.mark.parametrize("stage", ["intent", "commented", "transitioned", "done"])
+def test_journal_write_failure_resumes_from_durable_evidence(switched, tmp_path, monkeypatch, stage):
+    claim = working(switched, 1, tmp_path, survives=True)
+    original = daemon.specloop_job.save
+
+    def failing(path, data):
+        progress = next((key for key in ("done", "transitioned", "commented") if data.get(key)), "intent")
+        if progress == stage:
+            raise OSError("journal write failed")
+        original(path, data)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(daemon.specloop_job, "save", failing)
+        with pytest.raises(OSError, match="journal write failed"):
+            daemon._reconcile_engine_switch(switched.repo, queue.Labels())
+    assert claim.path.exists() == (stage != "done")
+    assert bool(outcomes.tasks()) == (stage == "done")
+    if stage == "intent":
+        assert not recovery_path().exists() and not recovery_writes(switched)
+    else:
+        saved = json.loads(recovery_path().read_text())
+        assert not saved["done"] and saved["claim"]["branch"] == claim.branch
+        saved["future_field"] = "keep"
+        original(recovery_path(), saved)
+    if stage == "commented":
+        assert labels(switched, 1) == {"agent:working", "keep-me"}
+    before = outcomes.tasks()
+    daemon.startup(Config(repos=[switched.repo]), {}, daemon.RepoHealth())
+    assert not claim.path.exists() and json.loads(recovery_path().read_text())["done"]
+    assert len(outcomes.tasks()) == 1
+    if before:
+        assert outcomes.tasks() == before  # No second outcome event after cleanup/save failure.
+    if stage != "intent":
+        assert json.loads(recovery_path().read_text())["future_field"] == "keep"
+    assert [c[1] for c in recovery_writes(switched)] == ["comment", "edit"]
+    assert (tmp_path / "work-1/diff.txt").read_text() == "unfinished work"
+
+
+@pytest.mark.scenario("config-resilience/durable-switch-recovery/partial-recovery-retries-safely")
+@pytest.mark.parametrize("conflict", ["agent:ready", "agent:revise", "agent:done", "removed", "rearmed"])
+def test_human_label_change_is_preserved(switched, tmp_path, monkeypatch, caplog, conflict):
+    claim = working(switched, 1, tmp_path, survives=True)
+    original = switched.gh
+
+    def human_change(args):
+        result = original(args)
+        if args[:2] == ["issue", "comment"]:
+            switched.issues[1]["labels"] = [{"name": "keep-me"}]
+            if conflict != "removed":
+                switched.issues[1]["labels"].append({"name": conflict})
+        return result
+
+    if conflict == "rearmed":
+        # The label transition was recorded, but the local outcome failed.
+        with monkeypatch.context() as patch:
+            patch.setattr(outcomes, "record", lambda *a, **k: None)
+            with pytest.raises(OSError, match="outcome not persisted"):
+                daemon._reconcile_engine_switch(switched.repo, queue.Labels())
+        switched.issues[1]["labels"] = [{"name": "agent:working"}, {"name": "keep-me"}]
+    else:
+        switched.gh = human_change
+    health = daemon.RepoHealth()
+    writes = list(recovery_writes(switched))
+    poll([switched], health)
+    assert health.failures == {switched.repo.name: 1} and "conflicting labels" in caplog.text
+    expected = "agent:working" if conflict == "rearmed" else conflict
+    assert labels(switched, 1) == ({"keep-me"} if conflict == "removed" else {"keep-me", expected})
+    assert claim.path.exists() and not outcomes.tasks()
+    assert not json.loads(recovery_path().read_text())["done"]
+    assert not any(c[:2] == ["issue", "edit"] for c in recovery_writes(switched)[len(writes):])
+
+
+@pytest.mark.scenario("config-resilience/durable-switch-recovery/partial-recovery-retries-safely")
+def test_pending_recovery_ignores_stale_lists(switched, tmp_path, monkeypatch):
+    claim = working(switched, 1, tmp_path, survives=True)
+    with monkeypatch.context() as patch:
+        patch.setattr(outcomes, "record", lambda *a, **k: None)
+        with pytest.raises(OSError, match="outcome not persisted"):
+            daemon._reconcile_engine_switch(switched.repo, queue.Labels())
+    original = switched.gh
+    writes = recovery_writes(switched)
+
+    def stale(args):
+        if args[:2] == ["issue", "list"]:
+            return json.dumps([{**switched.issues[1], "labels": [{"name": "agent:working"}]}])
+        if args[:2] == ["api", "repos/owner/switched/issues/1/comments"]:
+            return "[[]]"  # Already acknowledged comment omitted by a stale list.
+        return original(args)
+
+    daemon._reconcile_engine_switch(switched.repo, queue.Labels(), runner=stale)
+    assert not claim.path.exists() and json.loads(recovery_path().read_text())["done"]
+    assert recovery_writes(switched) == writes and len(outcomes.tasks()) == 1
+
+
+@pytest.mark.scenario("config-resilience/durable-switch-recovery/partial-recovery-retries-safely")
+def test_human_hold_prevents_release_after_intent_save(switched, tmp_path, monkeypatch, caplog):
+    claim = working(switched, 1, tmp_path)
+    original = daemon.specloop_job.save
+
+    def human_hold(path, data):
+        original(path, data)
+        switched.issues[1]["labels"] = [{"name": "needs-human"}, {"name": "keep-me"}]
+
+    health = daemon.RepoHealth()
+    with monkeypatch.context() as patch:
+        patch.setattr(daemon.specloop_job, "save", human_hold)
+        poll([switched], health)
+    poll([switched], health)
+    assert health.failures == {switched.repo.name: 2} and "conflicting labels" in caplog.text
+    assert labels(switched, 1) == {"needs-human", "keep-me"}
+    assert claim.path.exists() and not outcomes.tasks() and not recovery_writes(switched)
+    saved = json.loads(recovery_path().read_text())
+    assert saved["action"] == "release" and not saved["done"]
+
+
+@pytest.mark.scenario("config-resilience/durable-switch-recovery/partial-recovery-retries-safely")
+@pytest.mark.parametrize("boundary", ["intent", "comments-read", "comment", "edit"])
+def test_pause_between_recovery_operations_retains_intent(switched, tmp_path, monkeypatch, boundary):
+    claim = working(switched, 1, tmp_path, survives=True)
+    original_gh, original_save = switched.gh, daemon.specloop_job.save
+
+    def pause_after_read_or_write(args):
+        result = original_gh(args)
+        if (args[:2] == ["issue", boundary] or
+                (boundary == "comments-read" and args[:2] == [
+                    "api", "repos/owner/switched/issues/1/comments"])):
+            daemon.PAUSE_FILE.touch()
+        return result
+
+    def pause_after_intent(path, data):
+        original_save(path, data)
+        if boundary == "intent":
+            daemon.PAUSE_FILE.touch()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(daemon.specloop_job, "save", pause_after_intent)
+        switched.gh = pause_after_read_or_write
+        poll([switched], daemon.RepoHealth())
+    saved = json.loads(recovery_path().read_text())
+    assert not saved["done"] and claim.path.exists() and not outcomes.tasks()
+    writes = recovery_writes(switched)
+    assert [c[1] for c in writes] == {
+        "intent": [], "comments-read": [], "comment": ["comment"], "edit": ["comment", "edit"],
+    }[boundary]
+    switched.calls.clear()
+    poll([switched], daemon.RepoHealth())
+    assert not switched.calls  # A fully paused poll does no external recovery work.
+    daemon.PAUSE_FILE.unlink()
+    switched.gh = original_gh
+    poll([switched], daemon.RepoHealth())
+    assert not claim.path.exists() and json.loads(recovery_path().read_text())["done"]
+    assert [c[1] for c in writes + recovery_writes(switched)] == ["comment", "edit"]
+    assert len(switched.issues[1]["comments"]) == len(outcomes.tasks()) == 1

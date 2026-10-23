@@ -284,6 +284,12 @@ def _reconcile_engine_switch(repo: Repo, labels: queue.Labels, *, runner=None) -
             read_errors.append(exc)
             raise
 
+    def read_labels(number):
+        current = queue.labels_of(repo.name, number, runner=gh)
+        if read_errors:
+            raise read_errors[-1]
+        return current
+
     check()
     claims, unreadable = queue.in_flight(repo.name)
     if unreadable:
@@ -302,9 +308,7 @@ def _reconcile_engine_switch(repo: Repo, labels: queue.Labels, *, runner=None) -
         claim = by_number.get(number)
         if journal and journal.get("done") and claim is None and number not in working:
             continue
-        current = queue.labels_of(repo.name, number, runner=gh)
-        if read_errors:
-            raise read_errors[-1]
+        current = read_labels(number)
         path = root / f"{number}.json"
         if journal and journal.get("done"):
             if claim is None and labels.working not in current:
@@ -348,18 +352,32 @@ def _reconcile_engine_switch(repo: Repo, labels: queue.Labels, *, runner=None) -
         hold = journal["action"] == "hold"
         target = labels.needs_human if hold else labels.ready
         conflicts = {labels.ready, labels.revise, labels.needs_human, labels.done} - {target}
-        if current & conflicts or (labels.working not in current and target not in current):
-            raise ValueError(f"recovery #{number} has conflicting labels; inspect {path}")
-        if hold:
+
+        def validate_labels(current):
+            if (current & conflicts or (labels.working not in current and target not in current)
+                    or (journal.get("transitioned") and labels.working in current)):
+                # A recorded transition cannot need repeating. Working has
+                # been reapplied since then; retain the human's decision.
+                raise ValueError(f"recovery #{number} has conflicting labels; inspect {path}")
+
+        validate_labels(current)
+        if hold and not journal.get("commented"):
             pages = json.loads(gh([
                 "api", f"repos/{repo.name}/issues/{number}/comments", "--paginate", "--slurp",
             ]))
             if not any(journal["marker"] in c["body"] for page in pages for c in page):
+                validate_labels(read_labels(number))
                 gh(["issue", "comment", str(number), "--repo", repo.name, "--body",
                     f"{queue.SELF_COMMENT_PREFIX} {journal['detail']}. "
                     f"Work is preserved for human inspection.\n\n{journal['marker']}"])
+            # Once acknowledged, even a stale comment list must not cause a
+            # duplicate. An ambiguous response instead reconciles the marker.
             journal["commented"] = True
             specloop_job.save(path, journal)
+        # Comment delivery and local writes can take time. Recheck the object
+        # before transitioning so an intervening human label edit wins.
+        current = read_labels(number)
+        validate_labels(current)
         if labels.working in current:
             queue._relabel(repo.name, number, add=[target], remove=[labels.working], runner=gh)
         journal["transitioned"] = True
