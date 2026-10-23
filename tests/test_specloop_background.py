@@ -718,6 +718,7 @@ def test_finished_job_delivers_once_after_paused_restart(delivery_job, stage):
 
 
 @pytest.mark.scenario("paused-job-delivery/independent-supervisor-boundary/admission-already-committed")
+@pytest.mark.scenario("specloop-documentation/operations-guidance/operator-distinguishes-pause-and-stop")
 @pytest.mark.parametrize("cancelled", [False, True], ids=["paused", "cancelled"])
 @pytest.mark.parametrize("already_driving", [False, True], ids=["supervisor-starts", "supervisor-continues"])
 def test_committed_admission_survives_delivery_hold(delivery_job, monkeypatch, cancelled, already_driving):

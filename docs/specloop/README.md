@@ -136,11 +136,74 @@ use a frozen lockfile for reproducible fetching. See the
 [pnpm preparation example](prepare.md).
 
 **Rollout:** `worker` remains the default when `engine` is omitted, with its
-existing behavior; retiring it is a later change. While `~/.nightshift/pause`
-exists, there is no intake, approval, revision
-or publication; in-flight drafting/admission jobs may finish but delivery
-waits. Already-admitted runs continue under the separate specloop supervisor;
-unload its launchd job to stop that service.
+existing behavior; retiring it is a later change. See [operations](#operations)
+for pause, job control and supervisor boundaries.
+
+## Operations
+
+### Pause, stop and the supervisor
+
+`nightshift pause` creates `~/.nightshift/pause`, holding new daemon launches
+and completion delivery, including publication. In-flight drafting, admission
+and revision jobs can finish locally; an already-dispatched external operation
+may finish too. `nightshift resume` removes the pause and delivers eligible
+retained results without rerunning the job.
+
+`nightshift jobs` lists local background attempts and history offline, without
+a running daemon or valid repository configuration. Copy the exact full job ID
+into `nightshift jobs stop <id>`; prefixes and paths are not accepted. Stop
+verifies process-start identity, process group and job-directory ownership
+before sending SIGTERM, then SIGKILL if needed, to that group. It records
+`stopped` only after no executing group members remain; unverifiable identity
+is refused ([issue #8](https://github.com/mattpolicastro/nightshift/issues/8),
+[PR #28](https://github.com/mattpolicastro/nightshift/pull/28)).
+
+Logs, requests, results and receipts remain on disk. Stopped jobs stay held
+across polling, daemon restart, resume and label removal/reapplication: none
+delivers the stopped result or starts a replacement. There is no job retry
+command. Follow the existing [pause and job recovery instructions](../../README.md#pause-and-job-control)
+before changing receipts; pause and stop do not roll back committed effects.
+
+Admission can finish while paused and commit runnable state. The independent
+`specloop serve` supervisor can start or continue that build while the daemon
+withholds delivery. Neither daemon pause nor job stop cancels admitted runs.
+Control the supervisor and active run processes separately; unloading its
+launchd job alone does not prove detached run processes exited.
+
+### Touchpoint report
+
+Run `uv run python -m nightshift.touchpoints` for a read-only local report.
+Add `--since YYYY-MM-DD` to select changes drafted on or after that UTC date,
+and `--json` for versioned JSON; either option can be used alone or together
+([issue #50](https://github.com/mattpolicastro/nightshift/issues/50),
+[PR #53](https://github.com/mattpolicastro/nightshift/pull/53)).
+
+The seven counters cover drafter question rounds (not individual questions),
+spec revisions, build revisions, human pauses, manual resumes, human accepts
+and admission refusals. Pause and resume counts also break down by reason.
+Totals sum category observations, not unique human actions: a question during
+spec revision counts in both categories; a pause and its resume count separately.
+
+Coverage is observed local history in `~/.nightshift` receipts/retained jobs
+and `~/.specloop/runs` event logs. Missing or overwritten history can undercount.
+Draft-date filtering uses approximate filesystem timestamps from the earliest
+retained proposal request, falling back to proposal receipts. Unknown draft
+dates are excluded with a diagnostic when `--since` is used. The merge boundary
+is unknown; this is not a complete draft-to-merge audit. Read the warnings and
+errors alongside totals: unreadable records leave healthy rows visible but
+exit 1, with diagnostics in both table and JSON output.
+
+### Tests and scenario evidence
+
+Run `uv run pytest` for implementation acceptance. For parallel execution,
+`uv run pytest -n 4` uses pytest-xdist with four workers
+([PR #54](https://github.com/mattpolicastro/nightshift/pull/54)). When loaded
+with `-p scenario_plugin` and its directory on `PYTHONPATH`, the existing
+[scenario plugin](../../examples/specloop/scenario_plugin.py) forwards passed
+scenario IDs through test report `user_properties` from workers to the
+controller, which emits deduplicated `SCENARIO` lines. Failed tests contribute
+no passed IDs. CI currently invokes `uv run pytest -q`, not four workers by
+default, and ignores Markdown-only changes.
 
 ## Publication and base recovery
 

@@ -210,7 +210,17 @@ locally. Use `nightshift jobs` and `nightshift jobs stop <id>` to select and
 terminate a tracked background job. An admission that has already committed
 runnable state may still start or continue building under the independent
 `specloop serve` supervisor. See [pause and job control](#pause-and-job-control)
-for these boundaries and recovery guidance.
+for these boundaries and recovery guidance
+([issue #8](https://github.com/mattpolicastro/nightshift/issues/8),
+[PR #28](https://github.com/mattpolicastro/nightshift/pull/28)).
+
+The [operations guide](docs/specloop/README.md#operations) also covers the local
+touchpoint report (`uv run python -m nightshift.touchpoints`, optionally with
+`--since YYYY-MM-DD` and `--json`) and its counting limits
+([PR #53](https://github.com/mattpolicastro/nightshift/pull/53)). It explains
+parallel tests with `uv run pytest -n 4` and scenario reporting under xdist
+([PR #54](https://github.com/mattpolicastro/nightshift/pull/54)); `uv run pytest`
+remains the implementation acceptance command.
 
 ### Prepare dependencies before verification
 
