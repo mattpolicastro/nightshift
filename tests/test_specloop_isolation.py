@@ -5,6 +5,8 @@ import subprocess
 
 import pytest
 
+from manifest_fixtures import manifest_text
+
 from nightshift import daemon, queue, specloop_intake
 from nightshift.config import Config, Repo
 
@@ -59,7 +61,10 @@ class Pipeline:
         kind, action = args[:2]
         items = self.issues if kind == "issue" else self.prs
         if action == "list":
-            if self.fail == f"{kind}-list" and "--label" in args:
+            # This fixture injects intake discovery failures. Worker-recovery
+            # discovery now has its own repository hold and focused tests.
+            if (self.fail == f"{kind}-list" and "--label" in args
+                    and args[args.index("--label") + 1] != "agent:working"):
                 raise queue.GhError("discovery unavailable", transient=True)
             if "--label" in args:
                 label = args[args.index("--label") + 1]
@@ -133,7 +138,7 @@ def pipelines(tmp_path, monkeypatch):
     pipelines = []
     for name in ("first", "second"):
         manifest = tmp_path / f"{name}.toml"
-        manifest.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / name))}\n')
+        manifest.write_text(manifest_text(tmp_path / name))
         pipelines.append(Pipeline(Repo(f"owner/{name}", engine="specloop", manifest=manifest)))
 
     def git(args, **kwargs):
@@ -154,7 +159,10 @@ def poll(pipelines, health):
                 "version": 1, "runs": [run for p in pipelines for run in p.runs.values()],
             }), "")
         change = args[2] if args[1] == "publish" else args[args.index("--change") + 1]
-        return next(p for p in pipelines if change.startswith(p.repo.name.split("/")[-1] + "-")).command(args, **kwargs)
+        pipeline = next(p for p in pipelines if change.startswith((
+            p.repo.name.replace("/", "__") + "-", p.repo.name.split("/")[-1] + "-",
+        )))
+        return pipeline.command(args, **kwargs)
 
     daemon.poll_specloop(Config(repos=[p.repo for p in pipelines]), health, runner=gh, specloop_runner=cli)
 
@@ -220,7 +228,7 @@ def test_failures_do_not_starve_later_items_stages_or_repositories(pipelines, tm
         assert "Human input is needed" in item["comments"][-1]["body"]
     if failure == "push":
         assert len(first.issues[1]["comments"]) == 1  # Upsert failure explanations.
-        assert sum(call[:2] == ["specloop", "propose"] and "first-issue-1-gate" in call
+        assert sum(call[:2] == ["specloop", "propose"] and "owner__first-issue-1-gate" in call
                    for call in first.calls) == 1  # Reuse the durable draft.
     # A human resolves the problem and removes the hold; pending work resumes.
     first.fail = None
@@ -232,7 +240,7 @@ def test_failures_do_not_starve_later_items_stages_or_repositories(pipelines, tm
     assert not health.failures and not health.item_failures
     if failure == "push":
         assert "Spec draft ready" in first.issues[1]["comments"][-1]["body"]
-        assert sum(call[:2] == ["specloop", "propose"] and "first-issue-1-gate" in call
+        assert sum(call[:2] == ["specloop", "propose"] and "owner__first-issue-1-gate" in call
                    for call in first.calls) == 1
 
 
@@ -277,7 +285,7 @@ def test_multiple_item_failures_count_as_one_failed_poll(pipelines, tmp_path, mo
     original = first.command
 
     def fail_second_draft(args, **kwargs):
-        if args[:2] == ["specloop", "propose"] and "first-issue-2-gate" in args:
+        if args[:2] == ["specloop", "propose"] and "owner__first-issue-2-gate" in args:
             raise OSError("second draft could not start")
         return original(args, **kwargs)
 

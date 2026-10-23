@@ -10,12 +10,13 @@ import json
 import logging
 import re
 import subprocess
-import tomllib
 import uuid
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from urllib.parse import quote
+
+from specloop import manifest as manifests
 
 from . import queue, specloop_client, specloop_job
 from .config import Repo
@@ -30,6 +31,102 @@ class Paused(RuntimeError):
 
 class DeliveryError(RuntimeError):
     """An item needs human intervention before delivery can continue."""
+
+
+class ConfigurationError(RuntimeError):
+    """Enrollment needs repair; retain triggers without escalating items."""
+
+    transient = False
+
+
+class UnsupportedName(ConfigurationError):
+    """New identities are unsafe; recorded safe identities remain usable."""
+
+
+def _safe_change(change: str) -> bool:
+    """The shared admission/revision path and branch component predicate."""
+    return (re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*", change) is not None
+            and ".." not in change and not change.endswith((".", ".lock")))
+
+
+def _change_name(repository: str, number: int, title: str) -> str:
+    parts = repository.split("/", 1)
+    if len(parts) != 2 or not all(parts) or "/" in parts[1]:
+        raise UnsupportedName(
+            f"{repository}: unsupported repository spelling; expected owner/repository. "
+            "Correct the repository name in configuration and restart. "
+            "Recorded safe branches remain usable."
+        )
+    owner, name = parts
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40].rstrip("-")
+    return f"{owner}__{name}-issue-{number}-{slug or 'issue'}"
+
+
+def _require_supported_name(repo: Repo, change: str) -> None:
+    if not _safe_change(change):
+        raise UnsupportedName(
+            f"{repo.name}: unsupported repository spelling for new branch spec/{change}. "
+            "Use a repository spelling that passes branch validation and update enrollment; "
+            "restart after configuration changes. Recorded safe branches remain usable."
+        )
+
+
+def manifest_readiness(repo: Repo, *, new_work: bool = True) -> manifests.Manifest | ConfigurationError:
+    """Validate an enrollment template without changing it or executing work."""
+    if new_work:
+        try:
+            _require_supported_name(repo, _change_name(repo.name, 7, "Add a gate"))
+        except UnsupportedName as exc:
+            return exc
+    location = str(repo.manifest) if repo.manifest is not None else "(not configured)"
+    repair = ("Set the manifest path in configuration and restart." if repo.manifest is None
+              else "Repair the manifest at this path; the next poll will retry.")
+
+    def failure(exc: Exception) -> ConfigurationError:
+        # Parser diagnostics may contain template values. Report the failure
+        # category and repair path, never the operator-managed file contents.
+        return ConfigurationError(
+            f"{repo.name}: unusable manifest {location} ({type(exc).__name__}). {repair}"
+        )
+
+    try:
+        if repo.manifest is None:
+            raise ValueError("missing manifest")
+        path = repo.manifest.expanduser().resolve()
+        if not path.is_file():
+            raise ValueError("manifest must be a regular file")
+    except (OSError, RuntimeError, ValueError) as exc:
+        return failure(exc)
+    try:
+        manifest, _ = manifests.template(
+            path, change="readiness-probe", branch="spec/readiness-probe",
+        )
+        # Finish normalization deferred by Repo when home/filesystem lookup
+        # failed at config load. CLI dispatch must use the same resolved path;
+        # template() itself does not expand a literal ~user path.
+        object.__setattr__(repo, "manifest", path)
+        return manifest
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError) as exc:
+        # Wrong TOML field/table types can also fail mapping/string operations.
+        return failure(exc)
+    except RuntimeError as exc:
+        # pathlib uses RuntimeError for an unexpandable run.repo home path.
+        if str(exc) != "Could not determine home directory.":
+            raise
+        return failure(exc)
+
+
+def _require_manifest(
+    repo: Repo, readiness: manifests.Manifest | ConfigurationError | None = None,
+    *, new_work: bool = True,
+) -> manifests.Manifest:
+    # Saved-result delivery needs a valid template, but creates no identity.
+    if not new_work and isinstance(readiness, UnsupportedName):
+        readiness = None
+    result = manifest_readiness(repo, new_work=new_work) if readiness is None else readiness
+    if isinstance(result, ConfigurationError):
+        raise result
+    return result
 
 
 _PENDING = object()
@@ -99,7 +196,7 @@ def report_failure(repo, labels, number, stage, kind, exc, *, runner):
 
 def propose_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
-    git_runner=None, launcher=None, on_error=None, on_pending=None,
+    git_runner=None, launcher=None, on_error=None, on_pending=None, readiness=None,
 ) -> list[dict]:
     """Draft each armed issue and publish or escalate its durable receipt.
 
@@ -125,8 +222,6 @@ look like an absent label or an empty set of comments.
         if current.intersection((labels.working, labels.needs_human, labels.revise)):
             return None
         path = state_dir / "proposals" / repo.name.replace("/", "__") / f"{number}.json"
-        slug = re.sub(r"[^a-z0-9]+", "-", raw["title"].lower()).strip("-")[:40].rstrip("-")
-        change = f"{repo.name.split('/')[-1]}-issue-{number}-{slug or 'issue'}"
         receipt = json.loads(path.read_text()) if path.exists() else None
         drafting_labels = current.intersection((labels.ready, labels.spec_draft))
         selected_events = None
@@ -171,8 +266,18 @@ look like an absent label or an empty set of comments.
         if receipt:
             change = receipt["change"]
             receipt.setdefault("title", raw["title"])
+        else:
+            change = _change_name(repo.name, number, raw["title"])
         branch = f"spec/{change}"
         pr = queue._latest_pr_number(repo.name, branch, runner=gh, strict=True)
+        if not receipt and pr is None:
+            # Bounded recovery after receipt loss: exact branches in this
+            # repository, using the current title. Errors must not look like
+            # absence, and recorded identities never depend on today's title.
+            legacy = change.removeprefix(repo.name.split("/", 1)[0] + "__")
+            pr = queue._latest_pr_number(repo.name, f"spec/{legacy}", runner=gh, strict=True)
+            if pr is not None:
+                change = legacy
         replaces_pr = None
         if pr is not None:
             previous = json.loads(gh([
@@ -196,7 +301,8 @@ look like an absent label or an empty set of comments.
             _deliver(repo, labels, number, change, None, current, pr=pr, runner=gh)
             return receipt
         if receipt:
-            _deliver(repo, labels, number, change, receipt, current, runner=gh, git_runner=git_runner)
+            _deliver(repo, labels, number, change, receipt, current, runner=gh,
+                     git_runner=git_runner, readiness=readiness)
             receipt["delivered"] = True
             _save(path, receipt)
             return receipt
@@ -209,6 +315,12 @@ look like an absent label or an empty set of comments.
         # same applications used for rearming before replacing any receipt.
         if not authorize():
             return None
+        _require_manifest(repo, readiness)
+        # Closing a legacy PR ends that identity's round. Only genuinely new
+        # work gets today's qualified name; delivery retries keep the receipt.
+        change = _change_name(repo.name, number, raw["title"])
+        _require_supported_name(repo, change)
+        branch = f"spec/{change}"
         receipt = {"repo": repo.name, "issue": number, "change": change,
                    "title": raw["title"], "idea": idea, "input": issue_input,
                    "round_id": uuid.uuid4().hex, "drafting_events": drafting_events}
@@ -222,7 +334,8 @@ look like an absent label or an empty set of comments.
                 "change after it is labelled, so it is not drafted as written. A collaborator can open an "
                 "issue with the request (or restate it in a comment here and re-open it as their own)."]}
             _save(path, receipt)
-            _deliver(repo, labels, number, change, receipt, current, runner=gh, git_runner=git_runner)
+            _deliver(repo, labels, number, change, receipt, current, runner=gh,
+                     git_runner=git_runner, readiness=readiness)
             receipt["delivered"] = True
             _save(path, receipt)
             return receipt
@@ -232,7 +345,8 @@ look like an absent label or an empty set of comments.
         ], idea=idea, runner=specloop_runner, launcher=launcher):
             return _PENDING
         _save(path, receipt)
-        _deliver(repo, labels, number, change, receipt, current, runner=gh, git_runner=git_runner)
+        _deliver(repo, labels, number, change, receipt, current, runner=gh,
+                 git_runner=git_runner, readiness=readiness)
         receipt["delivered"] = True
         _save(path, receipt)
         return receipt
@@ -251,7 +365,7 @@ def _issue_author_trusted(repo: str, number: int, gh) -> bool:
 
 def admit_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
-    git_runner=None, launcher=None, status_runner=None, on_error=None, on_pending=None,
+    git_runner=None, launcher=None, status_runner=None, on_error=None, on_pending=None, readiness=None,
 ) -> list[dict]:
     """Admit approved spec branches and recover interrupted PR notifications."""
     if repo.engine != "specloop":
@@ -275,19 +389,18 @@ def admit_pending(
         change = branch.removeprefix("spec/")
         # Drafting preserves the repository name, including dots, underscores
         # and hyphens. Keep it a single safe path/ref component.
-        if (not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*", change)
-                or ".." in change or change.endswith((".", ".lock"))):
+        if not _safe_change(change):
             return None
         events = _latest_label_events(repo.name, number, {labels.spec_approved}, runner=gh)
         if not _authorize_label_events(repo.name, number, events, runner=gh, kind="pr"):
             return None
         # Bind the receipt and reviewed head to the same authorized application.
         approval_event = events[labels.spec_approved]["id"]
-        # Checked before the revise/needs-human skip, so an approval applied
-        # alongside agent:revise records the head the human actually saw.
-        if not _approval_covers_head(state_dir, repo, number, change, approval_event, pr, labels, gh):
-            return None
         if current.intersection((labels.needs_human, labels.revise)):
+            # Healthy approvals alongside agent:revise still bind the reviewed
+            # head, but a configuration hold must not record a new attempt.
+            _require_manifest(repo, readiness)
+            _approval_covers_head(state_dir, repo, number, change, approval_event, pr, labels, gh)
             return None
         path = state_dir / "admissions" / repo.name.replace("/", "__") / f"{number}.json"
         receipt = json.loads(path.read_text()) if path.exists() else None
@@ -299,6 +412,20 @@ def admit_pending(
         if not isinstance(status.get("runs"), list):
             raise specloop_client.SpecloopError("status returned no runs list")
         existing = next((run for run in status["runs"] if run["change"] == change), None)
+        committed = existing is not None and existing["pr"] == pr["url"]
+        recovering = (receipt and not receipt.get("delivered")
+                      and receipt["result"]["outcome"] in ("admitted", "refused")
+                      and receipt.get("approval_event") == approval_event
+                      and receipt["head"] == pr["headRefOid"] and receipt["change"] == change)
+        if not committed:
+            # A colliding change belongs to another admission, not this PR's
+            # recovery. Hold a new refusal just like a new admit until repair.
+            if existing is not None or not recovering:
+                source = _require_manifest(repo, readiness).repo
+            if not _approval_covers_head(state_dir, repo, number, change, approval_event, pr, labels, gh):
+                return None
+        # Durable run state completes admission even if its response was lost.
+        # Notification recovery needs neither enrollment nor a new approval head.
         if existing is not None:
             if existing["pr"] == pr["url"]:
                 result = {"outcome": "admitted"}
@@ -306,16 +433,12 @@ def admit_pending(
                 result = {"outcome": "refused", "reasons": [
                     f"Change {change} already belongs to a run with PR {existing['pr'] or '(none)'}."
                 ]}
-        elif (receipt and not receipt.get("delivered")
-              and receipt["result"]["outcome"] in ("admitted", "refused")
-              and receipt.get("approval_event") == approval_event
-              and receipt["head"] == pr["headRefOid"] and receipt["change"] == change):
+        elif recovering:
             result = receipt["result"]
         else:
             # Keep the reviewed tip reachable without moving a source branch:
             # it may be checked out, with local edits, or have been rebased.
             # Admission installs this exact commit only in its own bare repo.
-            source = Path(tomllib.loads(repo.manifest.read_text())["run"]["repo"]).expanduser()
             fetched_ref = f"refs/nightshift/admit/{change}"
             git = partial(_bounded_run, runner=git_runner)
             fetched = git([
@@ -335,7 +458,14 @@ def admit_pending(
             ], runner=specloop_runner, launcher=launcher):
                 return _PENDING
             result = receipt["result"]
-        receipt = {"change": change, "head": pr["headRefOid"],
+        head = pr["headRefOid"]
+        if (committed and receipt
+                and receipt["change"] == change and receipt["result"]["outcome"] == "admitted"
+                and receipt.get("approval_event") == approval_event):
+            # A build can advance the PR before a lost notification is retried.
+            # Keep its original delivery marker so recovery updates that comment.
+            head = receipt["head"]
+        receipt = {"change": change, "head": head,
                    "approval_event": approval_event, "result": result}
         _save(path, receipt)
         if result["outcome"] == "admitted":
@@ -488,7 +618,7 @@ def _acknowledge_revision_feedback(path: Path, receipt: dict) -> None:
 
 def revise_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
-    git_runner=None, launcher=None, status_runner=None, on_error=None, on_pending=None,
+    git_runner=None, launcher=None, status_runner=None, on_error=None, on_pending=None, readiness=None,
 ) -> list[dict]:
     """Re-draft specs or queue review tasks for admitted changes on their PR."""
     if repo.engine != "specloop":
@@ -511,8 +641,7 @@ def revise_pending(
                 or not branch.startswith("spec/")):
             return None
         change = branch.removeprefix("spec/")
-        if (not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*", change)
-                or ".." in change or change.endswith((".", ".lock"))):
+        if not _safe_change(change):
             return None
         events = _latest_label_events(repo.name, number, {labels.revise}, runner=gh)
         if not _authorize_label_events(repo.name, number, events, runner=gh, kind="pr"):
@@ -588,7 +717,7 @@ def revise_pending(
                         return _PENDING
             if "result" not in receipt:
                 receipt["command"] = "propose"
-                source = Path(tomllib.loads(repo.manifest.read_text())["run"]["repo"]).expanduser()
+                source = _require_manifest(repo, readiness).repo
                 # Prefer the original idea, including issue comments. A spec
                 # PR created outside intake still has its title/body and the
                 # existing change in the drafting clone as context.
@@ -619,7 +748,7 @@ def revise_pending(
 
         result = receipt["result"]
         if result["outcome"] == "drafted":
-            source = Path(tomllib.loads(repo.manifest.read_text())["run"]["repo"]).expanduser()
+            source = _require_manifest(repo, readiness, new_work=False).repo
             if pr["headRefOid"] not in (receipt["head"], result["commit"]):
                 raise DeliveryError(f"{branch} moved while its revision was drafted; review the branch before retrying")
             pushed = git([
@@ -1022,7 +1151,7 @@ def _comment(repo: str, number: int, change: str, body: str, *, runner,
 
 def _deliver(repo: Repo, labels: queue.Labels, number: int, change: str,
              receipt: dict | None, current: set[str], *, pr: int | None = None,
-             runner, git_runner=None) -> None:
+             runner, git_runner=None, readiness=None) -> None:
     drafting_labels = [label for label in (labels.ready, labels.spec_draft) if label in current]
     result = receipt["result"] if receipt else {}
     if pr is None and result["outcome"] != "drafted":
@@ -1040,7 +1169,7 @@ def _deliver(repo: Repo, labels: queue.Labels, number: int, change: str,
         branch = f"spec/{change}"
         # Propose places its commit in the manifest's source repository, which
         # need not be the worker clone configured by Repo.dir.
-        source = Path(tomllib.loads(repo.manifest.read_text())["run"]["repo"]).expanduser()
+        source = _require_manifest(repo, readiness, new_work=False).repo
         git = partial(_bounded_run, runner=git_runner)
         push_options = []
         if receipt.get("replaces_pr"):

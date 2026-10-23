@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from manifest_fixtures import manifest_text
+
 from nightshift import daemon, queue, specloop_job
 from nightshift.config import Config, Repo
 from specloop import serve, state
@@ -72,7 +74,7 @@ def background(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(queue, "CLAIM_DIR", tmp_path / "claims")
     manifest = tmp_path / "manifest.toml"
-    manifest.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / "source"))}\n')
+    manifest.write_text(manifest_text(tmp_path / "source"))
     repo = Repo("owner/sample", engine="specloop", manifest=manifest)
     children = []
     original = subprocess.Popen
@@ -280,6 +282,8 @@ def test_long_propose_allows_worker_claim_heartbeat_and_harvest(background, monk
 def test_jobs_survive_polls_and_restart_then_deliver_once(background, monkeypatch, command, outcome):
     root, repo, children = background
     change = "sample-issue-7-add-a-gate"
+    if command == "propose":
+        change = "owner__" + change
     result = {"version": 1, "outcome": outcome, "branch": f"spec/{change}",
               "commit": HEAD, "head": HEAD, "questions": ["Which voltage?"],
               "reasons": ["Contradictory voltage."], "risks": []}
@@ -552,6 +556,8 @@ def delivery_job(background, monkeypatch):
         gh = (DraftGh(("spec:draft",)) if stage == "draft" else
               ApprovalGh() if stage == "admit" else RevisionGh())
         change = "sample-issue-7-add-a-gate"
+        if stage == "draft":
+            change = "owner__" + change
         result = {"version": 1, "outcome": "admitted" if stage == "admit" else "drafted",
                   "branch": f"spec/{change}", "commit": HEAD, "head": HEAD}
         runs = []

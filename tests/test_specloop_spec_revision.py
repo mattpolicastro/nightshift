@@ -5,6 +5,8 @@ import subprocess
 
 import pytest
 
+from manifest_fixtures import manifest_text
+
 from nightshift import daemon, queue, specloop_intake, specloop_job
 from nightshift.config import Config, Repo
 from test_specloop_approval import ApprovalGh, BRANCH, CHANGE, HEAD
@@ -127,7 +129,7 @@ def seed_consumed(tmp_path, ids=("conversation:101",)):
 @pytest.fixture
 def setup(tmp_path):
     manifest = tmp_path / "manifest.toml"
-    manifest.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / "source"))}\n')
+    manifest.write_text(manifest_text(tmp_path / "source"))
     repo = Repo("owner/sample", engine="specloop", manifest=manifest)
     gh = RevisionGh()
     commands = Commands(gh)
