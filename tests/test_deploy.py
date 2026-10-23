@@ -480,6 +480,21 @@ def test_check_reports_process_older_than_code(recording, name, pid, path, case,
     assert not any(c.startswith("launchctl") for c in r.calls)
 
 
+@pytest.mark.scenario("deployment-drift/process-age-drift/process-identity-is-unavailable")
+@pytest.mark.parametrize("args", [[], ["--apply"], ["--apply", "--force"]])
+def test_zero_daemon_pid_is_rejected_before_process_probe(recording, args, capsys):
+    r = recording
+    (r.context.daemon_state / "heartbeat.json").write_text('{"pid": 0}')
+    # Even plausible ps output cannot turn PID zero into a service identity.
+    r.replies["/bin/ps -p 0 -o lstart="] = CURRENT_START
+    assert r.run(*args) == 1
+    output = capsys.readouterr().out
+    assert "daemon unavailable: invalid daemon PID: 0" in output
+    assert f"Manual daemon start: launchctl kickstart gui/{r.context.uid}/com.mattpolicastro.nightshift" in output
+    assert "/bin/ps -p 0 -o lstart=" not in r.calls
+    assert not any(c.startswith("launchctl") for c in r.calls)
+
+
 @pytest.fixture
 def restarting(recording, monkeypatch):
     r = recording
@@ -506,6 +521,7 @@ def restarting(recording, monkeypatch):
         key = " ".join(argv)
         if argv[:2] == ["launchctl", "kickstart"]:
             assert argv in [["launchctl", "kickstart", *flag, r.target] for flag in (["-k"], [])]
+            assert kwargs["timeout"] == 30
             r.kicks.append(key)
             if r.error == "timeout":
                 raise subprocess.TimeoutExpired(key, kwargs["timeout"])
@@ -571,7 +587,8 @@ def test_daemon_restart_waits_for_background_jobs(restarting, state, capsys):
     ("error", False, 0, None), ("contradictory", False, 0, None), ("wedged", False, 0, None),
     ("mismatch", False, 0, None), ("bad-serve", False, 0, None), ("missing-runs", False, 0, None), ("bad-row", False, 0, None),
     ("replacement-stale", False, 0, None), ("same-pid", False, 0, None), ("probe-timeout", False, 0, None), ("unavailable", True, 0, None),
-    ("current", False, 0, None), ("idle", False, 0, "exit"), ("idle", False, 32, "timeout"), ("idle", False, 99, "missing")])
+    ("current", False, 0, None), ("idle", False, 0, "exit"), ("idle", False, 32, "timeout"),
+    ("idle", False, 99, "exit"), ("idle", False, 99, "timeout"), ("idle", False, 99, "missing")])
 def test_supervisor_restart_deferred_while_driving(restarting, name, mode, force, delay, error, monkeypatch, capsys):
     r = restarting
     r.fresh, r.replacement, r.error, r.target = mode, delay, error, "gui/502/override label"
@@ -595,3 +612,17 @@ def test_supervisor_restart_deferred_while_driving(restarting, name, mode, force
     assert r.kicks == expected and r.now == (0 if not expected else 60 if timeout else delay)
     if timeout or error or mode == "unavailable":
         assert "launchctl kickstart 'gui/502/override label'" in output
+    if timeout:
+        if error == "missing":
+            diagnostic = "launchctl missing; launchctl missing"
+        elif error == "exit":
+            diagnostic = ("launchctl kickstart -k 'gui/502/override label': command error; "
+                          "launchctl kickstart 'gui/502/override label': command error")
+        elif error == "timeout":
+            diagnostic = "; ".join(str(subprocess.TimeoutExpired(command, 30)) for command in expected)
+        elif mode == "probe-timeout":
+            pid = 102 if name == "daemon" else 202
+            diagnostic = str(subprocess.TimeoutExpired(f"/bin/ps -p {pid} -o lstart=", 30))
+        else:
+            diagnostic = "no new current PID"
+        assert f"{name} unavailable: {name} restart failed: {diagnostic}" in output.splitlines()
