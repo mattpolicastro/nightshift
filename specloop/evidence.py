@@ -377,6 +377,7 @@ def _mutate_one(number: int, mut: Mutant, baseline_src: Path, head: str,
                 steps: tuple[Step, ...], m: Manifest, out: Path) -> str:
     """Run one mutation in a private source and build, retaining its diagnostics."""
     mutant_out = out / f"mutant-{number}"
+    run_dirs = [mutant_out]
     try:
         lines = (baseline_src / mut.path).read_text().splitlines(keepends=True)
         idx = mut.line - 1
@@ -394,16 +395,27 @@ def _mutate_one(number: int, mut: Mutant, baseline_src: Path, head: str,
         f.chmod(mode | 0o200)
         f.write_text("".join(lines))
         f.chmod(mode)
-        receipts = verify.run_extracted(src, head, steps, m, mutant_out)
-        failed = next((r for r in receipts if not r.passed), None)
+        narrowed = any("{mutant_path}" in arg for s in steps for arg in s.run)
+        uses_path = narrowed or any("{mutant_path}" in arg for s in m.prepare for arg in s.run)
+        phases = [(mutant_out, mut.path), (mutant_out / "confirmation", "")] if narrowed else [(mutant_out, "")]
         invalid_steps = set(BUILD_STEPS) | {s.id for s in m.prepare}
-        if failed is None:
-            return "survived"
-        if failed.id in invalid_steps:
-            return "invalid"
-        return "timeout" if failed.exit is None else "killed"
+        for run_out, path in phases:
+            if run_out != mutant_out:
+                run_dirs.append(run_out)
+            run_m = replace(m, vars={**m.vars, "mutant_path": path}) if uses_path else m
+            # Keep the same mutation and baseline budgets in this worker slot.
+            # A separate output directory gives confirmation fresh preparation
+            # and builds without overwriting the narrowed diagnostics.
+            receipts = verify.run_extracted(src, head, steps, run_m, run_out)
+            failed = next((r for r in receipts if not r.passed), None)
+            if failed is not None:
+                if failed.id in invalid_steps:
+                    return "invalid"
+                return "timeout" if failed.exit is None else "killed"
+        return "survived"
     finally:
-        verify.cleanup(mutant_out)
+        for run_out in reversed(run_dirs):
+            verify.cleanup(run_out)
 
 
 def mutate(repo: Path, head: str, mutants: list[Mutant], m: Manifest, out: Path) -> bool:
