@@ -57,6 +57,20 @@ export function groupFactoryRuns(runs: readonly FactoryRun[]): { active: Factory
   };
 }
 
+export function factoryWaitingTime(
+  run: FactoryRun, nowMs = Date.now(),
+): { text: string; warning: boolean } | null {
+  const since = run.pause?.since;
+  if (run.status !== 'paused' || run.pause?.auto_resumes_remaining !== 0 ||
+    typeof since !== 'number' || !Number.isFinite(since)) return null;
+
+  const elapsedSeconds = Math.max(0, nowMs / 1000 - since);
+  const duration = elapsedSeconds < 3600
+    ? `${Math.floor(elapsedSeconds / 60)}m`
+    : `${Math.floor(elapsedSeconds / 3600)}h`;
+  return { text: `waiting ${duration}`, warning: elapsedSeconds > 10_800 };
+}
+
 export function factoryButtons(run: FactoryRun) {
   return [...new Set(run.action?.actions ?? [])].map(verb => ({ verb, label: labels[verb] }));
 }

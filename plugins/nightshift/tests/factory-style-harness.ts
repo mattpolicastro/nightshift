@@ -56,6 +56,16 @@ export function styleView(runs: FactoryRun[], options: {
   };
   const actions: FactoryActInput[] = [];
   const reads: unknown[] = [], hosts: string[] = [], urls: string[] = [];
+  const intervals: { callback: () => void; delay: number; cleared: boolean }[] = [];
+  const subscriptions: { event: string; callback: (state: string) => void; removed: boolean }[] = [];
+  const appState = {
+    currentState: 'active',
+    addEventListener(event: string, callback: (state: string) => void) {
+      const subscription = { event, callback, removed: false };
+      subscriptions.push(subscription);
+      return { remove() { subscription.removed = true; } };
+    },
+  };
   const runsRpc = {}, actRpc = {};
   const read = async (input: unknown) => {
     reads.push(input);
@@ -72,12 +82,17 @@ export function styleView(runs: FactoryRun[], options: {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, esModuleInterop: true },
   }).outputText;
   runInNewContext(source, {
-    exports, setInterval: () => 1, clearInterval: () => {},
+    exports,
+    setInterval: (callback: () => void, delay: number) => {
+      intervals.push({ callback, delay, cleared: false });
+      return intervals.length;
+    },
+    clearInterval: (id: number) => { intervals[id - 1].cleared = true; },
     require: (name: string) => {
       if (name === 'react') return react;
       if (name === 'react-native') return {
         View: 'View', Text: 'Text', Pressable: 'Pressable', TextInput: 'TextInput',
-        AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) },
+        AppState: appState,
         Linking: { openURL: async (url: string) => { urls.push(url); await options.openURL?.(url); } },
       };
       if (name === '@getpaseo/plugin/client') return {
@@ -119,7 +134,7 @@ export function styleView(runs: FactoryRun[], options: {
   async function settle() { await new Promise(resolve => setImmediate(resolve)); draw(); }
   draw();
   return {
-    actions, reads, hosts, urls, nodes, text, find, settle,
+    actions, reads, hosts, urls, nodes, text, find, settle, intervals, subscriptions, appState,
     setColors(next: typeof colors) { themeColors = next; draw(); },
     async press(control: string | Node) {
       const button = typeof control === 'string' ? find(control) : control;

@@ -40,6 +40,12 @@ export function createFactory(execute: FactoryExecute, clock = () => Date.now(),
     }
     return {
       change: display(run.change), status: run.status, tasks: run.tasks, pr: display(run.pr),
+      ...(run.pause === null ? { pause: null } : run.pause &&
+          (run.pause.since !== undefined || run.pause.auto_resumes_remaining !== undefined) ? { pause: {
+        ...(run.pause.since !== undefined ? { since: run.pause.since } : {}),
+        ...(run.pause.auto_resumes_remaining !== undefined
+          ? { auto_resumes_remaining: run.pause.auto_resumes_remaining } : {}),
+      } } : {}),
       ...(run.context ? { context: {
         summary: display(run.context.summary), repo: display(run.context.repo),
         branch: display(run.context.branch), detail: display(run.context.detail),

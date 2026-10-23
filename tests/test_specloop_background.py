@@ -339,6 +339,7 @@ def test_jobs_survive_polls_and_restart_then_deliver_once(background, monkeypatc
 
 @pytest.mark.scenario("background-job-control/durable-cancellation/stopped-job-stays-stopped")
 @pytest.mark.scenario("background-job-control/durable-cancellation/stop-wins-completion-race")
+@pytest.mark.scenario("specloop-documentation/current-limitations/remaining-ledger-gaps-are-explicit")
 @pytest.mark.parametrize("stage", ["proposals", "admissions", "revisions"])
 @pytest.mark.parametrize("late_result", ["success", "error", "missing"])
 def test_cancelled_jobs_remain_pending_after_restart_and_resume(
@@ -718,6 +719,8 @@ def test_finished_job_delivers_once_after_paused_restart(delivery_job, stage):
 
 
 @pytest.mark.scenario("paused-job-delivery/independent-supervisor-boundary/admission-already-committed")
+@pytest.mark.scenario("specloop-documentation/operations-guidance/operator-distinguishes-pause-and-stop")
+@pytest.mark.scenario("specloop-documentation/current-limitations/remaining-ledger-gaps-are-explicit")
 @pytest.mark.parametrize("cancelled", [False, True], ids=["paused", "cancelled"])
 @pytest.mark.parametrize("already_driving", [False, True], ids=["supervisor-starts", "supervisor-continues"])
 def test_committed_admission_survives_delivery_hold(delivery_job, monkeypatch, cancelled, already_driving):

@@ -17,9 +17,11 @@ for you to review. When you label that PR `spec:approved`, its build engine,
 - a separate agent reviews it against the spec;
 - failures retry with the findings.
 
-At the end of each section, gates check that every scenario has a passing test,
-and that the tests catch deliberately planted bugs (mutation testing). The
-result lands on the same PR, with a checklist of what only a human can check.
+When enabled, [section evidence gates](docs/specloop/README.md#section-evidence)
+check scenario coverage and score killed/survived mutants. Generated mutants
+with no judged result pause; no mutable lines skips mutation but retains
+coverage checks ([PR #48](https://github.com/mattpolicastro/nightshift/pull/48)).
+The result lands on the same PR, with a checklist of what only a human can check.
 
 Each repository chooses an engine: `engine = "specloop"` for that flow, or the
 original `worker` engine, which runs headless
@@ -86,6 +88,31 @@ Create these labels in a repository before enrolling it with
 `engine = "specloop"`: the daemon adds and removes them but never creates them, and
 adding a missing label fails.
 
+An issue-body `blocked-by: #9, #12` line defers new drafts while any blocker
+is open or unreadable, leaving the trigger in place. Existing work can still
+be collected and delivered under normal eligibility rules
+([issue #24](https://github.com/mattpolicastro/nightshift/issues/24),
+[PR #29](https://github.com/mattpolicastro/nightshift/pull/29)).
+
+The latest application of each intake, approval or revision trigger must come
+from an OWNER, MEMBER or COLLABORATOR; both intake aliases require authorization
+if both remain. After rejection, a trusted actor must remove and reapply the
+label, or remove an unauthorized intake alias. Feedback trust is independent
+of trigger authorization ([issue #5](https://github.com/mattpolicastro/nightshift/issues/5),
+[PR #42](https://github.com/mattpolicastro/nightshift/pull/42)).
+
+Long issue threads go into durable UTF-8 files passed with `--idea-file`,
+keeping idea text out of argv
+([issue #12](https://github.com/mattpolicastro/nightshift/issues/12),
+[PR #35](https://github.com/mattpolicastro/nightshift/pull/35)).
+`specloop status --json` preserves healthy runs alongside non-actionable
+`status_error` rows in version-1 JSON with exit 0. Top-level failures exit 1;
+per-run errors refresh alongside healthy attention entries, while a failed
+top-level status read retains a `STALE` snapshot. See the
+[front-door guide](docs/specloop/README.md#github-front-door-nightshift--specloop)
+for details ([issue #10](https://github.com/mattpolicastro/nightshift/issues/10),
+[PR #32](https://github.com/mattpolicastro/nightshift/pull/32)).
+
 For example, issue 7, "Add a gate", in `owner/sample` produces change
 `sample-issue-7-add-a-gate` on `spec/sample-issue-7-add-a-gate`. The daemon
 opens a draft PR titled `Spec: Add a gate`, links it back to the issue, includes
@@ -104,11 +131,17 @@ An approval covers the PR head it was applied to: if the spec branch moves
 afterwards (a revision lands, or someone pushes), the daemon removes
 `spec:approved` and asks for a fresh review instead of building it.
 
-The harness seals, verifies and independently reviews each task. When the run
-pauses at `ready_to_publish`, the daemon publishes to the **same branch and
-PR**, commenting the remaining human checks and hosted CI reminder. Review
-the code and complete those checks before merging; merging closes the linked
-issue. No second PR is needed for the build.
+The harness seals, verifies and independently reviews each task. Before
+`ready_to_publish`, the driver fetches the configured base, merges it when
+needed and runs trusted preparation and verification. Publish refetches once
+with a 20-second limit; a moved base or pending integration checks return the
+run to `running` with no pause and a retryable error. `specloop serve` drives
+preparation, then the daemon retries publication to the **same branch and PR**.
+It comments the remaining human checks and hosted CI reminder after success.
+Review the code and complete those checks before merging; merging closes the
+linked issue. See [publication and base recovery](docs/specloop/README.md#publication-and-base-recovery)
+for `base_conflict`, `base_drift`, driver `base_fetch` and retryable publish
+fetch errors ([PR #59](https://github.com/mattpolicastro/nightshift/pull/59)).
 
 To request changes at either stage, leave PR conversation, review or inline
 comments, then have a trusted actor apply `agent:revise` to the PR. The daemon
@@ -116,10 +149,12 @@ selects trusted, actionable feedback by GitHub ID and tracks consumed IDs per
 repository and PR, separately for conversation comments, reviews and inline
 comments. Eligibility does not depend on the branch tip's time; inline feedback
 retains its file and line. Before admission, the spec gets another commit;
-after admission, each feedback block becomes a task in `## N. Review round K`.
+after admission, each feedback block becomes a task in `## N. Review round K`
+([issue #6](https://github.com/mattpolicastro/nightshift/issues/6),
+[PR #61](https://github.com/mattpolicastro/nightshift/pull/61)).
 
 Each round saves its selected IDs and feedback before starting. Those IDs are
-consumed after a successful spec push or a successful build revision result
+consumed after a successful spec push or a durable, successful build revision result
 with a landed commit, before notifications and without waiting for build
 publication. Comments posted during a revision remain available for the next
 authorized request, even if they predate the newly published tip. Reapplying
@@ -129,7 +164,7 @@ it eligible again: post a new comment, which has a new ID, to request further
 changes. Edits after selection also do not alter that round's saved feedback.
 The corresponding label application is removed after success. If no eligible
 unconsumed feedback remains, the daemon explains this and removes the label
-without running an agent.
+without running an agent ([PR #61](https://github.com/mattpolicastro/nightshift/pull/61)).
 
 Existing revision receipts without consumed IDs are initialized automatically
 after authorization. Trusted IDs created at or before the receipt's saved time
@@ -140,7 +175,8 @@ that cutoff once. This compatibility baseline approximates previously handled
 feedback; it is saved before further processing and is never recomputed on a
 tip advance or restart. Later IDs remain eligible. No manual initialization is
 needed. A PR with no revision receipt starts with no consumed IDs, so eligible
-historical feedback is available too.
+historical feedback is available too
+([PR #61](https://github.com/mattpolicastro/nightshift/pull/61)).
 
 ### Enroll a repository
 
@@ -175,7 +211,17 @@ locally. Use `nightshift jobs` and `nightshift jobs stop <id>` to select and
 terminate a tracked background job. An admission that has already committed
 runnable state may still start or continue building under the independent
 `specloop serve` supervisor. See [pause and job control](#pause-and-job-control)
-for these boundaries and recovery guidance.
+for these boundaries and recovery guidance
+([issue #8](https://github.com/mattpolicastro/nightshift/issues/8),
+[PR #28](https://github.com/mattpolicastro/nightshift/pull/28)).
+
+The [operations guide](docs/specloop/README.md#operations) also covers the local
+touchpoint report (`uv run python -m nightshift.touchpoints`, optionally with
+`--since YYYY-MM-DD` and `--json`) and its counting limits
+([PR #53](https://github.com/mattpolicastro/nightshift/pull/53)). It explains
+parallel tests with `uv run pytest -n 4` and scenario reporting under xdist
+([PR #54](https://github.com/mattpolicastro/nightshift/pull/54)); `uv run pytest`
+remains the implementation acceptance command.
 
 ### Prepare dependencies before verification
 
@@ -418,7 +464,7 @@ The worker-task refresh checks at most 32 tasks with four concurrent checks
 and a 40-second network budget. Outstanding tasks have priority; resolved history gets reserved
 capacity and normally waits an hour between checks. Large backlogs rotate across
 refreshes, and deferred checks are marked stale. Reopened historical tasks appear
-when their next historical check runs. See the [refresh policy](plugins/nightshift/README.md#refresh-behavior).
+when their next historical check runs. See the [refresh policy](plugins/nightshift/README.md#nightshift-task-refresh-behavior).
 
 History starts with this version; this does not backfill old tasks from
 ambiguous transcripts. The daemon records immutable events in

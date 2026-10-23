@@ -185,6 +185,7 @@ def event_log(root, events):
 
 
 @pytest.mark.scenario("touchpoint-report/intake-round-accounting/each-intake-kind-counted-once")
+@pytest.mark.scenario("specloop-documentation/operations-guidance/touchpoints-describe-observed-history")
 @pytest.mark.scenario("touchpoint-report/human-event-accounting/pauses-resumes-and-accepts-by-reason")
 def test_touchpoints_count_each_kind(tmp_path):
     rounds = [
@@ -586,6 +587,7 @@ def dated_put(root, relative, data, timestamp):
 
 
 @pytest.mark.scenario("touchpoint-report/draft-date-selection/inclusive-cutoff-selects-whole-changes")
+@pytest.mark.scenario("specloop-documentation/operations-guidance/touchpoints-describe-observed-history")
 def test_since_uses_earliest_proposal_request_and_keeps_whole_history(tmp_path):
     times = ["2026-10-20T23:59:59+00:00", "2026-10-21T00:00:00+00:00", "2026-10-21T00:00:01+00:00"]
     for issue, timestamp in enumerate(times, 1):
@@ -694,6 +696,7 @@ def test_draft_attempt_date_survives_without_success_or_current_receipt(tmp_path
 
 @pytest.mark.scenario("touchpoint-report/versioned-report-output/table-and-json-agree")
 @pytest.mark.scenario("touchpoint-report/versioned-report-output/observed-history-does-not-claim-merge")
+@pytest.mark.scenario("specloop-documentation/operations-guidance/touchpoints-describe-observed-history")
 def test_touchpoints_json_document(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path))
     nightshift_root, runs = tmp_path / ".nightshift", tmp_path / ".specloop/runs"
@@ -898,6 +901,7 @@ def test_argparse_help_and_usage_do_not_collect(tmp_path, monkeypatch, capsys, a
         assert "include changes drafted on or after this date (UTC, approximate)" in help_text
 
 
+@pytest.mark.scenario("specloop-documentation/operations-guidance/touchpoints-describe-observed-history")
 def test_partial_report_module_exit_and_diagnostics_in_both_formats(tmp_path):
     state = tmp_path / ".nightshift"
     put(state, "proposals/o__r/8.json", dict(change="r-issue-8-feature", result=dict(outcome="needs_input")))
