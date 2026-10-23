@@ -1,0 +1,90 @@
+## Context
+
+Nightshift deliberately leaves merging to a person. An explicitly delegated operator session may run this command; the daemon and `specloop serve` must never import or invoke it. The repository has no existing landing module. All implementation belongs in new `nightshift/land.py`, `tests/test_land.py`, and `docs/landing.md`; every existing file remains untouched, including the CLI, config loader, queue, daemon, supervisor, packaging, plugin, shared test fixtures, and existing documentation. In particular, avoid the concurrent work in `nightshift/arm.py`, `tests/test_arm.py`, `docs/arming.md`, `nightshift/cli.py`, `specloop/cli.py`, `specloop/critic.py`, `tests/test_status_pause_since.py`, `README.md`, `KNOWN-LIMITATIONS.md`, `docs/specloop/README.md`, `pyproject.toml`, and `plugins/nightshift/`.
+
+Relevant existing contracts remain intact:
+
+- `nightshift.config.load()` reads the existing `config.toml` and enrolled `Repo` objects.
+- `specloop status --json` is version 1, reports `pr`, `change`, `head`, status and pause, and may contain error rows even with exit status zero. Such rows cannot establish that a PR is direct.
+- `specloop finish <change>` accepts only a `human_checks` pause, archives and pushes, marks the PR ready, and saves `done`. It is a plain command, not a command to which this caller can append `--json`.
+- `nightshift.specloop_intake.publish_pending` comments the checks for adopted PRs. Its publication comment begins `**nightshift** —` and carries `<!-- nightshift:publish:<change>:<round> -->`; older unqualified markers also exist. Publication and revision history may contain multiple rounds.
+- `queue._gh` retries GitHub operations but has no subprocess runner parameter and reconciles only existing intake marker kinds. Passing a new attestation create through its blind retry path would risk duplicates. Do not change this helper.
+
+## Goals / Non-Goals
+
+Provide a standalone command with observable refusals, no automatic admission or publication, recoverable completion after finish, and tests that need neither GitHub nor a running host application. An invocation is the operator's decision to land the current reviewed PR; `--checks-done` records their assertion that they actually performed the checks.
+
+Non-goals include changing review policy, automatically running human checks, supporting bases other than `main`, deploying, introducing a background service, changing specloop state formats, or serializing all repository merges. GitHub's existing protection rules remain authoritative.
+
+## Decisions
+
+### 1. Public interface and external boundary
+
+Expose `main(argv=None, *, runner=None, sleep=time.sleep, monotonic=time.monotonic) -> int` in `nightshift/land.py` with an ordinary `__main__` guard. Support the positional PR, `--repo owner/name`, `--checks-done`, `--timeout SECONDS` (positive, default 1800), and `--config PATH` (default `nightshift.config.DEFAULT_PATH`). Help and argument handling use argparse. Exit 0 only after confirming the merge, exit 1 for operational refusals, and exit 2 for invalid syntax; every failure prints a useful reason to stderr.
+
+The injectable runner has the `subprocess.run` signature and returns `CompletedProcess[str]`. Every `gh` and `specloop` process goes through it using an argv list, `capture_output=True`, `text=True`, `check=False`, and a bounded timeout. Helpers receive the same runner. No shell execution, direct HTTP requests, or imports of specloop mutation internals. Use 30-second per-call limits for GitHub/status and 300 seconds for finish; cap calls and sleeps during CI/update polling to the remaining CI deadline. Inject sleep and monotonic time to eliminate real waiting in tests.
+
+A small local adapter may retry transient read failures at most three attempts with 1- and 2-second backoffs. Known-ID PATCHes are idempotent, but comment POSTs and branch updates must use the reconciliation rules below rather than generic mutation retries. It is acceptable to refuse an unresolved transient error. Do not use `queue._gh` in a way that escapes the runner or blindly retries a new marker type.
+
+### 2. Identity, enrollment, and lifecycle discovery
+
+Accept GitHub.com HTTPS pull URLs or positive integer PR numbers. A URL supplies owner/repo; an explicit `--repo` must agree. A bare number uses `--repo`, or `gh repo view --json nameWithOwner` if omitted. Load configuration and require exactly one case-insensitive matching enrolled repository before any mutation. Reject malformed identities, missing/unreadable configuration, ambiguous enrollment, a missing `main`, or a PR targeting a different base. Always pass explicit repository identity on subsequent GitHub commands. Read PR URL, state, draft status, head SHA and base; require an open PR. Direct draft PRs refuse rather than being silently marked ready; front-door draft PRs may become ready through finish.
+
+Query `specloop status --json` even for worker-enrolled repositories: front-door classification is by a run's exact canonical PR URL, not engine, branch naming, or labels. Zero matching runs means direct only after successful, fully readable discovery. Multiple matches, malformed output, unsupported versions, or any error row refuse before mutation because an unreadable run may conceal the match. Require a nonempty change name on a matching run. Before editing checks, permit only `paused` with `pause.reason == human_checks`, or `done`; reject running, aborted and other pauses immediately with the current state and retry guidance. This command does not wait for a run to reach that pause.
+
+### 3. Locate, tick, and attest human checks
+
+Always read the PR body. For a matching run also paginate all issue conversation comments and select the newest trusted publication comment for that change, ordered by creation time then numeric comment ID. Require both the `**nightshift** —` prefix and exact publication marker grammar; use the existing OWNER/MEMBER/COLLABORATOR trust policy. Accept the legacy marker without a round suffix. Ignore older publication rounds and unrelated comments. If no matching publication comment exists, the body is still checked; if neither source contains checks, print `No human checks listed` and continue. This cannot prove a delayed publication comment has arrived; document that limitation.
+
+Recognize Markdown `- [ ]`, `- [x]`, and `- [X]` task-list lines, including indentation and excluding fenced code examples. Gate on all unchecked items in the selected sources rather than guessing headings. Direct PRs use only the body. Preserve surrounding prose, markers, existing ticks, and line endings. Without `--checks-done`, any unchecked item refuses before finish, CI or merge. With it, fetch `gh api user` to identify the authenticated login, then edit each changed source once: the body via the PR API and the selected publication comment via its comment ID. Do not edit already-complete sources on retry. If either write fails, stop; the next invocation re-reads and completes only remaining edits.
+
+For `--checks-done` with at least one listed check, create or update one issue comment with the stable marker `<!-- nightshift:land-checks:<pr>:<head sha> -->`. Here `<pr>` is the decimal PR number within the repository and `<head sha>` is the full PR head observed for this human-check pass, before finish. Include `**nightshift** —`, actor login, PR URL, full head, source IDs/body reference, and the checked item text; explicitly say that this user recorded completion through `land`. A repeated invocation for the same head updates this comment rather than creating another; a new head has a new marker. Checked boxes still count as listed checks, allowing recovery after edits succeeded but attestation failed. No listed checks means no empty attestation.
+
+Search every comment page for the exact attestation marker before POST. On an ambiguous POST response, search again; if found, reuse/PATCH that ID. If absent or the read fails, refuse this invocation instead of blindly repeating POST. The next operator invocation reconciles again. Existing duplicate or untrusted marker matches refuse rather than choosing arbitrarily. A failed PATCH refuses and is safely retried by ID later. Reconcile before any retry in the production adapter as well as in the test fake. Concurrent `land` processes for one PR are not supported; document one operator invocation at a time.
+
+Re-read head and selected check sources before finish and immediately before merge. Refuse any unexpected head change, new/unticked checks, changed checklist text, or changed current publication comment; do not automatically attest additions discovered while waiting. Harmless tick changes made by this invocation are the expected snapshot. Full-body read/modify/write is not atomic; minimize that window and state it as a limitation.
+
+### 4. Finish and continuation
+
+After checks pass, refresh the matching run. If still paused at `human_checks`, invoke exactly `specloop finish <change>` through the runner. A failure stops the sequence with its reason; do not reset run state. After success, refresh status and PR: require the same run/PR to be `done`, and the remote head to equal the run's reported finished head before adopting the archive commit as the new expected head. This prevents an unrelated push during finish from being silently accepted. A draft that remains draft refuses.
+
+If initial discovery finds `done` and the PR is open, skip finish and repeat check-source, CI, base and merge gates against the current remote head. Do not require equality to the local run head in this path: a previous landing attempt may already have updated the remote branch from `main`. The new explicit invocation authorizes this current reviewed head; previous CI success is never a durable bypass. An interrupted finish which still reports `human_checks` is retried through existing finish recovery. Direct PRs perform no finish. If the PR closes or run becomes ineligible during the sequence, refuse.
+
+### 5. CI rounds and exact branch updates
+
+Start one overall monotonic deadline after finish/continuation validation: `--timeout` covers all CI waits and branch-update observation across all rounds, not 30 minutes per round. Poll every 10 seconds, capped by the remaining budget. Perform at most three CI rounds, initial round included. At each round's start read `refs/heads/main` through `gh api repos/{repo}/git/ref/heads/main` and record B; H is the expected PR head. In round one, use the compare API to determine whether B is already an ancestor of H. If the branch is stale on entry, update it before evaluating CI; otherwise already-green checks against an older base could slip through. Later rounds follow an observed base move and request an update.
+
+For an update, refresh PR head and read `main` immediately before requesting it, establishing H and B; require H still equals the expected head. Invoke:
+
+`gh api --method PUT repos/{repo}/pulls/{number}/update-branch -f expected_head_sha=<H>`
+
+Never prescribe the unsupported `gh pr update-branch --expected-head-sha` flag. Use the endpoint's default merge behavior, not rebase. The accepted response queues work; it does not prove which head resulted. Poll the PR until the head changes, within the shared deadline. Fetch the observed commit via the commits API and accept M only if its parents are exactly `[H, B]` in that order, with exactly two parents. A descendant of M, an unrelated commit that also contains B, reversed/extra parents, or an update against a newer base all refuse. An expected-head conflict or unrecoverable API rejection refuses. If the update response is lost, reconcile by the same head/parent inspection without a second PUT; timeout or uncertainty refuses. Pin M as the expected head thereafter. Tests must inject an unrelated push between PUT and the first head observation.
+
+Keep B as the baseline for that round, including time spent waiting for the asynchronous update; never silently replace B with a newer base after observing M. Wait on `gh pr checks <number> --repo <repo> --json name,bucket,state,link`, checking PR head before and after each read so results belong to the expected head. Empty checks remain pending until timeout. Pending checks wait; failure/cancel buckets refuse immediately; all checks must finish with pass or skipping buckets and at least one pass. Unknown/malformed buckets or command errors refuse, and known nonzero `gh pr checks` statuses for pending/failure must be decoded with the JSON rather than mistaken for a transport failure. Skipping covers GitHub neutral/skipped conclusions; an entirely skipped set does not establish green CI. New heads must obtain their own CI results; no reuse of a prior round's green snapshot.
+
+Once green, perform final PR/run/check-source revalidation, then read `main` again. If it differs from B, begin the next round, updating against a newly read base. If it differs at the end of round three, refuse with all observed base SHAs and do not start a fourth round. Thus three successive moves cause two subsequent updates and no merge (an initially stale branch may also need the round-one update). An unexpected head change at any observation refuses rather than being treated as another base move.
+
+### 6. Merge and reporting
+
+With all gates satisfied and final `main` equal to the round's B, invoke `gh pr merge <number> --repo <repo> --merge --match-head-commit <verified head>`. Do not use `--admin`, `--auto`, squash, rebase, or branch deletion. Re-read PR state and report success only if it is merged; a queue admission alone is not a completed merge. A lost response may be resolved by that read, but an open/unknown PR returns nonzero and can be retried. Print the merged PR URL. Do not print or depend on `python -m nightshift.deploy` (#77).
+
+### 7. Verification and operator documentation
+
+Use one scripted subprocess runner in new `tests/test_land.py`, asserting call ordering, command arguments, absence of later mutations after refusals, and simulated remote state after lost responses. Give scenario tests `pytest.mark.scenario` IDs. Inject time for deadline, three-round and polling tests. The exact required tests are `test_land_refuses_unticked_human_checks`, `test_land_checks_done_ticks_once_and_comments`, `test_land_finishes_only_at_human_checks`, `test_land_direct_pr_skips_finish`, `test_land_refuses_failing_ci`, `test_land_updates_branch_when_main_moved`, `test_land_refuses_after_three_moves`, and `test_daemon_and_supervisor_never_import_land`. Supplement them with pagination, done continuation, initial stale base, unexpected-update-head, head-race, timeout and lost-response cases. Trust tests must use production trust filtering (`real_trust` marker). The daemon/supervisor test should inspect import and command-dispatch references in their existing execution paths, including `nightshift/specloop_intake.py` and `specloop/serve.py`, without changing them.
+
+Run `uv run pytest` and `uv run python scripts/check_types.py`; preserve every existing assertion and do not edit the type baseline. `docs/landing.md` describes enrollment, auth, commands/flags, checklist locations, attestation semantics, direct/front-door differences, timeout/round limits, ordinary rerun recovery after finish, and refusal diagnostics. It states that the operator must have reviewed the current head and performed checks, and that only one invocation per PR should run at once.
+
+## Risks / Trade-offs
+
+- **Accepted base race:** `--match-head-commit` protects the PR head, not the base. `main` can move between its final read and GitHub's merge. This residual risk is explicitly accepted; branch protection still applies. Atomic base conditioning or a merge queue would be separate work.
+- Exact parent validation deliberately refuses a base move during update processing, a concurrent push, or alternative update behavior. An ancestry check alone would allow additional unreviewed commits. This strictness can require reviewing the new head and invoking `land` again.
+- Done-run continuation is based on existing durable run state plus the open PR and fresh gates, not a new local landing receipt. A new invocation is an operator decision about the current remote head; it is not an assertion that any intervening commits were reviewed automatically.
+- Checkbox edits and attestation are separate API operations. Completed edits survive a failure and retry re-reads them. A stable marker handles sequential retries and lost acknowledgements, but cannot provide a server-enforced uniqueness constraint against concurrent operators. Body/comment writes also have a residual concurrent-edit window.
+- A missing publication comment and empty body produce the required explicit no-checks message. This is not proof there were no intended checks if daemon comment delivery is delayed; operators must inspect publication before invoking the command. The attestation is an operator assertion, not automated evidence of performing a manual check.
+- CI JSON and mocked API responses cannot prove real permissions, GitHub update parent shape, check scheduling, branch-protection interactions, or an actual merge. No host application is needed for automated tests.
+
+Human checklist for the first real landing (not implementation tasks):
+
+- [ ] Watch an operator run `land` end to end on a reviewed enrolled PR; confirm checks are in the expected body/publication comment, edited in place, and attributed to the authenticated user by one marked attestation.
+- [ ] Observe finish, the resulting CI, and (when `main` moves) the REST update's exact parents and new CI before the head-conditioned merge; confirm GitHub records a merge commit and the command reports the merged PR without a deploy hint.
+- [ ] Record the outcome and any live GitHub restrictions. A green unit suite alone does not mark these checks done.
