@@ -1,14 +1,14 @@
 """Explicit operator entry point for landing an enrolled, reviewed PR.
 
-Identity, run validation, and human-check recording/attestation are wired so far.
-Finish and merge remain disabled until subsequent gates are implemented.
+Identity, human checks, and run completion are wired so far.
+CI and merge remain disabled until subsequent gates are implemented.
 """
 
 from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from html import escape
 import json
@@ -25,6 +25,7 @@ from . import config, queue
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 READ_TIMEOUT = 30
+FINISH_TIMEOUT = 300
 PR_FIELDS = "number,url,state,isDraft,headRefOid,baseRefName,body"
 _REPO = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9_.-]+")
 _PR_URL = re.compile(r"https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)/?")
@@ -90,10 +91,11 @@ class CheckSource:
 
 @dataclass(frozen=True)
 class CheckSnapshot:
-    """Expected post-edit sources and pre-finish head for later revalidation.
+    """Expected head and post-edit sources for later revalidation.
 
     Keep the authenticated actor even when every box was already ticked, so
-    a later attestation can recover independently of the source edits.
+    attestation can recover independently of the source edits. Attestation uses
+    the pre-finish head; validated finish advances the head for subsequent gates.
     """
 
     head: str
@@ -124,14 +126,16 @@ class Operations:
     sleep: Callable[[float], None]
     monotonic: Callable[[], float]
 
-    def run(self, argv: list[str], *, stage: str) -> subprocess.CompletedProcess[str]:
+    def run(
+        self, argv: list[str], *, stage: str, timeout: float = READ_TIMEOUT,
+    ) -> subprocess.CompletedProcess[str]:
         try:
             result = self.runner(
                 argv, capture_output=True, text=True, check=False,
-                timeout=READ_TIMEOUT,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            raise Refusal(f"{stage}: command timed out after {READ_TIMEOUT}s") from exc
+            raise Refusal(f"{stage}: command timed out after {timeout}s") from exc
         except (OSError, subprocess.SubprocessError) as exc:
             raise Refusal(f"{stage}: {exc}") from exc
         if result.returncode:
@@ -173,7 +177,7 @@ def _positive_timeout(value: str) -> float:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="python -m nightshift.land",
-        description="Land a reviewed PR in an enrolled repository (finish and merge currently disabled).",
+        description="Land a reviewed PR in an enrolled repository (CI and merge currently disabled).",
         allow_abbrev=False,
     )
     result.add_argument("pr", help="GitHub.com HTTPS pull URL or positive PR number")
@@ -517,6 +521,77 @@ def record_attestation(
     )
 
 
+def refresh_run(
+    identity: Identity, expected: LandingRun | None, operations: Operations,
+) -> LandingRun | None:
+    current = discover_run(identity, operations)
+    if ((expected is None) != (current is None)
+            or (expected is not None and current is not None
+                and (current.change, current.pr) != (expected.change, expected.pr))):
+        raise Refusal("run identity changed during landing; inspect status and rerun land")
+    return current
+
+
+def revalidate_check_sources(
+    pr: PullRequest, run: LandingRun | None, snapshot: CheckSnapshot, operations: Operations,
+) -> None:
+    if pr.head != snapshot.head:
+        raise Refusal(f"PR head changed during landing: expected {snapshot.head}, found {pr.head}; "
+                      "review the current head and rerun land")
+    sources = read_check_sources(pr, run, operations)
+    # Prose may change, but source identity, checklist text, order and ticks
+    # must still match this invocation's completed human-check pass.
+    if ([(s.comment_id, s.checks) for s in sources]
+            != [(s.comment_id, s.checks) for s in snapshot.sources]):
+        raise Refusal("human check sources changed during landing; inspect checks and rerun land")
+
+
+def finish_run(
+    pr: PullRequest, run: LandingRun | None, snapshot: CheckSnapshot, operations: Operations,
+) -> tuple[PullRequest, LandingRun | None, CheckSnapshot]:
+    """Finish only the checked run; a done-run retry authorizes the current PR.
+
+    Never reset state or repair a partial finish here. The plain finish command
+    owns archive/push recovery, including after a lost acknowledgement.
+    """
+    current = refresh_run(pr.identity, run, operations)
+    refreshed_pr = read_pr(pr.identity, operations)
+    validate_run_eligibility(refreshed_pr, current)
+    if run is not None and run.status == "done" and current is not None and current.status != "done":
+        raise Refusal(f"run {run.change} is no longer done; inspect status before retrying land")
+    revalidate_check_sources(refreshed_pr, current, snapshot, operations)
+    if current is not None and run is not None and run.status != "done":
+        if current.status == "paused":
+            operations.run(
+                ["specloop", "finish", current.change], timeout=FINISH_TIMEOUT,
+                stage=f"finish {current.change}; rerun land to recover",
+            )
+            current = refresh_run(pr.identity, current, operations)
+            if current is None or current.status != "done":
+                state = "missing" if current is None else f"{current.status} ({current.pause_reason})"
+                raise Refusal(f"finish {run.change}: expected the same run done, found {state}; "
+                              "inspect status and rerun land")
+            refreshed_pr = read_pr(pr.identity, operations)
+        # Only initial done discovery permits a local/remote head difference.
+        # A concurrent finish between discovery and refresh must also establish
+        # its finished head before this invocation can adopt it.
+        if refreshed_pr.head != current.head:
+            raise Refusal(f"finish {run.change}: finished run head {current.head} does not equal "
+                          f"remote PR head {refreshed_pr.head}; inspect status and rerun land")
+    if refreshed_pr.draft:
+        raise Refusal("PR remains draft after run completion; inspect status before retrying land")
+    return refreshed_pr, current, replace(snapshot, head=refreshed_pr.head)
+
+
+def continue_landing(
+    pr: PullRequest, run: LandingRun | None, snapshot: CheckSnapshot, operations: Operations,
+    *, timeout: float,
+) -> int:
+    """Boundary for the subsequent CI, base-update and merge gates."""
+    raise Refusal(f"{pr.identity.url}: mutations disabled beyond run completion until all landing "
+                  f"gates are wired (checks read at head {snapshot.head})")
+
+
 def main(
     argv: list[str] | None = None, *, runner: Runner | None = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -535,10 +610,8 @@ def main(
         sources = read_check_sources(pr, run, operations)
         snapshot = prepare_human_checks(pr, sources, operations, checks_done=args.checks_done)
         record_attestation(identity, snapshot, operations)
-        # Retain the expected post-edit snapshot for later
-        # revalidation. Finish/CI/merge must wait for their remaining gates.
-        raise Refusal(f"{identity.url}: mutations disabled beyond check attestation until all landing "
-                      f"gates are wired (checks read at head {snapshot.head})")
+        pr, run, snapshot = finish_run(pr, run, snapshot, operations)
+        return continue_landing(pr, run, snapshot, operations, timeout=args.timeout)
     except Refusal as exc:
         print(f"land: {exc}", file=sys.stderr)
         return 1

@@ -31,6 +31,8 @@ PR = {"number": 78, "url": URL, "state": "OPEN", "isDraft": False,
 MAIN_REF = {"ref": "refs/heads/main", "object": {"type": "commit", "sha": BASE}}
 RUN = {"change": "reviewed-change", "pr": URL, "head": HEAD,
        "status": "paused", "pause": {"reason": "human_checks"}}
+FINISH = ["specloop", "finish", "reviewed-change"]
+FINISHED_HEAD = "c" * 40
 
 
 class ScriptedRunner:
@@ -150,6 +152,7 @@ def test_default_subprocess_runner_and_config(
     monkeypatch.setattr(sys, "argv", ["nightshift.land", URL, "--timeout", "20",
                                      *(["--checks-done"] if checks_done else [])])
     scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF).expect(STATUS, EMPTY_STATUS)
+    expect_finish_gate(scripted_runner)
     assert land.main() == 1
     output = capsys.readouterr()
     assert "mutations disabled" in output.err
@@ -169,6 +172,7 @@ def test_repository_resolves(config_path, scripted_runner, capsys, argv, inferre
         scripted_runner.expect(["gh", "repo", "view", "--json", "nameWithOwner"],
                                {"nameWithOwner": "Owner/Project"})
     scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF).expect(STATUS, EMPTY_STATUS)
+    expect_finish_gate(scripted_runner)
     assert invoke(config_path, scripted_runner, *argv) == 1
     assert f"{URL}: mutations disabled" in capsys.readouterr().err
 
@@ -348,6 +352,7 @@ def test_discovery_uses_pr_identity_regardless_of_engine(
         STATUS, {**EMPTY_STATUS, "runs": rows})
     if matching:
         scripted_runner.expect(COMMENTS, [[]])
+    expect_finish_gate(scripted_runner, comments=[[]] if matching else None)
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
 
@@ -365,7 +370,7 @@ def test_discovery_uses_pr_identity_regardless_of_engine(
 def test_wrong_run_state_refused(
     config_path, scripted_runner, capsys, status, pause, checks_done,
 ):
-    scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF).expect(
+    scripted_runner.expect(VIEW, {**PR, "body": "- [ ] Must not be edited"}).expect(MAIN, MAIN_REF).expect(
         STATUS, {**EMPTY_STATUS, "runs": [{**RUN, "status": status, "pause": pause}]})
     assert invoke(config_path, scripted_runner, URL,
                   *(["--checks-done"] if checks_done else [])) == 1
@@ -385,8 +390,10 @@ def test_eligible_run_reaches_remaining_gates(config_path, scripted_runner, caps
     scripted_runner.expect(VIEW, {**PR, "isDraft": draft}).expect(MAIN, MAIN_REF).expect(
         STATUS, {**EMPTY_STATUS, "runs": [row]})
     scripted_runner.expect(COMMENTS, [[]])
+    expect_finish_gate(scripted_runner, comments=[[]], row=row, draft=draft)
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
-    assert "mutations disabled" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert ("PR remains draft" if status == "done" and draft else "mutations disabled") in error
 
 
 def test_direct_draft_refused_after_successful_discovery(config_path, scripted_runner, capsys):
@@ -527,6 +534,21 @@ def expect_check_sources(runner, body, comments=None):
         runner.expect(COMMENTS, comments)
 
 
+def expect_finish_gate(runner, body="", comments=None, *, row=None, head=HEAD, draft=False):
+    """Explicitly script the new gate for existing checklist/identity tests."""
+    if row is None and comments is not None:
+        row = RUN
+    runner.expect(STATUS, {**EMPTY_STATUS, "runs": [row] if row else []})
+    runner.expect(VIEW, {**PR, "body": body, "headRefOid": head, "isDraft": draft})
+    if row is not None:
+        runner.expect(COMMENTS, comments if comments is not None else [[]])
+        if row["status"] == "paused":
+            runner.expect(FINISH, subprocess.CompletedProcess(FINISH, 0, "Finished\n", ""), timeout=300)
+            runner.expect(STATUS, {**EMPTY_STATUS, "runs": [
+                {**row, "status": "done", "pause": None, "head": FINISHED_HEAD}]})
+            runner.expect(VIEW, {**PR, "body": body, "headRefOid": FINISHED_HEAD})
+
+
 @pytest.mark.real_trust
 @pytest.mark.scenario("reviewed-pr-landing/human-check-sources/unticked-checks-refuse")
 @pytest.mark.parametrize("source", ["body", "comment", "both", "direct"])
@@ -571,6 +593,7 @@ def test_latest_publication_across_pages(config_path, scripted_runner, capsys, l
     selected = land.select_publication([c for page in pages for c in page], RUN["change"])
     assert selected == land.CheckSource(newest["body"], 10)
     expect_check_sources(scripted_runner, "Body prose\r\n- [X] Body complete\r\n", pages)
+    expect_finish_gate(scripted_runner, "Body prose\r\n- [X] Body complete\r\n", pages)
     assert invoke(config_path, scripted_runner, URL) == 1
     output = capsys.readouterr()
     assert "mutations disabled" in output.err  # The human-check gate passed.
@@ -594,6 +617,8 @@ def test_publication_trust_uses_production_policy(
     if association == "missing":
         del comment["author_association"]
     expect_check_sources(scripted_runner, "", [[comment]])
+    if not trusted:
+        expect_finish_gate(scripted_runner, comments=[[comment]])
     assert invoke(config_path, scripted_runner, URL) == 1
     output = capsys.readouterr()
     assert ("publication comment 1: Inspect the UI" in output.err) == trusted
@@ -687,12 +712,13 @@ def test_no_listed_checks_reaches_remaining_gates(
                 "unrelated": [[publication(change="different-change")]],
                 "empty-publication": [[publication(checks="Publication prose only")]]}[kind]
     expect_check_sources(scripted_runner, body, comments)
+    expect_finish_gate(scripted_runner, body, comments)
     assert invoke(config_path, scripted_runner, URL, *(["--checks-done"] if checks_done else [])) == 1
     output = capsys.readouterr()
     assert output.out == "No human checks listed\n"
     assert "mutations disabled" in output.err
     assert "unticked" not in output.err
-    assert len(scripted_runner.calls) == (3 if kind == "direct" else 4)
+    assert len(scripted_runner.calls) == (5 if kind == "direct" else 10)
 
 
 @pytest.mark.real_trust
@@ -704,6 +730,8 @@ def test_missing_publication_still_checks_body(config_path, scripted_runner, cap
         scripted_runner.expect(ACTOR, {"login": "operator"})
         scripted_runner.expect(check_patch("- [x] Body check remains"), {})
         expect_attestation(scripted_runner, [("PR body", ["Body check remains"])])
+    if checks_done:
+        expect_finish_gate(scripted_runner, "- [x] Body check remains", [[]])
     assert invoke(config_path, scripted_runner, URL, *(["--checks-done"] if checks_done else [])) == 1
     output = capsys.readouterr()
     assert ("PR body: Body check remains" in output.err) == (not checks_done)
@@ -810,6 +838,7 @@ def test_checks_done_ticks_each_source_once_and_retains_snapshot(
     check_items = [("PR body", ["Keep uppercase", "Keep lowercase", "First", "Second"]),
                    ("publication comment 42", ["Old", "New", "More"])]
     recorded = expect_attestation(scripted_runner, check_items)
+    expect_finish_gate(scripted_runner, ticked_body, [[{**comment, "body": ticked_comment}]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
     assert snapshots == [land.CheckSnapshot(HEAD, (
@@ -821,6 +850,7 @@ def test_checks_done_ticks_each_source_once_and_retains_snapshot(
     expect_check_sources(scripted_runner, ticked_body, [[{**comment, "body": ticked_comment}]])
     scripted_runner.expect(ACTOR, {"login": "second-operator"})
     expect_attestation(scripted_runner, check_items, actor="second-operator", existing=recorded)
+    expect_finish_gate(scripted_runner, ticked_body, [[{**comment, "body": ticked_comment}]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
     assert snapshots[1].actor == "second-operator"
@@ -875,6 +905,7 @@ def test_partial_check_edits_recover_from_remote_state(
                                    lambda source=source: edit(source))
     expect_attestation(scripted_runner, [("PR body", ["First", "Existing"]),
                                         ("publication comment 42", ["Inspect the UI"])])
+    expect_finish_gate(scripted_runner, complete["body"], [[publication(42, body=complete["comment"])]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
     assert remote == complete
@@ -902,6 +933,7 @@ def test_complete_direct_sources_only_lookup_actor_when_recording(
     if checks_done:
         scripted_runner.expect(ACTOR, {"login": "operator"})
         expect_attestation(scripted_runner, [("PR body", ["Complete"])])
+    expect_finish_gate(scripted_runner, "- [X] Complete\r\n")
     assert invoke(config_path, scripted_runner, URL, *(["--checks-done"] if checks_done else [])) == 1
     assert "mutations disabled" in capsys.readouterr().err
 
@@ -920,12 +952,14 @@ def test_land_checks_done_ticks_once_and_comments(config_path, scripted_runner, 
     scripted_runner.expect(check_patch(completed_body), {})
     scripted_runner.expect(check_patch(completed_comment["body"], 42), {})
     existing = expect_attestation(scripted_runner, sources)
+    expect_finish_gate(scripted_runner, completed_body, [[completed_comment]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
 
     expect_check_sources(scripted_runner, completed_body, [[completed_comment, existing]])
     scripted_runner.expect(ACTOR, {"login": "next-operator"})
     updated = expect_attestation(scripted_runner, sources, actor="next-operator", existing=existing)
+    expect_finish_gate(scripted_runner, completed_body, [[completed_comment, updated]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
     assert "@next-operator recorded completion through `land`." in updated["body"]
@@ -933,7 +967,7 @@ def test_land_checks_done_ticks_once_and_comments(config_path, scripted_runner, 
     assert calls.count(check_patch(completed_body)) == 1
     assert calls.count(check_patch(completed_comment["body"], 42)) == 1
     assert sum("POST" in argv for argv in calls) == 1
-    assert calls[-1] == check_patch(updated["body"], existing["id"])
+    assert calls[-7] == check_patch(updated["body"], existing["id"])
 
 
 @pytest.mark.real_trust
@@ -966,6 +1000,7 @@ def test_attestation_quoted_markers_cannot_replace_publication(
     recorded = attestation(attestation_body(sources), created_at="2026-10-23T12:00:00Z")
     scripted_runner.expect(COMMENTS, [[completed_comment]])
     scripted_runner.expect(attestation_post(recorded["body"]), recorded)
+    expect_finish_gate(scripted_runner, completed_body, [[completed_comment], [recorded]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
     assert publish_marker not in recorded["body"]
@@ -977,6 +1012,7 @@ def test_attestation_quoted_markers_cannot_replace_publication(
     scripted_runner.expect(ACTOR, {"login": "operator"})
     scripted_runner.expect(COMMENTS, [[completed_comment], [recorded]])
     scripted_runner.expect(check_patch(recorded["body"], 501), {})
+    expect_finish_gate(scripted_runner, completed_body, [[completed_comment], [recorded]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
 
@@ -1007,6 +1043,7 @@ def test_attestation_changed_head_creates_distinct_marker(config_path, scripted_
             return remote[-1]
 
         scripted_runner.expect(attestation_post(body), create)
+        expect_finish_gate(scripted_runner, "- [X] Complete", head=head)
         assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
         assert "mutations disabled" in capsys.readouterr().err
     assert len(remote) == 2
@@ -1039,6 +1076,7 @@ def test_attestation_lost_response_reconciles_later_page(
     scripted_runner.expect(attestation_post(body), lost_create)
     scripted_runner.expect(COMMENTS, lambda: [remote[:100], remote[100:]])
     scripted_runner.expect(check_patch(body, 501), {})
+    expect_finish_gate(scripted_runner, "- [x] Complete")
     if production_runner:
         # Exercise the actual default adapter, not just the injected-runner path.
         monkeypatch.setattr(subprocess, "run", scripted_runner)
@@ -1049,7 +1087,7 @@ def test_attestation_lost_response_reconciles_later_page(
     assert "mutations disabled" in capsys.readouterr().err
     assert len(remote) == 101
     assert sum("POST" in argv for argv, _ in scripted_runner.calls) == 1
-    assert scripted_runner.calls[-1][0] == check_patch(body, 501)
+    assert scripted_runner.calls[-3][0] == check_patch(body, 501)
 
 
 @pytest.mark.real_trust
@@ -1124,6 +1162,7 @@ def test_attestation_failure_after_check_edits_recovers_on_next_invocation(
     scripted_runner.expect(ACTOR, {"login": "new-operator"})
     expect_attestation(scripted_runner, sources, actor="new-operator",
                        existing=existing if failed_method == "PATCH" else None)
+    expect_finish_gate(scripted_runner, "- [x] Check")
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
     assert sum(argv == check_patch("- [x] Check") for argv, _ in scripted_runner.calls) == 1
@@ -1148,6 +1187,387 @@ def test_existing_attestation_on_later_page_uses_production_trust(
     scripted_runner.expect(COMMENTS, [unrelated + [{"body": "Discussion"}] * 97,
                                      [attestation(body, author_association=association)]])
     scripted_runner.expect(check_patch(body, 501), {})
+    expect_finish_gate(scripted_runner, "- [X] Complete")
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
     assert not any("POST" in argv for argv, _ in scripted_runner.calls)
+
+
+# CI/update/merge belong to subsequent tasks. These lifecycle tests inject that
+# downstream boundary, while keeping discovery, human checks, finish, and all
+# external calls on the real production path and the strict scripted runner.
+CHECKS = ["gh", "pr", "checks", "78", "--repo", REPO, "--json", "name,bucket,state,link"]
+
+
+def status_rows(*rows):
+    return {**EMPTY_STATUS, "runs": list(rows)}
+
+
+def expect_initial_run(runner, pr, row, comments=None):
+    runner.expect(VIEW, pr).expect(MAIN, MAIN_REF).expect(STATUS, status_rows(row))
+    runner.expect(COMMENTS, [[]] if comments is None else comments)
+
+
+def expect_before_finish(runner, pr, row=RUN, comments=None):
+    runner.expect(STATUS, status_rows(row)).expect(VIEW, pr)
+    runner.expect(COMMENTS, [[]] if comments is None else comments)
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/eligible-run-state/finish-at-human-checks")
+@pytest.mark.parametrize("checks_done", [False, True])
+@pytest.mark.parametrize("draft", [False, True])
+def test_land_finishes_only_at_human_checks(
+    config_path, scripted_runner, monkeypatch, capsys, checks_done, draft,
+):
+    body = "- [ ] Body check" if checks_done else "- [x] Body check"
+    comment = publication(42, checks="- [x] Publication check")
+    pr = {**PR, "body": body, "isDraft": draft}
+    expect_initial_run(scripted_runner, pr, RUN, [[comment]])
+    recorded = None
+    if checks_done:
+        scripted_runner.expect(ACTOR, {"login": "operator"})
+        scripted_runner.expect(check_patch("- [x] Body check"), {})
+        recorded = expect_attestation(scripted_runner, [
+            ("PR body", ["Body check"]), ("publication comment 42", ["Publication check"]),
+        ])
+    completed = {**pr, "body": "- [x] Body check"}
+    expect_before_finish(scripted_runner, completed, comments=[[comment]])
+    scripted_runner.expect(FINISH, subprocess.CompletedProcess(FINISH, 0, "Archived and ready\n", ""),
+                           timeout=300)
+    done = {**RUN, "status": "done", "pause": None, "head": FINISHED_HEAD}
+    scripted_runner.expect(STATUS, status_rows(done))
+    scripted_runner.expect(VIEW, {**completed, "headRefOid": FINISHED_HEAD, "isDraft": False})
+    scripted_runner.expect(CHECKS, subprocess.CompletedProcess(CHECKS, 1, "", "CI failure"))
+
+    def downstream(pr, run, snapshot, operations, *, timeout):
+        assert timeout == 42
+        assert run.status == "done" and run.change == RUN["change"]
+        assert pr.head == run.head == snapshot.head == FINISHED_HEAD
+        assert not pr.draft
+        assert snapshot.sources == (
+            land.CheckSource("- [x] Body check"), land.CheckSource(comment["body"], 42),
+        )
+        assert snapshot.actor == ("operator" if checks_done else None)
+        operations.run(CHECKS, stage="CI")
+
+    monkeypatch.setattr(land, "continue_landing", downstream)
+    assert invoke(config_path, scripted_runner, URL, "--timeout", "42",
+                  *(["--checks-done"] if checks_done else [])) == 1
+    assert "CI failure" in capsys.readouterr().err
+    calls = [argv for argv, _ in scripted_runner.calls]
+    assert calls.count(FINISH) == 1
+    assert calls[-4:] == [FINISH, STATUS, VIEW, CHECKS]
+    if recorded:
+        assert f"<!-- nightshift:land-checks:78:{HEAD} -->" in recorded["body"]
+        assert FINISHED_HEAD not in recorded["body"]
+
+
+@pytest.mark.scenario("reviewed-pr-landing/reliable-run-discovery/direct-pr-skips-finish")
+@pytest.mark.parametrize("listed", [False, True])
+def test_land_direct_pr_skips_finish(config_path, scripted_runner, monkeypatch, listed):
+    pr = {**PR, "body": "- [x] Direct body check" if listed else "No checklist"}
+    unrelated = {**RUN, "pr": "https://github.com/other/project/pull/78"}
+    scripted_runner.expect(VIEW, pr).expect(MAIN, MAIN_REF).expect(STATUS, status_rows(unrelated))
+    scripted_runner.expect(STATUS, status_rows(unrelated)).expect(VIEW, pr)
+    reached = []
+
+    def downstream(pr, run, snapshot, operations, *, timeout):
+        reached.append(pr.head)
+        assert run is None
+        assert snapshot.sources == (land.CheckSource(pr.body),)
+        assert snapshot.head == pr.head == HEAD
+        raise land.Refusal("reached downstream CI and merge gates")
+
+    monkeypatch.setattr(land, "continue_landing", downstream)
+    assert invoke(config_path, scripted_runner, URL) == 1
+    assert reached == [HEAD]
+    assert [argv for argv, _ in scripted_runner.calls] == [VIEW, MAIN, STATUS, STATUS, VIEW]
+
+
+@pytest.mark.scenario("reviewed-pr-landing/eligible-run-state/wrong-state-refused")
+@pytest.mark.parametrize("row", [
+    {**RUN, "status": "running", "pause": None},
+    {**RUN, "status": "aborted", "pause": None},
+    {**RUN, "pause": {"reason": "ready_to_publish"}},
+    {**RUN, "pause": {"reason": "needs_human"}},
+])
+def test_land_refreshes_run_eligibility_before_finish(config_path, scripted_runner, capsys, row):
+    pr = {**PR, "body": "- [x] Reviewed"}
+    expect_initial_run(scripted_runner, pr, RUN)
+    scripted_runner.expect(STATUS, status_rows(row)).expect(VIEW, pr)
+    assert invoke(config_path, scripted_runner, URL) == 1
+    error = capsys.readouterr().err
+    assert f"run reviewed-change is {row['status']}" in error
+    if row["pause"]:
+        assert row["pause"]["reason"] in error
+    assert [argv for argv, _ in scripted_runner.calls] == [VIEW, MAIN, STATUS, COMMENTS, STATUS, VIEW]
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/eligible-run-state/finish-at-human-checks")
+@pytest.mark.parametrize("change", ["head", "closed", "body", "publication", "new-publication"])
+def test_land_rechecks_human_inputs_before_finish(config_path, scripted_runner, capsys, change):
+    comment = publication(checks="- [x] Reviewed publication")
+    pr = {**PR, "body": "- [x] Reviewed body"}
+    expect_initial_run(scripted_runner, pr, RUN, [[comment]])
+    refreshed = dict(pr)
+    comments = [[comment]]
+    if change == "head":
+        refreshed["headRefOid"] = "e" * 40
+    elif change == "closed":
+        refreshed["state"] = "CLOSED"
+    elif change == "body":
+        refreshed["body"] += "\n- [ ] Newly required"
+    elif change == "publication":
+        comments = [[{**comment, "body": comment["body"].replace("[x]", "[ ]")}]]
+    else:
+        comments = [[comment, publication(2, checks="- [x] New publication")]]
+    scripted_runner.expect(STATUS, status_rows(RUN)).expect(VIEW, refreshed)
+    if change not in {"head", "closed"}:
+        scripted_runner.expect(COMMENTS, comments)
+    assert invoke(config_path, scripted_runner, URL) == 1
+    error = capsys.readouterr().err
+    assert {"head": "head changed", "closed": "PR must be open"}.get(
+        change, "human check sources changed") in error
+    assert not any(argv == FINISH for argv, _ in scripted_runner.calls)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/eligible-run-state/finish-fails-safely")
+@pytest.mark.parametrize("response, reason", [
+    (subprocess.CompletedProcess(FINISH, 1, "", "push rejected"), "push rejected"),
+    (subprocess.CompletedProcess(FINISH, 2, "archive failed", ""), "archive failed"),
+    (subprocess.TimeoutExpired(FINISH, 300), "timed out after 300s"),
+    (OSError("finish unavailable"), "finish unavailable"),
+])
+def test_land_finish_failure_stops_before_ci(config_path, scripted_runner, capsys, response, reason):
+    expect_initial_run(scripted_runner, PR, RUN)
+    expect_before_finish(scripted_runner, PR)
+    scripted_runner.expect(FINISH, response, timeout=300)
+    assert invoke(config_path, scripted_runner, URL) == 1
+    error = capsys.readouterr().err
+    assert "finish reviewed-change" in error and reason in error and "rerun land" in error
+    assert scripted_runner.calls[-1][0] == FINISH
+
+
+@pytest.mark.scenario("reviewed-pr-landing/eligible-run-state/finish-fails-safely")
+@pytest.mark.parametrize("rows, reason", [
+    ([], "run identity changed"),
+    ([{**RUN, "change": "replacement"}], "run identity changed"),
+    ([{**RUN, "pr": "https://github.com/other/project/pull/78"}], "run identity changed"),
+    ([RUN], "expected the same run done"),
+    ([{**RUN, "status": "aborted", "pause": None}], "expected the same run done"),
+    ([{**RUN, "status": "running", "pause": None}], "expected the same run done"),
+    ([{**RUN, "pause": {"reason": "ready_to_publish"}}], "expected the same run done"),
+    ([{**RUN, "error": "unreadable"}], "unreadable"),
+    ([{**RUN, "head": ""}], "head SHA"),
+    ([RUN, RUN], "multiple matching runs"),
+])
+def test_land_partial_finish_must_establish_same_done_run(
+    config_path, scripted_runner, capsys, rows, reason,
+):
+    expect_initial_run(scripted_runner, PR, RUN)
+    expect_before_finish(scripted_runner, PR)
+    scripted_runner.expect(FINISH, subprocess.CompletedProcess(FINISH, 0, "Finished", ""), timeout=300)
+    scripted_runner.expect(STATUS, status_rows(*rows))
+    assert invoke(config_path, scripted_runner, URL) == 1
+    assert reason in capsys.readouterr().err
+    assert scripted_runner.calls[-1][0] == STATUS
+
+
+@pytest.mark.scenario("reviewed-pr-landing/eligible-run-state/finish-fails-safely")
+@pytest.mark.parametrize("patch, reason", [
+    ({"headRefOid": HEAD}, "does not equal remote PR head"),
+    ({"headRefOid": "e" * 40}, "does not equal remote PR head"),
+    ({"isDraft": True}, "PR remains draft"),
+    ({"state": "CLOSED"}, "PR must be open"),
+    ({"url": "https://github.com/other/project/pull/78"}, "contradictory PR identity"),
+    ({"baseRefName": "other"}, "PR must target main"),
+])
+def test_land_finished_head_and_remote_pr_must_agree(
+    config_path, scripted_runner, capsys, patch, reason,
+):
+    expect_initial_run(scripted_runner, PR, RUN)
+    expect_before_finish(scripted_runner, PR)
+    scripted_runner.expect(FINISH, subprocess.CompletedProcess(FINISH, 0, "Finished", ""), timeout=300)
+    scripted_runner.expect(STATUS, status_rows(
+        {**RUN, "status": "done", "pause": None, "head": FINISHED_HEAD}))
+    scripted_runner.expect(VIEW, {**PR, "headRefOid": FINISHED_HEAD, **patch})
+    assert invoke(config_path, scripted_runner, URL) == 1
+    assert reason in capsys.readouterr().err
+    assert scripted_runner.calls[-1][0] == VIEW
+
+
+@pytest.mark.scenario("reviewed-pr-landing/eligible-run-state/finish-fails-safely")
+@pytest.mark.parametrize("stage", ["status", "pr"])
+def test_land_post_finish_read_failure_stops_before_ci(config_path, scripted_runner, capsys, stage):
+    expect_initial_run(scripted_runner, PR, RUN)
+    expect_before_finish(scripted_runner, PR)
+    scripted_runner.expect(FINISH, subprocess.CompletedProcess(FINISH, 0, "Finished", ""), timeout=300)
+    failure = subprocess.CompletedProcess([], 1, "", "post-finish read failed")
+    if stage == "status":
+        scripted_runner.expect(STATUS, failure)
+    else:
+        scripted_runner.expect(STATUS, status_rows(
+            {**RUN, "status": "done", "pause": None, "head": FINISHED_HEAD}))
+        scripted_runner.expect(VIEW, failure)
+    assert invoke(config_path, scripted_runner, URL) == 1
+    assert "post-finish read failed" in capsys.readouterr().err
+
+
+@pytest.mark.scenario("reviewed-pr-landing/eligible-run-state/finish-fails-safely")
+@pytest.mark.parametrize("saved_done", [False, True])
+def test_land_interrupted_finish_uses_existing_recovery(
+    config_path, scripted_runner, capsys, saved_done,
+):
+    remote = {"pr": dict(PR), "run": dict(RUN)}
+    expect_initial_run(scripted_runner, remote["pr"], remote["run"])
+    expect_before_finish(scripted_runner, remote["pr"])
+
+    def partial_finish():
+        remote["pr"] = {**PR, "headRefOid": FINISHED_HEAD}
+        remote["run"] = {**RUN, "head": FINISHED_HEAD}
+        if saved_done:
+            remote["run"].update(status="done", pause=None)
+        return subprocess.TimeoutExpired(FINISH, 300)
+
+    scripted_runner.expect(FINISH, partial_finish, timeout=300)
+    assert invoke(config_path, scripted_runner, URL) == 1
+    assert "timed out" in capsys.readouterr().err
+    assert remote["run"]["status"] == ("done" if saved_done else "paused")
+
+    expect_initial_run(scripted_runner, remote["pr"], remote["run"])
+    expect_finish_gate(scripted_runner, comments=[[]], row=remote["run"], head=FINISHED_HEAD)
+    assert invoke(config_path, scripted_runner, URL) == 1
+    assert "mutations disabled beyond run completion" in capsys.readouterr().err
+    assert sum(argv == FINISH for argv, _ in scripted_runner.calls) == (1 if saved_done else 2)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/done-run-continuation/retry-after-finish")
+@pytest.mark.parametrize("failure_stage", ["ci", "update", "after-update", "merge"])
+def test_land_done_run_retry_after_downstream_failure(
+    config_path, scripted_runner, monkeypatch, capsys, failure_stage,
+):
+    # Model downstream outcomes without implementing the later CI/update/merge
+    # tasks here. The durable remote run/head are carried into a real second
+    # invocation, including an accepted update which changes only the PR head.
+    remote = {"pr": {**PR, "body": "- [x] Reviewed"}, "run": dict(RUN)}
+    received = []
+    attempts = 0
+    update = ["gh", "api", "--method", "PUT", f"repos/{REPO}/pulls/78/update-branch",
+              "-f", f"expected_head_sha={FINISHED_HEAD}"]
+
+    def merge(head):
+        return ["gh", "pr", "merge", "78", "--repo", REPO, "--merge", "--match-head-commit", head]
+
+    def downstream(pr, run, snapshot, operations, *, timeout):
+        nonlocal attempts
+        attempts += 1
+        received.append((pr.head, run.head, snapshot.head))
+        assert run.status == "done"
+        operations.run(CHECKS, stage="CI")
+        if attempts == 1 and failure_stage in {"update", "after-update"}:
+            operations.run(update, stage="branch update")
+            if failure_stage == "after-update":
+                operations.run(CHECKS, stage="CI after accepted update")
+        operations.run(merge(pr.head), stage="merge")
+        return 0
+
+    monkeypatch.setattr(land, "continue_landing", downstream)
+    expect_initial_run(scripted_runner, remote["pr"], remote["run"])
+    expect_before_finish(scripted_runner, remote["pr"])
+
+    def finish():
+        remote["pr"] = {**remote["pr"], "headRefOid": FINISHED_HEAD}
+        remote["run"] = {**RUN, "status": "done", "pause": None, "head": FINISHED_HEAD}
+        return subprocess.CompletedProcess(FINISH, 0, "Finished", "")
+
+    scripted_runner.expect(FINISH, finish, timeout=300)
+    scripted_runner.expect(STATUS, lambda: status_rows(remote["run"]))
+    scripted_runner.expect(VIEW, lambda: remote["pr"])
+    failure = subprocess.CompletedProcess([], 1, "", f"{failure_stage} failed")
+    scripted_runner.expect(CHECKS, failure if failure_stage == "ci" else {})
+    if failure_stage == "update":
+        scripted_runner.expect(update, failure)
+    elif failure_stage == "after-update":
+        def accepted_update():
+            remote["pr"] = {**remote["pr"], "headRefOid": "d" * 40}
+            return {}
+        scripted_runner.expect(update, accepted_update)
+        scripted_runner.expect(CHECKS, failure)
+    elif failure_stage == "merge":
+        scripted_runner.expect(merge(FINISHED_HEAD), failure)
+    assert invoke(config_path, scripted_runner, URL) == 1
+    assert f"{failure_stage} failed" in capsys.readouterr().err
+    assert remote["run"]["status"] == "done"
+
+    expect_initial_run(scripted_runner, remote["pr"], remote["run"])
+    expect_finish_gate(scripted_runner, remote["pr"]["body"], [[]],
+                       row=remote["run"], head=remote["pr"]["headRefOid"])
+    scripted_runner.expect(CHECKS, {})
+    scripted_runner.expect(merge(remote["pr"]["headRefOid"]), {})
+    assert invoke(config_path, scripted_runner, URL) == 0
+    assert capsys.readouterr().err == ""
+    assert received == [
+        (FINISHED_HEAD, FINISHED_HEAD, FINISHED_HEAD),
+        (remote["pr"]["headRefOid"], FINISHED_HEAD, remote["pr"]["headRefOid"]),
+    ]
+    assert sum(argv == FINISH for argv, _ in scripted_runner.calls) == 1
+    assert sum(argv == CHECKS for argv, _ in scripted_runner.calls) == (
+        3 if failure_stage == "after-update" else 2)
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/done-run-continuation/retry-after-finish")
+@pytest.mark.parametrize("source", ["body", "publication"])
+def test_land_done_run_still_requires_fresh_human_checks(
+    config_path, scripted_runner, capsys, source,
+):
+    done = {**RUN, "status": "done", "pause": None, "head": FINISHED_HEAD}
+    pr = {**PR, "headRefOid": "d" * 40, "body": "- [ ] New check" if source == "body" else ""}
+    comment = publication(checks="- [ ] New check" if source == "publication" else "- [x] Done")
+    expect_initial_run(scripted_runner, pr, done, [[comment]])
+    assert invoke(config_path, scripted_runner, URL) == 1
+    assert "unticked human checks remain" in capsys.readouterr().err
+    assert not any(argv == FINISH for argv, _ in scripted_runner.calls)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/eligible-run-state/wrong-state-refused")
+@pytest.mark.scenario("reviewed-pr-landing/done-run-continuation/retry-after-finish")
+def test_land_done_run_cannot_regress_and_repeat_finish(config_path, scripted_runner, capsys):
+    done = {**RUN, "status": "done", "pause": None, "head": FINISHED_HEAD}
+    expect_initial_run(scripted_runner, PR, done)
+    scripted_runner.expect(STATUS, status_rows(RUN)).expect(VIEW, PR)
+    assert invoke(config_path, scripted_runner, URL) == 1
+    assert "no longer done" in capsys.readouterr().err
+    assert not any(argv == FINISH for argv, _ in scripted_runner.calls)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/eligible-run-state/finish-fails-safely")
+@pytest.mark.parametrize("rows", [
+    [], [{**RUN, "change": "replacement"}],
+    [{**RUN, "pr": "https://github.com/other/project/pull/78"}],
+])
+def test_land_run_identity_must_survive_pre_finish_refresh(
+    config_path, scripted_runner, capsys, rows,
+):
+    expect_initial_run(scripted_runner, PR, RUN)
+    scripted_runner.expect(STATUS, status_rows(*rows))
+    assert invoke(config_path, scripted_runner, URL) == 1
+    assert "run identity changed" in capsys.readouterr().err
+    assert scripted_runner.calls[-1][0] == STATUS
+
+
+@pytest.mark.scenario("reviewed-pr-landing/eligible-run-state/finish-at-human-checks")
+@pytest.mark.parametrize("finished_head, accepted", [(HEAD, True), (FINISHED_HEAD, False)])
+def test_land_concurrent_done_refresh_still_requires_finished_head(
+    config_path, scripted_runner, capsys, finished_head, accepted,
+):
+    expect_initial_run(scripted_runner, PR, RUN)
+    done = {**RUN, "status": "done", "pause": None, "head": finished_head}
+    expect_before_finish(scripted_runner, PR, row=done)
+    assert invoke(config_path, scripted_runner, URL) == 1
+    error = capsys.readouterr().err
+    assert ("mutations disabled beyond run completion" if accepted
+            else "does not equal remote PR head") in error
+    assert not any(argv == FINISH for argv, _ in scripted_runner.calls)
