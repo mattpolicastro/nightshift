@@ -23,7 +23,7 @@ VIEW = ["gh", "pr", "view", "78", "--repo", REPO, "--json",
         "number,url,state,isDraft,headRefOid,baseRefName,body"]
 MAIN = ["gh", "api", f"repos/{REPO}/git/ref/heads/main"]
 COMMENTS = ["gh", "api", f"repos/{REPO}/issues/78/comments", "--paginate", "--slurp"]
-STATUS = ["specloop", "status", "--json"]
+STATUS = [sys.executable, "-m", "specloop.cli", "status", "--json"]
 ACTOR = ["gh", "api", "user"]
 EMPTY_STATUS = {"version": 1, "supervisor": {"state": "not running"}, "runs": []}
 PR = {"number": 78, "url": URL, "state": "OPEN", "isDraft": False,
@@ -31,7 +31,7 @@ PR = {"number": 78, "url": URL, "state": "OPEN", "isDraft": False,
 MAIN_REF = {"ref": "refs/heads/main", "object": {"type": "commit", "sha": BASE}}
 RUN = {"change": "reviewed-change", "pr": URL, "head": HEAD,
        "status": "paused", "pause": {"reason": "human_checks"}}
-FINISH = ["specloop", "finish", "reviewed-change"]
+FINISH = [sys.executable, "-m", "specloop.cli", "finish", "reviewed-change"]
 FINISHED_HEAD = "c" * 40
 CONFIRM_MERGED = ["gh", "pr", "view", "78", "--repo", REPO, "--json", "number,url,state"]
 
