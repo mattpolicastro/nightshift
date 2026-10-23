@@ -19,6 +19,10 @@ export const factoryRunSchema = z.object({
   change: changeSchema, status: z.enum(['running', 'paused', 'done', 'aborted']),
   tasks: z.object({ done: z.number().int().nonnegative(), total: z.number().int().nonnegative() }),
   pr: z.string(), action: factoryActionSchema.optional(), context: factoryContextSchema.optional(),
+  pause: z.object({
+    since: z.number().finite().nullable().optional(),
+    auto_resumes_remaining: z.number().int().nonnegative().nullable().optional(),
+  }).nullable().optional(),
 });
 export const factorySnapshotSchema = z.object({
   runs: z.array(factoryRunSchema), stale: z.boolean(), fetchedAt: z.string(),
