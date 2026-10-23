@@ -169,7 +169,34 @@ def plugin_differs(context, runner, destination, manifest):
     return False
 
 
-def plugin(context, runner, destination, *, apply):
+def rollback_copies(state):
+    return sorted(p for p in state.iterdir() if re.fullmatch(r"rollback-\d{20}-[0-9a-f]{32}", p.name)
+                  and p.is_dir() and not p.is_symlink())
+
+
+def reload_plugin(context, runner, destination, marker, command):
+    if not command:
+        print("plugin reload skipped: empty reload command; reload remains pending")
+        return
+    try:
+        context.run(runner, command)
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+        copies = rollback_copies(marker.parent)
+        if copies:
+            aside = destination.with_name(f"{destination.name}.failed-{uuid.uuid4().hex}")
+            print("Manual restore and reload (pending marker remains):")
+            print(" && ".join(shlex.join(argv) for argv in (
+                ["mv", "--", str(destination), str(aside)],
+                ["mv", "--", str(copies[-1]), str(destination)], command)))
+        else:
+            print("No rollback available; retry reload:")
+            print(shlex.join(command))
+        raise
+    marker.unlink()
+    print("plugin: reload completed")
+
+
+def plugin(context, runner, destination, *, apply, reload_cmd):
     root, resolved = context.cwd.resolve(), destination.resolve()
     if destination.is_symlink() or resolved.is_relative_to(root) or root.is_relative_to(resolved):
         raise ValueError(f"unsafe plugin destination: {destination}")
@@ -181,6 +208,8 @@ def plugin(context, runner, destination, *, apply):
         raise ValueError("unsafe plugin deployment state")
     if marker.exists() and not marker.is_file():
         raise ValueError("plugin pending marker is not a file")
+    if marker.exists():
+        print("plugin installed but not reloaded")
     manifest = plugin_manifest(context, runner)
     stale = plugin_differs(context, runner, destination, manifest)
     print(f"plugin: {'differs from committed HEAD' if stale else 'current'}")
@@ -214,13 +243,12 @@ def plugin(context, runner, destination, *, apply):
             if destination.exists():
                 destination.rename(state / f"rollback-{time.time_ns():020d}-{uuid.uuid4().hex}")
             stage.rename(destination)
-        copies = sorted(p for p in state.iterdir() if re.fullmatch(r"rollback-\d{20}-[0-9a-f]{32}", p.name)
-                        and p.is_dir() and not p.is_symlink())
+        copies = rollback_copies(state)
         for old in copies[:-3]:
             shutil.rmtree(old)
         print("plugin: committed tree installed")
-    if marker.exists():
-        print("plugin installed but not reloaded")
+    if apply and marker.exists():
+        reload_plugin(context, runner, destination, marker, reload_cmd)
     return (stale and not apply) or marker.exists()
 
 
@@ -229,8 +257,6 @@ def main(argv=None, *, runner=default_runner, context=None) -> int:
     args = parse_options(argv, context)
     if args.plugin_dir is None:
         print("plugin check skipped: no plugin directory configured")
-    if not args.reload_cmd:
-        print("plugin reload skipped: empty reload command")
     failures = (RuntimeError, OSError, ValueError, subprocess.SubprocessError)
     try:
         root = context.run(runner, ["git", "rev-parse", "--show-toplevel"]).stdout.strip()
@@ -265,7 +291,8 @@ def main(argv=None, *, runner=default_runner, context=None) -> int:
         return 1
     if args.plugin_dir is not None:
         try:
-            failed = plugin(context, runner, args.plugin_dir, apply=args.apply) or failed
+            failed = plugin(context, runner, args.plugin_dir, apply=args.apply,
+                            reload_cmd=args.reload_cmd) or failed
         except failures as exc:
             print(f"plugin failed: {exc}")
             return 1

@@ -1,4 +1,5 @@
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,7 +33,7 @@ def recording(tmp_path):
         assert key in replies, f"unexpected command: {argv}"
         value = replies[key]
         value = value.pop(0) if isinstance(value, list) else value
-        if isinstance(value, Exception):
+        if isinstance(value, BaseException):
             raise value
         if argv[0] == "uv":
             assert env["UV_PROJECT_ENVIRONMENT"] == str(tmp_path / ".venv")
@@ -43,7 +44,7 @@ def recording(tmp_path):
             (tmp_path / ".venv").mkdir(exist_ok=True)
         return subprocess.CompletedProcess(argv, *(value if isinstance(value, tuple) else (0, value, "")))
 
-    return SimpleNamespace(context=context, replies=replies, calls=calls,
+    return SimpleNamespace(context=context, replies=replies, calls=calls, runner=runner,
         run=lambda *args: deploy.main(list(args), runner=runner, context=context))
 
 
@@ -297,3 +298,139 @@ def test_apply_swaps_plugin_keeping_rollback(plugin_recording, failure, monkeypa
             assert (destination / "main.ts").read_text() == "old"
     assert unrelated.is_dir() and (r.state / "rollback-unrelated").is_dir()
     assert not list(r.destination.parent.glob(f".{r.destination.name}.stage-*"))
+
+
+def fresh_plugin_run(r, *args):
+    return deploy.main(["--plugin-dir", str(r.destination), *args], runner=r.runner,
+                       context=deploy.Context(r.context.cwd, dict(r.context.env)))
+
+
+@pytest.mark.scenario("deployment-drift/pending-plugin-reload/interrupted-reload-succeeds-on-rerun")
+@pytest.mark.scenario("deployment-drift/pending-plugin-reload/failed-reload-succeeds-on-rerun")
+@pytest.mark.parametrize("failure", ["interrupted", "failed", "first-install", "timeout", "unavailable"])
+def test_pending_reload_rerun(plugin_recording, failure, monkeypatch, capsys):
+    r = plugin_recording
+    # Spaces and apostrophes must survive the printed shell commands.
+    destination = r.destination.with_name(r.destination.name + " plugin's copy")
+    r.destination.rename(destination)
+    r.destination = destination
+    r.state = destination.parent / f".{destination.name}.nightshift-deploy"
+    r.marker = r.state / "pending-reload"
+    (destination / "main.ts").write_text("old")
+    if failure == "first-install":
+        deploy.shutil.rmtree(destination)
+    else:
+        previous = r.state / ("rollback-" + "0" * 20 + "-" + "a" * 32)
+        previous.mkdir(parents=True)
+        (previous / "main.ts").write_text("older")
+    command = "paseo plugin reload nightshift"
+    r.replies[command] = {
+        "interrupted": KeyboardInterrupt(), "failed": (1, "", "reload failed"),
+        "first-install": (1, "", "reload failed"),
+        "timeout": subprocess.TimeoutExpired(command, 120),
+        "unavailable": FileNotFoundError("paseo unavailable"),
+    }[failure]
+    if failure == "interrupted":
+        with pytest.raises(KeyboardInterrupt):
+            fresh_plugin_run(r, "--apply")
+    else:
+        assert fresh_plugin_run(r, "--apply") == 1
+    output = capsys.readouterr().out
+    assert r.calls[-1] == command
+    assert (destination / "main.ts").read_bytes() == b"committed"
+    assert r.marker.read_bytes() == b""
+    backups = sorted(r.state.glob("rollback-*"))
+    assert len(backups) == 2 * int(failure != "first-install")
+    if backups:
+        assert (backups[-1] / "main.ts").read_text() == "old"
+    if failure == "first-install":
+        assert "No rollback available" in output and command in output
+    elif failure != "interrupted":
+        advice = next(line for line in output.splitlines() if line.startswith("mv "))
+        move, restore, reload = [shlex.split(part) for part in advice.split(" && ")]
+        assert move[:3] == ["mv", "--", str(destination)]
+        aside = Path(move[3])
+        assert aside.is_absolute() and aside.parent == destination.parent and not aside.exists()
+        assert restore == ["mv", "--", str(backups[-1]), str(destination)]
+        assert reload == shlex.split(command)
+
+    def no_rename(*args):
+        pytest.fail("matching plugin must not be swapped again")
+
+    original_open = Path.open
+
+    def no_marker_write(path, mode="r", *args, **kwargs):
+        assert path != r.marker or mode in {"r", "rb"}
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rename", no_rename)
+    monkeypatch.setattr(Path, "open", no_marker_write)
+    calls = list(r.calls)
+    assert fresh_plugin_run(r) == 1
+    assert "plugin installed but not reloaded" in capsys.readouterr().out
+    assert command not in r.calls[len(calls):] and r.marker.exists()
+    r.replies[command] = ""
+    assert fresh_plugin_run(r, "--apply") == 0
+    assert not r.marker.exists() and sorted(r.state.iterdir()) == backups
+    assert r.calls.count(command) == 2
+    assert fresh_plugin_run(r, "--apply") == 0
+    assert r.calls.count(command) == 2 and sorted(r.state.iterdir()) == backups
+    assert "uv sync --frozen" not in r.calls and "git pull --ff-only" not in r.calls
+
+
+@pytest.mark.scenario("deployment-drift/staged-plugin-replacement/missing-destination-after-interruption")
+def test_rename_gap_stages_current_head_afresh(plugin_recording, monkeypatch, capsys):
+    r = plugin_recording
+    (r.destination / "main.ts").write_text("old")
+    original_rename = Path.rename
+    renames = []
+
+    def rename(path, target):
+        renames.append((path, target))
+        if len(renames) == 2:
+            raise KeyboardInterrupt()
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    with pytest.raises(KeyboardInterrupt):
+        fresh_plugin_run(r, "--apply")
+    backups = sorted(r.state.glob("rollback-*"))
+    assert len(backups) == 1 and not r.destination.exists() and r.marker.read_bytes() == b""
+    assert fresh_plugin_run(r) == 1
+    output = capsys.readouterr().out
+    assert "differs from committed HEAD" in output and "plugin installed but not reloaded" in output
+    r.replies["git cat-file blob 0"] = b"new HEAD"
+    r.replies["paseo plugin reload nightshift"] = ""
+    assert fresh_plugin_run(r, "--apply") == 0
+    assert len(renames) == 3 and renames[1][0] != renames[2][0]
+    assert (r.destination / "main.ts").read_bytes() == b"new HEAD"
+    assert sorted(r.state.iterdir()) == backups and (backups[0] / "main.ts").read_text() == "old"
+    assert r.calls[-1] == "paseo plugin reload nightshift"
+
+
+@pytest.mark.scenario("deployment-drift/pending-plugin-reload/reload-override-and-explicit-skip")
+def test_reload_override_and_skip(plugin_recording, capsys):
+    r = plugin_recording
+    (r.destination / "main.ts").write_text("old")
+    assert fresh_plugin_run(r, "--apply", "--reload-cmd", "") == 1
+    assert "reload skipped" in capsys.readouterr().out and r.marker.read_bytes() == b""
+    before = {p: p.stat() for p in r.state.iterdir()}
+    assert fresh_plugin_run(r, "--apply", "--reload-cmd", "") == 1
+    assert {p: p.stat() for p in r.state.iterdir()} == before
+    command = ["custom reload", "two words", "$(touch surprise);", "plugin's name"]
+    runner = r.runner
+    results = [1, 0]
+
+    def custom_runner(argv, **kwargs):
+        if argv == command:
+            assert r.marker.exists()
+            return subprocess.CompletedProcess(argv, results.pop(0), "", "custom reload result")
+        return runner(argv, **kwargs)
+
+    r.runner = custom_runner
+    assert fresh_plugin_run(r, "--apply", "--reload-cmd", shlex.join(command)) == 1
+    assert shlex.join(command) in capsys.readouterr().out and r.marker.exists()
+    assert fresh_plugin_run(r, "--apply", "--reload-cmd", shlex.join(command)) == 0
+    assert not r.marker.exists() and not results
+    assert sorted(r.state.iterdir()) == sorted(p for p in before if p != r.marker)
+    assert fresh_plugin_run(r, "--apply", "--reload-cmd", "") == 0
