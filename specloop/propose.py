@@ -129,9 +129,9 @@ NEGATED = re.compile(r"\b(?:do not|don't|never|without)\b(?:[^.;]|\.(?=\S)){0,60
                      r"|\bleave\b(?:[^.;]|\.(?=\S)){0,60}?\b(?:unchanged|untouched|alone|as is)\b", re.I)
 
 
-def edited_paths(text: str) -> set[str]:
+def edited_paths(text: str, root: Path | None = None) -> set[str]:
     """Paths a task names, minus those in a clause telling the implementer to leave them alone."""
-    return set().union(*(paths(c) for c in re.split(r"(?<=[.;])\s+", text) if not NEGATED.search(c)))
+    return set().union(*(paths(c, root=root) for c in re.split(r"(?<=[.;])\s+", text) if not NEGATED.search(c)))
 
 
 def is_test(path: str) -> bool:
@@ -155,7 +155,8 @@ def in_flight(source: Path, change: str) -> dict[str, list[str]]:
             text = git(d / "repo.git", "show", f"{m.branch}:openspec/changes/{m.change}/tasks.md").decode()
         except Exception:
             continue  # an unreadable run must not stop drafting
-        for path in paths(text, root=root):
+        # A "Do not edit X" list names X but plans no edit to it.
+        for path in edited_paths(text, root=root):
             planned.setdefault(path, []).append(d.name)
     return planned
 
