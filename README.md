@@ -114,13 +114,20 @@ for details ([issue #10](https://github.com/mattpolicastro/nightshift/issues/10)
 [PR #32](https://github.com/mattpolicastro/nightshift/pull/32)).
 
 For example, issue 7, "Add a gate", in `owner/sample` produces change
-`sample-issue-7-add-a-gate` on `spec/sample-issue-7-add-a-gate`. The daemon
+`owner__sample-issue-7-add-a-gate` on `spec/owner__sample-issue-7-add-a-gate`. The daemon
 opens a draft PR titled `Spec: Add a gate`, links it back to the issue, includes
 `Closes #7` and feasibility risks in the PR body, and removes the intake labels.
 Questions or rejected drafts receive a comment and `needs-human` instead,
 and both intake labels are removed. To retry, answer the questions or resolve
 the rejection on the issue, remove `needs-human`, and reapply `spec:draft` or
 `agent:ready`. Removing `needs-human` alone does not requeue the issue.
+
+New names preserve owner/repository spelling, including safe dots, underscores
+and hyphens. Unsafe spellings such as `owner/widget..js` are unsupported:
+repository health holds new drafting, admission and spec re-drafting, without
+encoding names or relaxing branch checks. Recorded legacy identities remain
+authoritative, including after title edits; existing safe branches stay usable.
+See [naming and migration limits](KNOWN-LIMITATIONS.md#open-gaps).
 
 After spec review, apply `spec:approved` to the PR. The daemon admits the
 reviewed tip with `--pr <url>`, records that PR, comments that the build has
@@ -191,14 +198,37 @@ manifest = "/absolute/path/to/sample.toml"
 base = "main"
 ```
 
-`manifest` must name an existing file; relative paths resolve beside
+`manifest` must name a readable regular file; relative paths resolve beside
 `config.toml`, and `~` is expanded. Its `[run]` table supplies the local source
 `repo`, `github` repository and `pr_base` (keep these aligned with the repo
-block), plus template `change` and `branch` values. It also defines provider
+block). Template `run.change` and `run.branch` are optional because intake
+supplies both per change. The template also defines provider
 profiles and roles, allowed and frozen paths, and trusted verification commands.
-The daemon overrides `change` and `branch` per issue; admission saves the
-effective manifest with the run. The worker's `verify` command is not required
-for this engine. See [manifest templates and CLI outcomes](docs/specloop/command-json.md).
+Admission saves the effective manifest with the run. The worker's `verify`
+command is not required for this engine. See [manifest templates and CLI outcomes](docs/specloop/command-json.md).
+
+Each unpaused poll checks regular-file status and validates the template before
+new work. Symlinks to regular files work; directories, FIFOs and devices are
+rejected before reading. Missing, unreadable or invalid templates, including an
+omitted manifest path, report repository-local health: healthy repositories
+continue. New drafting, admission and spec-stage re-drafting hold with triggers,
+receipts and jobs retained, without `needs-human` or an agent session.
+Repair the file at the same path to retry on a later poll. Adding or changing
+a config entry requires a daemon restart; malformed config TOML, invalid engines
+and empty or wrongly typed manifest values still fail configuration loading.
+
+Admitted runs continue publication and build-stage revisions using their copied
+manifest and recorded branch. Existing jobs can finish and be collected; delivery
+needing the damaged template waits with its successful result retained. Pause
+and stopped-job holds still apply. See [enrollment recovery](docs/specloop/README.md#enrollment-recovery)
+([issue #13](https://github.com/mattpolicastro/nightshift/issues/13)).
+
+On unpaused startup and polls after a worker-to-specloop switch, orphaned
+`agent:working` issues with no claim or surviving worktree return to `agent:ready`,
+with a `needs_decision` recovery outcome. Surviving worker branches/worktrees are
+preserved for human inspection: an issue comment gives the phase and location,
+and `agent:working` becomes `needs-human`. Recovery does not resume or delete that
+work, and runs even when the enrollment manifest is unhealthy.
 
 Make `specloop` available on the daemon's PATH and run the separate supervisor
 (`uv run specloop serve`, or its existing launchd job) to drive admitted runs.
