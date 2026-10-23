@@ -260,9 +260,43 @@ uv run specloop drill <change>        # seeded defects through the review gate
 **`propose`** has an agent draft the OpenSpec change. The harness then:
 1. validates and lints it;
 2. runs the feasibility review;
-3. feeds both kinds of problem back for up to three rounds;
+3. feeds problems back within a default budget of four drafting rounds
+   ([PR #37](https://github.com/mattpolicastro/nightshift/pull/37));
 4. leaves the draft on a local `spec/<change>` branch for a human to approve.
    For daemon-managed issues, Nightshift pushes it and opens the spec review PR.
+
+**Work in flight.** Before drafting, the harness snapshots paths named in
+`tasks.md` by other running or paused runs for the same source repository.
+It excludes the current change and skips unreadable runs without stopping
+the draft ([PR #36](https://github.com/mattpolicastro/nightshift/pull/36)).
+This is a snapshot of planned work, not a file reservation or a complete list
+of future edits. References such as `file.py:function` and
+`file.py::function` normalize to `file.py`; source-root names such as
+`README.md` count when they are existing files in the source checkout
+([PR #60](https://github.com/mattpolicastro/nightshift/pull/60), implementing
+[issue #58](https://github.com/mattpolicastro/nightshift/issues/58)).
+
+The drafter sees the map and should avoid those files where possible, putting
+new tests in new files. On the first drafting round, tasks that edit shared
+test files get overlap feedback ([PR #36](https://github.com/mattpolicastro/nightshift/pull/36)).
+Explicit hands-off clauses, such as “do not edit `tests/test_calc.py`”, do not
+count as edits. Necessary overlap may remain as a merge-conflict risk rather
+than an unconditional ban ([PR #37](https://github.com/mattpolicastro/nightshift/pull/37)).
+Implementers do not receive the map: any necessary avoidance instruction must
+name each file to leave untouched in the draft, for example “do not edit
+`tests/test_calc.py`”, rather than referring to “files in the in-flight list”
+([PR #43](https://github.com/mattpolicastro/nightshift/pull/43)).
+
+**Feasible tasks.** Human-only checks belong in `design.md`, where they become
+the PR's human checklist; every task in `tasks.md` goes to an implementing
+agent ([PR #30](https://github.com/mattpolicastro/nightshift/pull/30)).
+Lint catches common human-task forms such as “Manually …” or “The operator …”.
+Feasibility also rejects named-person checks such as “Matt checks …” and tasks
+that are impossible under the allowed paths, frozen files or trusted verify
+commands. Preserve existing `openspec/specs/` guarantees: feasibility rejects
+a change that removes, hides or breaks one without a justified `MODIFIED` or
+`REMOVED` delta for that requirement
+([PR #36](https://github.com/mattpolicastro/nightshift/pull/36)).
 
 **`drill`** plants the manifest's declared one-line defects into landed
 candidates. A drill counts only if the defect survives verification, and is
