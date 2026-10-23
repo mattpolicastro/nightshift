@@ -8,7 +8,7 @@
 
 ## 3. Calculate human waiting time
 
-- [ ] 3.1 Add the pure `factoryWaitingTime` helper in `plugins/nightshift/client/factory-model.ts` and new `plugins/nightshift/tests/factory-waiting-model.test.ts`. Test exact-zero eligibility, all excluded states, missing values, seconds-to-milliseconds conversion, rounding, future and epoch-zero timestamps, and the strict three-hour warning boundary with an injected clock. Run the model tests and plugin typecheck. Covers `paseo-runs-page/human-pause-waiting-time/waiting-time-shows-for-human-pauses-only`, `paseo-runs-page/human-pause-waiting-time/waiting-duration-uses-whole-units`, `paseo-runs-page/human-pause-waiting-time/waiting-time-turns-to-warning-after-three-hours`.
+- [x] 3.1 Add the pure `factoryWaitingTime` helper in `plugins/nightshift/client/factory-model.ts` and new `plugins/nightshift/tests/factory-waiting-model.test.ts`. Test exact-zero eligibility, all excluded states, missing values, seconds-to-milliseconds conversion, rounding, future and epoch-zero timestamps, and the strict three-hour warning boundary with an injected clock. Run the model tests and plugin typecheck. Covers `paseo-runs-page/human-pause-waiting-time/waiting-time-shows-for-human-pauses-only`, `paseo-runs-page/human-pause-waiting-time/waiting-duration-uses-whole-units`, `paseo-runs-page/human-pause-waiting-time/waiting-time-turns-to-warning-after-three-hours`.
 
 ## 4. Render the waiting indicator and verify integration
 
