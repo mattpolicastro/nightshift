@@ -60,6 +60,11 @@ Rules:
 - Do not commit, push, create branches or worktrees, use the network, or read credentials.
 - Never weaken, delete or skip an existing test to make something pass. If an existing
   test is wrong, change it only if this task requires it, and explain why in `summary`.
+  An existing test is one that predates this change; tests added by earlier tasks of
+  this same change may be updated when this task's behaviour requires it.
+- Test documentation by structure, never by wording: links resolve, examples parse or
+  run, tables and commands match the code. Never assert that a document contains
+  particular phrases; later changes edit prose freely.
 
 Finish with the structured result:
 - "ready" — the task is implemented and you believe each named scenario holds;
@@ -87,7 +92,9 @@ recorded in `basis`:
 - "scenario:<id>" — a scenario this task names is not satisfied; say how
 - "task" — a requirement stated in the task text is not met
 - "weakened-test" — an existing test was weakened, deleted or made vacuous without
-  the task requiring it (check every line in test-edits.md)
+  the task requiring it (check every line in test-edits.md). An existing test is one
+  that predates this change; tests an earlier task of this change added may evolve
+  with it when this task's behaviour requires it.
 - "scope" — a change that does not belong to this task
 - "input:<input>" — a concrete input or sequence that produces a wrong result
   in a real deployment. Code that exists only on this change's branch, whether
