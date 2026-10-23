@@ -86,7 +86,9 @@ Intake SHALL select unconsumed IDs per repository and PR without timestamp filte
 
 ### Requirement: Durable round snapshot
 
-Intake SHALL atomically save selected IDs, rendered blocks, and consumed history before dispatch and retain that snapshot through edits and restart. It SHALL durably consume only selected IDs after a validated build revision result with a landed commit or a successful spec push, before notifications or label removal and without waiting for publication. Unsuccessful new attempts SHALL consume nothing; legacy baseline initialization SHALL follow Feedback state compatibility.
+Intake SHALL atomically save selected IDs, rendered blocks, and consumed history before dispatch and retain that snapshot through edits and restart. It SHALL durably consume only selected IDs after a validated build revision result with a landed commit or a successful spec push, before notifications or label removal and without waiting for publication. Unsuccessful new attempts SHALL consume nothing; legacy baseline initialization SHALL follow Feedback state compatibility. Explicit
+release MAY detach a stopped attempt for normal selection of a new snapshot,
+without consuming the stopped result or erasing prior consumed history.
 
 #### Scenario: Snapshot is fixed before dispatch
 - **WHEN** either revision stage starts, then a selected comment is edited and another comment appears while its job runs across a daemon restart
@@ -110,7 +112,7 @@ Intake SHALL atomically save selected IDs, rendered blocks, and consumed history
 
 #### Scenario: Pause and stop preserve snapshots
 - **WHEN** a selected revision job completes while daemon delivery is paused, or the selected job has durable stop intent
-- **THEN** pause retains the saved result for authorized resume without duplicate dispatch, and stopped work remains held without delivery or consumption
+- **THEN** pause retains the saved result for authorized resume without duplicate dispatch, and stopped work remains held without delivery or consumption until explicit release detaches its receipt; the stopped result remains ineligible afterward
 - **THEN** resume of an eligible unstopped result acknowledges only the saved snapshot under the existing stage success rule
 
 ### Requirement: Feedback state compatibility
@@ -131,7 +133,7 @@ Intake SHALL validate state and preserve consumed IDs and unknown fields. Legacy
 - **WHEN** an authorized legacy receipt with a pending job or delivery is automatically initialized
 - **THEN** the original payload, job, result, event and marker remain available under existing pause and stop rules, without inferring snapshot IDs from rendered text
 - **THEN** eligible saved work finishes before a newer request starts, adds no IDs beyond the migration baseline, and subsequent new snapshots use exact IDs
-- **THEN** stopped work remains held without delivery or replacement dispatch
+- **THEN** stopped work remains held without delivery or replacement dispatch until explicit release; release retains the initialized ledger and permits only normal new-round selection
 
 #### Scenario: Legacy initialization failure preserves receipt
 - **WHEN** legacy initialization encounters malformed recorded time, missing or invalid required feedback timestamps or IDs, a failed page or fallback commit read, or an atomic save failure
@@ -172,3 +174,40 @@ Revision health checks SHALL distinguish new spec drafting from admitted-run rev
 - **WHEN** an authorized unadmitted PR has new eligible feedback but its repository enrollment is unhealthy
 - **THEN** no propose command or manifest-dependent git operation starts and the request and feedback remain eligible
 - **THEN** after repair a later poll starts the normal spec revision once
+
+### Requirement: Released revision selection
+
+After explicit release, eligible revision intake SHALL select a new snapshot
+using normal unconsumed-feedback rules, even under an unchanged trigger event.
+It SHALL preserve consumed IDs and unknown receipt fields and SHALL NOT
+acknowledge the stopped attempt's result.
+
+#### Scenario: Same event permits replacement
+- **WHEN** a stopped spec or build revision is released, its trusted revision label remains applied, and eligible unconsumed feedback exists
+- **THEN** a later eligible poll starts one replacement with a new job ID using the normal feedback selection and stage rules without requiring relabeling
+- **THEN** previously consumed IDs and unknown receipt fields survive, and stopped feedback is not consumed merely because release occurred
+
+#### Scenario: Release does not replay consumed feedback
+- **WHEN** a released revision is polled and only already-consumed feedback remains
+- **THEN** normal empty-feedback handling explains that nothing remains, removes the corresponding label application and launches no revision
+
+### Requirement: Immutable build revision input
+
+Each build-revision invocation SHALL receive a distinct absolute UTF-8 JSON
+feedback file, fully written and closed before dispatch. The file SHALL remain
+unchanged and available with the historical request across release,
+replacement and restart. Input preparation failure SHALL prevent dispatch.
+
+#### Scenario: Replacement preserves stopped input
+- **WHEN** a build revision stops, its feedback is edited or supplemented without changing the trigger event, and release permits a replacement invocation
+- **THEN** the replacement request names a different input file containing its newly selected blocks
+- **THEN** the stopped request still resolves to its exact original bytes after replacement and restart, including for a stopped attempt using the legacy event-named file
+
+#### Scenario: Delayed reader retains complete blocks
+- **WHEN** a build revision reads its input after the launching poll returns, including with a state path containing spaces and feedback containing Unicode and Markdown separators
+- **THEN** its absolute JSON input contains the original complete blocks and remains available after daemon restart
+- **THEN** synchronous injected runners also receive distinct files for separate invocations
+
+#### Scenario: Feedback file preparation fails
+- **WHEN** exclusive creation or writing of a build-revision feedback file fails
+- **THEN** no revision command launches, no feedback is consumed, and the existing intake failure path reports the error without overwriting an earlier input
