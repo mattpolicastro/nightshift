@@ -147,7 +147,7 @@ class Operations:
 
     def run(
         self, argv: list[str], *, stage: str, timeout: float = READ_TIMEOUT,
-        allowed_returncodes: tuple[int, ...] = (0,),
+        allowed_returncodes: tuple[int, ...] | None = (0,),
     ) -> subprocess.CompletedProcess[str]:
         timeout = min(timeout, self.remaining())
         try:
@@ -162,7 +162,7 @@ class Operations:
         # A command that used up its budget cannot authorize further progress,
         # even if it returned a successful result just as the deadline elapsed.
         self.remaining()
-        if result.returncode not in allowed_returncodes:
+        if allowed_returncodes is not None and result.returncode not in allowed_returncodes:
             detail = (result.stderr or result.stdout or "command failed").strip()
             raise Refusal(f"{stage}: {detail} (exit {result.returncode})")
         return result
@@ -331,7 +331,7 @@ def update_branch(
             ["gh", "api", "--method", "PUT",
              f"repos/{identity.repo}/pulls/{identity.number}/update-branch",
              "-f", f"expected_head_sha={expected_head}"],
-            stage="branch update", allowed_returncodes=(0, 1),
+            stage="branch update", allowed_returncodes=None,
         )
     except Refusal as exc:
         if not isinstance(exc.__cause__, (OSError, subprocess.SubprocessError)):
@@ -339,16 +339,26 @@ def update_branch(
         lost_response = exc
     else:
         if result.returncode:
-            detail = (result.stderr or result.stdout or "request rejected").strip()
-            # gh reports HTTP rejections in stderr. Only recognizable transport
-            # loss is ambiguous; unknown errors fail closed. An HTTP rejection
-            # takes precedence even if its message mentions a transport error.
+            stdout, stderr = result.stdout or "", result.stderr or ""
+            detail = (stderr or stdout or "request rejected").strip()
+            failure = Refusal(f"branch update: {detail} (exit {result.returncode})")
+            # Definite failures override every uncertain-response exception.
+            if re.search(r"\bHTTP(?:/[0-9.]+)?\s+[1-5][0-9]{2}\b", stderr, re.IGNORECASE):
+                raise failure
+            for stream in (stdout, stderr):
+                try:
+                    json.loads(stream)
+                except ValueError:
+                    continue
+                raise failure
+            if result.returncode == 4:
+                raise failure
             transport_loss = re.search(
                 r"\b(EOF|connection reset|connection lost|broken pipe|timed out|timeout)\b",
                 detail, re.IGNORECASE,
             )
-            failure = Refusal(f"branch update: {detail} (exit {result.returncode})")
-            if re.search(r"\bHTTP\s+[45][0-9]{2}\b", detail, re.IGNORECASE) or not transport_loss:
+            if not ("unexpected end of JSON input" in stderr
+                    or (stdout == "" and stderr == "") or transport_loss):
                 raise failure
             lost_response = failure
 
