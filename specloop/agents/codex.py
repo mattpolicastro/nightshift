@@ -19,6 +19,16 @@ DISABLE = ("apps", "browser_use", "browser_use_external", "browser_use_full_cdp_
            "in_app_browser", "hooks", "plugins", "remote_plugin", "memories", "skill_mcp_dependency_install",
            "multi_agent", "goals", "image_generation")
 USAGE = re.compile(r"usage limit|rate limit|quota|too many requests|\b429\b", re.I)
+UNAVAILABLE = re.compile(
+    r"\b(?:logged[ -]out|not logged[ -]in"
+    r"|(?:authentication|login|log[ -]in|sign[ -]in)(?: is)? required"
+    r"|(?:please|must|need to) (?:log[ -]?in|sign[ -]in)"
+    r"|(?:expired|invalid) (?:(?:auth(?:entication)?|oauth|access|refresh) )?token"
+    r"|(?:(?:auth(?:entication)?|oauth|access|refresh) )?token (?:is |has (?:been )?)?(?:expired|invalid)"
+    r"|(?:inactive|expired|cancelled|canceled) (?:plan|subscription)"
+    r"|(?:plan|subscription) (?:is |has (?:been )?)?(?:inactive|expired|cancelled|canceled)"
+    r"|401|403)\b", re.I,
+)
 
 
 def _home(call: Call) -> Path:
@@ -63,11 +73,16 @@ def run(call: Call) -> Result:
     code, timeout = spawn(argv(call, schema_path, out_path), env, call, stdin=call.prompt)
 
     session, errors, usage = "", [], {}
+    diagnostics: list[str] = []
     for e in read_jsonl(call.transcript):
         if e.get("type") == "thread.started":
             session = e.get("thread_id", "")
         elif e.get("type") in ("error", "turn.failed"):
             errors.append(json.dumps(e)[:500])
+            error = e.get("error")
+            # Match decoded messages: JSON escaping hides boundaries after newlines.
+            diagnostics.extend(value for value in (e.get("message"),
+                error.get("message") if isinstance(error, dict) else error) if isinstance(value, str))
         elif e.get("type") == "turn.completed":
             usage = e.get("usage", {})
     stderr = call.transcript.with_suffix(".stderr").read_text(errors="replace")[-2000:]
@@ -75,7 +90,8 @@ def run(call: Call) -> Result:
         return Result("infra", session=session, detail=timeout, usage=usage)
     if code != 0:
         text = " ".join(errors) + stderr
-        kind = "usage_limit" if USAGE.search(text) else "infra"
+        diagnostic = "\n".join([*diagnostics, stderr])
+        kind = "usage_limit" if USAGE.search(text) else "unavailable" if UNAVAILABLE.search(diagnostic) else "infra"
         return Result(kind, session=session, detail=f"exit {code}: {text[-600:]}", usage=usage)
     try:
         return Result("ok", json.loads(out_path.read_text()), session, usage=usage)

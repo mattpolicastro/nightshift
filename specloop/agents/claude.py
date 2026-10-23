@@ -21,6 +21,16 @@ SETTINGS = {"sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True, "allo
 TOOLS = {"write": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"], "read": ["Bash", "Read", "Glob", "Grep"]}
 DENY = ["Bash(git commit:*)", "Bash(git push:*)", "Bash(git reset:*)", "Bash(git checkout:*)"]
 USAGE = re.compile(r"usage limit|rate limit|limit reached|quota|\b429\b", re.I)
+UNAVAILABLE = re.compile(
+    r"\b(?:logged[ -]out|not logged[ -]in"
+    r"|(?:authentication|login|log[ -]in|sign[ -]in)(?: is)? required"
+    r"|(?:please|must|need to) (?:log[ -]?in|sign[ -]in)"
+    r"|(?:expired|invalid) (?:(?:auth(?:entication)?|oauth|access|refresh) )?token"
+    r"|(?:(?:auth(?:entication)?|oauth|access|refresh) )?token (?:is |has (?:been )?)?(?:expired|invalid)"
+    r"|(?:inactive|expired|cancelled|canceled) (?:plan|subscription)"
+    r"|(?:plan|subscription) (?:is |has (?:been )?)?(?:inactive|expired|cancelled|canceled)"
+    r"|401|403)\b", re.I,
+)
 
 
 def argv(call: Call) -> list[str]:
@@ -57,8 +67,16 @@ def run(call: Call) -> Result:
     if timeout:
         return Result("infra", session=session, detail=timeout, usage=usage)
     if not final or final.get("is_error") or final.get("subtype") != "success":
-        text = json.dumps(final or {})[:800] + call.transcript.with_suffix(".stderr").read_text(errors="replace")[-800:]
-        kind = "usage_limit" if USAGE.search(text) else "infra"
+        stderr = call.transcript.with_suffix(".stderr").read_text(errors="replace")[-800:]
+        text = json.dumps(final or {})[:800] + stderr
+        # Token counts and other result metadata are not provider diagnostics.
+        errors = (final or {}).get("errors", [])
+        if not isinstance(errors, list):
+            errors = [errors]
+        # Keep decoded whitespace so multiline messages retain their word boundaries.
+        diagnostic = "\n".join(value for value in [(final or {}).get("result"), *errors, stderr]
+                               if isinstance(value, str))
+        kind = "usage_limit" if USAGE.search(text) else "unavailable" if UNAVAILABLE.search(diagnostic) else "infra"
         return Result(kind, session=session, detail=f"exit {code}: {text}", usage=usage)
     out = final.get("structured_output")
     if not isinstance(out, dict):

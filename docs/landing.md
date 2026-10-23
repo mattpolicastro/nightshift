@@ -17,12 +17,15 @@ if you also pass `--repo`, it must agree with that URL.
 
 ## Prerequisites and flags
 
-Use a working Nightshift checkout with `uv`, `gh`, and `specloop` available on
-PATH. The selected configuration must contain exactly one case-insensitive
-enrollment for the repository. Authenticate `gh` as the operator with permission
-to read and edit the PR and issue comments, update the branch, and merge under
-the repository's protection rules. Run in the environment where
-`specloop status --json` can read the applicable runs, including for worker repositories.
+Use a working Nightshift checkout with `uv` and `gh` available on PATH. The
+interpreter running `nightshift.land` must be able to import `specloop.cli`;
+the `specloop` console script need not be on PATH, and virtual-environment
+activation is not required. The selected configuration must contain exactly one
+case-insensitive enrollment for the repository. Authenticate `gh` as the operator
+with permission to read and edit the PR and issue comments, update the branch,
+and merge under the repository's protection rules. Run in the environment where
+that interpreter's `-m specloop.cli status --json` can read the applicable runs,
+including for worker repositories.
 Only open PRs targeting an existing `main` are eligible.
 
 | Argument | Meaning |

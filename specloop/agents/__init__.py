@@ -25,7 +25,7 @@ from specloop.manifest import Profile
 
 @dataclass
 class Result:
-    disposition: str  # ok | infra | usage_limit | invalid_output
+    disposition: str  # ok | infra | usage_limit | unavailable | invalid_output
     output: dict | None = None
     session: str = ""
     detail: str = ""
