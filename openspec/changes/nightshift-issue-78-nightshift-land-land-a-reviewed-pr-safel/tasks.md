@@ -17,7 +17,7 @@
 ## 4. Establish CI verdicts and deadlines
 
 - [x] 4.1 Add expected-head CI polling, JSON/exit-status classification and the injected shared deadline. Add `test_land_refuses_failing_ci` and pending-to-green, empty/all-skipped, cancellation, malformed-result, timeout and head-change tests. Cover `reviewed-pr-landing/bounded-ci-wait/pending-then-green`, `reviewed-pr-landing/bounded-ci-wait/failing-ci-refused`, `reviewed-pr-landing/bounded-ci-wait/shared-deadline-expires`.
-- [ ] 4.2 Strengthen the tests so each of these single-line mutations of code added in section 4 makes a test fail; where a mutation genuinely cannot change behaviour, say why in a comment on the line above it starting `mutation-equivalent:` (the reviewer judges it): nightshift/land.py:657 `"review the current head and rerun land")` -> `"review the current head or rerun land")`; nightshift/land.py:137 `raise Refusal("shared CI deadline expired; inspect checks an` -> `raise Refusal("shared CI deadline expired; inspect checks or`
+- [x] 4.2 Strengthen the tests so each of these single-line mutations of code added in section 4 makes a test fail; where a mutation genuinely cannot change behaviour, say why in a comment on the line above it starting `mutation-equivalent:` (the reviewer judges it): nightshift/land.py:657 `"review the current head and rerun land")` -> `"review the current head or rerun land")`; nightshift/land.py:137 `raise Refusal("shared CI deadline expired; inspect checks an` -> `raise Refusal("shared CI deadline expired; inspect checks or`
 
 ## 5. Validate updates and synchronize main
 
