@@ -29,6 +29,9 @@ Implementation scope: `nightshift/specloop_job.py`, the collection and revision
 input paths in `nightshift/specloop_intake.py`, `nightshift/cli.py`, corresponding
 tests, and those three documentation files. Preserve every existing assertion;
 explain any fixture/fake changes in the implementation PR.
+Implementing agents do not edit `openspec/**`. This change carries the spec
+deltas; the archive workflow applies them to the canonical capabilities after
+implementation acceptance, including the Current limitations correction.
 
 Out of scope: changing #8's signals, stop deadlines, identity checks or stop
 protocol; automatic retries; rollback or cleanup; daemon/supervisor lifecycle

@@ -143,6 +143,19 @@ protocol or require a new label event solely because release occurred.
    explained in the implementation PR. Run focused tests with each task, then
    require green `uv run pytest` for implementation acceptance.
 
+8. **Archive workflow.** After implementation acceptance, the OpenSpec archive
+   workflow applies this change's ADDED and MODIFIED deltas to the corresponding
+   capability specifications. In particular, it applies the Current limitations
+   delta from this change's `specs/specloop-documentation/spec.md` to
+   `openspec/specs/specloop-documentation/spec.md`, removing issue #34's
+   missing-command claim while retaining the other limitations and scenarios.
+   This is archive-owned spec maintenance, outside the implementation tasks:
+   implementing agents never edit `openspec/**`. Task 1.6 implements and checks
+   the operator-documentation behavior against the delta; its completion does
+   not depend on changing the canonical specification. The archive workflow
+   verifies that the applied requirements match the accepted deltas and preserve
+   unrelated capability requirements before completing archival.
+
 Human checks for the implementation PR, never implementing-agent tasks:
 
 - On the next real daemon stop during delivery, record the job ID and inspect
