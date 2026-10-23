@@ -53,6 +53,30 @@ def test_phase_durations_from_event_pairs(tmp_path, logs):
         count=5, total_seconds=150, median_seconds=20)
 
 
+@pytest.mark.scenario("build-timing-report/phase-durations/retries-and-separate-tasks")
+@pytest.mark.parametrize("phase,start,end", [
+    ("verify", "sealed", "verified"),
+    ("review", "review", "reviewed"),
+])
+def test_task_phase_pairs_remain_separate(tmp_path, logs, phase, start, end):
+    logs("interleaved", event(start, 0, "1.1"), event(start, 5, "1.2"),
+         event(end, 20, "1.1"), event(end, 95, "1.2"))
+
+    assert collect_report(tmp_path)["phases"][phase] == dict(
+        count=2, total_seconds=110, median_seconds=55)
+
+
+@pytest.mark.scenario("build-timing-report/phase-durations/six-phase-summaries")
+@pytest.mark.parametrize("pause_task,resume_task", [({}, {}), ({"task": "1.1"}, {"task": "1.2"})])
+def test_paused_wait_pairs_by_run(tmp_path, logs, pause_task, resume_task):
+    # Run-level waits pair even without task keys or when the task changes.
+    logs("paused", dict(event="pause", at=100, **pause_task),
+         dict(event="resumed", at=160, **resume_task))
+
+    assert collect_report(tmp_path)["phases"]["paused_wait"] == dict(
+        count=1, total_seconds=60, median_seconds=60)
+
+
 @pytest.mark.scenario("build-timing-report/change-summaries/build-and-wait-hours")
 def test_per_change_build_and_wait_hours(tmp_path, logs):
     logs("complete", event("admitted", 0), event("landed", 1), event("landed", 2, "2.1"),
