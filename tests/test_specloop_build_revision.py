@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from manifest_fixtures import manifest_text
+
 from nightshift import daemon, queue, specloop_intake, specloop_job
 from nightshift.config import Config, Repo
 from test_specloop_spec_revision import Commands, RevisionGh, CHANGE, HEAD, REVISED, TIP_DATE, seed_consumed
@@ -34,7 +36,7 @@ class BuildCommands(Commands):
 @pytest.fixture
 def setup(tmp_path):
     manifest = tmp_path / "manifest.toml"
-    manifest.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / "source"))}\n')
+    manifest.write_text(manifest_text(tmp_path / "source"))
     repo = Repo("owner/sample", engine="specloop", manifest=manifest)
     gh = RevisionGh()
     gh.label_event("spec:review", "unlabeled")

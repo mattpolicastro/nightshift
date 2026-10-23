@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from manifest_fixtures import manifest_text
+
 from nightshift import daemon, queue, specloop_client
 from nightshift.config import Config, Repo, load
 from test_queue import FakeGh
@@ -15,7 +17,7 @@ from test_queue import FakeGh
 @pytest.fixture
 def manifest(tmp_path):
     path = tmp_path / "repository.toml"
-    path.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / "source"))}\n')
+    path.write_text(manifest_text(tmp_path / "source"))
     return path
 
 
@@ -60,11 +62,8 @@ spec_approved = "approved"
 
 @pytest.mark.parametrize("settings,reason", [
     ('engine = "typo"', "engine"),
-    ('engine = "specloop"', "requires a manifest"),
     ('engine = "specloop"\nmanifest = ""', "non-empty path"),
     ('engine = "specloop"\nmanifest = 42', "non-empty path"),
-    ('engine = "specloop"\nmanifest = "missing.toml"', "not a file"),
-    ('engine = "specloop"\nmanifest = "."', "not a file"),
 ])
 def test_invalid_engine_configuration_rejected(tmp_path, settings, reason):
     config = tmp_path / "config.toml"
@@ -197,7 +196,7 @@ def test_specloop_repository_drafts_without_worker_claims(isolated, monkeypatch,
         if args[0] == "git":
             return subprocess.CompletedProcess(args, 0, "", "")
         return subprocess.CompletedProcess(args, 0, json.dumps({
-            "version": 1, "outcome": "drafted", "branch": "spec/sample-issue-7-add-a-gate",
+            "version": 1, "outcome": "drafted", "branch": "spec/owner__sample-issue-7-add-a-gate",
             "commit": "abc123", "questions": [], "contradictions": [], "risks": [], "problems": [],
         }), "")
 
@@ -217,12 +216,12 @@ def test_specloop_repository_drafts_without_worker_claims(isolated, monkeypatch,
     assert daemon.claim_next(cfg, {"owner/sample": isolated}) is None
     assert len(commands) == 2
     assert commands[1] == ["git", "-C", str(isolated / "source"), "push", "origin",
-                           "abc123:refs/heads/spec/sample-issue-7-add-a-gate"]
+                           "abc123:refs/heads/spec/owner__sample-issue-7-add-a-gate"]
     command = commands[0]
     assert command[:3] == ["specloop", "propose", str(manifest)]
     assert command[-1] == "--json"
-    assert command[command.index("--change") + 1] == "sample-issue-7-add-a-gate"
-    assert command[command.index("--branch") + 1] == "spec/sample-issue-7-add-a-gate"
+    assert command[command.index("--change") + 1] == "owner__sample-issue-7-add-a-gate"
+    assert command[command.index("--branch") + 1] == "spec/owner__sample-issue-7-add-a-gate"
     assert "--idea" not in command
     payload = Path(command[command.index("--idea-file") + 1])
     assert payload.is_absolute()
@@ -255,6 +254,7 @@ def test_specloop_poll_is_independent_of_worker_cap(isolated, monkeypatch, manif
 def test_mixed_repos_keep_worker_recovery_and_claims(isolated, monkeypatch, manifest):
     cfg = Config(repos=[Repo("o/spec", engine="specloop", manifest=manifest), Repo("o/worker", "true")])
     recovered, claimed = [], []
+    monkeypatch.setattr(queue, "_gh", FakeGh())
     monkeypatch.setattr(queue, "reconcile", lambda name, labels: recovered.append(name) or [])
     monkeypatch.setattr(queue, "claim", lambda name, *a: claimed.append(name))
     dirs = {repo.name: isolated for repo in cfg.repos}

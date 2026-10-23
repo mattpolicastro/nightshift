@@ -21,6 +21,46 @@ REPOSITORY = "https://github.com/mattpolicastro/nightshift"
 LINK = re.compile(r"\[([^\[\]\n]+)\]\(([^\s)]+)\)")
 
 
+@pytest.mark.scenario(
+    "specloop-documentation/configuration-resilience-guidance/operator-repairs-enrollment"
+)
+@pytest.mark.parametrize("path", ("README.md", "docs/specloop/README.md"))
+def test_enrollment_guidance_explains_holds_repair_and_surviving_work(path):
+    text = " ".join((ROOT / path).read_text().split())
+    for guidance in (
+        "regular-file", "Symlinks to regular files", "FIFOs and devices",
+        "`run.change` and `run.branch` are optional", "intake supplies both per change",
+        "repository-local health", "Healthy repositories continue",
+        "triggers, receipts and jobs retained, without `needs-human` or an agent session",
+        "Repair the file at the same path to retry on a later poll",
+        "requires a daemon restart", "Admitted runs continue publication and build-stage revisions",
+        "manifest and recorded branch", "successful result", "stopped-job holds still apply",
+        "unpaused startup and polls", "no claim or surviving worktree return to `agent:ready`",
+        "`needs_decision`", "preserved for human inspection", "phase and location",
+        "`agent:working` becomes `needs-human`", "Recovery does not resume or delete",
+    ):
+        assert guidance.lower() in text.lower(), f"{path}: missing guidance: {guidance}"
+
+
+@pytest.mark.scenario(
+    "specloop-documentation/configuration-resilience-guidance/operator-understands-names-and-limits"
+)
+def test_naming_guidance_distinguishes_compatibility_from_migration():
+    for path in DOCS:
+        text = " ".join((ROOT / path).read_text().split())
+        assert "`owner/widget..js`" in text and "unsupported" in text
+        assert "Recorded legacy identities remain" in text
+        assert f"[issue #13]({REPOSITORY}/issues/13)" in text
+        if path != "KNOWN-LIMITATIONS.md":
+            assert "`owner__sample-issue-7-add-a-gate`" in text
+            assert "`spec/owner__sample-issue-7-add-a-gate`" in text
+    limits = " ".join((ROOT / "KNOWN-LIMITATIONS.md").read_text().split())
+    for boundary in ("not automatically migrated or renamed", "global name collisions",
+                     "both proposal receipt loss and a title change", "transport retry risks are unchanged",
+                     "do not reread labels", "cannot guarantee exactly-once", "human rearms"):
+        assert boundary in limits
+
+
 
 @pytest.mark.scenario(
     "specloop-documentation/documentation-integrity/references-and-reader-checks-are-reviewable"

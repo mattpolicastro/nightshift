@@ -164,7 +164,9 @@ def collect_history(nightshift_root: Path, runs_root: Path) -> dict:
             elif matches:
                 raise ValueError("ambiguous proposal identity for change")
             else:
-                pattern = re.escape(repo.split("/")[1]) + r"-issue-([1-9][0-9]*)-([a-z0-9]+(?:-[a-z0-9]+)*)"
+                prefixes = (repo.replace("/", "__"), repo.split("/")[1])
+                pattern = ("(?:" + "|".join(re.escape(prefix) for prefix in prefixes) + ")"
+                           + r"-issue-([1-9][0-9]*)-([a-z0-9]+(?:-[a-z0-9]+)*)")
                 match = re.fullmatch(pattern, change)
                 if not match or len(match[2]) > 40:
                     raise ValueError("missing proposal and no front-door change identity")

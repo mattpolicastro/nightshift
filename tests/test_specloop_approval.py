@@ -7,6 +7,8 @@ from functools import partial
 
 import pytest
 
+from manifest_fixtures import manifest_text
+
 from nightshift import daemon, queue, specloop_client, specloop_intake
 from nightshift.config import Config, Repo
 from test_engine_routing import DraftGh
@@ -126,7 +128,7 @@ class Commands:
 @pytest.fixture
 def repo(tmp_path):
     manifest = tmp_path / "manifest.toml"
-    manifest.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / "source"))}\n')
+    manifest.write_text(manifest_text(tmp_path / "source"))
     return Repo("owner/sample", engine="specloop", manifest=manifest)
 
 
@@ -139,12 +141,14 @@ def poll(repo, tmp_path, gh, commands, labels=queue.Labels()):
 @pytest.mark.real_trust
 def test_approved_spec_admitted_through_daemon(repo, tmp_path, monkeypatch):
     gh, commands = ApprovalGh(), Commands()
+    template = repo.manifest.read_bytes()
     monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
     monkeypatch.setattr(specloop_intake.subprocess, "run", commands)
     health = daemon.RepoHealth()
     for _ in range(2):
         daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
     assert not health.failures
+    assert repo.manifest.read_bytes() == template
     assert commands.admissions == [["specloop", "admit", str(repo.manifest), "--change", CHANGE,
                                     "--branch", BRANCH, "--head", HEAD, "--pr", gh.pr_url, "--json"]]
     assert commands.runs[0]["pr"] == gh.pr_url
@@ -169,10 +173,12 @@ def test_approved_spec_admitted_through_daemon(repo, tmp_path, monkeypatch):
 }])
 def test_refused_admission_explained(repo, tmp_path, reason):
     gh, commands = ApprovalGh(), Commands("refused")
+    template = repo.manifest.read_bytes()
     commands.result["reasons"] = [reason]
     poll(repo, tmp_path, gh, commands)
     poll(repo, tmp_path, gh, commands)
     assert len(commands.admissions) == 1
+    assert repo.manifest.read_bytes() == template
     assert commands.runs == []
     assert len(gh.comments) == 1
     details = reason.values() if isinstance(reason, dict) else [reason]
@@ -245,6 +251,7 @@ def test_rebased_spec_admits_the_reviewed_tip(repo, tmp_path):
     assert gh.labels == set()
 
 
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/saved-work-survives-a-hold")
 @pytest.mark.parametrize("outcome", ["admitted", "refused"])
 @pytest.mark.parametrize("operation,after_write", [
     (("pr", "comment"), False), (("pr", "comment"), True),
@@ -262,17 +269,26 @@ def test_restart_finishes_admission_delivery(repo, tmp_path, outcome, operation,
 
     with pytest.raises(queue.GhError):
         poll(repo, tmp_path, interrupted, commands)
+    if outcome == "admitted":
+        repo.manifest.unlink()
+        gh.head = "b" * 40
     poll(repo, tmp_path, gh, commands)
     assert len(commands.admissions) == 1
     assert len(gh.comments) == 1
     assert gh.labels == (set() if outcome == "admitted" else {"spec:review", "needs-human"})
 
 
-def test_lost_admission_response_uses_status_before_retry(repo, tmp_path):
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/saved-work-survives-a-hold")
+def test_lost_admission_response_uses_status_before_retry(repo, tmp_path, monkeypatch):
     gh, commands = ApprovalGh(), Commands()
     commands.lost_admission = True
     with pytest.raises(specloop_client.SpecloopError):
         poll(repo, tmp_path, gh, commands)
+    repo.manifest.unlink()
+    monkeypatch.setattr(specloop_intake, "manifest_readiness",
+                        lambda *a: pytest.fail("committed admission read enrollment"))
+    # The build may have moved the PR since the reviewed admission committed.
+    gh.head = "b" * 40
     poll(repo, tmp_path, gh, commands)
     assert len(commands.admissions) == 1
     assert len(gh.comments) == 1

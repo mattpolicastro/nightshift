@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from manifest_fixtures import manifest_text
+
 from nightshift import daemon, queue, specloop_intake
 from nightshift.config import Config, Repo
 from specloop import cli, state
@@ -49,7 +51,7 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
     monkeypatch.setattr(daemon, "PAUSE_FILE", tmp_path / "pause")
     manifest = tmp_path / "manifest.toml"
-    manifest.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / "source"))}\n')
+    manifest.write_text(manifest_text(tmp_path / "source"))
     repo = Repo("owner/sample", engine="specloop", manifest=manifest)
     gh, commands = ApprovalGh(), PublishCommands()
     # Use actual admission to establish daemon ownership, not hand-written state.
