@@ -12,7 +12,7 @@
 
 ## 3. Front door
 
-- [ ] 3.1 Reconcile front-door sections in `docs/specloop/README.md` and `README.md` with dependencies, label authorization, consumed feedback IDs and legacy initialization, idea files and isolated status errors. Retain correct root README revision details and keep worker instructions unchanged. Add adjacent citations from the design and stay below 250 changed lines. Covers `specloop-documentation/front-door-guidance/dependencies-and-label-actors-gate-work`, `specloop-documentation/front-door-guidance/revision-feedback-survives-a-long-round`, `specloop-documentation/front-door-guidance/input-and-status-remain-usable`.
+- [x] 3.1 Reconcile front-door sections in `docs/specloop/README.md` and `README.md` with dependencies, label authorization, consumed feedback IDs and legacy initialization, idea files and isolated status errors. Retain correct root README revision details and keep worker instructions unchanged. Add adjacent citations from the design and stay below 250 changed lines. Covers `specloop-documentation/front-door-guidance/dependencies-and-label-actors-gate-work`, `specloop-documentation/front-door-guidance/revision-feedback-survives-a-long-round`, `specloop-documentation/front-door-guidance/input-and-status-remain-usable`.
 
 ## 4. Evidence
 
