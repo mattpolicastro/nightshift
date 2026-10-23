@@ -1,6 +1,6 @@
 """Explicit operator entry point for landing an enrolled, reviewed PR.
 
-Only read-only identity validation is wired so far. Mutations remain disabled
+Only read-only identity and run validation are wired so far. Mutations remain disabled
 until the human-check, lifecycle, CI, and merge gates are implemented.
 """
 
@@ -48,6 +48,15 @@ class PullRequest:
     identity: Identity
     head: str
     draft: bool
+
+
+@dataclass(frozen=True)
+class LandingRun:
+    change: str
+    pr: str
+    head: str
+    status: str
+    pause_reason: str | None
 
 
 @dataclass
@@ -199,6 +208,66 @@ def read_main(identity: Identity, operations: Operations) -> str:
     return obj["sha"]
 
 
+def discover_run(identity: Identity, operations: Operations) -> LandingRun | None:
+    """A missing match is meaningful only after every row is readable.
+
+    Validate the version-1 fields used for classification and lifecycle gates;
+    status presentation fields (tasks, context, action) are not landing inputs.
+    """
+    data = operations.read_json(["specloop", "status", "--json"], stage="run discovery")
+    if type(data.get("version")) is not int or data["version"] != 1:
+        raise Refusal("run discovery: unsupported status version; expected version 1")
+    if "error" in data:
+        raise Refusal(f"run discovery: status error: {data['error']}")
+    rows = data.get("runs")
+    if not isinstance(rows, list):
+        raise Refusal("run discovery: malformed status; expected a runs list")
+    matches = []
+    for index, row in enumerate(rows):
+        stage = f"run discovery: status row {index + 1}"
+        if not isinstance(row, dict):
+            raise Refusal(f"{stage}: malformed run object")
+        if "error" in row:
+            raise Refusal(f"{stage} ({row.get('change', 'unknown')}): error: {row['error']}")
+        change, pr, head = row.get("change"), row.get("pr"), row.get("head")
+        status, pause = row.get("status"), row.get("pause")
+        if not isinstance(change, str) or not change.strip():
+            raise Refusal(f"{stage}: malformed or missing change name")
+        if not isinstance(pr, str):
+            raise Refusal(f"{stage} ({change}): malformed or missing PR URL")
+        try:
+            run_identity = _url_identity(pr) if pr else None
+        except Refusal as exc:
+            raise Refusal(f"{stage} ({change}): malformed PR URL: {pr!r}") from exc
+        if not isinstance(head, str) or not _SHA.fullmatch(head):
+            raise Refusal(f"{stage} ({change}): malformed or missing head SHA")
+        if status not in ("running", "paused", "done", "aborted"):
+            raise Refusal(f"{stage} ({change}): malformed run state: {status!r}")
+        if ("pause" not in row or (pause is not None and (
+                not isinstance(pause, dict) or not isinstance(pause.get("reason"), str)
+                or not pause["reason"].strip())) or (status == "paused" and pause is None)):
+            raise Refusal(f"{stage} ({change}): malformed pause for state {status}")
+        if run_identity == identity:
+            matches.append(LandingRun(change, identity.url, head, status,
+                                      pause["reason"] if pause is not None else None))
+    if len(matches) > 1:
+        raise Refusal(f"run discovery: multiple matching runs for {identity.url}: "
+                      + ", ".join(run.change for run in matches))
+    return matches[0] if matches else None
+
+
+def validate_run_eligibility(pr: PullRequest, run: LandingRun | None) -> None:
+    if run is None:
+        if pr.draft:
+            raise Refusal("direct PR is draft; mark it ready before retrying land")
+        return
+    if run.status == "done" or (run.status == "paused" and run.pause_reason == "human_checks"):
+        return
+    state = run.status + (f" ({run.pause_reason})" if run.pause_reason else "")
+    raise Refusal(f"run {run.change} is {state}; retry land only when paused at human_checks "
+                  "or done")
+
+
 def main(
     argv: list[str] | None = None, *, runner: Runner | None = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -210,8 +279,10 @@ def main(
         cfg = load_config(args.config)
         identity = resolve_identity(args.pr, args.repo, operations)
         enrolled_repo(cfg, identity)
-        read_pr(identity, operations)
+        pr = read_pr(identity, operations)
         read_main(identity, operations)
+        run = discover_run(identity, operations)
+        validate_run_eligibility(pr, run)
         # Fail closed until every subsequent safety gate is wired. In
         # particular, --checks-done must not authorize mutations on its own.
         raise Refusal(f"{identity.url}: mutations disabled until all landing gates are wired")

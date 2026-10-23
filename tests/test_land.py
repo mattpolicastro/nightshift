@@ -1,8 +1,11 @@
 """Scripted, offline landing tests: unexpected calls (including mutations) fail."""
 
+import ast
 from collections import deque
+from importlib.util import resolve_name
 import json
 from pathlib import Path
+import re
 import runpy
 import subprocess
 import sys
@@ -19,9 +22,13 @@ BASE = "b" * 40
 VIEW = ["gh", "pr", "view", "78", "--repo", REPO, "--json",
         "number,url,state,isDraft,headRefOid,baseRefName"]
 MAIN = ["gh", "api", f"repos/{REPO}/git/ref/heads/main"]
+STATUS = ["specloop", "status", "--json"]
+EMPTY_STATUS = {"version": 1, "supervisor": {"state": "not running"}, "runs": []}
 PR = {"number": 78, "url": URL, "state": "OPEN", "isDraft": False,
       "headRefOid": HEAD, "baseRefName": "main"}
 MAIN_REF = {"ref": "refs/heads/main", "object": {"type": "commit", "sha": BASE}}
+RUN = {"change": "reviewed-change", "pr": URL, "head": HEAD,
+       "status": "paused", "pause": {"reason": "human_checks"}}
 
 
 class ScriptedRunner:
@@ -137,7 +144,7 @@ def test_default_subprocess_runner_and_config(
     monkeypatch.setattr(subprocess, "run", scripted_runner)
     monkeypatch.setattr(sys, "argv", ["nightshift.land", URL, "--timeout", "20",
                                      *(["--checks-done"] if checks_done else [])])
-    scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF)
+    scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF).expect(STATUS, EMPTY_STATUS)
     assert land.main() == 1
     output = capsys.readouterr()
     assert "mutations disabled" in output.err
@@ -156,7 +163,7 @@ def test_repository_resolves(config_path, scripted_runner, capsys, argv, inferre
     if inferred:
         scripted_runner.expect(["gh", "repo", "view", "--json", "nameWithOwner"],
                                {"nameWithOwner": "Owner/Project"})
-    scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF)
+    scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF).expect(STATUS, EMPTY_STATUS)
     assert invoke(config_path, scripted_runner, *argv) == 1
     assert f"{URL}: mutations disabled" in capsys.readouterr().err
 
@@ -246,6 +253,211 @@ def test_invalid_remote_pr(config_path, scripted_runner, capsys, patch, reason):
     scripted_runner.expect(VIEW, {**PR, **patch})
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert reason in capsys.readouterr().err
+
+
+@pytest.mark.scenario("reviewed-pr-landing/reliable-run-discovery/uncertain-discovery-refused")
+@pytest.mark.parametrize("response, reason", [
+    (subprocess.CompletedProcess(STATUS, 1, "", "cannot read runs"), "cannot read runs"),
+    (subprocess.CompletedProcess(STATUS, 1, json.dumps(EMPTY_STATUS), "failed"), "exit 1"),
+    (subprocess.CompletedProcess(STATUS, 0, "{broken", ""), "malformed JSON"),
+    (subprocess.TimeoutExpired(STATUS, 30), "timed out"),
+    (FileNotFoundError("specloop missing"), "specloop missing"),
+    ([], "JSON object"), (None, "JSON object"),
+    ({}, "version"),
+    *[({**EMPTY_STATUS, "version": version}, "version")
+      for version in [0, 2, "1", True, 1.0, None]],
+    ({"version": 1}, "runs list"),
+    *[({**EMPTY_STATUS, "runs": rows}, "runs list") for rows in [None, {}, ""]],
+    ({**EMPTY_STATUS, "error": "collection failed"}, "collection failed"),
+    ({**EMPTY_STATUS, "runs": [RUN, {**RUN, "change": "second"}]}, "multiple matching runs"),
+    ({**EMPTY_STATUS, "runs": [RUN, RUN]}, "multiple matching runs"),
+])
+def test_uncertain_discovery_refused(config_path, scripted_runner, capsys, response, reason):
+    scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF).expect(STATUS, response)
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    output = capsys.readouterr()
+    assert "run discovery" in output.err and reason in output.err
+    assert "mutations disabled" not in output.err
+    assert output.out == ""
+    assert [argv for argv, _ in scripted_runner.calls] == [VIEW, MAIN, STATUS]
+
+
+@pytest.mark.scenario("reviewed-pr-landing/reliable-run-discovery/uncertain-discovery-refused")
+@pytest.mark.parametrize("bad_row", [
+    None, [], "run", {},
+    *[{**RUN, key: value} for key, value in [
+        ("change", ""), ("change", "  "), ("change", None), ("change", 42),
+        ("pr", None), ("pr", 78), ("pr", "not a PR"), ("pr", URL + "/files"),
+        ("head", None), ("head", "short"),
+        ("status", None), ("status", []), ("status", "unknown"),
+        ("pause", None), ("pause", "human_checks"), ("pause", {}),
+        ("pause", {"reason": []}), ("pause", {"reason": ""}),
+        ("pause", {"reason": "  "}),
+    ]],
+    *[{key: value for key, value in RUN.items() if key != missing}
+      for missing in RUN],
+    {**RUN, "pr": "", "head": "", "pause": {"reason": "status_error"},
+     "error": "FileNotFoundError: unreadable run"},
+    *[{**RUN, "error": value} for value in ["broken", "", None, False]],
+])
+@pytest.mark.parametrize("position", ["only", "before", "after"])
+def test_every_status_row_must_be_readable(
+    config_path, scripted_runner, capsys, bad_row, position,
+):
+    rows = {"only": [bad_row], "before": [bad_row, RUN], "after": [RUN, bad_row]}[position]
+    scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF).expect(
+        STATUS, {**EMPTY_STATUS, "runs": rows})
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    error = capsys.readouterr().err
+    assert "run discovery: status row" in error
+    assert "mutations disabled" not in error
+    assert [argv for argv, _ in scripted_runner.calls] == [VIEW, MAIN, STATUS]
+
+
+@pytest.mark.parametrize("engine", ["worker", "specloop"])
+@pytest.mark.parametrize("matching", [False, True])
+def test_discovery_uses_pr_identity_regardless_of_engine(
+    config_path, scripted_runner, capsys, engine, matching,
+):
+    config_path.write_text(f'[[repos]]\nname = "{REPO}"\nverify = "true"\nengine = "{engine}"\n'
+                          'manifest = "manifest.toml"\n')
+    config_path.with_name("manifest.toml").write_text("")
+    # Similar branches/change names and the same PR number in another repo
+    # cannot identify a front-door PR. Unpublished runs have an empty URL.
+    rows = [{**RUN, "pr": pr} for pr in [
+        "", f"https://github.com/{REPO}/pull/780",
+        "https://github.com/other/project/pull/78",
+    ]]
+    if matching:
+        rows.append(RUN)
+    scripted_runner.expect(STATUS, {**EMPTY_STATUS, "runs": rows})
+    operations = land.Operations(scripted_runner, lambda _: None, lambda: 100.0)
+    identity = land.Identity(REPO, 78)
+    assert land.enrolled_repo(land.load_config(config_path), identity).engine == engine
+    found = land.discover_run(identity, operations)
+    if matching:
+        assert found == land.LandingRun("reviewed-change", URL, HEAD, "paused", "human_checks")
+    else:
+        assert found is None
+    scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF).expect(
+        STATUS, {**EMPTY_STATUS, "runs": rows})
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    assert "mutations disabled" in capsys.readouterr().err
+
+
+@pytest.mark.scenario("reviewed-pr-landing/eligible-run-state/wrong-state-refused")
+@pytest.mark.parametrize("status, pause", [
+    ("running", None), ("aborted", None),
+    ("running", {"reason": "human_checks"}), ("aborted", {"reason": "human_checks"}),
+    *[("paused", {"reason": reason}) for reason in [
+        "ready_to_publish", "requested", "infra", "usage_limit", "phase_gate",
+        "needs_human", "status_error", "future_reason",
+    ]],
+])
+@pytest.mark.parametrize("checks_done", [False, True])
+def test_wrong_run_state_refused(
+    config_path, scripted_runner, capsys, status, pause, checks_done,
+):
+    scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF).expect(
+        STATUS, {**EMPTY_STATUS, "runs": [{**RUN, "status": status, "pause": pause}]})
+    assert invoke(config_path, scripted_runner, URL,
+                  *(["--checks-done"] if checks_done else [])) == 1
+    error = capsys.readouterr().err
+    assert f"run reviewed-change is {status}" in error
+    if pause:
+        assert pause["reason"] in error
+    assert "retry land only when paused at human_checks or done" in error
+    assert [argv for argv, _ in scripted_runner.calls] == [VIEW, MAIN, STATUS]
+
+
+@pytest.mark.parametrize("status", ["paused", "done"])
+@pytest.mark.parametrize("draft", [False, True])
+def test_eligible_run_reaches_remaining_gates(config_path, scripted_runner, capsys, status, draft):
+    row = {**RUN, "status": status, "pause": RUN["pause"] if status == "paused" else None,
+           "head": "c" * 40}  # A done run's local head need not equal the remote head.
+    scripted_runner.expect(VIEW, {**PR, "isDraft": draft}).expect(MAIN, MAIN_REF).expect(
+        STATUS, {**EMPTY_STATUS, "runs": [row]})
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    assert "mutations disabled" in capsys.readouterr().err
+
+
+def test_direct_draft_refused_after_successful_discovery(config_path, scripted_runner, capsys):
+    scripted_runner.expect(VIEW, {**PR, "isDraft": True}).expect(MAIN, MAIN_REF).expect(
+        STATUS, EMPTY_STATUS)
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    assert "direct PR is draft" in capsys.readouterr().err
+
+
+def background_references(root, entry_points):
+    """Follow local imports and literal module dispatch without executing them.
+
+    Includes imports inside functions, package initializers, and subprocess
+    module targets such as the supervisor's `python -m specloop.cli`.
+    """
+    pending = list(entry_points)
+    visited, violations = set(), []
+    while pending:
+        module = pending.pop()
+        if module in visited:
+            continue
+        if module == "nightshift.land":
+            violations.append(module)
+            continue
+        path = root.joinpath(*module.split(".")).with_suffix(".py")
+        package = module.rpartition(".")[0]
+        if not path.is_file():
+            path = root.joinpath(*module.split("."), "__init__.py")
+            package = module
+        if not path.is_file():
+            continue
+        visited.add(module)
+        if package and package != module:
+            pending.append(package)
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                pending.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                target = "." * node.level + (node.module or "")
+                target = resolve_name(target, package) if node.level else target
+                pending.append(target)
+                pending.extend(f"{target}.{alias.name}" for alias in node.names)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                # Literal dynamic imports and argv tokens, plus shell command
+                # strings. A standalone land token also catches CLI dispatch maps.
+                if (node.value == "land" or re.search(
+                        r"\bnightshift(?:\.land\b|\s+land\b)", node.value)):
+                    violations.append(f"{module}:{node.lineno}: {node.value}")
+                if re.fullmatch(r"(?:nightshift|specloop)(?:\.[a-z_]+)+", node.value):
+                    pending.append(node.value)
+    return visited, violations
+
+
+@pytest.mark.scenario("reviewed-pr-landing/operator-entry-point/background-paths-excluded")
+def test_daemon_and_supervisor_never_import_land():
+    root = Path(__file__).resolve().parents[1]
+    visited, violations = background_references(root, ["nightshift.daemon", "specloop.serve"])
+    assert {"nightshift.daemon", "nightshift.specloop_intake", "nightshift.specloop_job",
+            "specloop.serve", "specloop.cli"} <= visited
+    assert not violations, "background landing references: " + "; ".join(violations)
+
+
+@pytest.mark.parametrize("reference", [
+    "import nightshift.land as helper", "from nightshift import land as helper",
+    "from .land import main", "from . import land",
+    "importlib.import_module('nightshift.land')",
+    "subprocess.run(['python', '-m', 'nightshift.land', '78'])",
+    "subprocess.run('uv run python -m nightshift.land 78', shell=True)",
+    "subprocess.run(['nightshift', 'land', '78'])",
+])
+def test_background_inspection_detects_indirect_landing(tmp_path, reference):
+    package = tmp_path / "nightshift"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "daemon.py").write_text("from . import helper\n")
+    (package / "helper.py").write_text(reference + "\n")
+    _, violations = background_references(tmp_path, ["nightshift.daemon"])
+    assert violations
 
 
 @pytest.mark.scenario("reviewed-pr-landing/enrolled-pr-identity/invalid-target-refused")
