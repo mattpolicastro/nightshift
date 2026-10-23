@@ -3,8 +3,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
+import shutil
+import stat
 import subprocess
+import tempfile
+import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -45,7 +51,7 @@ def parse_options(argv, context):
     try:
         args.reload_cmd = shlex.split(args.reload_cmd)
         if args.plugin_dir is not None:
-            args.plugin_dir = (context.cwd / Path(args.plugin_dir).expanduser()).resolve()
+            args.plugin_dir = Path(os.path.abspath(context.cwd / Path(args.plugin_dir).expanduser()))
     except (ValueError, RuntimeError, OSError) as exc:
         parser.error(str(exc))
     return args
@@ -109,6 +115,115 @@ def environment(context, runner, *, apply):
     return stale
 
 
+def plugin_manifest(context, runner):
+    prefix = "plugins/nightshift/"
+    tree = context.run(runner, ["git", "ls-tree", "-rz", "HEAD", "--", "plugins/nightshift"], text=False).stdout
+    manifest = {}
+    for entry in tree.split(b"\0"):
+        if not entry:
+            continue
+        metadata, name = entry.split(b"\t", 1)
+        mode, kind, oid = metadata.decode().split()
+        name = os.fsdecode(name)
+        relative = name.removeprefix(prefix)
+        if (not name.startswith(prefix) or any(p in {"", ".", ".."} for p in relative.split("/"))
+                or kind != "blob" or mode not in {"100644", "100755", "120000"}):
+            raise ValueError(f"unsafe plugin entry: {name}")
+        manifest[relative] = (mode, context.run(runner, ["git", "cat-file", "blob", oid], text=False).stdout)
+    if not manifest:
+        raise ValueError("committed plugin tree is empty")
+    if any(str(parent) in manifest for name in manifest for parent in Path(name).parents):
+        raise ValueError("plugin entry has a file or link as parent")
+    return manifest
+
+
+def plugin_differs(context, runner, destination, manifest):
+    if not destination.is_dir():
+        return True
+    for name, (mode, data) in manifest.items():
+        path = destination / name
+        if any((destination / parent).is_symlink() for parent in Path(name).parents):
+            return True
+        if mode == "120000":
+            if not path.is_symlink() or os.fsencode(os.readlink(path)) != data:
+                return True
+        elif (path.is_symlink() or not path.exists() or not stat.S_ISREG(path.stat().st_mode)
+              or bool(path.stat().st_mode & 0o111) != (mode == "100755") or path.read_bytes() != data):
+            return True
+
+    def leaves(directory):
+        for path in directory.iterdir():
+            if path.is_dir() and not path.is_symlink():
+                yield from leaves(path)
+            else:
+                yield path.relative_to(destination).as_posix()
+
+    for name in leaves(destination):
+        if name not in manifest:
+            result = context.run(runner, ["git", "check-ignore", "--quiet", "--no-index", "--",
+                                         f"plugins/nightshift/{name}"], check=False)
+            if result.returncode == 1:
+                return True
+            if result.returncode:
+                raise RuntimeError(f"plugin ignore probe: {result.stderr}")
+    return False
+
+
+def plugin(context, runner, destination, *, apply):
+    root, resolved = context.cwd.resolve(), destination.resolve()
+    if destination.is_symlink() or resolved.is_relative_to(root) or root.is_relative_to(resolved):
+        raise ValueError(f"unsafe plugin destination: {destination}")
+    if destination.exists() and not destination.is_dir():
+        raise ValueError(f"plugin destination is not a directory: {destination}")
+    state = destination.parent / f".{destination.name}.nightshift-deploy"
+    marker = state / "pending-reload"
+    if state.is_symlink() or marker.is_symlink():
+        raise ValueError("unsafe plugin deployment state")
+    if marker.exists() and not marker.is_file():
+        raise ValueError("plugin pending marker is not a file")
+    manifest = plugin_manifest(context, runner)
+    stale = plugin_differs(context, runner, destination, manifest)
+    print(f"plugin: {'differs from committed HEAD' if stale else 'current'}")
+    if stale and apply:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=f".{destination.name}.stage-", dir=destination.parent) as temporary:
+            stage = (Path(temporary) / "plugin").resolve()
+            stage.mkdir()
+            for name, (mode, data) in manifest.items():
+                path = stage / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if mode == "120000":
+                    path.symlink_to(os.fsdecode(data))
+                else:
+                    path.write_bytes(data)
+                    path.chmod(0o755 if mode == "100755" else 0o644)
+            for name, (mode, _) in manifest.items():
+                if mode == "120000":
+                    try:
+                        (stage / name).resolve(strict=True)
+                    except FileNotFoundError:
+                        pass  # Dangling internal links are valid committed entries.
+                    if not (stage / name).resolve().is_relative_to(stage):
+                        raise ValueError(f"plugin link escapes staging: {name}")
+            if plugin_differs(context, runner, stage, manifest):
+                raise RuntimeError("staged plugin verification failed")
+            state.mkdir(exist_ok=True)
+            if not marker.exists():
+                with marker.open("xb"):
+                    pass
+            if destination.exists():
+                destination.rename(state / f"rollback-{time.time_ns():020d}-{uuid.uuid4().hex}")
+            stage.rename(destination)
+        copies = sorted(p for p in state.iterdir() if re.fullmatch(r"rollback-\d{20}-[0-9a-f]{32}", p.name)
+                        and p.is_dir() and not p.is_symlink())
+        for old in copies[:-3]:
+            shutil.rmtree(old)
+        print("plugin: committed tree installed")
+    if marker.exists():
+        print("plugin installed but not reloaded")
+    return (stale and not apply) or marker.exists()
+
+
 def main(argv=None, *, runner=default_runner, context=None) -> int:
     context = context or Context()
     args = parse_options(argv, context)
@@ -146,6 +261,14 @@ def main(argv=None, *, runner=default_runner, context=None) -> int:
     except failures as exc:
         print(exc)
         failed = True
+    if args.apply and failed:
+        return 1
+    if args.plugin_dir is not None:
+        try:
+            failed = plugin(context, runner, args.plugin_dir, apply=args.apply) or failed
+        except failures as exc:
+            print(f"plugin failed: {exc}")
+            return 1
     return int(failed)
 
 

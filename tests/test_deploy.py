@@ -1,4 +1,6 @@
+import os
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -25,7 +27,8 @@ def recording(tmp_path):
     def runner(argv, *, cwd, env, timeout, text):
         key = " ".join(argv)
         calls.append(key)
-        assert cwd == tmp_path and timeout > 0 and text is True
+        assert cwd == tmp_path and timeout > 0
+        assert text is (not key.startswith(("git ls-tree", "git cat-file")))
         assert key in replies, f"unexpected command: {argv}"
         value = replies[key]
         value = value.pop(0) if isinstance(value, list) else value
@@ -145,3 +148,152 @@ def test_check_keeps_observing_after_fetch_failure(recording, capsys):
     assert recording.run() == 1 and CHECK in recording.calls
     output = capsys.readouterr().out
     assert "fetch unavailable" in output and "uv unavailable" in output
+
+
+@pytest.fixture(params=[b"main.ts", b"./main.ts"])
+def plugin_recording(recording, request):
+    r = recording
+    r.destination = r.context.cwd.with_name(r.context.cwd.name + "-plugin")
+    r.state = r.destination.parent / f".{r.destination.name}.nightshift-deploy"
+    r.marker = r.state / "pending-reload"
+    r.files = {"main.ts": ("100644", b"committed"), "bin/tool": ("100755", b"tool"),
+               "link": ("120000", request.param), "generated/tracked": ("100644", b"tracked")}
+    r.tree = "git ls-tree -rz HEAD -- plugins/nightshift"
+    r.replies[r.tree] = b"".join(f"{mode} blob {i}\tplugins/nightshift/{name}\0".encode()
+                               for i, (name, (mode, _)) in enumerate(r.files.items()))
+    for i, (name, (mode, data)) in enumerate(r.files.items()):
+        r.replies[f"git cat-file blob {i}"] = data
+        path = r.destination / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if mode == "120000":
+            path.symlink_to(data.decode())
+        else:
+            path.write_bytes(data)
+            path.chmod(int(mode, 8) & 0o777)
+    return r
+
+
+@pytest.mark.scenario("deployment-drift/committed-plugin-drift/plugin-differs-from-committed-tree")
+@pytest.mark.parametrize("change", ["current", "missing-directory", "missing", "changed", "obsolete",
+                                    "ignored", "mode", "link", "link-spelling", "type", "tracked-ignored", "parent-link"])
+def test_check_reports_plugin_drift(plugin_recording, change, capsys):
+    r = plugin_recording
+    path = r.destination / "main.ts"
+    if change == "missing-directory":
+        deploy.shutil.rmtree(r.destination)
+    elif change == "missing":
+        path.unlink()
+    elif change == "changed":
+        path.write_text("uncommitted")
+    elif change in {"obsolete", "ignored"}:
+        (r.destination / change).write_text("extra")
+        r.replies[f"git check-ignore --quiet --no-index -- plugins/nightshift/{change}"] = (0 if change == "ignored" else 1, "", "")
+    elif change == "mode":
+        (r.destination / "bin/tool").chmod(0o644)
+    elif change in {"link", "link-spelling", "type"}:
+        (r.destination / "link").unlink()
+        if change == "link":
+            (r.destination / "link").symlink_to("bin/tool")
+        elif change == "link-spelling":
+            (r.destination / "link").symlink_to("main.ts" if r.files["link"][1] == b"./main.ts" else "./main.ts")
+        else:
+            (r.destination / "link").write_text("main.ts")
+    elif change == "tracked-ignored":
+        (r.destination / "generated/tracked").write_text("changed")
+    elif change == "parent-link":
+        (r.destination / "bin").rename(r.destination / "elsewhere")
+        (r.destination / "bin").symlink_to("elsewhere")
+    assert r.run("--plugin-dir", str(r.destination)) == int(change not in {"current", "ignored"})
+    assert ("differs from committed HEAD" in capsys.readouterr().out) == (change not in {"current", "ignored"})
+    if change in {"current", "ignored"}:
+        assert r.run("--apply", "--plugin-dir", str(r.destination)) == 0
+    assert not r.state.exists() and "uv sync --frozen" not in r.calls
+
+
+@pytest.mark.scenario("deployment-drift/staged-plugin-replacement/swap-retains-rollback-copies")
+@pytest.mark.scenario("deployment-drift/staged-plugin-replacement/unsafe-destination-or-failed-swap")
+@pytest.mark.parametrize("failure", [None, "first-install", "parent-alias", "destination-link", "inside", "ancestor", "file",
+    "escape", "absolute", "link-escape", "link-chain", "link-cycle", "submodule", "parent-entry",
+    "staging", "verification", "marker", "rename-1", "rename-2"])
+def test_apply_swaps_plugin_keeping_rollback(plugin_recording, failure, monkeypatch, capsys):
+    r = plugin_recording
+    destination = r.destination
+    (destination / "main.ts").write_text("old")
+    unrelated = destination.with_name(destination.name + "-backup")
+    unrelated.mkdir()
+    r.state.mkdir()
+    (r.state / "rollback-unrelated").mkdir()
+    if failure == "first-install":
+        deploy.shutil.rmtree(destination)
+    elif failure == "parent-alias":
+        alias = r.context.cwd / "alias"
+        alias.symlink_to(destination.parent)
+        destination = alias / destination.name
+    elif failure == "destination-link":
+        destination.rename(unrelated / "target")
+        destination.symlink_to(unrelated / "target")
+    elif failure in {"inside", "ancestor", "file"}:
+        destination = {"inside": r.context.cwd / "plugin", "ancestor": r.context.cwd.parent,
+                       "file": r.destination / "main.ts"}[failure]
+    elif failure in {"escape", "absolute", "submodule", "parent-entry"}:
+        entry = {"escape": "100644 blob 0\tplugins/nightshift/../escape",
+                 "absolute": "100644 blob 0\tplugins/nightshift//escape",
+                 "submodule": "160000 commit 0\tplugins/nightshift/module",
+                 "parent-entry": "100644 blob 0\tplugins/nightshift/bin"}[failure]
+        r.replies[r.tree] += entry.encode() + b"\0"
+    elif failure in {"link-escape", "link-chain", "link-cycle"}:
+        r.replies["git cat-file blob 2"] = {"link-escape": b"../../escape", "link-chain": b"other", "link-cycle": b"link"}[failure]
+        if failure == "link-chain":
+            r.replies[r.tree] += b"120000 blob 4\tplugins/nightshift/other\0"
+            r.replies["git cat-file blob 4"] = b"/outside"
+    original_open, original_rename = Path.open, Path.rename
+    renames = []
+
+    def open_path(path, *args, **kwargs):
+        if (failure == "marker" and path == r.marker) or (failure == "staging" and ".stage-" in str(path)):
+            raise OSError(f"{failure} failed")
+        return original_open(path, *args, **kwargs)
+
+    def rename(path, target):
+        assert r.marker.read_bytes() == b""  # Written before either rename.
+        renames.append((path, target))
+        if failure == f"rename-{len(renames)}":
+            raise OSError("rename failed")
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "open", open_path)
+    monkeypatch.setattr(Path, "rename", rename)
+    if failure == "verification":
+        monkeypatch.setattr(deploy, "plugin_differs", lambda *args: True)
+    assert r.run("--apply", "--plugin-dir", str(destination), "--reload-cmd", "") == 1
+    backups = sorted(r.state.glob("rollback-0*"))
+    if failure in {None, "first-install", "parent-alias"}:
+        for name, (mode, data) in r.files.items():
+            path = destination / name
+            assert (os.fsencode(os.readlink(path)) if mode == "120000" else path.read_bytes()) == data
+            if mode != "120000":
+                assert path.stat().st_mode & 0o777 == int(mode, 8) & 0o777
+        assert len(backups) == int(failure != "first-install")
+        if backups:
+            assert (backups[0] / "main.ts").read_text() == "old"
+        for i in range(5):
+            (destination / "main.ts").write_text(str(i))
+            assert r.run("--apply", "--plugin-dir", str(destination), "--reload-cmd", "") == 1
+        backups = sorted(r.state.glob("rollback-0*"))
+        assert [(p / "main.ts").read_text() for p in backups] == ["2", "3", "4"]
+        extra = r.state / ("rollback-" + "0" * 20 + "-" + "a" * 32)
+        extra.mkdir()
+        before = list(renames)
+        assert r.run("--apply", "--plugin-dir", str(destination), "--reload-cmd", "") == 1
+        assert renames == before and extra.exists()  # No pruning on a no-op.
+    else:
+        assert "plugin failed:" in capsys.readouterr().out
+        assert len(renames) == ({"rename-1": 1, "rename-2": 2}.get(failure, 0))
+        assert r.marker.exists() == failure.startswith("rename-")
+        assert len(backups) == int(failure == "rename-2")
+        if failure == "rename-2":
+            assert not destination.exists() and (backups[0] / "main.ts").read_text() == "old"
+        elif failure not in {"inside", "ancestor", "file"}:
+            assert (destination / "main.ts").read_text() == "old"
+    assert unrelated.is_dir() and (r.state / "rollback-unrelated").is_dir()
+    assert not list(r.destination.parent.glob(f".{r.destination.name}.stage-*"))
