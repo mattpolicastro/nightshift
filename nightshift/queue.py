@@ -431,7 +431,7 @@ def _pr_feedback_records(repo: str, number: int, *, runner=_gh) -> list[tuple[st
     Ordinary selection does not need timestamps or IDs on excluded bodies.
     """
     records = []
-    seen = {}
+    seen: dict[str, dict] = {}
     for source, endpoint in (
         ("conversation", f"issues/{number}/comments"),
         ("review", f"pulls/{number}/reviews"),

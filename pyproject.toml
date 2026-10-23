@@ -35,4 +35,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-xdist>=3"]
+dev = ["pytest>=8", "pytest-xdist>=3", "mypy>=1.13"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["nightshift", "specloop"]
+ignore_missing_imports = true
