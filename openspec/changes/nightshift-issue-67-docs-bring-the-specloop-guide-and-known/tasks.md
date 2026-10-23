@@ -16,7 +16,7 @@
 
 ## 4. Evidence
 
-- [ ] 4.1 Update evidence guidance in `docs/specloop/README.md` for concurrency, timeout scoring, prose/comment exclusions, `mutation_skip`, measured versus skipped evidence, and both guard-clause operators. Add small examples and PR citations; reconcile only any conflicting specloop evidence summary in `README.md`. Keep this session below 200 changed lines. Covers `specloop-documentation/mutation-evidence-guidance/parallel-and-timed-out-mutants-are-interpreted`, `specloop-documentation/mutation-evidence-guidance/exclusions-do-not-fabricate-evidence`, `specloop-documentation/mutation-evidence-guidance/guard-clauses-produce-candidates`.
+- [x] 4.1 Update evidence guidance in `docs/specloop/README.md` for concurrency, timeout scoring, prose/comment exclusions, `mutation_skip`, measured versus skipped evidence, and both guard-clause operators. Add small examples and PR citations; reconcile only any conflicting specloop evidence summary in `README.md`. Keep this session below 200 changed lines. Covers `specloop-documentation/mutation-evidence-guidance/parallel-and-timed-out-mutants-are-interpreted`, `specloop-documentation/mutation-evidence-guidance/exclusions-do-not-fabricate-evidence`, `specloop-documentation/mutation-evidence-guidance/guard-clauses-produce-candidates`.
 
 ## 5. Operations
 
