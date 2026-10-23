@@ -20,12 +20,13 @@ URL = f"https://github.com/{REPO}/pull/78"
 HEAD = "a" * 40
 BASE = "b" * 40
 VIEW = ["gh", "pr", "view", "78", "--repo", REPO, "--json",
-        "number,url,state,isDraft,headRefOid,baseRefName"]
+        "number,url,state,isDraft,headRefOid,baseRefName,body"]
 MAIN = ["gh", "api", f"repos/{REPO}/git/ref/heads/main"]
+COMMENTS = ["gh", "api", f"repos/{REPO}/issues/78/comments", "--paginate", "--slurp"]
 STATUS = ["specloop", "status", "--json"]
 EMPTY_STATUS = {"version": 1, "supervisor": {"state": "not running"}, "runs": []}
 PR = {"number": 78, "url": URL, "state": "OPEN", "isDraft": False,
-      "headRefOid": HEAD, "baseRefName": "main"}
+      "headRefOid": HEAD, "baseRefName": "main", "body": ""}
 MAIN_REF = {"ref": "refs/heads/main", "object": {"type": "commit", "sha": BASE}}
 RUN = {"change": "reviewed-change", "pr": URL, "head": HEAD,
        "status": "paused", "pause": {"reason": "human_checks"}}
@@ -148,7 +149,7 @@ def test_default_subprocess_runner_and_config(
     assert land.main() == 1
     output = capsys.readouterr()
     assert "mutations disabled" in output.err
-    assert output.out == ""
+    assert output.out == "No human checks listed\n"
 
 
 @pytest.mark.scenario("reviewed-pr-landing/enrolled-pr-identity/repository-resolves")
@@ -341,6 +342,8 @@ def test_discovery_uses_pr_identity_regardless_of_engine(
         assert found is None
     scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF).expect(
         STATUS, {**EMPTY_STATUS, "runs": rows})
+    if matching:
+        scripted_runner.expect(COMMENTS, [[]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
 
@@ -377,6 +380,7 @@ def test_eligible_run_reaches_remaining_gates(config_path, scripted_runner, caps
            "head": "c" * 40}  # A done run's local head need not equal the remote head.
     scripted_runner.expect(VIEW, {**PR, "isDraft": draft}).expect(MAIN, MAIN_REF).expect(
         STATUS, {**EMPTY_STATUS, "runs": [row]})
+    scripted_runner.expect(COMMENTS, [[]])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
 
@@ -502,3 +506,227 @@ def test_external_read_failures(config_path, scripted_runner, capsys, response, 
     output = capsys.readouterr()
     assert "PR read" in output.err and reason in output.err
     assert output.out == ""
+
+
+def publication(comment_id=1, *, checks="- [ ] Inspect the UI", change="reviewed-change",
+                round_id="round-1", created_at="2026-10-22T12:00:00Z", **extra):
+    suffix = "" if round_id is None else f":{round_id}"
+    return {"id": comment_id, "created_at": created_at, "author_association": "COLLABORATOR",
+            "body": f"**nightshift** — Human checks\n\n{checks}\n\n"
+                    f"<!-- nightshift:publish:{change}{suffix} -->", **extra}
+
+
+def expect_check_sources(runner, body, comments=None):
+    runner.expect(VIEW, {**PR, "body": body}).expect(MAIN, MAIN_REF).expect(
+        STATUS, {**EMPTY_STATUS, "runs": [] if comments is None else [RUN]})
+    if comments is not None:
+        runner.expect(COMMENTS, comments)
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/human-check-sources/unticked-checks-refuse")
+@pytest.mark.parametrize("source", ["body", "comment", "both", "direct"])
+def test_land_refuses_unticked_human_checks(config_path, scripted_runner, capsys, source):
+    body = "Introduction\r\n- [X] Already done\r\n"
+    if source in {"body", "both", "direct"}:
+        body += "- [ ] Check the body requirement\r\n"
+    comment = publication(checks="- [x] Completed comment check")
+    if source in {"comment", "both"}:
+        comment = publication(checks="- [ ] Check the publication requirement")
+    expect_check_sources(scripted_runner, body, None if source == "direct" else [[comment]])
+    assert invoke(config_path, scripted_runner, URL) == 1
+    output = capsys.readouterr()
+    assert "unticked human checks remain" in output.err
+    assert ("PR body: Check the body requirement" in output.err) == (source != "comment")
+    assert ("publication comment 1: Check the publication requirement" in output.err) == (
+        source in {"comment", "both"})
+    assert "Already done" not in output.err and "Completed comment check" not in output.err
+    assert "mutations disabled" not in output.err
+    assert output.out == ""
+    # The exact script allows only reads: no edits, finish, CI, or merge.
+    assert len(scripted_runner.calls) == (3 if source == "direct" else 4)
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/human-check-sources/publication-selection")
+@pytest.mark.parametrize("legacy", [False, True])
+def test_latest_publication_across_pages(config_path, scripted_runner, capsys, legacy):
+    old = publication(900, round_id=None if not legacy else "previous",
+                      created_at="2026-10-21T12:00:00Z", updated_at="2026-10-23T12:00:00Z")
+    tied = publication(9, round_id="zzz")
+    newest = publication(10, round_id=None if legacy else "aaa",
+                         checks="Prose stays.\r\n- [x] Current round complete\r\n")
+    unrelated = publication(999, change="another-change", created_at="2026-10-23T12:00:00Z")
+    untrusted = publication(1000, author_association="CONTRIBUTOR",
+                           created_at="2026-10-23T12:00:00Z")
+    # Neither API order, round lexicographic order, updated_at, nor highest ID
+    # alone establishes the current publication. Page one is a full REST page.
+    pages = [[old] + [{"body": "Unrelated conversation"}] * 99,
+             [newest, unrelated], [untrusted, tied]]
+    original = json.dumps(pages)
+    selected = land.select_publication([c for page in pages for c in page], RUN["change"])
+    assert selected == land.CheckSource(newest["body"], 10)
+    expect_check_sources(scripted_runner, "Body prose\r\n- [X] Body complete\r\n", pages)
+    assert invoke(config_path, scripted_runner, URL) == 1
+    output = capsys.readouterr()
+    assert "mutations disabled" in output.err  # The human-check gate passed.
+    assert "unticked" not in output.err
+    assert output.out == ""
+    assert json.dumps(pages) == original
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/human-check-sources/publication-selection")
+@pytest.mark.parametrize("association, trusted", [
+    ("OWNER", True), ("MEMBER", True), ("COLLABORATOR", True), ("collaborator", True),
+    ("CONTRIBUTOR", False), ("FIRST_TIMER", False), ("FIRST_TIME_CONTRIBUTOR", False),
+    ("NONE", False), ("MANNEQUIN", False), ("", False), (None, False), ([], False),
+    ("missing", False),
+])
+def test_publication_trust_uses_production_policy(
+    config_path, scripted_runner, capsys, association, trusted,
+):
+    comment = publication(author_association=association)
+    if association == "missing":
+        del comment["author_association"]
+    expect_check_sources(scripted_runner, "", [[comment]])
+    assert invoke(config_path, scripted_runner, URL) == 1
+    output = capsys.readouterr()
+    assert ("publication comment 1: Inspect the UI" in output.err) == trusted
+    assert ("mutations disabled" in output.err) == (not trusted)
+    assert output.out == ("" if trusted else "No human checks listed\n")
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/human-check-sources/publication-selection")
+@pytest.mark.parametrize("body", [
+    "Human checks\n- [ ] Spoof\n<!-- nightshift:publish:reviewed-change:r1 -->",
+    " **nightshift** —\n- [ ] Spoof\n<!-- nightshift:publish:reviewed-change:r1 -->",
+    "**nightshift** -\n- [ ] Spoof\n<!-- nightshift:publish:reviewed-change:r1 -->",
+    *[f"**nightshift** —\n- [ ] Spoof\n{marker}" for marker in [
+        "<!-- nightshift:publish:reviewed-change-extra:r1 -->",
+        "<!-- nightshift:publish:reviewed-change:r1:extra -->",
+        "<!-- nightshift:publish:reviewed-change: -->",
+        "<!-- nightshift:publish:reviewed-change:two words -->",
+        "<!-- nightshift:publish:reviewed-change:r<1 -->",
+        "<!-- nightshift:revise:reviewed-change:r1 -->",
+        "<!-- nightshift:publish:reviewed-change:r1-->",
+        "<!--nightshift:publish:reviewed-change:r1 -->",
+    ]],
+])
+def test_publication_requires_prefix_and_exact_marker(body):
+    assert land.select_publication([publication(body=body)], RUN["change"]) is None
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/human-check-sources/publication-selection")
+def test_publication_matches_literal_change_and_creation_instant():
+    literal = publication(3, change="reviewed.change", created_at="2026-10-22T11:00:00-02:00")
+    newer_looking_clock = publication(4, change="reviewed.change",
+                                     created_at="2026-10-22T12:00:00Z")
+    lookalike = publication(5, change="reviewed-change", created_at="2026-10-23T12:00:00Z")
+    assert land.select_publication([literal, newer_looking_clock, lookalike], "reviewed.change") == (
+        land.CheckSource(literal["body"], 3))
+
+
+@pytest.mark.scenario("reviewed-pr-landing/human-check-sources/publication-selection")
+def test_task_line_rule_preserves_prose_and_counts_all_containers():
+    body = (
+        "Before prose\r\n- [ ] Plain **text**\r\n"
+        "```markdown\n\t* [ ] Fenced example\n```\n"
+        "~~~\r\n+ [X] Other fence\r\n~~~\r\n"
+        "> > - [ ] Nested quote\n"
+        "<div>\n    - [x] HTML check\n</div>\n"
+        "    + [ ] Indented code\n"
+        "- [ ] \n"
+        "Inline - [ ] prose\n- [ ]No following space\n- [y] Wrong tick\n"
+        "1. [ ] Numbered\n-  [ ] Two spaces\n-\t[ ] Tab separator\n"
+        "- [x]\n\u00a0- [ ] Non-rule indentation\n"
+        "After prose and <!-- nightshift:publish:reviewed-change:round -->"
+    )
+    source = land.CheckSource(body, 17)
+    assert source.checks == (
+        land.HumanCheck("Plain **text**", False), land.HumanCheck("Fenced example", False),
+        land.HumanCheck("Other fence", True), land.HumanCheck("Nested quote", False),
+        land.HumanCheck("HTML check", True), land.HumanCheck("Indented code", False),
+        land.HumanCheck("", False),
+    )
+    assert source.body == body
+    assert source.comment_id == 17
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/human-check-sources/unticked-checks-refuse")
+@pytest.mark.scenario("reviewed-pr-landing/human-check-sources/publication-selection")
+@pytest.mark.parametrize("container", ["```\n{}\n```", "~~~\n{}\n~~~", "> > {}", "<div>\n{}\n</div>"])
+@pytest.mark.parametrize("source", ["body", "comment"])
+def test_container_task_lines_block_landing(config_path, scripted_runner, capsys, container, source):
+    text = container.format("* [ ] Count this example too")
+    expect_check_sources(scripted_runner, text if source == "body" else "",
+                         [[publication(checks=text if source == "comment" else "No checks")]])
+    assert invoke(config_path, scripted_runner, URL) == 1
+    error = capsys.readouterr().err
+    assert "Count this example too" in error
+    assert "unticked human checks remain" in error
+    assert "mutations disabled" not in error
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/human-check-sources/no-listed-checks")
+@pytest.mark.parametrize("checks_done", [False, True])
+@pytest.mark.parametrize("kind", ["direct", "no-comments", "unrelated", "empty-publication"])
+@pytest.mark.parametrize("body", ["", "Only prose\r\nInline - [ ] example\r\n"])
+def test_no_listed_checks_reaches_remaining_gates(
+    config_path, scripted_runner, capsys, checks_done, kind, body,
+):
+    comments = {"direct": None, "no-comments": [[]],
+                "unrelated": [[publication(change="different-change")]],
+                "empty-publication": [[publication(checks="Publication prose only")]]}[kind]
+    expect_check_sources(scripted_runner, body, comments)
+    assert invoke(config_path, scripted_runner, URL, *(["--checks-done"] if checks_done else [])) == 1
+    output = capsys.readouterr()
+    assert output.out == "No human checks listed\n"
+    assert "mutations disabled" in output.err
+    assert "unticked" not in output.err
+    assert len(scripted_runner.calls) == (3 if kind == "direct" else 4)
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/human-check-sources/unticked-checks-refuse")
+@pytest.mark.parametrize("checks_done", [False, True])
+def test_missing_publication_still_checks_body(config_path, scripted_runner, capsys, checks_done):
+    expect_check_sources(scripted_runner, "- [ ] Body check remains", [[]])
+    assert invoke(config_path, scripted_runner, URL, *(["--checks-done"] if checks_done else [])) == 1
+    output = capsys.readouterr()
+    assert ("PR body: Body check remains" in output.err) == (not checks_done)
+    assert ("mutations disabled" in output.err) == checks_done
+    assert output.out == ""
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/human-check-sources/publication-selection")
+@pytest.mark.parametrize("response, reason", [
+    (subprocess.CompletedProcess(COMMENTS, 1, "", "later page failed"), "later page failed"),
+    (subprocess.CompletedProcess(COMMENTS, 0, "[]\n[]", ""), "malformed JSON"),
+    (subprocess.TimeoutExpired(COMMENTS, 30), "timed out"),
+    ({}, "JSON array"), ([{}], "comment page"), ([[None]], "comment body"),
+    ([[publication()], [{"body": None}]], "comment body"),
+    *[([[publication(**patch)]], "publication") for patch in [
+        {"id": "1"}, {"id": True}, {"id": -1}, {"id": None},
+        {"created_at": None}, {"created_at": "invalid"}, {"created_at": "2026-10-22"},
+    ]],
+])
+def test_comment_discovery_fails_closed(config_path, scripted_runner, capsys, response, reason):
+    expect_check_sources(scripted_runner, "", response)
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    output = capsys.readouterr()
+    assert "publication comment discovery" in output.err and reason in output.err
+    assert "mutations disabled" not in output.err
+    assert output.out == ""
+
+
+@pytest.mark.parametrize("body", [None, [], 42])
+def test_unreadable_pr_body_refuses(config_path, scripted_runner, capsys, body):
+    scripted_runner.expect(VIEW, {**PR, "body": body})
+    assert invoke(config_path, scripted_runner, URL) == 1
+    assert "malformed PR body" in capsys.readouterr().err

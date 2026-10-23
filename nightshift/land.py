@@ -1,7 +1,7 @@
 """Explicit operator entry point for landing an enrolled, reviewed PR.
 
-Only read-only identity and run validation are wired so far. Mutations remain disabled
-until the human-check, lifecycle, CI, and merge gates are implemented.
+Read-only identity, run validation, and human-check discovery are wired so far.
+Mutations remain disabled until recording, lifecycle, CI, and merge gates are implemented.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 import json
 import math
 from pathlib import Path
@@ -18,15 +19,16 @@ import sys
 import time
 from typing import Any
 
-from . import config
+from . import config, queue
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 READ_TIMEOUT = 30
-PR_FIELDS = "number,url,state,isDraft,headRefOid,baseRefName"
+PR_FIELDS = "number,url,state,isDraft,headRefOid,baseRefName,body"
 _REPO = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9_.-]+")
 _PR_URL = re.compile(r"https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)/?")
 _SHA = re.compile(r"[0-9a-fA-F]{40}")
+_TASK_LINE = re.compile(r"^[ \t>]*[-*+] \[(?P<state>[ xX])\] (?P<text>[^\r\n]*)", re.MULTILINE)
 
 
 class Refusal(Exception):
@@ -48,6 +50,32 @@ class PullRequest:
     identity: Identity
     head: str
     draft: bool
+    body: str
+
+
+@dataclass(frozen=True)
+class HumanCheck:
+    text: str
+    checked: bool
+
+
+@dataclass(frozen=True)
+class CheckSource:
+    """Keep the original text intact, including prose, markers, and line endings."""
+
+    body: str
+    comment_id: int | None = None
+
+    @property
+    def reference(self) -> str:
+        return "PR body" if self.comment_id is None else f"publication comment {self.comment_id}"
+
+    @property
+    def checks(self) -> tuple[HumanCheck, ...]:
+        # Deliberately count examples in fences, HTML, and blockquotes. Markdown
+        # parsing could hide a real check, so only the design's line rule applies.
+        return tuple(HumanCheck(match["text"], match["state"] != " ")
+                     for match in _TASK_LINE.finditer(self.body))
 
 
 @dataclass(frozen=True)
@@ -71,7 +99,7 @@ class Operations:
     sleep: Callable[[float], None]
     monotonic: Callable[[], float]
 
-    def read_json(self, argv: list[str], *, stage: str) -> dict[str, Any]:
+    def _read_json(self, argv: list[str], *, stage: str) -> Any:
         try:
             result = self.runner(
                 argv, capture_output=True, text=True, check=False,
@@ -88,8 +116,18 @@ class Operations:
             value = json.loads(result.stdout)
         except (ValueError, TypeError) as exc:
             raise Refusal(f"{stage}: malformed JSON response") from exc
+        return value
+
+    def read_json(self, argv: list[str], *, stage: str) -> dict[str, Any]:
+        value = self._read_json(argv, stage=stage)
         if not isinstance(value, dict):
             raise Refusal(f"{stage}: expected a JSON object")
+        return value
+
+    def read_json_array(self, argv: list[str], *, stage: str) -> list[Any]:
+        value = self._read_json(argv, stage=stage)
+        if not isinstance(value, list):
+            raise Refusal(f"{stage}: expected a JSON array")
         return value
 
 
@@ -192,7 +230,10 @@ def read_pr(identity: Identity, operations: Operations) -> PullRequest:
     draft = data.get("isDraft")
     if not isinstance(head, str) or not _SHA.fullmatch(head) or not isinstance(draft, bool):
         raise Refusal("malformed PR metadata: expected a full head SHA and draft status")
-    return PullRequest(identity, head, draft)
+    body = data.get("body")
+    if not isinstance(body, str):
+        raise Refusal("malformed PR body: expected text")
+    return PullRequest(identity, head, draft, body)
 
 
 def read_main(identity: Identity, operations: Operations) -> str:
@@ -268,6 +309,76 @@ def validate_run_eligibility(pr: PullRequest, run: LandingRun | None) -> None:
                   "or done")
 
 
+def read_comments(identity: Identity, operations: Operations) -> list[dict[str, Any]]:
+    """Slurp all REST pages into one JSON document; never use a partial history."""
+    pages = operations.read_json_array(
+        ["gh", "api", f"repos/{identity.repo}/issues/{identity.number}/comments",
+         "--paginate", "--slurp"],
+        stage="publication comment discovery",
+    )
+    comments = []
+    for page in pages:
+        if not isinstance(page, list):
+            raise Refusal("publication comment discovery: malformed comment page")
+        for comment in page:
+            if not isinstance(comment, dict) or not isinstance(comment.get("body"), str):
+                raise Refusal("publication comment discovery: malformed comment body")
+            comments.append(comment)
+    return comments
+
+
+def select_publication(comments: list[dict[str, Any]], change: str) -> CheckSource | None:
+    # One optional round token, with literal marker whitespace/delimiters.
+    # Escape the change name so neither regex syntax nor a similarly named
+    # change can select another run's publication.
+    marker = re.compile(r"<!-- nightshift:publish:" + re.escape(change)
+                        + r"(?::[^\s:<>]+)? -->")
+    candidates = []
+    for comment in comments:
+        body = comment["body"]
+        association = comment.get("author_association")
+        if (not isinstance(association, str)
+                or not queue.trusted(comment, key="author_association")
+                or not body.startswith(queue.SELF_COMMENT_PREFIX)
+                or not marker.search(body)):
+            continue
+        comment_id, created_at = comment.get("id"), comment.get("created_at")
+        if type(comment_id) is not int or comment_id <= 0 or not isinstance(created_at, str):
+            raise Refusal("publication comment discovery: malformed publication ID or creation time")
+        try:
+            created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise Refusal("publication comment discovery: malformed publication creation time") from exc
+        if created.tzinfo is None:
+            raise Refusal("publication comment discovery: publication creation time has no timezone")
+        candidates.append((created, comment_id, body))
+    if not candidates:
+        return None
+    _, comment_id, body = max(candidates, key=lambda candidate: candidate[:2])
+    return CheckSource(body, comment_id)
+
+
+def read_check_sources(
+    pr: PullRequest, run: LandingRun | None, operations: Operations,
+) -> tuple[CheckSource, ...]:
+    sources = [CheckSource(pr.body)]
+    if run is not None:
+        publication = select_publication(read_comments(pr.identity, operations), run.change)
+        if publication is not None:
+            sources.append(publication)
+    return tuple(sources)
+
+
+def validate_human_checks(sources: tuple[CheckSource, ...], *, checks_done: bool) -> None:
+    checks = [(source.reference, check) for source in sources for check in source.checks]
+    if not checks:
+        print("No human checks listed")
+        return
+    remaining = [f"{reference}: {check.text}" for reference, check in checks if not check.checked]
+    if remaining and not checks_done:
+        raise Refusal("unticked human checks remain:\n" + "\n".join(remaining))
+
+
 def main(
     argv: list[str] | None = None, *, runner: Runner | None = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -283,6 +394,8 @@ def main(
         read_main(identity, operations)
         run = discover_run(identity, operations)
         validate_run_eligibility(pr, run)
+        sources = read_check_sources(pr, run, operations)
+        validate_human_checks(sources, checks_done=args.checks_done)
         # Fail closed until every subsequent safety gate is wired. In
         # particular, --checks-done must not authorize mutations on its own.
         raise Refusal(f"{identity.url}: mutations disabled until all landing gates are wired")
