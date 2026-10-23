@@ -427,8 +427,9 @@ def load(path: Path | None = None) -> Config:
         review_attempts=daemon.get("review_attempts", 2),
         implement_max_turns=daemon.get("implement_max_turns", 140),
         review_max_turns=daemon.get("review_max_turns", 60),
-        worktree_root=Path(
-            daemon.get("worktree_root", str(Path.home() / "Projects" / "nightshift-wt"))
+        worktree_root=_worktree_root(
+            daemon.get("worktree_root", str(Path.home() / "Projects" / "nightshift-wt")),
+            path.parent,
         ),
         slack_webhook=_webhook(raw.get("notify", {})),
         forbidden_probe=daemon.get("forbidden_probe", ""),
@@ -436,6 +437,27 @@ def load(path: Path | None = None) -> Config:
         chores_model=models.get("chores", ""),
         mirror_to_paseo=daemon.get("mirror_to_paseo", False),
     )
+
+
+def _worktree_root(value: object, config_dir: Path) -> Path:
+    """Normalize placement without inspecting or creating worktrees or state."""
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or any(char in value for char in "\0\n\r")
+        or (value.startswith("~") and not value.startswith("~/"))
+    ):
+        raise ValueError(
+            "daemon.worktree_root must be a non-empty path with no unsupported tilde or NUL/line breaks"
+        )
+    path = Path(value)
+    # Check the original spelling: Path strips './', whose following tilde
+    # names a literal directory rather than the host user's home.
+    if value.startswith("~/"):
+        path = path.expanduser()
+    # Do not resolve symlinks or require the destination to exist. Relative
+    # values belong to the selected config's directory, not the daemon cwd.
+    return path if path.is_absolute() else config_dir.absolute() / path
 
 
 def _manifest_path(repo: dict, config_dir: Path) -> Path | None:

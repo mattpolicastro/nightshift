@@ -22,9 +22,27 @@ id = "tests"
 run = ["/usr/bin/env", "PATH={node_bin}:/usr/bin:/bin", "pnpm", "--dir", "{build}/project", "test"]
 ```
 
-Steps run with a fixed `PATH` (`/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin`). Tools installed
-elsewhere, such as `node` and `pnpm` under `~/n/bin` (from the `n` version manager), need a manifest variable and an
-explicit `PATH`, as above; pnpm's `#!/usr/bin/env node` line needs `node` on it too. With `n`, `~/n/bin/pnpm` is a Corepack shim that downloads pnpm on first use; prepare
+Steps use `NIGHTSHIFT_BIN_DIR` (default `/opt/homebrew/bin`) followed by
+`/usr/bin:/bin:/usr/sbin:/sbin`, without appending the inherited PATH. Supply
+this operator setting in the Python process environment and restart the
+affected supervisor or daemon; candidate files and manifest env files cannot
+configure the harness resolver. Absolute paths and leading `~/` are supported;
+home expansion uses the host user's home before the isolated `HOME` is set.
+Spaces stay literal, with no `$VAR`, glob or shell-substitution expansion.
+Blank/relative paths, unsupported tilde forms, NUL/line breaks and colons in
+this PATH directory setting are invalid. See
+[host setup](../../README.md#host-path-setup) for direct CLI examples,
+service inheritance and the frozen wrappers' fixed bootstrap paths, and
+[platform limits](../../KNOWN-LIMITATIONS.md#platform-assumptions) for all
+defaults and pending second-install checks.
+
+`NIGHTSHIFT_NODE_BIN` affects plugin Factory only; it does not add Node to
+verification. Tools elsewhere, such as `node` and `pnpm` under `~/n/bin` (from
+the `n` version manager), can use a manifest variable and explicit `PATH`, as
+above, or a suitable `NIGHTSHIFT_BIN_DIR`. PATH selection grants no sandbox
+read access: home-local tools still need manifest variables or
+`[sandbox].prepare_read`, and credential denials remain. pnpm's
+`#!/usr/bin/env node` line needs `node` on PATH too. With `n`, `~/n/bin/pnpm` is a Corepack shim that downloads pnpm on first use; prepare
 steps have network and share the build's `HOME` with verify steps, so running pnpm in a prepare step
 leaves it cached for the offline verify steps.
 
