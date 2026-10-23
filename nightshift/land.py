@@ -1,7 +1,7 @@
 """Explicit operator entry point for landing an enrolled, reviewed PR.
 
-Identity, run validation, and in-place human-check recording are wired so far.
-Finish and merge remain disabled until attestation and subsequent gates are implemented.
+Identity, run validation, and human-check recording/attestation are wired so far.
+Finish and merge remain disabled until subsequent gates are implemented.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import argparse
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from html import escape
 import json
 import math
 from pathlib import Path
@@ -114,7 +115,9 @@ class Operations:
     """Single process and clock boundary, shared by command helpers.
 
     The clocks are injected here for later bounded polling. Identity reads do
-    not wait or retry; an unresolved read fails closed.
+    not wait or retry; an unresolved read fails closed. In particular, never
+    retry a comment POST here: only marker reconciliation can resolve a lost
+    response, and that belongs to the attestation helper, even in production.
     """
 
     runner: Runner
@@ -335,20 +338,22 @@ def validate_run_eligibility(pr: PullRequest, run: LandingRun | None) -> None:
                   "or done")
 
 
-def read_comments(identity: Identity, operations: Operations) -> list[dict[str, Any]]:
+def read_comments(
+    identity: Identity, operations: Operations, *, stage: str = "publication comment discovery",
+) -> list[dict[str, Any]]:
     """Slurp all REST pages into one JSON document; never use a partial history."""
     pages = operations.read_json_array(
         ["gh", "api", f"repos/{identity.repo}/issues/{identity.number}/comments",
          "--paginate", "--slurp"],
-        stage="publication comment discovery",
+        stage=stage,
     )
     comments = []
     for page in pages:
         if not isinstance(page, list):
-            raise Refusal("publication comment discovery: malformed comment page")
+            raise Refusal(f"{stage}: malformed comment page")
         for comment in page:
             if not isinstance(comment, dict) or not isinstance(comment.get("body"), str):
-                raise Refusal("publication comment discovery: malformed comment body")
+                raise Refusal(f"{stage}: malformed comment body")
             comments.append(comment)
     return comments
 
@@ -441,6 +446,77 @@ def prepare_human_checks(
     return CheckSnapshot(pr.head, tuple(completed), actor)
 
 
+def select_attestation(comments: list[dict[str, Any]], marker: str) -> int | None:
+    """An untrusted match is uncertainty, never permission to create another."""
+    matches = [comment for comment in comments if marker in comment["body"]]
+    if not matches:
+        return None
+    if len(matches) != 1 or matches[0]["body"].count(marker) != 1:
+        raise Refusal("attestation lookup: duplicate marker matches; resolve duplicates before retrying")
+    comment = matches[0]
+    if (not isinstance(comment.get("author_association"), str)
+            or not queue.trusted(comment, key="author_association")
+            or not comment["body"].startswith(queue.SELF_COMMENT_PREFIX)):
+        raise Refusal("attestation lookup: untrusted marker match; inspect the comment before retrying")
+    comment_id = comment.get("id")
+    if type(comment_id) is not int or comment_id <= 0:
+        raise Refusal("attestation lookup: malformed comment ID")
+    return comment_id
+
+
+def record_attestation(
+    identity: Identity, snapshot: CheckSnapshot, operations: Operations,
+) -> None:
+    if snapshot.actor is None or not any(source.checks for source in snapshot.sources):
+        return
+    marker = f"<!-- nightshift:land-checks:{identity.number}:{snapshot.head} -->"
+    lines = [f"{queue.SELF_COMMENT_PREFIX} Human checks", "",
+             f"@{snapshot.actor} recorded completion through `land`.",
+             f"PR: {identity.url}", f"Head: `{snapshot.head}`", ""]
+    for source in snapshot.sources:
+        if source.checks:
+            # Checklist text is quoted content, not comment metadata. Escape
+            # HTML so copied publication/attestation markers cannot make this
+            # comment supersede a publication or corrupt marker reconciliation.
+            lines.extend([f"Source: {source.reference}",
+                          *[f"- [x] {escape(check.text, quote=False)}" for check in source.checks], ""])
+    body = "\n".join([*lines, marker])
+
+    def lookup() -> int | None:
+        return select_attestation(read_comments(
+            identity, operations, stage="attestation lookup",
+        ), marker)
+
+    comment_id = lookup()
+    if comment_id is None:
+        try:
+            response = operations.read_json(
+                ["gh", "api", "--method", "POST",
+                 f"repos/{identity.repo}/issues/{identity.number}/comments", "-f", f"body={body}"],
+                stage="attestation create",
+            )
+            # Even exit zero can leave an unusable acknowledgement. Resolve
+            # that through the same full-history lookup as a transport error.
+            if (not isinstance(response.get("body"), str)
+                    or select_attestation([response], marker) is None):
+                raise Refusal("attestation create: incomplete comment acknowledgement")
+            return
+        except Refusal as exc:
+            try:
+                comment_id = lookup()
+            except Refusal as lookup_error:
+                raise Refusal(f"{exc}; reconciliation failed: {lookup_error}; rerun land to recover") from exc
+            if comment_id is None:
+                raise Refusal(f"{exc}; attestation could not be reconciled; rerun land to recover") from exc
+            # The remote create may have succeeded. Reuse its known ID; never
+            # issue a second POST in this invocation, even if it was rejected.
+    operations.run(
+        ["gh", "api", "--method", "PATCH", f"repos/{identity.repo}/issues/comments/{comment_id}",
+         "-f", f"body={body}"],
+        stage=f"attestation update for comment {comment_id}; rerun land to recover",
+    )
+
+
 def main(
     argv: list[str] | None = None, *, runner: Runner | None = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -458,9 +534,10 @@ def main(
         validate_run_eligibility(pr, run)
         sources = read_check_sources(pr, run, operations)
         snapshot = prepare_human_checks(pr, sources, operations, checks_done=args.checks_done)
-        # Retain the expected post-edit snapshot for attestation and later
+        record_attestation(identity, snapshot, operations)
+        # Retain the expected post-edit snapshot for later
         # revalidation. Finish/CI/merge must wait for their remaining gates.
-        raise Refusal(f"{identity.url}: mutations disabled beyond check edits until all landing "
+        raise Refusal(f"{identity.url}: mutations disabled beyond check attestation until all landing "
                       f"gates are wired (checks read at head {snapshot.head})")
     except Refusal as exc:
         print(f"land: {exc}", file=sys.stderr)

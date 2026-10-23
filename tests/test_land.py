@@ -703,6 +703,7 @@ def test_missing_publication_still_checks_body(config_path, scripted_runner, cap
     if checks_done:
         scripted_runner.expect(ACTOR, {"login": "operator"})
         scripted_runner.expect(check_patch("- [x] Body check remains"), {})
+        expect_attestation(scripted_runner, [("PR body", ["Body check remains"])])
     assert invoke(config_path, scripted_runner, URL, *(["--checks-done"] if checks_done else [])) == 1
     output = capsys.readouterr()
     assert ("PR body: Body check remains" in output.err) == (not checks_done)
@@ -745,6 +746,30 @@ def check_patch(body, comment_id=None):
     return ["gh", "api", "--method", "PATCH", endpoint, "-f", f"body={body}"]
 
 
+def attestation_body(sources, *, actor="operator", head=HEAD):
+    body = (f"**nightshift** — Human checks\n\n@{actor} recorded completion through `land`.\n"
+            f"PR: {URL}\nHead: `{head}`\n\n")
+    for reference, items in sources:
+        body += f"Source: {reference}\n" + "".join(f"- [x] {item}\n" for item in items) + "\n"
+    return body + f"<!-- nightshift:land-checks:78:{head} -->"
+
+
+def attestation(body, comment_id=501, **extra):
+    return {"body": body, "id": comment_id, "author_association": "COLLABORATOR", **extra}
+
+
+def attestation_post(body):
+    return ["gh", "api", "--method", "POST", f"repos/{REPO}/issues/78/comments", "-f", f"body={body}"]
+
+
+def expect_attestation(runner, sources, *, actor="operator", existing=None):
+    body = attestation_body(sources, actor=actor)
+    runner.expect(COMMENTS, [[]] if existing is None else [[existing]])
+    runner.expect(attestation_post(body) if existing is None else check_patch(body, existing["id"]),
+                  attestation(body))
+    return attestation(body)
+
+
 @pytest.mark.real_trust
 @pytest.mark.scenario("reviewed-pr-landing/record-checks-in-place/tick-each-source-once")
 @pytest.mark.parametrize("complete", ["neither", "body", "comment", "both"])
@@ -782,6 +807,9 @@ def test_checks_done_ticks_each_source_once_and_retains_snapshot(
         scripted_runner.expect(check_patch(ticked_body), {})
     if complete not in {"comment", "both"}:
         scripted_runner.expect(check_patch(ticked_comment, 42), {})
+    check_items = [("PR body", ["Keep uppercase", "Keep lowercase", "First", "Second"]),
+                   ("publication comment 42", ["Old", "New", "More"])]
+    recorded = expect_attestation(scripted_runner, check_items)
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
     assert snapshots == [land.CheckSnapshot(HEAD, (
@@ -792,6 +820,7 @@ def test_checks_done_ticks_each_source_once_and_retains_snapshot(
     # the later attestation step, without writing any source a second time.
     expect_check_sources(scripted_runner, ticked_body, [[{**comment, "body": ticked_comment}]])
     scripted_runner.expect(ACTOR, {"login": "second-operator"})
+    expect_attestation(scripted_runner, check_items, actor="second-operator", existing=recorded)
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
     assert snapshots[1].actor == "second-operator"
@@ -844,6 +873,8 @@ def test_partial_check_edits_recover_from_remote_state(
         if remote[source] != complete[source]:
             scripted_runner.expect(check_patch(complete[source], comment_id),
                                    lambda source=source: edit(source))
+    expect_attestation(scripted_runner, [("PR body", ["First", "Existing"]),
+                                        ("publication comment 42", ["Inspect the UI"])])
     assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
     assert "mutations disabled" in capsys.readouterr().err
     assert remote == complete
@@ -870,5 +901,253 @@ def test_complete_direct_sources_only_lookup_actor_when_recording(
     expect_check_sources(scripted_runner, "- [X] Complete\r\n")
     if checks_done:
         scripted_runner.expect(ACTOR, {"login": "operator"})
+        expect_attestation(scripted_runner, [("PR body", ["Complete"])])
     assert invoke(config_path, scripted_runner, URL, *(["--checks-done"] if checks_done else [])) == 1
     assert "mutations disabled" in capsys.readouterr().err
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/stable-check-attestation/repeated-attestation-updates")
+def test_land_checks_done_ticks_once_and_comments(config_path, scripted_runner, capsys):
+    body = "Intro\r\n- [ ] Body check\r\n- [X] Existing\r\n"
+    comment = publication(42)
+    completed_body = body.replace("[ ]", "[x]")
+    completed_comment = {**comment, "body": comment["body"].replace("[ ]", "[x]")}
+    sources = [("PR body", ["Body check", "Existing"]),
+               ("publication comment 42", ["Inspect the UI"])]
+    expect_check_sources(scripted_runner, body, [[comment]])
+    scripted_runner.expect(ACTOR, {"login": "operator"})
+    scripted_runner.expect(check_patch(completed_body), {})
+    scripted_runner.expect(check_patch(completed_comment["body"], 42), {})
+    existing = expect_attestation(scripted_runner, sources)
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    assert "mutations disabled" in capsys.readouterr().err
+
+    expect_check_sources(scripted_runner, completed_body, [[completed_comment, existing]])
+    scripted_runner.expect(ACTOR, {"login": "next-operator"})
+    updated = expect_attestation(scripted_runner, sources, actor="next-operator", existing=existing)
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    assert "mutations disabled" in capsys.readouterr().err
+    assert "@next-operator recorded completion through `land`." in updated["body"]
+    calls = [argv for argv, _ in scripted_runner.calls]
+    assert calls.count(check_patch(completed_body)) == 1
+    assert calls.count(check_patch(completed_comment["body"], 42)) == 1
+    assert sum("POST" in argv for argv in calls) == 1
+    assert calls[-1] == check_patch(updated["body"], existing["id"])
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/stable-check-attestation/repeated-attestation-updates")
+@pytest.mark.parametrize("marker_suffix", ["", ":1"])
+@pytest.mark.parametrize("quoted_in", ["body", "publication"])
+def test_attestation_quoted_markers_cannot_replace_publication(
+    config_path, scripted_runner, capsys, marker_suffix, quoted_in,
+):
+    publish_marker = f"<!-- nightshift:publish:reviewed-change{marker_suffix} -->"
+    land_marker = f"<!-- nightshift:land-checks:78:{HEAD} -->"
+    quoted = f"Inspect {publish_marker} & <example>"
+    # Literal marker text must remain readable without becoming metadata in
+    # the copied attestation.
+    escaped = (f"Inspect &lt;!-- nightshift:publish:reviewed-change{marker_suffix} --&gt;"
+               " &amp; &lt;example&gt;")
+    body = f"- [ ] {quoted}" if quoted_in == "body" else ""
+    comment = publication(42, checks=f"- [ ] {quoted}" if quoted_in == "publication"
+                          else "- [ ] Inspect the UI")
+    completed_body = body.replace("[ ]", "[x]")
+    completed_comment = {**comment, "body": comment["body"].replace("[ ]", "[x]")}
+    sources = ([("PR body", [escaped])] if body else []) + [
+        ("publication comment 42", [escaped if quoted_in == "publication" else "Inspect the UI"]),
+    ]
+    expect_check_sources(scripted_runner, body, [[comment]])
+    scripted_runner.expect(ACTOR, {"login": "operator"})
+    if body:
+        scripted_runner.expect(check_patch(completed_body), {})
+    scripted_runner.expect(check_patch(completed_comment["body"], 42), {})
+    recorded = attestation(attestation_body(sources), created_at="2026-10-23T12:00:00Z")
+    scripted_runner.expect(COMMENTS, [[completed_comment]])
+    scripted_runner.expect(attestation_post(recorded["body"]), recorded)
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    assert "mutations disabled" in capsys.readouterr().err
+    assert publish_marker not in recorded["body"]
+    assert recorded["body"].count(land_marker) == 1
+
+    # Discovery sees the newer, trusted attestation, but must keep selecting
+    # the real publication and update only the existing attestation by ID.
+    expect_check_sources(scripted_runner, completed_body, [[completed_comment], [recorded]])
+    scripted_runner.expect(ACTOR, {"login": "operator"})
+    scripted_runner.expect(COMMENTS, [[completed_comment], [recorded]])
+    scripted_runner.expect(check_patch(recorded["body"], 501), {})
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    assert "mutations disabled" in capsys.readouterr().err
+
+    # An operator unticks the original publication after recording checks.
+    # The attestation must never hide that check on the next invocation.
+    expect_check_sources(scripted_runner, completed_body, [[comment], [recorded]])
+    assert invoke(config_path, scripted_runner, URL) == 1
+    error = capsys.readouterr().err
+    assert "unticked human checks remain" in error
+    assert "publication comment 42:" in error
+    assert "mutations disabled" not in error
+    assert sum("POST" in argv for argv, _ in scripted_runner.calls) == 1
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/stable-check-attestation/repeated-attestation-updates")
+def test_attestation_changed_head_creates_distinct_marker(config_path, scripted_runner, capsys):
+    sources = [("PR body", ["Complete"])]
+    remote = []
+    for head in [HEAD, "c" * 40]:
+        scripted_runner.expect(VIEW, {**PR, "headRefOid": head, "body": "- [X] Complete"})
+        scripted_runner.expect(MAIN, MAIN_REF).expect(STATUS, EMPTY_STATUS)
+        scripted_runner.expect(ACTOR, {"login": "operator"}).expect(COMMENTS, [list(remote)])
+        body = attestation_body(sources, head=head)
+
+        def create():
+            remote.append(attestation(body, 501 + len(remote)))
+            return remote[-1]
+
+        scripted_runner.expect(attestation_post(body), create)
+        assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+        assert "mutations disabled" in capsys.readouterr().err
+    assert len(remote) == 2
+    assert remote[0]["body"].endswith(f"<!-- nightshift:land-checks:78:{HEAD} -->")
+    assert remote[1]["body"].endswith(f"<!-- nightshift:land-checks:78:{'c' * 40} -->")
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/stable-check-attestation/lost-comment-response")
+@pytest.mark.parametrize("production_runner", [False, True])
+@pytest.mark.parametrize("failure", [
+    subprocess.TimeoutExpired([], 30), OSError("connection lost"),
+    subprocess.CompletedProcess([], 1, "", "connection reset"),
+    subprocess.CompletedProcess([], 0, "truncated JSON", ""), {},
+    {"id": 501, "body": None},
+])
+def test_attestation_lost_response_reconciles_later_page(
+    config_path, scripted_runner, monkeypatch, capsys, production_runner, failure,
+):
+    body = attestation_body([("PR body", ["Complete"])])
+    remote = [{"body": "Unrelated discussion"}] * 100
+    expect_check_sources(scripted_runner, "- [x] Complete")
+    scripted_runner.expect(ACTOR, {"login": "operator"})
+    scripted_runner.expect(COMMENTS, lambda: [remote[:100], remote[100:]])
+
+    def lost_create():
+        remote.append(attestation(body))
+        return failure
+
+    scripted_runner.expect(attestation_post(body), lost_create)
+    scripted_runner.expect(COMMENTS, lambda: [remote[:100], remote[100:]])
+    scripted_runner.expect(check_patch(body, 501), {})
+    if production_runner:
+        # Exercise the actual default adapter, not just the injected-runner path.
+        monkeypatch.setattr(subprocess, "run", scripted_runner)
+        result = land.main([URL, "--checks-done", "--config", str(config_path)])
+    else:
+        result = invoke(config_path, scripted_runner, URL, "--checks-done")
+    assert result == 1
+    assert "mutations disabled" in capsys.readouterr().err
+    assert len(remote) == 101
+    assert sum("POST" in argv for argv, _ in scripted_runner.calls) == 1
+    assert scripted_runner.calls[-1][0] == check_patch(body, 501)
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/stable-check-attestation/uncertain-attestation-refused")
+@pytest.mark.parametrize("after_post", [False, True])
+@pytest.mark.parametrize("problem", [
+    "failed-read", "timeout", "malformed-json", "malformed-page", "malformed-body", "duplicate",
+    "repeated-marker", "untrusted", "missing-trust", "bad-prefix", "bad-id", "absent",
+])
+def test_uncertain_attestation_refuses_without_retry_or_later_mutations(
+    config_path, scripted_runner, capsys, after_post, problem,
+):
+    body = attestation_body([("PR body", ["Complete"])])
+    existing = attestation(body)
+    responses = {
+        "failed-read": subprocess.CompletedProcess([], 1, "", "later page failed"),
+        "timeout": subprocess.TimeoutExpired([], 30),
+        "malformed-json": subprocess.CompletedProcess([], 0, "[]\n[]", ""),
+        "malformed-page": [[existing], {}],
+        "malformed-body": [[existing], [{"body": None}]],
+        "duplicate": [[existing], [attestation(body, 502)]],
+        "repeated-marker": [[attestation(body + "\n" + body)]],
+        "untrusted": [[attestation(body, author_association="CONTRIBUTOR")]],
+        "missing-trust": [[{"id": 501, "body": body}]],
+        "bad-prefix": [[attestation(body.replace("**nightshift** —", "Lookalike"))]],
+        "bad-id": [[attestation(body, True)]],
+        "absent": [[]],
+    }
+    expect_check_sources(scripted_runner, "- [x] Complete")
+    scripted_runner.expect(ACTOR, {"login": "operator"})
+    if after_post or problem == "absent":
+        scripted_runner.expect(COMMENTS, [[]])
+        scripted_runner.expect(attestation_post(body), subprocess.TimeoutExpired([], 30))
+    scripted_runner.expect(COMMENTS, responses[problem])
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    error = capsys.readouterr().err
+    assert "attestation" in error and "mutations disabled" not in error
+    if after_post or problem == "absent":
+        assert "reconcil" in error
+    if problem in {"duplicate", "repeated-marker"}:
+        assert "duplicate marker" in error
+    if problem in {"untrusted", "missing-trust", "bad-prefix"}:
+        assert "untrusted marker" in error
+    # The exact script stops at the failed lookup: no PATCH, finish, CI or merge.
+    assert scripted_runner.calls[-1][0] == COMMENTS
+    assert sum("POST" in argv for argv, _ in scripted_runner.calls) == int(after_post or problem == "absent")
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/stable-check-attestation/repeated-attestation-updates")
+@pytest.mark.scenario("reviewed-pr-landing/stable-check-attestation/uncertain-attestation-refused")
+@pytest.mark.parametrize("failed_method", ["POST", "PATCH"])
+def test_attestation_failure_after_check_edits_recovers_on_next_invocation(
+    config_path, scripted_runner, capsys, failed_method,
+):
+    sources = [("PR body", ["Check"])]
+    body = attestation_body(sources)
+    existing = attestation(body)
+    expect_check_sources(scripted_runner, "- [ ] Check")
+    scripted_runner.expect(ACTOR, {"login": "operator"})
+    scripted_runner.expect(check_patch("- [x] Check"), {})
+    scripted_runner.expect(COMMENTS, [[]] if failed_method == "POST" else [[existing]])
+    scripted_runner.expect(attestation_post(body) if failed_method == "POST" else check_patch(body, 501),
+                           subprocess.CompletedProcess([], 1, "", "permission denied"))
+    if failed_method == "POST":
+        scripted_runner.expect(COMMENTS, [[]])
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    error = capsys.readouterr().err
+    assert "permission denied" in error and "mutations disabled" not in error
+
+    expect_check_sources(scripted_runner, "- [x] Check")
+    scripted_runner.expect(ACTOR, {"login": "new-operator"})
+    expect_attestation(scripted_runner, sources, actor="new-operator",
+                       existing=existing if failed_method == "PATCH" else None)
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    assert "mutations disabled" in capsys.readouterr().err
+    assert sum(argv == check_patch("- [x] Check") for argv, _ in scripted_runner.calls) == 1
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/stable-check-attestation/repeated-attestation-updates")
+@pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR", "collaborator"])
+def test_existing_attestation_on_later_page_uses_production_trust(
+    config_path, scripted_runner, capsys, association,
+):
+    body = attestation_body([("PR body", ["Complete"])])
+    marker = f"<!-- nightshift:land-checks:78:{HEAD} -->"
+    unrelated = [attestation(body.replace(marker, other), index, author_association="NONE")
+                 for index, other in enumerate([
+                     f"<!-- nightshift:land-checks:79:{HEAD} -->",
+                     f"<!-- nightshift:land-checks:78:{'c' * 40} -->",
+                     f"<!-- nightshift:land-checks:78:{HEAD}extra -->",
+                 ], 1)]
+    expect_check_sources(scripted_runner, "- [X] Complete")
+    scripted_runner.expect(ACTOR, {"login": "operator"})
+    scripted_runner.expect(COMMENTS, [unrelated + [{"body": "Discussion"}] * 97,
+                                     [attestation(body, author_association=association)]])
+    scripted_runner.expect(check_patch(body, 501), {})
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    assert "mutations disabled" in capsys.readouterr().err
+    assert not any("POST" in argv for argv, _ in scripted_runner.calls)
