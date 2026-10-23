@@ -12,6 +12,7 @@ from manifest_fixtures import manifest_text
 from nightshift import daemon, queue, specloop_client, specloop_intake
 from nightshift.config import Config, Repo
 from test_engine_routing import DraftGh
+from test_specloop_jobs import release_receipt
 
 
 CHANGE = "sample-issue-7-add-a-gate"
@@ -320,14 +321,19 @@ def test_unavailable_state_never_admits(repo, tmp_path, monkeypatch, failure):
     assert gh.labels == {"spec:review", "spec:approved"}
 
 
+@pytest.mark.scenario("issue-intake/released-item-intake/ineligible-released-item-waits")
+@pytest.mark.parametrize("released", [False, True])
 @pytest.mark.parametrize("field,value", [
     ("state", "CLOSED"), ("branch", "feature/other"), ("fork", True),
     ("branch", "spec/../outside"), ("branch", "spec/widget..js-issue-7"),
     ("branch", "spec/widget.lock"), ("branch", "spec/widget."),
     ("labels", {"spec:approved", "needs-human"}), ("labels", {"spec:approved", "agent:revise"}),
 ])
-def test_ineligible_pr_is_not_admitted(repo, tmp_path, field, value):
+def test_ineligible_pr_is_not_admitted(repo, tmp_path, field, value, released):
     gh, commands = ApprovalGh(), Commands()
+    if released:
+        release_receipt(tmp_path, tmp_path / "admissions/owner__sample/8.json",
+                        {"change": CHANGE, "head": HEAD, "approval_event": gh.events[0]["id"]})
     setattr(gh, field, value)
     poll(repo, tmp_path, gh, commands)
     assert not commands.calls
@@ -513,7 +519,9 @@ def test_pause_and_worker_routing_prevent_admission(repo, tmp_path, monkeypatch)
 
 
 @pytest.mark.scenario("issue-intake/approval-admits/approved-spec-admitted")
-def test_approval_does_not_cover_a_revision_pushed_after_it(repo, tmp_path):
+@pytest.mark.scenario("issue-intake/released-item-intake/recovery-precedes-replacement")
+@pytest.mark.parametrize("released", [False, True])
+def test_approval_does_not_cover_a_revision_pushed_after_it(repo, tmp_path, released):
     class Moving(Commands):  # git reports whatever the PR's head now is
         def __call__(self, args, **kwargs):
             result = super().__call__(args, **kwargs)
@@ -523,6 +531,9 @@ def test_approval_does_not_cover_a_revision_pushed_after_it(repo, tmp_path):
 
     gh, commands = ApprovalGh(labels=("spec:approved", "spec:review", "agent:revise")), Moving()
     poll(repo, tmp_path, gh, commands)  # approved alongside agent:revise: skipped, head recorded
+    if released:
+        release_receipt(tmp_path, tmp_path / "admissions/owner__sample/8.json",
+                        {"change": CHANGE, "head": HEAD, "approval_event": gh.events[0]["id"]})
     gh.head = "b" * 40  # the revision lands and agent:revise is removed
     gh.label_event("agent:revise", "unlabeled")
     poll(repo, tmp_path, gh, commands)

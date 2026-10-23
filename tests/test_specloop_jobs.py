@@ -29,6 +29,16 @@ def identity(directory):
             "started_at": "2026-10-21T12:00:00+00:00"}
 
 
+def release_receipt(root, path, receipt):
+    """Model a confirmed stopped attempt, then use the real release transaction."""
+    directory = attempt(root, path.parent.parent.name, number=int(path.stem))
+    jobs.save(directory / "process.json", identity(directory))
+    jobs.save(path, {**receipt, "job": directory.name})
+    jobs.request_stop(directory, verify_identity=lambda: identity(directory))
+    jobs.finish_stop(directory)
+    assert jobs.release_job(root, directory.name) == "released"
+
+
 def eventually(predicate):
     deadline = time.monotonic() + 5
     while not predicate():
@@ -734,8 +744,10 @@ def test_stop_commit_precedes_concurrent_result(tmp_path, control_race, competit
     assert not (directory / "collected.json").exists()
     assert jobs.list_jobs(tmp_path)[0][0].state == "stopping"
     jobs.finish_stop(directory)
+    stopped = (directory / "stop.json").read_bytes()
     assert jobs.collect(path, receipt) is None
     assert jobs.list_jobs(tmp_path)[0][0].state == "stopped"
+    assert (directory / "stop.json").read_bytes() == stopped
 
 
 @pytest.mark.scenario("background-job-control/durable-cancellation/completion-wins-stop-race")
@@ -775,6 +787,7 @@ def test_completion_commit_precedes_stop(tmp_path, control_race, completion, mon
         jobs._children.clear()
         assert jobs.stop_job(tmp_path, directory.name) == "finished"
         assert (directory / "collected.json").read_text() == marker
+        assert json.loads(path.read_text()) == receipt
 
 
 def test_refused_stop_does_not_accept_intent_and_retry_preserves_it(tmp_path):
@@ -1496,6 +1509,7 @@ def test_stop_inspection_failure_never_signals(tmp_path, monkeypatch, owned_job,
         assert not (directory / "stop.json").exists()
 
 
+@pytest.mark.scenario("background-job-control/durable-cancellation/repeat-stop-safely")
 @pytest.mark.parametrize("record,contents,expected", [
     ("result.json", {"result": {}}, "finished"),
     ("result.json", {"error": "failed"}, "finished"),
@@ -1508,6 +1522,8 @@ def test_stop_terminal_attempt_is_signal_free(tmp_path, monkeypatch, record, con
     before = (directory / record).read_bytes()
     monkeypatch.setattr(jobs, "_verify_process", lambda *a: pytest.fail("terminal job verified"))
     monkeypatch.setattr(os, "killpg", lambda *a: pytest.fail("terminal job signalled"))
+    assert jobs.stop_job(tmp_path, directory.name) == expected
+    jobs._children.clear()
     assert jobs.stop_job(tmp_path, directory.name) == expected
     assert (directory / record).read_bytes() == before
     if record != "stop.json":

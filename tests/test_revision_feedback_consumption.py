@@ -10,6 +10,7 @@ from nightshift import queue, specloop_intake as intake, specloop_job
 from test_specloop_approval import Commands as AdmissionCommands
 from test_specloop_build_revision import BuildCommands, setup, poll
 from test_specloop_intake import idea_file
+from test_specloop_jobs import release_receipt
 from test_specloop_spec_revision import HEAD, REVISED, TIP_DATE, setup as spec_setup
 
 
@@ -34,6 +35,71 @@ def dispatched_feedback(commands):
     if isinstance(commands, BuildCommands):
         return "\n".join(json.loads(commands.feedback[-1]))
     return idea_file(commands.proposals[-1]).read_text(encoding="utf-8")
+
+
+@pytest.mark.scenario("pr-revision/released-revision-selection/same-event-permits-replacement")
+@pytest.mark.scenario("pr-revision/released-revision-selection/release-does-not-replay-consumed-feedback")
+@pytest.mark.parametrize("consumed", [False, True])
+def test_released_revision_selects_unconsumed_feedback(stage_setup, tmp_path, consumed):
+    _, gh, commands = stage_setup
+    previous = read(tmp_path)
+    previous.pop("result")
+    previous.pop("delivered")
+    previous.update(event=gh.events[-1]["id"], future={"keep": True},
+                    feedback_ids=["conversation:102"], feedback=["Stopped snapshot"])
+    if consumed:
+        previous["consumed_feedback_ids"].append("conversation:102")
+    release_receipt(tmp_path, receipt_path(tmp_path), previous)
+    assert read(tmp_path) == previous  # Release alone acknowledges nothing.
+    gh.feedback[1]["body"] = "Edited feedback under the same label event"
+    result, = poll(stage_setup, tmp_path)
+    saved = read(tmp_path)
+    assert saved["event"] == previous["event"] and saved["future"] == previous["future"]
+    assert set(saved["consumed_feedback_ids"]) == set(previous["consumed_feedback_ids"]) | {"conversation:102"}
+    assert "agent:revise" not in gh.labels and saved["delivered"]
+    if consumed:
+        assert result == {"outcome": "empty"} and not commands.calls
+        assert saved["feedback_ids"] == [] and "nothing to revise" in gh.comments[-1]["body"]
+    else:
+        assert saved["feedback_ids"] == ["conversation:102"]
+        assert gh.feedback[1]["body"] in dispatched_feedback(commands)
+    assert poll(stage_setup, tmp_path) == []
+
+
+@pytest.mark.scenario("issue-intake/released-item-intake/ineligible-released-item-waits")
+@pytest.mark.parametrize("hold", ["unarmed", "closed", "unauthorized", "needs-human"])
+def test_released_revision_waits_for_eligibility(stage_setup, tmp_path, hold):
+    _, gh, commands = stage_setup
+    previous = read(tmp_path)
+    previous.pop("result")
+    previous.pop("delivered")
+    release_receipt(tmp_path, receipt_path(tmp_path), previous)
+    before = receipt_path(tmp_path).read_bytes()
+    if hold == "unarmed":
+        gh.labels.remove("agent:revise")
+    elif hold == "closed":
+        gh.state = "CLOSED"
+    elif hold == "unauthorized":
+        gh.events[-1]["actor"]["login"] = "outsider"
+    else:
+        gh.labels.add("needs-human")
+    for _ in range(2):
+        assert poll(stage_setup, tmp_path) == []
+        assert receipt_path(tmp_path).read_bytes() == before and not commands.calls
+
+
+@pytest.mark.scenario("issue-intake/released-item-intake/ineligible-released-item-waits")
+def test_released_spec_revision_waits_for_manifest(spec_setup, tmp_path):
+    repo, _, commands = spec_setup
+    previous = read(tmp_path)
+    previous.pop("result")
+    previous.pop("delivered")
+    release_receipt(tmp_path, receipt_path(tmp_path), previous)
+    before = receipt_path(tmp_path).read_bytes()
+    repo.manifest.unlink()
+    with pytest.raises(intake.ConfigurationError):
+        poll(spec_setup, tmp_path)
+    assert receipt_path(tmp_path).read_bytes() == before and not commands.proposals
 
 
 @pytest.mark.scenario("pr-revision/revision-actor-gate/unauthorized-revision-ignored-at-either-stage")

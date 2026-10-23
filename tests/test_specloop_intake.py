@@ -13,6 +13,7 @@ from manifest_fixtures import manifest_text
 from nightshift import daemon, queue, specloop_intake
 from nightshift.config import Config, Repo
 from test_engine_routing import DraftGh
+from test_specloop_jobs import release_receipt
 
 
 CHANGE = "owner__sample-issue-7-add-a-gate"
@@ -258,11 +259,13 @@ def test_blocked_issue_is_not_drafted_until_blockers_close(
 
 
 @pytest.mark.scenario("issue-intake/dependency-gated-drafting/blocked-poll-preserves-state")
+@pytest.mark.scenario("issue-intake/polling-filesystem-preservation/blocked-polls-leave-files-unchanged")
+@pytest.mark.scenario("issue-intake/released-item-intake/ineligible-released-item-waits")
 @pytest.mark.scenario("issue-intake/dependency-gated-drafting/rearmed-round-waits")
 @pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
 @pytest.mark.parametrize("previous,lost_response", [
     (None, False), ("needs_input", False), ("rejected", False), ("drafted", False),
-    ("needs_input", True), ("rejected", True), ("drafted", True),
+    ("needs_input", True), ("rejected", True), ("drafted", True), ("released", False),
 ])
 def test_blocked_issue_changes_no_labels_or_comments(
     repo, tmp_path, monkeypatch, caplog, armed, previous, lost_response,
@@ -271,7 +274,10 @@ def test_blocked_issue_changes_no_labels_or_comments(
     commands = Commands(outcome=previous or "drafted")
     path = tmp_path / "proposals/owner__sample/7.json"
     old_receipt = None
-    if previous:
+    if previous == "released":
+        release_receipt(tmp_path, path, {"change": CHANGE, "round_id": "stopped"})
+        old_receipt = path.read_bytes()
+    elif previous:
         def interrupted(args):
             result = gh(args)
             if lost_response and args[:2] == ["issue", "edit"]:
@@ -452,6 +458,7 @@ def test_running_draft_is_collected_and_delivered_after_blocker_reopens(
 
 
 @pytest.mark.scenario("issue-intake/draft-lifecycle-independent-of-blockers/existing-pr-recovery-continues")
+@pytest.mark.scenario("issue-intake/polling-filesystem-preservation/existing-pr-recovery-creates-no-directory")
 @pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
 def test_open_pr_without_receipt_is_delivered_while_blocker_is_open(repo, tmp_path, caplog, armed):
     gh, commands = BlockedDraftGh(armed, {6: "OPEN"}), Commands()
@@ -476,6 +483,63 @@ def test_open_pr_without_receipt_is_delivered_while_blocker_is_open(repo, tmp_pa
     assert len(calls(gh, "issue", "comment")) == len(calls(gh, "issue", "edit")) == 1
     assert gh.labels == set()
     assert caplog.records == []
+
+
+@pytest.mark.scenario("issue-intake/released-item-intake/recovery-precedes-replacement")
+@pytest.mark.parametrize("change", [CHANGE, "sample-issue-7-old-title"])
+def test_released_draft_recovers_recorded_pr(repo, tmp_path, change):
+    gh, commands = BlockedDraftGh("spec:draft", {6: "OPEN"}), Commands()
+    gh.prs = [{"number": 8, "state": "OPEN", "isDraft": True}]
+    path = tmp_path / "proposals/owner__sample/7.json"
+    release_receipt(tmp_path, path, {"change": change, "round_id": "stopped"})
+    before = path.read_bytes()
+
+    def github(args):
+        if args[:2] == ["issue", "view"] and args[-1] != "state":
+            return json.dumps({**json.loads(gh(args)), "title": "A renamed issue"})
+        if args[:2] == ["pr", "list"]:
+            assert args[args.index("--head") + 1] == f"spec/{change}"
+        return gh(args)
+
+    poll(repo, tmp_path, github, commands)
+    assert not commands.calls and not gh.blocker_reads and not calls(gh, "pr", "create")
+    assert gh.labels == set() and gh.pr_url in gh.comments[-1]["body"]
+    assert f"<!-- nightshift:draft:{change}:pr-8 -->" in gh.comments[-1]["body"]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.scenario("issue-intake/released-item-intake/ineligible-released-item-waits")
+@pytest.mark.parametrize("hold", ["unarmed", "closed", "unauthorized", "needs-human", "health", "unreadable"])
+def test_released_issue_waits_for_eligibility(repo, tmp_path, hold):
+    gh, commands = BlockedDraftGh("spec:draft", {6: "CLOSED"}), Commands()
+    path = tmp_path / "proposals/owner__sample/7.json"
+    release_receipt(tmp_path, path, {"change": CHANGE, "round_id": "stopped"})
+    before = path.read_bytes()
+    if hold == "unarmed":
+        gh.labels.clear()
+    elif hold == "needs-human":
+        gh.labels.add("needs-human")
+    elif hold == "unauthorized":
+        gh.events[-1]["actor"]["login"] = "outsider"
+    elif hold == "unreadable":
+        gh.states[6] = queue.GhError("blocker unavailable", transient=True)
+
+    def github(args):
+        result = gh(args)
+        if hold == "closed" and args[:2] == ["issue", "view"]:
+            return json.dumps({**json.loads(result), "state": "CLOSED"})
+        return result
+
+    errors = []
+    for _ in range(2):
+        assert specloop_intake.propose_pending(
+            repo, queue.Labels(), tmp_path, runner=github, specloop_runner=commands,
+            readiness=specloop_intake.ConfigurationError("held") if hold == "health" else None,
+            on_error=lambda n, e: errors.append(e),
+        ) == []
+        assert path.read_bytes() == before and not commands.calls
+    assert bool(errors) == (hold == "health")
+    assert not calls(gh, "pr", "create")
 
 
 @pytest.mark.scenario("issue-intake/dependency-gated-drafting/no-dependencies-allows-round")

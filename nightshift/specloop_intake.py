@@ -245,8 +245,12 @@ look like an absent label or an empty set of comments.
             return None
         if receipt and not _collect(path, receipt, "propose"):
             return _PENDING
+        # Released and failed attempts still identify any PR they created.
+        # Keep that identity for recovery even without a deliverable result.
+        recorded_change = None
         if receipt and "result" not in receipt:
-            receipt = None  # A failed job was reported on the preceding poll.
+            recorded_change = receipt.get("change")
+            receipt = None
         # Only collaborators' comments steer a draft (queue.TRUSTED_ASSOCIATIONS).
         comments = [comment.get("body") or "" for comment in raw.get("comments", []) if queue.trusted(comment)]
         idea_parts = [raw["title"], raw.get("body") or ""]
@@ -269,10 +273,10 @@ look like an absent label or an empty set of comments.
             change = receipt["change"]
             receipt.setdefault("title", raw["title"])
         else:
-            change = _change_name(repo.name, number, raw["title"])
+            change = recorded_change or _change_name(repo.name, number, raw["title"])
         branch = f"spec/{change}"
         pr = queue._latest_pr_number(repo.name, branch, runner=gh, strict=True)
-        if not receipt and pr is None:
+        if not receipt and not recorded_change and pr is None:
             # Bounded recovery after receipt loss: exact branches in this
             # repository, using the current title. Errors must not look like
             # absence, and recorded identities never depend on today's title.
