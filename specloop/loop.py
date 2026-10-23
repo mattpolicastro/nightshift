@@ -760,6 +760,7 @@ class _InfraRetries:
         block: dict = {}
         recover: dict = {}
         cleared: dict[str, float] = {}
+        causes: dict[str, str] = {}
         for event in agents.read_jsonl(run.dir / "events.jsonl"):
             if not isinstance(event, dict):
                 continue
@@ -770,6 +771,8 @@ class _InfraRetries:
                 profile = event.get("profile")
                 if isinstance(profile, str):
                     cleared.pop(profile, None)  # A later block supersedes an old manual resume.
+                    if profile in run.state.exhausted and event.get("until") == run.state.exhausted[profile]:
+                        causes[profile] = kind
             elif kind == "unavailable_pause":
                 block = event
             elif kind == "pause":
@@ -803,9 +806,10 @@ class _InfraRetries:
                 if isinstance(profile, str) and profile:
                     self.previous[key] = profile
         # Manual recovery may probe a repaired single provider before its cooldown.
-        # Reconcile after replay so an old resume cannot clear a newer block.
+        # Reconcile after replay so an old resume cannot clear a newer block,
+        # including quota recorded before resume with the same deadline.
         for profile, until in cleared.items():
-            if run.state.exhausted.get(profile) == until:
+            if run.state.exhausted.get(profile) == until and causes.get(profile) == "unavailable":
                 del run.state.exhausted[profile]
                 run.save()
 
