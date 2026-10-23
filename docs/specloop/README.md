@@ -393,6 +393,17 @@ uv run specloop drill <change>        # seeded defects through the review gate
 5. leaves the draft on a local `spec/<change>` branch for a human to approve.
    For daemon-managed issues, Nightshift pushes it and opens the spec review PR.
 
+Size tasks by risk and dependencies: combine work touching the same file for
+one concern within the single-session ceiling of about 300 changed lines.
+Split when distinct concerns, dependencies or that ceiling require it.
+Documentation-only changes update documentation without changing executable
+behavior; use one or two tasks in one section within that ceiling, rather
+than splitting by document heading. Most changes should use six tasks or
+fewer and as few sections as dependencies allow. Six is a normal target,
+not a hard rejection limit. Every task incurs a full implement, verify and
+review cycle; every section incurs an evidence gate, so unnecessary splits
+add overhead ([issue #75](https://github.com/mattpolicastro/nightshift/issues/75)).
+
 **Work in flight.** Before drafting, the harness snapshots paths named in
 `tasks.md` by other running or paused runs for the same source repository.
 It excludes the current change and skips unreadable runs without stopping
