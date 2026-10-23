@@ -38,6 +38,10 @@ class Refusal(Exception):
     """An operational failure that is safe to show to the operator."""
 
 
+class _CIDeadlineExpired(Refusal):
+    """Distinguish shared-budget expiry from command and validation failures."""
+
+
 @dataclass(frozen=True)
 class Identity:
     repo: str
@@ -134,7 +138,7 @@ class Operations:
             return math.inf
         remaining = self.deadline - self.monotonic()
         if remaining <= 0:
-            raise Refusal("shared CI deadline expired; inspect checks and rerun land")
+            raise _CIDeadlineExpired("shared CI deadline expired; inspect checks and rerun land")
         return remaining
 
     def poll_sleep(self) -> None:
@@ -710,7 +714,7 @@ def continue_landing(
             snapshot = replace(snapshot, head=pr.head)
         # Retain the immediately pre-update base even if main moved while the
         # asynchronous update was being observed. Only a new round adopts it.
-        wait_for_ci(pr.identity, snapshot.head, bounded)
+        wait_for_ci(pr.identity, snapshot.head, bounded, timeout=timeout)
         pr, run = revalidate_landing_inputs(
             pr.identity, run, snapshot, bounded, require_done=True,
         )
@@ -738,8 +742,15 @@ def incorporates_base(identity: Identity, head: str, base: str, operations: Oper
     return ancestor["sha"] == base
 
 
+def _checks_not_registered(result: subprocess.CompletedProcess[str]) -> bool:
+    return (result.returncode == 1 and result.stdout == ""
+            and "no checks reported" in (result.stderr or ""))
+
+
 def ci_is_green(result: subprocess.CompletedProcess[str]) -> bool:
     """Decode gh's JSON together with its special failure/pending exit codes."""
+    if _checks_not_registered(result):
+        return False
     try:
         checks = json.loads(result.stdout)
     except (ValueError, TypeError) as exc:
@@ -769,8 +780,14 @@ def ci_is_green(result: subprocess.CompletedProcess[str]) -> bool:
     return "pass" in buckets and buckets <= {"pass", "skipping"}
 
 
-def wait_for_ci(identity: Identity, expected_head: str, operations: Operations) -> None:
+def wait_for_ci(
+    identity: Identity, expected_head: str, operations: Operations, *, timeout: float | None = None,
+) -> None:
     """Require green checks bracketed by reads of the same reviewed head."""
+    if timeout is None:
+        timeout = operations.remaining()
+    awaiting_registration = False
+
     def check_head() -> None:
         pr = read_pr(identity, operations)
         if pr.head != expected_head:
@@ -779,17 +796,24 @@ def wait_for_ci(identity: Identity, expected_head: str, operations: Operations) 
         if pr.draft:
             raise Refusal("PR became draft during CI; inspect it before retrying land")
 
-    while True:
-        check_head()
-        result = operations.run(
-            ["gh", "pr", "checks", str(identity.number), "--repo", identity.repo,
-             "--json", "name,bucket,state,link"],
-            stage="CI checks", allowed_returncodes=(0, 1, 8),
-        )
-        check_head()
-        if ci_is_green(result):
-            return
-        operations.poll_sleep()
+    try:
+        while True:
+            check_head()
+            result = operations.run(
+                ["gh", "pr", "checks", str(identity.number), "--repo", identity.repo,
+                 "--json", "name,bucket,state,link"],
+                stage="CI checks", allowed_returncodes=(0, 1, 8),
+            )
+            check_head()
+            if ci_is_green(result):
+                return
+            awaiting_registration = _checks_not_registered(result)
+            operations.poll_sleep()
+    except _CIDeadlineExpired as exc:
+        if awaiting_registration:
+            raise Refusal(f"no CI checks were reported for head {expected_head} within {timeout:g}s; "
+                          "inspect checks and rerun land") from exc
+        raise
 
 
 def after_ci(
