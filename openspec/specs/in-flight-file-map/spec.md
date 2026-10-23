@@ -45,3 +45,15 @@ When a repository root is supplied, path extraction SHALL additionally accept ot
 #### Scenario: Run selection remains unchanged
 - **WHEN** running and paused runs on the source repository name the same eligible file alongside the current change, done or aborted runs, a run on a different repository, and an unreadable run
 - **THEN** the file's attribution contains only the other running and paused runs in run-name order, and the unreadable run does not prevent collection
+
+### Requirement: Hands-off mentions
+
+`in_flight` SHALL exclude a path that another run's tasks name only in a clause telling the implementer to leave it alone (the same rule as `edited_paths`), so a "Do not edit X" list does not appear as a planned edit. A path also named in an editing clause SHALL still count.
+
+#### Scenario: Hands-off paths are not planned edits
+- **WHEN** an eligible run's task says "Edit `specloop/loop.py`. Do not edit `nightshift/cli.py`, `README.md` or `specloop/cli.py`." and `README.md` exists in the source checkout
+- **THEN** the map contains only `specloop/loop.py` for that run
+
+#### Scenario: An edited path still counts
+- **WHEN** a task names `specloop/cli.py` in an editing clause and again in a hands-off clause
+- **THEN** the map includes `specloop/cli.py` for that run
