@@ -1,7 +1,7 @@
 ## 1. Issue lint and dependency readers
 
 - [x] 1.1 Create the section parser, finding representation, and pure wording lint in `nightshift/arm.py`; create fixture-driven `tests/test_arm.py` with `test_arm_flags_missing_sections`, `test_arm_flags_discouraged_phrasing`, `test_arm_requires_a_named_test`, and manual-check/section-boundary cases. Cover `issue-arming/issue-body-lint/missing-sections-accumulate`, `issue-arming/issue-body-lint/named-tests-are-required`, `issue-arming/issue-body-lint/discouraged-phrases-have-replacements`, and `issue-arming/issue-body-lint/human-checks-stay-outside-done`. Keep this increment to about 300 changed lines and preserve every pre-existing file and assertion.
-- [ ] 1.2 Add the bounded injectable GitHub issue reader, issue cache, and direct blocker completion lint to `nightshift/arm.py`, importing `queue.blockers` without editing its owner; add state, reason, parser-syntax, and lookup-failure tests in `tests/test_arm.py`. Cover `issue-arming/dependency-completion-lint/closed-incomplete-blocker-is-reported` and `issue-arming/dependency-completion-lint/unknown-blocker-state-stays-visible` within about 300 changed lines.
+- [x] 1.2 Add the bounded injectable GitHub issue reader, issue cache, and direct blocker completion lint to `nightshift/arm.py`, importing `queue.blockers` without editing its owner; add state, reason, parser-syntax, and lookup-failure tests in `tests/test_arm.py`. Cover `issue-arming/dependency-completion-lint/closed-incomplete-blocker-is-reported` and `issue-arming/dependency-completion-lint/unknown-blocker-state-stays-visible` within about 300 changed lines.
 
 ## 2. Concurrent context and overlap decisions
 
