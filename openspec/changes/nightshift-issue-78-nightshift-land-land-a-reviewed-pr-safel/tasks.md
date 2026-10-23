@@ -26,7 +26,7 @@
 
 ## 6. Revalidate and merge
 
-- [ ] 6.1 Add source/head/run revalidation before finish and before the final main read, refusing concurrent changes and newly added checks; add scripted tests that inject each change at both boundaries. Cover `reviewed-pr-landing/stable-landing-inputs/inputs-change-during-landing`.
+- [x] 6.1 Add source/head/run revalidation before finish and before the final main read, refusing concurrent changes and newly added checks; add scripted tests that inject each change at both boundaries. Cover `reviewed-pr-landing/stable-landing-inputs/inputs-change-during-landing`.
 - [ ] 6.2 Wire the guarded merge commit command, merged-state confirmation and useful success/refusal output. Add stable-base success, competing push, protection rejection, queued-but-open result, and lost merge response tests; assert no deploy hint and no forbidden merge options. Cover `reviewed-pr-landing/head-conditioned-merge/verified-pr-merged`, `reviewed-pr-landing/head-conditioned-merge/merge-not-confirmed`, `reviewed-pr-landing/actionable-refusal-output/operator-can-recover`.
 
 ## 7. Document and verify the completed command
