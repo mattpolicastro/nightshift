@@ -222,7 +222,6 @@ look like an absent label or an empty set of comments.
         if current.intersection((labels.working, labels.needs_human, labels.revise)):
             return None
         path = state_dir / "proposals" / repo.name.replace("/", "__") / f"{number}.json"
-        change = _change_name(repo.name, number, raw["title"])
         receipt = json.loads(path.read_text()) if path.exists() else None
         drafting_labels = current.intersection((labels.ready, labels.spec_draft))
         selected_events = None
@@ -267,8 +266,18 @@ look like an absent label or an empty set of comments.
         if receipt:
             change = receipt["change"]
             receipt.setdefault("title", raw["title"])
+        else:
+            change = _change_name(repo.name, number, raw["title"])
         branch = f"spec/{change}"
         pr = queue._latest_pr_number(repo.name, branch, runner=gh, strict=True)
+        if not receipt and pr is None:
+            # Bounded recovery after receipt loss: exact branches in this
+            # repository, using the current title. Errors must not look like
+            # absence, and recorded identities never depend on today's title.
+            legacy = change.removeprefix(repo.name.split("/", 1)[0] + "__")
+            pr = queue._latest_pr_number(repo.name, f"spec/{legacy}", runner=gh, strict=True)
+            if pr is not None:
+                change = legacy
         replaces_pr = None
         if pr is not None:
             previous = json.loads(gh([
@@ -307,7 +316,11 @@ look like an absent label or an empty set of comments.
         if not authorize():
             return None
         _require_manifest(repo, readiness)
+        # Closing a legacy PR ends that identity's round. Only genuinely new
+        # work gets today's qualified name; delivery retries keep the receipt.
+        change = _change_name(repo.name, number, raw["title"])
         _require_supported_name(repo, change)
+        branch = f"spec/{change}"
         receipt = {"repo": repo.name, "issue": number, "change": change,
                    "title": raw["title"], "idea": idea, "input": issue_input,
                    "round_id": uuid.uuid4().hex, "drafting_events": drafting_events}

@@ -555,7 +555,9 @@ def test_rejected_open_pr_recovery_does_not_prevent_next_eligible_issue(repo, tm
             ])
         if (args[:3] in (["issue", "view", "9"], ["issue", "edit", "9"], ["issue", "comment", "9"])
                 or (args[0] == "api" and ("/issues/9/" in args[1] or args[1].endswith("/issues/9")))
-                or (args[:2] == ["pr", "list"] and branch in args)
+                or (args[:2] == ["pr", "list"] and any(candidate in args for candidate in (
+                    branch, "spec/sample-issue-9-add-a-gate",
+                )))
                 or args[:2] in (["pr", "create"], ["pr", "edit"])
                 or (args[:2] == ["pr", "view"] and args[-1] == "state,url")):
             # The shared fake models issue 7; route the independent issue's API
