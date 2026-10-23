@@ -8,7 +8,7 @@ import json
 import tomllib
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 ADAPTERS = ("codex", "claude")
 
@@ -28,6 +28,12 @@ class Step:
     run: tuple[str, ...]
     expect: int = 0
     timeout: int = 300
+
+
+@dataclass(frozen=True)
+class MutationRoute:
+    paths: tuple[str, ...]
+    steps: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -69,6 +75,7 @@ class Manifest:
     mutation_parallel: int = 2
     mutation_skip: tuple[str, ...] = ()  # literal, case-sensitive whole-line exclusions
     mutation_step: tuple[Step, ...] = ()
+    mutation_routes: tuple[MutationRoute, ...] = ()
 
 
 def _path(s: str) -> Path:
@@ -197,10 +204,39 @@ def _gates(g: dict, definitions: tuple[Step, ...]) -> dict:
     unknown = set(steps) - {s.id for s in definitions}
     if unknown:
         raise ValueError(f"gates.mutation_steps names unknown verify or mutation-only steps: {sorted(unknown)}")
+    raw_routes = g.get("mutation_route", [])
+    if not isinstance(raw_routes, list):
+        raise ValueError(f"gates.mutation_route must be an array of tables: {raw_routes!r}")
+    routes = []
+    known = {s.id for s in definitions}
+    for index, route in enumerate(raw_routes, 1):
+        setting = f"gates.mutation_route[{index}]"
+        if not isinstance(route, dict):
+            raise ValueError(f"{setting} must be a table: {route!r}")
+        for key in ("paths", "steps"):
+            values = route.get(key)
+            if (not isinstance(values, list) or not values
+                    or any(not isinstance(v, str) or not v for v in values)):
+                raise ValueError(f"{setting}.{key} must be a nonempty array of nonempty strings: {values!r}")
+        for pattern in route["paths"]:
+            if (pattern.startswith("/") or PureWindowsPath(pattern).is_absolute()
+                    or "\\" in pattern or ".." in pattern.split("/")):
+                raise ValueError(f"{setting}.paths has bad path pattern {pattern!r}")
+        seen = set()
+        for step in route["steps"]:
+            if step not in known:
+                raise ValueError(f"{setting}.steps names unknown verify or mutation-only step {step!r}")
+            if step in seen:
+                raise ValueError(f"{setting}.steps repeats step {step!r}")
+            seen.add(step)
+        routes.append(MutationRoute(tuple(route["paths"]), tuple(route["steps"])))
+    if routes and not steps:
+        raise ValueError(f"gates.mutation_route requires nonempty gates.mutation_steps fallback: {references!r}")
     for key in ("review", "stuck"):
         if g.get(key, "human") not in ("human", "agent"):
             raise ValueError(f"gates.{key} must be \"human\" or \"agent\", not {g[key]!r}")
     return {"evidence": bool(g.get("evidence", False)), "mutation_steps": steps,
+            "mutation_routes": tuple(routes),
             "mutation_parallel": parallel,
             "mutation_skip": tuple(skip),
             "gate_review": g.get("review", "human"), "stuck": g.get("stuck", "human"),

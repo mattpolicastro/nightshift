@@ -1,7 +1,7 @@
 import sys
 import tomllib
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -180,3 +180,156 @@ def test_legacy_defaults_and_vars_are_preserved(variables):
     # Existing verify/acceptance ID sharing remains permitted.
     data["acceptance"][0]["id"] = "tests"
     assert manifest.parse(data).acceptance[0].id == "tests"
+
+
+@pytest.mark.scenario("mutation-selection/ordered-mutation-routes/routes-validate-and-round-trip")
+@pytest.mark.parametrize("overrides", [{}, {"change": "routed", "branch": "spec/routed"}])
+def test_mutation_routes_round_trip(tmp_path, overrides):
+    text = TEMPLATE.replace("[[prepare]]", '''[[gates.mutation_route]]
+paths = ["src/special?.py", "src/[ab]*.py", "src/file with spaces.py"]
+steps = ["negative", "tests", "narrow"]
+[[gates.mutation_route]]
+paths = ["src/**", "src/*", "src/**"]
+steps = ["narrow", "tests"]
+[[gates.mutation_route]]
+paths = ["*"]
+steps = ["tests", "narrow"]
+[[prepare]]''')
+    data = tomllib.loads(text)
+    original = deepcopy(data)
+    m = manifest.parse(data)
+    assert data == original
+    assert m.mutation_routes == (
+        manifest.MutationRoute(("src/special?.py", "src/[ab]*.py", "src/file with spaces.py"),
+                               ("negative", "tests", "narrow")),
+        manifest.MutationRoute(("src/**", "src/*", "src/**"), ("narrow", "tests")),
+        manifest.MutationRoute(("*",), ("tests", "narrow")),
+    )
+    assert replace(m, mutation_routes=()) == manifest.parse(tomllib.loads(TEMPLATE))
+    for field in ("paths", "steps"):
+        with pytest.raises(FrozenInstanceError):
+            setattr(m.mutation_routes[0], field, ())
+    # Parsed routes own immutable copies of the input arrays.
+    data["gates"]["mutation_route"][0]["paths"].append("changed")
+    data["gates"]["mutation_route"][0]["steps"].reverse()
+    path = tmp_path / "template.toml"
+    path.write_text(text)
+    assert manifest.load(path) == m
+    effective, stored = manifest.template(path, **overrides)
+    assert effective == replace(m, **overrides)
+    saved = tmp_path / "saved.toml"
+    saved.write_text(stored)
+    assert manifest.load(saved) == effective
+
+
+@pytest.mark.scenario("mutation-selection/ordered-mutation-routes/routes-validate-and-round-trip")
+@pytest.mark.parametrize("routes, offending", [
+    (None, "None"), ({}, "{}"), ("route", "'route'"), (1, "1"),
+    (["route"], "'route'"), ([[]], "[]"), ([{}], "None"),
+    ([{"paths": ["src/**"]}], "None"),
+    ([{"steps": ["tests"]}], "None"),
+])
+def test_invalid_route_tables(routes, offending):
+    data = tomllib.loads(TEMPLATE)
+    data["gates"]["mutation_route"] = routes
+    with pytest.raises(ValueError, match=r"gates\.mutation_route") as exc:
+        manifest.parse(data)
+    assert offending in str(exc.value)
+
+
+@pytest.mark.scenario("mutation-selection/ordered-mutation-routes/routes-validate-and-round-trip")
+@pytest.mark.parametrize("field", ["paths", "steps"])
+@pytest.mark.parametrize("value", [None, [], "tests", {}, [1], [False], [[]], [""], ["tests", 1]])
+def test_route_fields_require_nonempty_string_arrays(field, value):
+    data = tomllib.loads(TEMPLATE)
+    route = {"paths": ["src/**"], "steps": ["tests"], field: value}
+    data["gates"]["mutation_route"] = [{"paths": ["*"], "steps": ["narrow"]}, route]
+    with pytest.raises(ValueError, match=rf"gates\.mutation_route\[2\]\.{field}") as exc:
+        manifest.parse(data)
+    assert repr(value) in str(exc.value)
+
+
+@pytest.mark.scenario("mutation-selection/ordered-mutation-routes/routes-validate-and-round-trip")
+@pytest.mark.parametrize("pattern", [
+    "/src/*.py", "//server/share/*", "C:/src/*.py", "../*.py", "src/../*.py",
+    "src/..", "..", r"src\*.py", r"C:\src\*.py",
+])
+def test_invalid_route_paths(pattern):
+    data = tomllib.loads(TEMPLATE)
+    data["gates"]["mutation_route"] = [{"paths": ["src/**", pattern], "steps": ["tests"]}]
+    with pytest.raises(ValueError, match=r"gates\.mutation_route\[1\]\.paths") as exc:
+        manifest.parse(data)
+    assert repr(pattern) in str(exc.value)
+
+
+@pytest.mark.scenario("mutation-selection/ordered-mutation-routes/routes-validate-and-round-trip")
+@pytest.mark.parametrize("steps, offending", [
+    (["tests", "missing"], "missing"), (["dependencies"], "dependencies"),
+    (["accept"], "accept"), (["tests", "tests"], "tests"),
+    (["narrow", "tests", "narrow"], "narrow"),
+])
+def test_invalid_route_step_references(steps, offending):
+    data = tomllib.loads(TEMPLATE)
+    data["gates"]["mutation_route"] = [{"paths": ["src/**"], "steps": steps}]
+    with pytest.raises(ValueError, match=r"gates\.mutation_route\[1\]\.steps") as exc:
+        manifest.parse(data)
+    assert repr(offending) in str(exc.value)
+
+
+@pytest.mark.scenario("mutation-selection/ordered-mutation-routes/routes-validate-and-round-trip")
+@pytest.mark.parametrize("explicit_empty", [False, True])
+def test_routes_require_fallback(explicit_empty):
+    data = tomllib.loads(TEMPLATE)
+    data["gates"] = {"mutation_route": [{"paths": ["*"], "steps": ["tests"]}]}
+    if explicit_empty:
+        data["gates"]["mutation_steps"] = []
+    with pytest.raises(ValueError, match=r"gates\.mutation_route.*gates\.mutation_steps.*\[\]"):
+        manifest.parse(data)
+
+
+@pytest.mark.scenario("mutation-selection/ordered-mutation-routes/legacy-manifest-is-unchanged")
+@pytest.mark.parametrize("evidence", [False, True])
+@pytest.mark.parametrize("fallback", [None, [], ["tests", "build"]])
+def test_manifest_without_routes_unchanged(evidence, fallback):
+    data = tomllib.loads(TEMPLATE)
+    del data["mutation_step"]
+    data["vars"] = {"custom": "unchanged"}
+    data["verify"].insert(0, {"id": "build", "run": ["true"]})
+    data["gates"] = {"evidence": evidence}
+    if fallback is not None:
+        data["gates"]["mutation_steps"] = fallback
+    m = manifest.parse(data)
+    data["gates"]["mutation_route"] = []
+    assert manifest.parse(data) == m
+    assert m.mutation_routes == ()
+    assert m.mutation_step == ()
+    assert m.evidence is evidence
+    assert m.mutation_steps == tuple(fallback or [])
+    assert [s.id for s in m.verify] == ["build", "tests"]
+    assert all(s.expect == 0 and s.timeout == 300 for s in m.verify)
+    assert m.vars == {"custom": "unchanged"}
+    assert m.mutation_paths == m.mutation_skip == ()
+    assert (m.mutation_count, m.mutation_min, m.mutation_parallel) == (12, 0.8, 2)
+    assert (m.gate_review, m.stuck) == ("human", "human")
+    direct = manifest.Manifest(m.repo, m.change, m.branch, m.pr_base, m.github,
+                               m.roles, m.allowed, m.frozen, m.verify)
+    assert direct.mutation_routes == ()
+    assert direct.mutation_steps == ()
+    assert direct.evidence is False
+
+
+@pytest.mark.scenario("mutation-selection/ordered-mutation-routes/routes-validate-and-round-trip")
+@pytest.mark.parametrize("namespace, key", [("paths", "allowed"), ("paths", "frozen"),
+                                          ("gates", "mutation_paths")])
+def test_route_globs_do_not_relax_path_policy(namespace, key):
+    data = tomllib.loads(TEMPLATE)
+    data["gates"]["mutation_route"] = [{"paths": ["src/*.py"], "steps": ["tests"]}]
+    assert manifest.parse(data).mutation_routes[0].paths == ("src/*.py",)
+    data[namespace][key] = ["src/*.py"]
+    with pytest.raises(ValueError, match="bad path pattern"):
+        manifest.parse(data)
+    assert manifest.matches("src/nested/module.py", ("src/**",))
+    assert manifest.matches("src/module.py", ("src/module.py",))
+    assert not manifest.matches("src/module.py", ("src/*.py",))
+    assert not manifest.matches("SRC/module.py", ("src/**",))
+    assert not manifest.matches("src-other/module.py", ("src/**",))
