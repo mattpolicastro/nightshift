@@ -20,7 +20,7 @@
 
 ## 5. Operations
 
-- [ ] 5.1 Add concise operations guidance in `docs/specloop/README.md` and links or summaries in the specloop portions of `README.md`: job controls and supervisor boundaries, touchpoint commands and counting limits, `uv run pytest -n 4` and xdist-safe scenario reporting. Reuse existing root README recovery guidance and cite PRs #28, #53 and #54. Keep this session below 200 changed lines. Covers `specloop-documentation/operations-guidance/operator-distinguishes-pause-and-stop`, `specloop-documentation/operations-guidance/touchpoints-describe-observed-history`, `specloop-documentation/operations-guidance/parallel-tests-retain-scenario-evidence`.
+- [x] 5.1 Add concise operations guidance in `docs/specloop/README.md` and links or summaries in the specloop portions of `README.md`: job controls and supervisor boundaries, touchpoint commands and counting limits, `uv run pytest -n 4` and xdist-safe scenario reporting. Reuse existing root README recovery guidance and cite PRs #28, #53 and #54. Keep this session below 200 changed lines. Covers `specloop-documentation/operations-guidance/operator-distinguishes-pause-and-stop`, `specloop-documentation/operations-guidance/touchpoints-describe-observed-history`, `specloop-documentation/operations-guidance/parallel-tests-retain-scenario-evidence`.
 
 ## 6. Limitations
 
