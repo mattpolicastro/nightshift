@@ -581,6 +581,24 @@ def report_finding(finding: Finding) -> None:
           f"{finding.message} Suggestion: {finding.suggestion}")
 
 
+def confirm_intake_label(repository: str, number: int, *, runner=None) -> bool:
+    """Reconcile an uncertain write with one fresh read, bypassing the snapshot."""
+    command = ["gh", "issue", "view", str(number), "--repo", repository, "--json", "labels"]
+    try:
+        response = (runner or subprocess.run)(
+            command, capture_output=True, text=True, check=True, timeout=30)
+        if response.returncode:
+            return False
+        data = json.loads(response.stdout)
+        labels = data.get("labels") if isinstance(data, dict) else None
+        return (isinstance(labels, list)
+                and all(isinstance(label, dict) and isinstance(label.get("name"), str)
+                        for label in labels)
+                and any(label["name"] == "spec:draft" for label in labels))
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m nightshift.arm", allow_abbrev=False,
                                      description="Check issue wording and overlap before arming.")
@@ -621,7 +639,9 @@ def main(argv: list[str] | None = None) -> int:
                     if response.returncode:
                         raise subprocess.CalledProcessError(response.returncode, command)
                 except (OSError, subprocess.SubprocessError):
-                    disposition, success = "unconfirmed (label write failed)", False
+                    success = confirm_intake_label(repository, number)
+                    disposition = ("armed (label confirmed after write failure)" if success else
+                                   "unconfirmed (label write failed)")
                 else:
                     disposition, success = "forced arming" if args.force else "armed", True
         print(f"#{number}: {disposition}")

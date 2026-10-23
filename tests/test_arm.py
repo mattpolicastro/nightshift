@@ -924,8 +924,16 @@ def test_unlabelled_batch_overlap_is_checked_before_writes(tmp_path, issue_body,
 @pytest.fixture
 def command_reader(tmp_path, monkeypatch, issue_reader):
     monkeypatch.setattr(state, "ROOT", tmp_path / "run-home")
+    state.ROOT.mkdir()
+    (state.ROOT / "sentinel").write_text("Existing local state must be preserved.\n")
 
-    def make(records, host="github.com"):
+    def snapshot():
+        return {str(path.relative_to(tmp_path)): (path.read_bytes(), path.stat().st_mtime_ns)
+                if path.is_file() else None for path in tmp_path.rglob("*")}
+
+    before = snapshot()
+
+    def make(records, host="github.com", *, edit_failures=None, label_reads=None):
         repository = "org/repo" if host == "github.com" else f"{host}/org/repo"
         cache, _ = issue_reader({(repository, n): row for n, row in records.items()})
         calls = []
@@ -946,6 +954,16 @@ def command_reader(tmp_path, monkeypatch, issue_reader):
                 output = json.dumps({"nameWithOwner": "org/repo", "url": f"https://{host}/org/repo"})
             elif argv == ["git", "rev-parse", "--show-toplevel"]:
                 output = str(tmp_path) + "\n"
+            elif argv[:3] == ["gh", "issue", "view"] and argv[-1] == "labels":
+                assert argv == ["gh", "issue", "view", argv[3], "--repo", repository,
+                                "--json", "labels"]
+                assert kwargs == expected
+                result = label_reads[int(argv[3])]
+                if isinstance(result, Exception):
+                    raise result
+                if isinstance(result, subprocess.CompletedProcess):
+                    return result
+                output = json.dumps(result)
             elif argv[:3] == ["gh", "issue", "view"]:
                 return cache.runner(argv, **kwargs)
             elif argv[:3] == ["gh", "issue", "edit"]:
@@ -953,6 +971,13 @@ def command_reader(tmp_path, monkeypatch, issue_reader):
                                 "--add-label", "spec:draft"]
                 assert int(argv[3]) in records
                 assert all(read in calls for read in context)  # Snapshot precedes writes.
+                assert kwargs == expected
+                failure = (edit_failures or {}).get(int(argv[3]))
+                if isinstance(failure, Exception):
+                    raise failure
+                if failure is not None:
+                    return failure
+                records[int(argv[3])]["labels"].append({"name": "spec:draft"})
                 output = ""
             else:
                 assert argv in context  # No unexpected reads or mutations.
@@ -962,7 +987,8 @@ def command_reader(tmp_path, monkeypatch, issue_reader):
 
         monkeypatch.setattr(arm.subprocess, "run", runner)
         return calls, context, repository
-    return make
+    yield make
+    assert snapshot() == before  # No receipts, run-state edits, or other local writes.
 
 
 def unarmed_record(number, body):
@@ -1030,6 +1056,124 @@ def test_arm_force_labels_and_reports(command_reader, issue_body, capsys, force)
     assert output.count(f": {disposition}\n") == 2
     assert output.index(f"#77: {disposition}\n") < output.index("#76 line 5")
     assert output.endswith(f"#76: {disposition}\n")
+
+
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/existing-labels-are-idempotent")
+@pytest.mark.parametrize("mode", [[], ["--force"], ["--check"], ["--check", "--force"]])
+@pytest.mark.parametrize("findings", [False, True])
+def test_arm_existing_label_respects_mode(command_reader, issue_body, capsys, mode, findings):
+    record = issue_record(76, body="" if findings else issue_body())
+    calls, _, _ = command_reader({76: record})
+    failed = findings and ("--check" in mode or "--force" not in mode)
+    assert arm.main([*mode, "76", "#76"]) == int(failed)
+    assert not any(call[:3] == ["gh", "issue", "edit"] for call in calls)
+    assert len([call for call in calls if call[:3] == ["gh", "issue", "view"]]) == 1
+    assert record["labels"] == [{"name": "spec:draft"}, {"name": "bug"}]
+    output = capsys.readouterr().out
+    assert output.count("[missing-section]") == (4 if findings else 0)
+    if "--check" in mode:
+        disposition = "check failed" if failed else "check clean"
+    else:
+        disposition = "unarmed (findings)" if failed else "already armed"
+    assert output.endswith(f"#76: {disposition}\n")
+
+
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/target-and-label-failures-remain-failures")
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("failure", ["unreadable", "malformed", "closed", "unknown-state"])
+def test_arm_target_failure_does_not_stop_batch(command_reader, issue_body, capsys, force, failure):
+    bad = unarmed_record(76, issue_body().replace("nightshift/arm.py", "docs/other.md"))
+    if failure == "unreadable":
+        bad = OSError("private diagnostic")
+    elif failure == "malformed":
+        bad = subprocess.CompletedProcess([], 0, "not json")
+    else:
+        bad["state"] = "CLOSED" if failure == "closed" else "UNKNOWN"
+        bad["labels"].append({"name": "spec:draft"})
+    records = {76: bad, 77: unarmed_record(77, issue_body())}
+    calls, _, _ = command_reader(records)
+    assert arm.main([*(["--force"] if force else []), "76", "77", "#76"]) == 1
+    assert [call[3] for call in calls if call[:3] == ["gh", "issue", "view"]] == ["76", "77"]
+    assert [call[3] for call in calls if call[:3] == ["gh", "issue", "edit"]] == ["77"]
+    assert records[77]["labels"] == [{"name": "bug"}, {"name": "spec:draft"}]
+    output = capsys.readouterr().out
+    disposition = "issue unreadable" if failure in ("unreadable", "malformed") else "issue is not open"
+    assert f"#76: unarmed ({disposition})\n" in output
+    assert output.endswith(f"#77: {'forced arming' if force else 'armed'}\n")
+    assert "private diagnostic" not in output
+
+
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/target-and-label-failures-remain-failures")
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("write_failure", [
+    OSError("private diagnostic"), subprocess.TimeoutExpired("gh", 30),
+    subprocess.CalledProcessError(1, "gh"), subprocess.CompletedProcess([], 1, ""),
+], ids=["os-error", "lost-response", "exit-error", "returned-error"])
+@pytest.mark.parametrize("confirmation", [
+    {"labels": [{"name": "bug"}, {"name": "spec:draft"}]},
+    {"labels": [{"name": "bug"}]}, OSError("private diagnostic"),
+    subprocess.TimeoutExpired("gh", 30), subprocess.CompletedProcess([], 1, ""),
+    subprocess.CompletedProcess([], 0, "not json"), {"labels": ["spec:draft"]}, {}, [],
+], ids=["confirmed", "absent", "unreadable", "timeout", "exit-error", "invalid-json",
+        "invalid-labels", "missing-labels", "invalid-object"])
+def test_arm_reconciles_label_write_once(command_reader, issue_body, capsys,
+                                         force, write_failure, confirmation):
+    body = issue_body("manually inspect" if force else "`test_expected_behavior`")
+    records = {76: unarmed_record(76, body),
+               77: unarmed_record(77, issue_body().replace("nightshift/arm.py", "docs/other.md"))}
+    calls, context, repository = command_reader(
+        records, edit_failures={76: write_failure}, label_reads={76: confirmation})
+    confirmed = isinstance(confirmation, dict) and confirmation.get("labels") == [
+        {"name": "bug"}, {"name": "spec:draft"}]
+    assert arm.main([*(["--force"] if force else []), "76", "77", "#76"]) == int(not confirmed)
+    # A fresh labels-only read follows the failed write, with no repeat write.
+    assert calls == [
+        ["git", "rev-parse", "--show-toplevel"],
+        ["gh", "repo", "view", "--json", "nameWithOwner,url"],
+        *[["gh", "issue", "view", str(n), "--repo", repository,
+           "--json", "number,body,state,stateReason,labels"] for n in (76, 77)],
+        *context,
+        ["gh", "issue", "edit", "76", "--repo", repository, "--add-label", "spec:draft"],
+        ["gh", "issue", "view", "76", "--repo", repository, "--json", "labels"],
+        ["gh", "issue", "edit", "77", "--repo", repository, "--add-label", "spec:draft"],
+    ]
+    assert records[77]["labels"] == [{"name": "bug"}, {"name": "spec:draft"}]
+    output = capsys.readouterr().out
+    disposition = ("armed (label confirmed after write failure)" if confirmed else
+                   "unconfirmed (label write failed)")
+    assert f"#76: {disposition}\n" in output
+    assert output.endswith(f"#77: {'forced arming' if force else 'armed'}\n")
+    assert output.count("[manual-check]") == int(force)
+    assert output.count("[named-test]") == int(force)
+    assert "private diagnostic" not in output
+
+
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/batch-results-retain-failures")
+@pytest.mark.parametrize("numbers", [[77, 76, 77, 76], [76, 77, 76, 77]])
+def test_arm_batch_keeps_success_and_all_findings(command_reader, issue_body, capsys, numbers):
+    body = issue_body("visually inspect manually by hand") + "Do not edit existing tests.\n"
+    records = {76: unarmed_record(76, body),
+               77: unarmed_record(77, issue_body().replace("nightshift/arm.py", "docs/other.md"))}
+    calls, _, _ = command_reader(records)
+    assert arm.main([str(n) if i % 2 else f"#{n}" for i, n in enumerate(numbers)]) == 1
+    assert [int(call[3]) for call in calls if call[:3] == ["gh", "issue", "view"]] == numbers[:2]
+    assert [call[3] for call in calls if call[:3] == ["gh", "issue", "edit"]] == ["77"]
+    assert records[76]["labels"] == [{"name": "bug"}]
+    assert records[77]["labels"] == [{"name": "bug"}, {"name": "spec:draft"}]
+    lines = capsys.readouterr().out.splitlines()
+    assert [line for line in lines if ": " in line and "[" not in line] == [
+        "#77: armed" if n == 77 else "#76: unarmed (findings)" for n in numbers[:2]]
+    findings = [line for line in lines if "[" in line]
+    assert [line.split(": ", 1)[0] for line in findings] == [
+        "#76 line 5 [discouraged-phrase]", *(["#76 line 3 [manual-check]"] * 3),
+        "#76 line 3 [named-test]",
+    ]
+    for line, phrase in zip(findings[1:4], ("by hand", "manually", "visually")):
+        assert f"Human check in Definition of done: {phrase}" in line
+        assert "Move this check under **What CI cannot prove:**" in line
+    assert "existing assertions are preserved" in findings[0]
+    assert "Name a test" in findings[-1]
+    assert lines.index(findings[-1]) < lines.index("#76: unarmed (findings)")
 
 
 @pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/invalid-arguments-fail-before-reads")
