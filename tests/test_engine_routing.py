@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from manifest_fixtures import manifest_text
+
 from nightshift import daemon, queue, specloop_client
 from nightshift.config import Config, Repo, load
 from test_queue import FakeGh
@@ -15,7 +17,7 @@ from test_queue import FakeGh
 @pytest.fixture
 def manifest(tmp_path):
     path = tmp_path / "repository.toml"
-    path.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / "source"))}\n')
+    path.write_text(manifest_text(tmp_path / "source"))
     return path
 
 
@@ -60,11 +62,8 @@ spec_approved = "approved"
 
 @pytest.mark.parametrize("settings,reason", [
     ('engine = "typo"', "engine"),
-    ('engine = "specloop"', "requires a manifest"),
     ('engine = "specloop"\nmanifest = ""', "non-empty path"),
     ('engine = "specloop"\nmanifest = 42', "non-empty path"),
-    ('engine = "specloop"\nmanifest = "missing.toml"', "not a file"),
-    ('engine = "specloop"\nmanifest = "."', "not a file"),
 ])
 def test_invalid_engine_configuration_rejected(tmp_path, settings, reason):
     config = tmp_path / "config.toml"

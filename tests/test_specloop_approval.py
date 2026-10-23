@@ -7,6 +7,8 @@ from functools import partial
 
 import pytest
 
+from manifest_fixtures import manifest_text
+
 from nightshift import daemon, queue, specloop_client, specloop_intake
 from nightshift.config import Config, Repo
 from test_engine_routing import DraftGh
@@ -126,7 +128,7 @@ class Commands:
 @pytest.fixture
 def repo(tmp_path):
     manifest = tmp_path / "manifest.toml"
-    manifest.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / "source"))}\n')
+    manifest.write_text(manifest_text(tmp_path / "source"))
     return Repo("owner/sample", engine="specloop", manifest=manifest)
 
 

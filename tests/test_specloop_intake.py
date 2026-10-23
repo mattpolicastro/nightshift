@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from manifest_fixtures import manifest_text
+
 from nightshift import daemon, queue, specloop_intake
 from nightshift.config import Config, Repo
 from test_engine_routing import DraftGh
@@ -41,7 +43,7 @@ class Commands:
 @pytest.fixture
 def repo(tmp_path):
     manifest = tmp_path / "template.toml"
-    manifest.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / "manifest-source"))}\n')
+    manifest.write_text(manifest_text(tmp_path / "manifest-source"))
     return Repo("owner/sample", engine="specloop", manifest=manifest, base="develop", dir="unused-worker-clone")
 
 
@@ -907,9 +909,11 @@ def test_pr_state_lookup_failure_preserves_receipt_and_armed_issue(repo, tmp_pat
 
 def test_github_lookup_failure_reaches_repo_health_without_proposing(repo, tmp_path, monkeypatch):
     gh, commands = DraftGh(("spec:draft",)), Commands()
+    lookups = []
 
     def unavailable(args):
         if args[:2] == ["pr", "list"]:
+            lookups.append(args)
             raise queue.GhError("HTTP 503", transient=True)
         return gh(args)
 
@@ -920,6 +924,7 @@ def test_github_lookup_failure_reaches_repo_health_without_proposing(repo, tmp_p
     assert commands.calls == []
     assert gh.labels == {"spec:draft"}
     assert not calls(gh, "pr", "create")
+    assert any("--head" in args for args in lookups)
     # The worker lookup retains its existing best-effort contract.
     assert queue._latest_pr_number(repo.name, BRANCH, runner=unavailable) is None
 

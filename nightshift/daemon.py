@@ -238,6 +238,9 @@ class RepoHealth:
         if repo in self.announced or (transient and count < self.threshold):
             return
         self.announced.add(repo)
+        if isinstance(exc, specloop_intake.ConfigurationError):
+            notify.send(webhook, f"nightshift: configuration unhealthy for {repo} — {exc}")
+            return
         notify.send(
             webhook,
             f"nightshift: cannot reach {repo} — {exc}\n"
@@ -250,7 +253,7 @@ class RepoHealth:
         """A pass succeeded. Re-arm, so the NEXT outage is news again."""
         if self.failures.pop(repo, 0) and repo in self.announced:
             self.announced.discard(repo)
-            log.info("%s is reachable again", repo)
+            log.info("%s is healthy again", repo)
 
 
 def startup(cfg: Config, repo_dirs: dict[str, Path],
@@ -526,7 +529,10 @@ def poll_specloop(cfg: Config, health: RepoHealth, *, runner=None, specloop_runn
             return
         if repo.engine != "specloop":
             continue
-        errors = []
+        errors: list[Exception] = []
+        readiness = specloop_intake.manifest_readiness(repo)
+        if isinstance(readiness, specloop_intake.ConfigurationError):
+            errors.append(readiness)
         failed_items = set()
         pending_items = set()
 
@@ -535,6 +541,8 @@ def poll_specloop(cfg: Config, health: RepoHealth, *, runner=None, specloop_runn
 
         def item_failed(number, exc):
             errors.append(exc)
+            if isinstance(exc, specloop_intake.ConfigurationError):
+                return  # A repository hold never consumes an item's retries.
             key = (repo.name, stage, number)
             failed_items.add(key)
             health.item_failures[key] = health.item_failures.get(key, 0) + 1
@@ -568,6 +576,8 @@ def poll_specloop(cfg: Config, health: RepoHealth, *, runner=None, specloop_runn
             ("publish", "pr", specloop_intake.publish_pending, dict(specloop_runner=cli)),
         )
         for stage, kind, action, kwargs in stages:
+            if stage != "publish":
+                kwargs["readiness"] = readiness
             try:
                 action(repo, cfg.labels, STATE_DIR, runner=gh, on_error=item_failed, **kwargs)
             except specloop_intake.Paused:

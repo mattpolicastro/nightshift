@@ -10,12 +10,13 @@ import json
 import logging
 import re
 import subprocess
-import tomllib
 import uuid
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from urllib.parse import quote
+
+from specloop import manifest as manifests
 
 from . import queue, specloop_client, specloop_job
 from .config import Repo
@@ -30,6 +31,61 @@ class Paused(RuntimeError):
 
 class DeliveryError(RuntimeError):
     """An item needs human intervention before delivery can continue."""
+
+
+class ConfigurationError(RuntimeError):
+    """Enrollment needs repair; retain triggers without escalating items."""
+
+    transient = False
+
+
+def manifest_readiness(repo: Repo) -> manifests.Manifest | ConfigurationError:
+    """Validate an enrollment template without changing it or executing work."""
+    location = str(repo.manifest) if repo.manifest is not None else "(not configured)"
+    repair = ("Set the manifest path in configuration and restart." if repo.manifest is None
+              else "Repair the manifest at this path; the next poll will retry.")
+
+    def failure(exc: Exception) -> ConfigurationError:
+        # Parser diagnostics may contain template values. Report the failure
+        # category and repair path, never the operator-managed file contents.
+        return ConfigurationError(
+            f"{repo.name}: unusable manifest {location} ({type(exc).__name__}). {repair}"
+        )
+
+    try:
+        if repo.manifest is None:
+            raise ValueError("missing manifest")
+        path = repo.manifest.expanduser().resolve()
+        if not path.is_file():
+            raise ValueError("manifest must be a regular file")
+    except (OSError, RuntimeError, ValueError) as exc:
+        return failure(exc)
+    try:
+        manifest, _ = manifests.template(
+            path, change="readiness-probe", branch="spec/readiness-probe",
+        )
+        # Finish normalization deferred by Repo when home/filesystem lookup
+        # failed at config load. CLI dispatch must use the same resolved path;
+        # template() itself does not expand a literal ~user path.
+        object.__setattr__(repo, "manifest", path)
+        return manifest
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError) as exc:
+        # Wrong TOML field/table types can also fail mapping/string operations.
+        return failure(exc)
+    except RuntimeError as exc:
+        # pathlib uses RuntimeError for an unexpandable run.repo home path.
+        if str(exc) != "Could not determine home directory.":
+            raise
+        return failure(exc)
+
+
+def _require_manifest(
+    repo: Repo, readiness: manifests.Manifest | ConfigurationError | None = None,
+) -> manifests.Manifest:
+    result = manifest_readiness(repo) if readiness is None else readiness
+    if isinstance(result, ConfigurationError):
+        raise result
+    return result
 
 
 _PENDING = object()
@@ -99,7 +155,7 @@ def report_failure(repo, labels, number, stage, kind, exc, *, runner):
 
 def propose_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
-    git_runner=None, launcher=None, on_error=None, on_pending=None,
+    git_runner=None, launcher=None, on_error=None, on_pending=None, readiness=None,
 ) -> list[dict]:
     """Draft each armed issue and publish or escalate its durable receipt.
 
@@ -196,7 +252,8 @@ look like an absent label or an empty set of comments.
             _deliver(repo, labels, number, change, None, current, pr=pr, runner=gh)
             return receipt
         if receipt:
-            _deliver(repo, labels, number, change, receipt, current, runner=gh, git_runner=git_runner)
+            _deliver(repo, labels, number, change, receipt, current, runner=gh,
+                     git_runner=git_runner, readiness=readiness)
             receipt["delivered"] = True
             _save(path, receipt)
             return receipt
@@ -209,6 +266,7 @@ look like an absent label or an empty set of comments.
         # same applications used for rearming before replacing any receipt.
         if not authorize():
             return None
+        _require_manifest(repo, readiness)
         receipt = {"repo": repo.name, "issue": number, "change": change,
                    "title": raw["title"], "idea": idea, "input": issue_input,
                    "round_id": uuid.uuid4().hex, "drafting_events": drafting_events}
@@ -222,7 +280,8 @@ look like an absent label or an empty set of comments.
                 "change after it is labelled, so it is not drafted as written. A collaborator can open an "
                 "issue with the request (or restate it in a comment here and re-open it as their own)."]}
             _save(path, receipt)
-            _deliver(repo, labels, number, change, receipt, current, runner=gh, git_runner=git_runner)
+            _deliver(repo, labels, number, change, receipt, current, runner=gh,
+                     git_runner=git_runner, readiness=readiness)
             receipt["delivered"] = True
             _save(path, receipt)
             return receipt
@@ -232,7 +291,8 @@ look like an absent label or an empty set of comments.
         ], idea=idea, runner=specloop_runner, launcher=launcher):
             return _PENDING
         _save(path, receipt)
-        _deliver(repo, labels, number, change, receipt, current, runner=gh, git_runner=git_runner)
+        _deliver(repo, labels, number, change, receipt, current, runner=gh,
+                 git_runner=git_runner, readiness=readiness)
         receipt["delivered"] = True
         _save(path, receipt)
         return receipt
@@ -251,7 +311,7 @@ def _issue_author_trusted(repo: str, number: int, gh) -> bool:
 
 def admit_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
-    git_runner=None, launcher=None, status_runner=None, on_error=None, on_pending=None,
+    git_runner=None, launcher=None, status_runner=None, on_error=None, on_pending=None, readiness=None,
 ) -> list[dict]:
     """Admit approved spec branches and recover interrupted PR notifications."""
     if repo.engine != "specloop":
@@ -315,7 +375,7 @@ def admit_pending(
             # Keep the reviewed tip reachable without moving a source branch:
             # it may be checked out, with local edits, or have been rebased.
             # Admission installs this exact commit only in its own bare repo.
-            source = Path(tomllib.loads(repo.manifest.read_text())["run"]["repo"]).expanduser()
+            source = _require_manifest(repo, readiness).repo
             fetched_ref = f"refs/nightshift/admit/{change}"
             git = partial(_bounded_run, runner=git_runner)
             fetched = git([
@@ -488,7 +548,7 @@ def _acknowledge_revision_feedback(path: Path, receipt: dict) -> None:
 
 def revise_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
-    git_runner=None, launcher=None, status_runner=None, on_error=None, on_pending=None,
+    git_runner=None, launcher=None, status_runner=None, on_error=None, on_pending=None, readiness=None,
 ) -> list[dict]:
     """Re-draft specs or queue review tasks for admitted changes on their PR."""
     if repo.engine != "specloop":
@@ -588,7 +648,7 @@ def revise_pending(
                         return _PENDING
             if "result" not in receipt:
                 receipt["command"] = "propose"
-                source = Path(tomllib.loads(repo.manifest.read_text())["run"]["repo"]).expanduser()
+                source = _require_manifest(repo, readiness).repo
                 # Prefer the original idea, including issue comments. A spec
                 # PR created outside intake still has its title/body and the
                 # existing change in the drafting clone as context.
@@ -619,7 +679,7 @@ def revise_pending(
 
         result = receipt["result"]
         if result["outcome"] == "drafted":
-            source = Path(tomllib.loads(repo.manifest.read_text())["run"]["repo"]).expanduser()
+            source = _require_manifest(repo, readiness).repo
             if pr["headRefOid"] not in (receipt["head"], result["commit"]):
                 raise DeliveryError(f"{branch} moved while its revision was drafted; review the branch before retrying")
             pushed = git([
@@ -1022,7 +1082,7 @@ def _comment(repo: str, number: int, change: str, body: str, *, runner,
 
 def _deliver(repo: Repo, labels: queue.Labels, number: int, change: str,
              receipt: dict | None, current: set[str], *, pr: int | None = None,
-             runner, git_runner=None) -> None:
+             runner, git_runner=None, readiness=None) -> None:
     drafting_labels = [label for label in (labels.ready, labels.spec_draft) if label in current]
     result = receipt["result"] if receipt else {}
     if pr is None and result["outcome"] != "drafted":
@@ -1040,7 +1100,7 @@ def _deliver(repo: Repo, labels: queue.Labels, number: int, change: str,
         branch = f"spec/{change}"
         # Propose places its commit in the manifest's source repository, which
         # need not be the worker clone configured by Repo.dir.
-        source = Path(tomllib.loads(repo.manifest.read_text())["run"]["repo"]).expanduser()
+        source = _require_manifest(repo, readiness).repo
         git = partial(_bounded_run, runner=git_runner)
         push_options = []
         if receipt.get("replaces_pr"):

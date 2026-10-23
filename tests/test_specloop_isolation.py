@@ -5,6 +5,8 @@ import subprocess
 
 import pytest
 
+from manifest_fixtures import manifest_text
+
 from nightshift import daemon, queue, specloop_intake
 from nightshift.config import Config, Repo
 
@@ -133,7 +135,7 @@ def pipelines(tmp_path, monkeypatch):
     pipelines = []
     for name in ("first", "second"):
         manifest = tmp_path / f"{name}.toml"
-        manifest.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / name))}\n')
+        manifest.write_text(manifest_text(tmp_path / name))
         pipelines.append(Pipeline(Repo(f"owner/{name}", engine="specloop", manifest=manifest)))
 
     def git(args, **kwargs):
