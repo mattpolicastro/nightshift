@@ -670,6 +670,7 @@ def test_condition_candidates_use_committed_source(tmp_path, monkeypatch):
     assert (repo / "calc.py").read_text() == dirty
 
 
+@pytest.mark.scenario("specloop-documentation/mutation-evidence-guidance/guard-clauses-produce-candidates")
 @pytest.mark.scenario("mutation-selection/guard-clause-diffs-produce-evidence/guard-only-change-is-measured")
 def test_gate_measures_a_guard_clause_change(tmp_path, monkeypatch):
     repo = tmp_path / "repo"

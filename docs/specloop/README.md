@@ -405,14 +405,88 @@ to `~/.logs/specloop.log`.
 **Admission** runs a feasibility review, which refuses tasks that are
 impossible as written under the frozen paths and verify commands.
 
-**Section boundaries** gather evidence: coverage of the section's scenarios,
-and a mutation check of the code it added. A pass notifies and continues; a
-shortfall adds strengthen-tests tasks to the section; a second shortfall
-pauses. **`mutation_steps` must include a step that runs the candidate's own
-tests.** Otherwise only trusted checks can kill a mutant, and strengthening
-tasks cannot move the score: one run's section went from 1/8 to 8/8 once its
-package tests were added. A second shortfall with an unchanged score says
-so in the pause.
+### Section evidence
+
+With `[gates] evidence = true`, section boundaries check scenario coverage and
+mutate added lines under `mutation_paths`. A pass notifies and continues. A
+coverage or measured-score shortfall adds strengthen-tests tasks; a second
+shortfall pauses. An unchanged score is called out in the pause.
+`mutation_steps` must include a step that runs the candidate's own tests:
+trusted checks alone can leave strengthening tasks unable to move the score.
+
+The unmutated baseline runs first and must pass before mutants execute. Each
+mutant has an isolated source copy and build directory. The default is
+`mutation_parallel = 2`; set `mutation_parallel = 1` for serial execution
+([issue #4](https://github.com/mattpolicastro/nightshift/issues/4),
+[PR #27](https://github.com/mattpolicastro/nightshift/pull/27)).
+
+Only `killed` and `survived` results enter the score:
+`killed / (killed + survived)`. A selected-test timeout is `timeout`, excluded
+from both numerator and denominator. Preparation or steps named `configure`
+or `build` failing or timing out produce `invalid`, not a kill or test timeout.
+For example, two killed, one survived and three timed out score `2/3`, not
+`5/6` or `2/6` ([issue #31](https://github.com/mattpolicastro/nightshift/issues/31),
+[PR #44](https://github.com/mattpolicastro/nightshift/pull/44)).
+
+**Exclusions and measurement.** Full committed source protects Python
+docstrings and comments, including inline comments, in `.py` and `.pyi` files;
+adjacent executable code stays eligible. Other languages have limited
+line-based filtering: comment prefixes (`#`, `//`, `/*`, `*`) and complete
+`/* ... */` blocks whose opening and closing lines contain only comments.
+This is not general string or inline-comment parsing. Arbitrary runtime
+strings and JSX styles are not automatically excluded
+([issue #21](https://github.com/mattpolicastro/nightshift/issues/21),
+[PR #48](https://github.com/mattpolicastro/nightshift/pull/48)).
+
+`mutation_skip` contains case-sensitive literal substrings, not regexes or
+globs. A match anywhere on the whole line excludes every candidate on that
+line before sampling, without consuming the mutation budget. For example:
+
+```toml
+[gates]
+mutation_parallel = 2
+mutation_skip = ["fontWeight", "# cosmetic"]
+```
+
+This skips `fontWeight = 600` and `padding = 12  # cosmetic`, but keeps
+`FontWeight = 600` eligible. Use narrow patterns to avoid hiding behavior.
+
+Generated mutants require at least one killed or survived result to establish
+measured evidence. If all are `equivalent`, `invalid` or `timeout`, evidence
+is unmeasured: the run pauses at `gate_evidence` without adding strengthening
+tasks. Review equivalence annotations, `mutation_steps` and preparation.
+An all-equivalent set is not a successful measurement. A `mutation-equivalent:`
+annotation on the same or preceding line is a claim judged by the reviewer;
+equivalent results do not enter the score. If exclusions leave no mutable
+lines, mutation is instead skipped with no score; scenario coverage checks
+still apply ([PR #48](https://github.com/mattpolicastro/nightshift/pull/48),
+[PR #63](https://github.com/mattpolicastro/nightshift/pull/63)).
+
+**Python guards.** Two operators add candidates for eligible `.py` / `.pyi`
+guards ([issue #33](https://github.com/mattpolicastro/nightshift/issues/33),
+[PR #64](https://github.com/mattpolicastro/nightshift/pull/64)):
+
+```python
+def choose(blocked, fallback):
+    if blocked:          # negate-condition: if not blocked:
+        return None      # drop-return: pass
+    return fallback
+
+while pending:           # negate-condition: while not pending:
+    pending = advance()
+```
+
+`negate-condition` requires a bare-name `if` or `while` test on a single-line
+header with a separate body. It excludes `elif`, compound expressions,
+already-negated tests, inline suites and multiline headers. `drop-return`
+replaces a standalone, single-line branch-ending return (bare or valued) with
+`pass` only when its owning `if` / `elif` / `else` conditional has a following
+statement in the same enclosing suite. A final function return, a nested
+conditional without its own continuation, inline/semicolon returns and
+multiline returns do not qualify. Indentation and trailing comments remain.
+Both operators retain added-line/path selection, prose/comment protection,
+`mutation_skip`, equivalence handling, seeded sampling and one mutant per line;
+eligibility does not guarantee selection.
 
 **Usage limits** move a role to the next profile in its fallback chain, or
 pause with a resume time that `serve` honours.

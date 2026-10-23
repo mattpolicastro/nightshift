@@ -17,9 +17,11 @@ for you to review. When you label that PR `spec:approved`, its build engine,
 - a separate agent reviews it against the spec;
 - failures retry with the findings.
 
-At the end of each section, gates check that every scenario has a passing test,
-and that the tests catch deliberately planted bugs (mutation testing). The
-result lands on the same PR, with a checklist of what only a human can check.
+When enabled, [section evidence gates](docs/specloop/README.md#section-evidence)
+check scenario coverage and score killed/survived mutants. Generated mutants
+with no judged result pause; no mutable lines skips mutation but retains
+coverage checks. The result lands on the same PR, with a checklist of what
+only a human can check.
 
 Each repository chooses an engine: `engine = "specloop"` for that flow, or the
 original `worker` engine, which runs headless
