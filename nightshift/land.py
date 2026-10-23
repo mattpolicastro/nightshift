@@ -1,7 +1,7 @@
 """Explicit operator entry point for landing an enrolled, reviewed PR.
 
-Identity, human checks, run completion, and bounded CI polling are wired so far.
-Base synchronization and merge remain disabled until subsequent gates are implemented.
+Identity, human checks, run completion, and bounded CI/base synchronization are wired.
+Merge remains disabled until the final landing gate is implemented.
 """
 
 from __future__ import annotations
@@ -685,8 +685,46 @@ def continue_landing(
     polling helper never creates or resets a deadline of its own.
     """
     bounded = replace(operations, deadline=operations.monotonic() + timeout)
-    wait_for_ci(pr.identity, snapshot.head, bounded)
-    return after_ci(pr, run, snapshot, bounded)
+    movements = []
+    for round_number in range(1, 4):
+        baseline = read_main(pr.identity, bounded)
+        if round_number > 1 or not incorporates_base(pr.identity, snapshot.head, baseline, bounded):
+            pr, baseline = update_branch(pr.identity, snapshot.head, bounded)
+            snapshot = replace(snapshot, head=pr.head)
+        # Retain the immediately pre-update base even if main moved while the
+        # asynchronous update was being observed. Only a new round adopts it.
+        wait_for_ci(pr.identity, snapshot.head, bounded)
+        current = refresh_run(pr.identity, run, bounded)
+        pr = read_pr(pr.identity, bounded)
+        validate_run_eligibility(pr, current)
+        if current is not None and current.status != "done":
+            raise Refusal(f"run {current.change} is no longer done; inspect status before retrying land")
+        if pr.draft:
+            raise Refusal("PR became draft during landing")
+        revalidate_check_sources(pr, current, snapshot, bounded)
+        run = current
+        observed_base = read_main(pr.identity, bounded)
+        if observed_base == baseline:
+            return after_ci(pr, run, snapshot, bounded)
+        movements.append(f"round {round_number}: {baseline} -> {observed_base}")
+    raise Refusal("main moved during all three CI rounds; refusing a fourth round: "
+                  + "; ".join(movements) + "; inspect main and rerun land")
+
+
+def incorporates_base(identity: Identity, head: str, base: str, operations: Operations) -> bool:
+    """Compare the recorded base to the pinned head, failing closed on bad data."""
+    comparison = operations.read_json(
+        ["gh", "api", f"repos/{identity.repo}/compare/{base}...{head}"],
+        stage="initial base ancestry check",
+    )
+    ancestor = comparison.get("merge_base_commit")
+    status = comparison.get("status")
+    if (status not in ("ahead", "identical", "behind", "diverged")
+            or not isinstance(ancestor, dict) or not isinstance(ancestor.get("sha"), str)
+            or not _SHA.fullmatch(ancestor["sha"])
+            or (ancestor["sha"] == base) != (status in ("ahead", "identical"))):
+        raise Refusal("initial base ancestry check: malformed or inconsistent comparison")
+    return ancestor["sha"] == base
 
 
 def ci_is_green(result: subprocess.CompletedProcess[str]) -> bool:
@@ -746,7 +784,7 @@ def wait_for_ci(identity: Identity, expected_head: str, operations: Operations) 
 def after_ci(
     pr: PullRequest, run: LandingRun | None, snapshot: CheckSnapshot, operations: Operations,
 ) -> int:
-    """Boundary for final revalidation, base synchronization and merge gates."""
+    """Boundary for the remaining merge gate, after validated CI/base rounds."""
     raise Refusal(f"{pr.identity.url}: mutations disabled beyond run completion until all landing "
                   f"gates are wired (checks read at head {snapshot.head})")
 
