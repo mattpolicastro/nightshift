@@ -1513,7 +1513,10 @@ def test_land_ci_timeout(config_path, scripted_runner, capsys, checks, code):
     for remaining in (25, 15, 5):
         expect_ci_poll(scripted_runner, checks, code=code, timeout=remaining)
     assert invoke_ci(config_path, scripted_runner, clock, timeout=25) == 1
-    assert "shared CI deadline expired" in capsys.readouterr().err
+    # Recovery requires inspecting the checks as well as rerunning land.
+    assert capsys.readouterr().err == (
+        "land: shared CI deadline expired; inspect checks and rerun land\n"
+    )
     assert clock.sleeps == [10, 10, 5]
     assert clock.now == 125
     assert sum(argv == CHECKS for argv, _ in scripted_runner.calls) == 3
@@ -1567,7 +1570,11 @@ def test_land_ci_refuses_head_change(config_path, scripted_runner, capsys, posit
         scripted_runner.expect(VIEW, PR).expect(CHECKS, [ci_check()])
     scripted_runner.expect(VIEW, {**PR, "headRefOid": FINISHED_HEAD})
     assert invoke_ci(config_path, scripted_runner, clock) == 1
-    assert f"PR head changed during CI: expected {HEAD}, found {FINISHED_HEAD}" in capsys.readouterr().err
+    # Rerunning alone must not be presented as an alternative to reviewing the new head.
+    assert capsys.readouterr().err == (
+        f"land: PR head changed during CI: expected {HEAD}, found {FINISHED_HEAD}; "
+        "review the current head and rerun land\n"
+    )
     assert clock.sleeps == ([10] if position == "next-poll" else [])
     assert not any("merge" in argv for argv, _ in scripted_runner.calls)
 
