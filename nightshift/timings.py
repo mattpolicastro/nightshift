@@ -1,7 +1,10 @@
 """Read-only timing and recorded-outcome summaries from local run events."""
 
+import argparse
 import json
 import math
+import sys
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from statistics import median
 
@@ -58,14 +61,15 @@ def _change_summary(name: str, events: list[dict]) -> dict:
                 publication_wait_hours=_hours(published, finished))
 
 
-def collect_report(runs_root: Path) -> dict:
+def collect_report(runs_root: Path, *, since: date | None = None, change: str | None = None) -> dict:
     """Pool readable runs in name order, retaining one diagnostic per failed read."""
     samples: dict[str, list[float]] = {phase: [] for phase, *_ in PAIRS}
     changes, errors = [], []
     profiles: dict[str, dict] = {}
+    cutoff = datetime.combine(since, time.min, timezone.utc).timestamp() if since is not None else None
     directories = sorted(runs_root.iterdir()) if runs_root.exists() else []
     for directory in directories:
-        if not directory.is_dir():
+        if not directory.is_dir() or (change is not None and directory.name != change):
             continue
         path = directory / "events.jsonl"
         try:
@@ -73,6 +77,10 @@ def collect_report(runs_root: Path) -> dict:
         except (OSError, UnicodeError) as exc:
             errors.append(f"{path}: {exc}")
             continue
+        if cutoff is not None:
+            admitted = next((e["at"] for e in events if e["event"] == "admitted"), None)
+            if admitted is None or admitted < cutoff:
+                continue
         changes.append(_change_summary(directory.name, events))
         pending: dict[tuple[str, str], float] = {}
         for event in events:
@@ -107,3 +115,58 @@ def collect_report(runs_root: Path) -> dict:
                                    median_seconds=median(values) if values else None)
                         for phase, values in samples.items()},
                 changes=changes, profiles=[profiles[name] for name in sorted(profiles)], errors=errors)
+
+
+def render_table(report: dict) -> str:
+    """Flatten the report's measurements into one table with explicit units."""
+    rows = [("Kind", "Name", "Metric", "Value", "Unit")]
+    groups = (("phase", report["phases"].items()),
+              ("change", ((row["change"], row) for row in report["changes"])),
+              ("profile", ((row["profile"], row) for row in report["profiles"])))
+    for kind, entries in groups:
+        for name, measurements in entries:
+            for metric, value in measurements.items():
+                if metric in {"change", "profile"}:
+                    continue
+                unit = ("seconds" if metric.endswith("_seconds") else
+                        "hours" if metric.endswith("_hours") else
+                        "%" if metric.endswith("_rate") else "count")
+                display = "-" if value is None else str(value * 100 if unit == "%" else value)
+                rows.append((kind, name, metric, display, unit))
+    widths = [max(len(row[i]) for row in rows) for i in range(5)]
+    lines = ["  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip()
+             for row in rows]
+    return "\n".join(lines) + (
+        "\n\nLocal-history estimates: missing pairs are dropped; evidence/slot waits are endpoint "
+        "proxies; intervals may overlap. Recorded FAIL rates can differ from harness decisions; "
+        "finish is not merge. Phases need not sum to build hours."
+    )
+
+
+def _since_date(value: str) -> date:
+    try:
+        parsed = date.fromisoformat(value)
+        if parsed.isoformat() != value:
+            raise ValueError("expected YYYY-MM-DD")
+        return parsed
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected a valid date in YYYY-MM-DD format") from exc
+
+
+def main(argv: list[str] | None = None, *, runs_root: Path | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Report local build timings.", allow_abbrev=False)
+    parser.add_argument("--since", type=_since_date, metavar="YYYY-MM-DD",
+                        help="include whole runs first admitted on or after this UTC date")
+    parser.add_argument("--change", metavar="NAME", help="select an exact change name")
+    parser.add_argument("--json", action="store_true", help="emit one JSON report")
+    args = parser.parse_args(argv)
+    root = runs_root if runs_root is not None else Path.home() / ".specloop" / "runs"
+    report = collect_report(root, since=args.since, change=args.change)
+    for error in report["errors"]:
+        print(error, file=sys.stderr)
+    print(json.dumps(report, indent=2) if args.json else render_table(report))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
