@@ -37,6 +37,31 @@ See [enrollment and preparation](../../README.md#enroll-a-repository) and the
 | `agent:revise` on the PR, after admission | Append a review round of tasks and resume the run. |
 | `needs-human` on the issue or PR | Read and resolve the questions or refusal comment, remove this label, and reapply the stage's trigger label as described below. |
 
+An issue-body line such as `blocked-by: #9, #12` defers a new draft round
+while any dependency is open or unreadable. The trigger stays in place, so a
+later poll can draft after all blockers close. Existing jobs, saved results
+and open draft PRs can still be collected or delivered under normal
+eligibility rules, including authorization
+([issue #24](https://github.com/mattpolicastro/nightshift/issues/24),
+[PR #29](https://github.com/mattpolicastro/nightshift/pull/29)).
+
+For `spec:draft`, `agent:ready`, `spec:approved` and `agent:revise`, the actor
+on the latest application of each trigger must be an OWNER, MEMBER or
+COLLABORATOR. If both intake aliases remain, both must be authorized. An
+untrusted application gets an explanation and does not authorize work; have
+a trusted actor remove and reapply the label (or remove an unauthorized
+intake alias). A failed actor lookup defers action for retry. Feedback authors
+are checked independently: a trusted trigger does not make untrusted comments
+eligible ([issue #5](https://github.com/mattpolicastro/nightshift/issues/5),
+[PR #42](https://github.com/mattpolicastro/nightshift/pull/42)).
+
+The daemon writes the issue title, body and trusted comments to a durable
+UTF-8 file and passes its absolute path with `--idea-file`; the idea text
+does not go in argv. The file survives delayed background reads, later polls
+and restarts; each round keeps its own input
+([issue #12](https://github.com/mattpolicastro/nightshift/issues/12),
+[PR #35](https://github.com/mattpolicastro/nightshift/pull/35)).
+
 Draft questions or rejection remove both issue intake labels. Answer the
 questions or resolve the rejection on the issue, remove `needs-human`, and
 reapply `spec:draft` or `agent:ready` to retry. Removing `needs-human` alone
@@ -48,18 +73,54 @@ is titled `Spec: Add a gate`, links the issue with `Closes #7`, and carries
 the feasibility risks. Successful admission removes `spec:review` and
 `spec:approved`. Refusal removes `spec:approved` and adds `needs-human`;
 remove `needs-human` and reapply `spec:approved` after resolving the refusal.
-Revision uses only feedback newer than the branch tip, including inline file
-and line references. Empty revision requests are explained and cleared without
-running an agent.
+
+Revision selects trusted, actionable feedback by source-qualified GitHub ID,
+with consumed IDs tracked per repository and PR: `conversation:123`,
+`review:123` and `inline:123` are distinct. Inline feedback keeps its file and
+line. Each spec or build round saves its selected IDs and feedback before
+starting. Comments arriving during that round remain eligible for the next
+authorized request, even if older than the new branch tip. Edits cannot change
+the saved snapshot or make a consumed ID eligible again; post a new comment
+with a new ID for further requests
+([issue #6](https://github.com/mattpolicastro/nightshift/issues/6),
+[PR #61](https://github.com/mattpolicastro/nightshift/pull/61)).
+
+The saved IDs are consumed after a successful spec push or a durable,
+successful build revision result with a landed commit, before notifications
+and without waiting for build publication. Relabeling or restarting does not
+replay them. Empty revision requests are explained and cleared without an
+agent ([PR #61](https://github.com/mattpolicastro/nightshift/pull/61)).
+
+Legacy revision receipts initialize consumed IDs once, after authorization.
+Trusted records created at or before the receipt's saved time are treated as
+consumed, including blank and daemon-prefixed records. This uses comment
+creation and review submission times, not edit times. If the saved time is
+absent, the current PR head's committer time supplies the cutoff once. The
+approximate baseline is saved before further processing and is never
+recomputed on restart or tip advance; later IDs stay eligible. No manual
+initialization is needed. With no receipt, eligible historical feedback is
+available ([PR #61](https://github.com/mattpolicastro/nightshift/pull/61)).
 
 The separate `specloop serve` supervisor executes admitted tasks and prepares
 the current base before `ready_to_publish`. The daemon then attempts
 [publication](#publication-and-base-recovery) to the same branch and PR,
 commenting the remaining human checks and hosted CI reminder after success.
 A human reviews, checks and merges; merging closes the linked issue.
-`nightshift attention` lists human
-pauses with reason, change and PR link; failed status reads retain the previous
-snapshot marked `STALE` and exit 1. JSON carries `specloop` beside worker
+
+`specloop status --json` isolates unreadable runs: version-1 JSON still
+includes healthy runs and exits 0. Each unreadable run has a non-actionable
+`status_error` row with a bounded diagnostic and compatibility placeholders
+(`paused`, zero tasks, empty head/PR). It offers no actions and does not persist
+a pause. Top-level failures, such as an unreadable run listing or supervisor
+status, instead return a version-1 error document and exit 1
+([issue #10](https://github.com/mattpolicastro/nightshift/issues/10),
+[PR #32](https://github.com/mattpolicastro/nightshift/pull/32)).
+
+`nightshift attention` lists human pauses with reason, change and PR link.
+Per-run `status_error` rows refresh alongside healthy entries; a failed
+top-level status read instead retains the previous snapshot marked `STALE`
+and exits 1 ([PR #32](https://github.com/mattpolicastro/nightshift/pull/32)).
+JSON carries `specloop` beside worker
 `tasks`. The Paseo plugin source now includes the Factory section described
 below. Daemon quota pacing for these runs remains separate work.
 
