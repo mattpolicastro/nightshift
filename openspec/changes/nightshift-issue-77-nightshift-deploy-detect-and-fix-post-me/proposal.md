@@ -1,47 +1,48 @@
 ## Why
 
-After merging, the operator manually pulls the live checkout, synchronizes its
-Python environment, redeploys the Paseo plugin, and restarts affected services.
-These steps can be missed without any drift report. On 2026-10-23, verification
-failed with `No module named mypy` because the live `.venv` had not been synced
-after PR #69. Sandboxed verification depends on that environment.
+After each merge, the operator manually pulls the live checkout, runs `uv
+sync`, redeploys changed plugin files, and restarts services with changed code.
+Missed steps are silent: on 2026-10-23 verification failed with `No module
+named mypy` after PR #69 because sandboxed verification uses the live `.venv`.
 
 ## What Changes
 
-- Add `nightshift/deploy.py`, invoked as `uv run python -m nightshift.deploy`.
-  Default check reports checkout, environment, plugin, and process-age drift.
-  Document `uv run --no-sync python -m nightshift.deploy` for checks that must
-  observe the environment before uv implicitly repairs it.
-- Add ordered, conditional `--apply`: fast-forward pull, frozen dependency
-  sync, staged plugin replacement with up to three rollback copies, plugin
-  reload, and idle-only daemon/supervisor restarts. `--force` overrides busy
-  restart guards, not checkout refusals. Repeated successful application is a
-  no-op when nothing changed.
-- Persist plugin reload intent before replacement so interruption cannot leave
-  matching deployed files masking an unreloaded Paseo plugin. Retry reconciles
-  the saved transaction before treating that component as current.
-- Recover a service stopped by this command's restart with one non-killing
-  launchctl start, bounded confirmation, and durable restart intent. This
-  accommodates the daemon's clean SIGTERM exit and existing launchd policy
-  without changing either plist or starting arbitrary stopped services.
-- Add isolated command-runner tests in `tests/test_deploy.py` and an operator
-  guide in `docs/deploy.md`, including the post-merge host checklist.
-- Implementation may create only those three files. Every existing file is
-  out of scope, including `launchd/`, `config.toml`, `pyproject.toml`, existing
-  tests, plugin sources, CLI modules, and repository documentation. No CLI
-  consolidation (issue #40), installation of services, automatic scheduling,
-  manifest changes, verification sandbox changes, or Factory UI changes.
+- Add the local command `uv run python -m nightshift.deploy`. Default check
+  reports checkout, environment, plugin, and process-age drift. Document the
+  `uv run --no-sync` form so the launcher does not repair dependencies before
+  the command observes them.
+- Add conditional `--apply`, in order: fast-forward pull, frozen sync, staged
+  plugin swap, reload, daemon restart, supervisor restart. Each step rechecks
+  real state before acting; a successful second run says `Nothing to do.`.
+- Keep at most three plugin rollback copies. One presence-only pending-reload
+  marker is the only persisted control state. Write it before swapping, retry
+  reload while it exists, and remove it only after successful reload. Failures
+  print an exact manual restore command; there is no automatic rollback.
+- Guard restarts on idle specloop background jobs / supervisor activity unless
+  `--force`. Confirm a new PID within 30 seconds; if absent, issue one
+  non-killing kickstart and wait another 30 seconds. Report remaining failures
+  with a manual command. There are no restart records or ownership probes.
+- Add `tests/test_deploy.py`, including the eight requested named tests and
+  interrupted/failed reload reruns, and `docs/deploy.md` with operator guidance.
+  Plan six implementation tasks, about 1,000 changed lines in total.
+
+Implementation creates only `nightshift/deploy.py`, `tests/test_deploy.py`, and
+`docs/deploy.md`. Every existing file is out of scope, including `launchd/`,
+`config.toml`, CLI modules, packaging, existing tests, and existing docs.
+Also out of scope: transaction journals, interrupted-run reconciliation,
+automatic rollback, service installation, worker-engine task guards, automatic
+deployment, UI changes, and CLI consolidation (issue #40).
 
 ## Capabilities
 
 ### New Capabilities
 
-- `deployment-drift`: detect post-merge deployment drift and repair it through
-  an ordered, repeatable command with rollback copies and restart guards.
+- `deployment-drift`: check and repair local post-merge drift through an
+  ordered operator command with safe reruns and guarded restarts.
 
 ### Modified Capabilities
 
-None. The command consumes existing job inventory and version-1 specloop
-status without changing them. Requirements in `background-job-control`,
-`paused-job-delivery`, `specloop-interface`, `verify-preparation`,
-`paseo-runs-page`, and `run-actions` remain in force.
+None. Existing `background-job-control`, `paused-job-delivery`,
+`specloop-interface`, `verify-preparation`, `paseo-runs-page`, and `run-actions`
+requirements remain unchanged. Deployment consumes their existing interfaces;
+it does not change scheduling, job delivery, verification, status, or the UI.
