@@ -464,7 +464,7 @@ The worker-task refresh checks at most 32 tasks with four concurrent checks
 and a 40-second network budget. Outstanding tasks have priority; resolved history gets reserved
 capacity and normally waits an hour between checks. Large backlogs rotate across
 refreshes, and deferred checks are marked stale. Reopened historical tasks appear
-when their next historical check runs. See the [refresh policy](plugins/nightshift/README.md#refresh-behavior).
+when their next historical check runs. See the [refresh policy](plugins/nightshift/README.md#nightshift-task-refresh-behavior).
 
 History starts with this version; this does not backfill old tasks from
 ambiguous transcripts. The daemon records immutable events in
