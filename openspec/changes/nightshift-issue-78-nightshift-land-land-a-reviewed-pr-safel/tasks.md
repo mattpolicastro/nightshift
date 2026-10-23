@@ -1,7 +1,7 @@
 ## 1. Establish the standalone command boundary
 
 - [x] 1.1 Add the parser, injectable subprocess runner and clock boundary, config loading, PR identity resolution and enrollment validation in new `nightshift/land.py`; create the scripted-runner fixture and argument/identity tests in new `tests/test_land.py`. Keep mutations disabled until later gates are wired. Cover `reviewed-pr-landing/operator-entry-point/explicit-invocation`, `reviewed-pr-landing/enrolled-pr-identity/repository-resolves`, `reviewed-pr-landing/enrolled-pr-identity/invalid-target-refused`.
-- [ ] 1.2 Add version-1 status discovery and pre-mutation run eligibility validation, with tests for no match, duplicate matches, malformed status and error rows. Add `test_daemon_and_supervisor_never_import_land` inspecting background import/dispatch paths without editing them. Cover `reviewed-pr-landing/reliable-run-discovery/uncertain-discovery-refused`, `reviewed-pr-landing/eligible-run-state/wrong-state-refused`, `reviewed-pr-landing/operator-entry-point/background-paths-excluded`.
+- [x] 1.2 Add version-1 status discovery and pre-mutation run eligibility validation, with tests for no match, duplicate matches, malformed status and error rows. Add `test_daemon_and_supervisor_never_import_land` inspecting background import/dispatch paths without editing them. Cover `reviewed-pr-landing/reliable-run-discovery/uncertain-discovery-refused`, `reviewed-pr-landing/eligible-run-state/wrong-state-refused`, `reviewed-pr-landing/operator-entry-point/background-paths-excluded`.
 
 ## 2. Read and record human checks
 
