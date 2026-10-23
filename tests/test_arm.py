@@ -712,3 +712,165 @@ def test_partial_context_keeps_evidence_and_distinct_findings(concurrent_checkou
     assert "private diagnostic" not in str(context)
     assert findings == sorted(findings, key=arm.Finding.sort_key)
     assert cache.open_prs("org/repo") is cache.open_prs("org/repo") and len(calls) == 9
+
+
+@pytest.fixture
+def batch_reader(tmp_path, monkeypatch, issue_reader):
+    monkeypatch.setattr(state, "ROOT", tmp_path / "run-home")
+
+    def make(records):
+        cache, calls = issue_reader(records)
+        read = cache.runner
+        context_calls = []
+
+        def runner(argv, **kwargs):
+            if argv[:3] == ["gh", "issue", "view"]:
+                return read(argv, **kwargs)
+            assert argv[:2] == ["gh", "api"]  # Reject edits and any other mutation.
+            endpoint = argv[2] if "--method" in argv else argv[4]
+            assert endpoint in (
+                "repos/org/repo/issues?state=open&labels=spec%3Adraft&per_page=100&page=1",
+                "repos/org/repo/pulls?state=open&per_page=100&page=1",
+            )
+            context_calls.append(endpoint)
+            return subprocess.CompletedProcess(argv, 0, "[]")
+
+        cache.runner = runner
+        return cache, calls, context_calls
+    return make
+
+
+@pytest.mark.scenario("issue-arming/dependency-aware-overlap-decisions/unchained-overlap-suggests-a-blocker")
+def test_arm_reports_unchained_overlap(tmp_path, issue_body, issue_reader):
+    cache, calls = issue_reader({
+        ("org/repo", n): issue_record(n, body=issue_body()) for n in (76, 77, 78)
+    })
+    target = cache.get("org/repo", 76)
+    path = "nightshift/arm.py"
+    sources = ["issue #77", "run repo-issue-77-old-title",
+               "PR #901 https://github.example/org/repo/pull/901"]
+    context = arm.ConcurrentContext([
+        *(arm.PathEvidence(path, 77, source) for source in sources),
+        arm.PathEvidence(path, 77, sources[0]),
+        arm.PathEvidence(path, 78, "run repo-issue-78-paused"),
+        arm.PathEvidence(path, 76, "run repo-issue-76-self"),
+        arm.PathEvidence(path, None, "run custom-name"),
+    ], [])
+    findings = arm.overlap_findings(target, tmp_path, context, "org/repo", cache)
+    assert [(f.code, f.path, f.related_issue) for f in findings] == [
+        ("overlap", path, n) for n in (None, 77, 78)
+    ]
+    assert "Identify" in findings[0].suggestion
+    for finding, number in zip(findings[1:], (77, 78)):
+        assert f"#{number}" in finding.message and path in finding.message
+        assert f"blocked-by: #{number}" in finding.suggestion
+    assert all(source in findings[1].message for source in sources)
+    assert arm.overlap_findings(target, tmp_path, context, "org/repo", cache) == findings
+    assert calls == [("org/repo", n) for n in (76, 77, 78)]
+
+
+@pytest.mark.scenario("issue-arming/dependency-aware-overlap-decisions/unchained-overlap-suggests-a-blocker")
+def test_shared_prerequisite_does_not_chain_candidates(tmp_path, issue_body, batch_reader):
+    records = {("org/repo", n): issue_record(n, body=issue_body() + "blocked-by: #90")
+               for n in (76, 77)}
+    records["org/repo", 90] = issue_record(90)
+    cache, calls, _ = batch_reader(records)
+    results = arm.check_candidates("org/repo", [76, 77], tmp_path, cache)
+    assert [[(f.code, f.related_issue) for f in results[n]] for n in (76, 77)] == [
+        [("overlap", 77)], [("overlap", 76)],
+    ]
+    assert len(calls) == len(set(calls)) == 3
+
+
+@pytest.mark.scenario("issue-arming/dependency-aware-overlap-decisions/transitive-chains-work-in-both-directions")
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("intermediate", [False, True])
+def test_arm_accepts_transitively_chained_overlap(tmp_path, issue_body, batch_reader,
+                                                 reverse, intermediate):
+    source, target = (77, 76) if reverse else (76, 77)
+    records = {("org/repo", n): issue_record(n, body=issue_body()) for n in (76, 77)}
+    records["org/repo", source]["body"] = (
+        issue_body("`test_expected_behavior` manually inspect")
+        + f"blocked-by: #{90 if intermediate else target} #91"
+    )
+    records["org/repo", 90] = {
+        **issue_record(90, body=f"> * BlOcKeD-bY: #{target}"), "labels": [],
+    }
+    records["org/repo", 91] = issue_record(91, state="CLOSED", reason="NOT_PLANNED")
+    cache, calls, _ = batch_reader(records)
+    results = arm.check_candidates("org/repo", [76, 77], tmp_path, cache)
+    assert results[target] == []
+    assert [f.code for f in results[source]] == ["dependency-completion", "manual-check"]
+    assert results[source][0].related_issue == 91
+    assert (("org/repo", 90) in calls) == intermediate
+    assert len(calls) == len(set(calls))
+
+
+@pytest.mark.scenario("issue-arming/dependency-aware-overlap-decisions/cycles-terminate-and-failures-do-not-exempt")
+@pytest.mark.parametrize("failed", [False, True])
+def test_cycles_and_failed_intermediates_keep_overlap(tmp_path, issue_body, batch_reader, failed):
+    records = {
+        ("org/repo", 76): issue_record(76, body=issue_body() + "blocked-by: #90"),
+        ("org/repo", 77): issue_record(77, body=issue_body()),
+        ("org/repo", 90): issue_record(90, body="blocked-by: #91"),
+        ("org/repo", 91): (OSError("private diagnostic") if failed else
+                           issue_record(91, body="blocked-by: #90")),
+    }
+    cache, calls, _ = batch_reader(records)
+    results = arm.check_candidates("org/repo", [76, 77], tmp_path, cache)
+    for number, other in ((76, 77), (77, 76)):
+        assert [(f.code, f.related_issue) for f in results[number]] == (
+            ([("incomplete-context", 91)] if failed else []) + [("overlap", other)]
+        )
+        assert f"blocked-by: #{other}" in results[number][-1].suggestion
+    assert "private diagnostic" not in str(results)
+    assert arm.check_candidates("org/repo", [77, 76], tmp_path, cache) == results
+    assert len(calls) == len(set(calls)) == 4
+
+
+@pytest.mark.scenario("issue-arming/dependency-aware-overlap-decisions/cycles-terminate-and-failures-do-not-exempt")
+def test_cycle_search_does_not_cache_partial_negative_proofs(issue_reader):
+    cache, calls = issue_reader({
+        (repo, n): issue_record(n, body=body)
+        for repo in ("org/repo", "other/repo")
+        for n, body in ((1, "blocked-by: #2 #3"), (2, "blocked-by: #1"),
+                        (3, "blocked-by: #4"))
+    })
+    assert cache.reaches("org/repo", 1, 4) == (True, ())
+    assert cache.reaches("org/repo", 2, 4) == (True, ())
+    assert cache.reaches("other/repo", 2, 4) == (True, ())
+    assert len(calls) == len(set(calls)) == 6
+
+
+@pytest.mark.scenario("issue-arming/dependency-aware-overlap-decisions/cycles-terminate-and-failures-do-not-exempt")
+@pytest.mark.scenario("issue-arming/dependency-aware-overlap-decisions/transitive-chains-work-in-both-directions")
+def test_failed_branch_keeps_context_finding_but_does_not_hide_proven_chain(
+        tmp_path, issue_body, batch_reader):
+    cache, calls, _ = batch_reader({
+        ("org/repo", 76): issue_record(76, body=issue_body() + "blocked-by: #90 #91"),
+        ("org/repo", 77): issue_record(77, body=issue_body()),
+        ("org/repo", 90): OSError("unreadable branch"),
+        ("org/repo", 91): issue_record(91, body="blocked-by: #77"),
+    })
+    results = arm.check_candidates("org/repo", [76, 77], tmp_path, cache)
+    for findings in results.values():
+        # The direct-blocker and traversal failure produce one diagnostic.
+        assert [(f.code, f.related_issue) for f in findings] == [("incomplete-context", 90)]
+    assert len(calls) == len(set(calls)) == 4
+
+
+@pytest.mark.scenario("issue-arming/dependency-aware-overlap-decisions/batch-candidates-are-compared-together")
+@pytest.mark.parametrize("numbers", [[76, 77, 76], [77, 76, 77]])
+def test_unlabelled_batch_overlap_is_checked_before_writes(tmp_path, issue_body, batch_reader, numbers):
+    cache, calls, context_calls = batch_reader({
+        ("org/repo", n): {**issue_record(n, body=issue_body()), "labels": []}
+        for n in (76, 77)
+    })
+    results = arm.check_candidates("org/repo", numbers, tmp_path, cache)
+    assert list(results) == numbers[:2]
+    assert calls == [("org/repo", n) for n in numbers[:2]]
+    assert len(context_calls) == 3  # One shared armed/PR snapshot for the batch.
+    for number, other in ((76, 77), (77, 76)):
+        assert [(f.code, f.related_issue) for f in results[number]] == [("overlap", other)]
+        assert f"blocked-by: #{other}" in results[number][0].suggestion
+        assert cache.get("org/repo", number).labels == frozenset()

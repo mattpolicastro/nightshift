@@ -122,6 +122,38 @@ class IssueCache:
         self._issues: dict[tuple[str, int], Issue | IssueLookupError] = {}
         self._armed: dict[str, tuple[list[Issue], list[str]]] = {}
         self._prs: dict[str, ConcurrentContext] = {}
+        self._reachability: dict[tuple[str, int, int], tuple[bool, tuple[tuple[int, str], ...]]] = {}
+
+    def reaches(self, repository: str, source: int, target: int
+                ) -> tuple[bool, tuple[tuple[int, str], ...]]:
+        """Follow directed blockers lazily; cache proofs and failed lookup notes.
+
+        Each search owns its visited set: a cycle is not a cached negative proof
+        for another search. Iteration also avoids recursion limits on long chains.
+        """
+        key = (repository, source, target)
+        if key in self._reachability:
+            return self._reachability[key]
+        pending, visited = [source], set()
+        failures: dict[int, str] = {}
+        found = False
+        while pending:
+            number = pending.pop()
+            if number in visited:
+                continue
+            visited.add(number)
+            try:
+                dependencies = blockers(self.get(repository, number).body)
+            except IssueLookupError as error:
+                failures[number] = str(error)
+                continue
+            if target in dependencies:
+                found = True
+                break
+            pending.extend(reversed(dependencies))
+        result = (found, tuple(sorted(failures.items())))
+        self._reachability[key] = result
+        return result
 
     def open_prs(self, repository: str) -> ConcurrentContext:
         if repository not in self._prs:
@@ -309,6 +341,62 @@ def unattributed_run_findings(issue: Issue, root: Path, context: ConcurrentConte
         "Identify this run's source issue before adding a dependency.", path=entry.path,
     ) for entry in concurrent_overlaps(issue, root, context) if entry.issue is None),
         key=Finding.sort_key)
+
+
+def overlap_findings(issue: Issue, root: Path, context: ConcurrentContext,
+                     repository: str, cache: IssueCache) -> list[Finding]:
+    """Combine evidence by path/issue, exempting only proven directed chains."""
+    findings = unattributed_run_findings(issue, root, context)
+    grouped: dict[tuple[str, int], set[str]] = {}
+    for entry in concurrent_overlaps(issue, root, context):
+        if entry.issue is not None:
+            grouped.setdefault((entry.path, entry.issue), set()).add(entry.source)
+    failures: dict[int, str] = {}
+    for (path, other), sources in sorted(grouped.items()):
+        chained, notes = cache.reaches(repository, issue.number, other)
+        failures.update(notes)
+        if not chained:
+            chained, notes = cache.reaches(repository, other, issue.number)
+            failures.update(notes)
+        if not chained:
+            findings.append(Finding(
+                "overlap", issue.number,
+                f"{path} overlaps issue #{other}: {'; '.join(sorted(sources))}.",
+                f"Add blocked-by: #{other} to sequence this work.",
+                path=path, related_issue=other,
+            ))
+    findings.extend(Finding(
+        "incomplete-context", issue.number, message,
+        f"Restore access to issue #{number}, then rerun.", related_issue=number,
+    ) for number, message in failures.items())
+    return sorted(findings, key=Finding.sort_key)
+
+
+def check_candidates(repository: str, numbers: list[int], root: Path,
+                     cache: IssueCache) -> dict[int, list[Finding]]:
+    """Evaluate the entire batch before callers decide whether to write labels.
+
+    Preserve argument order, read each target once, and include unlabelled targets
+    in the shared snapshot. This phase never mutates GitHub or local state.
+    """
+    results: dict[int, list[Finding]] = {}
+    targets = []
+    for number in dict.fromkeys(numbers):
+        results[number] = lint_issue(repository, number, cache)
+        try:
+            targets.append(cache.get(repository, number))
+        except IssueLookupError:
+            pass  # lint_issue already retained this failure.
+    context = collect_concurrent(repository, root, targets, cache)
+    for number in results:
+        results[number].extend(context_findings(number, context))
+    for issue in targets:
+        results[issue.number].extend(overlap_findings(issue, root, context, repository, cache))
+    for number, findings in results.items():
+        # The same failed read may arise in direct lint and graph traversal.
+        unique = {finding.sort_key(): finding for finding in findings}
+        results[number] = sorted(unique.values(), key=Finding.sort_key)
+    return results
 
 
 def lint_dependencies(issue: int, body: str, repository: str, cache: IssueCache) -> list[Finding]:
