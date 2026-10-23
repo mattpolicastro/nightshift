@@ -5,6 +5,22 @@
 # already-admitted runs continue under the separate specloop supervisor.
 
 [daemon]
+# Worker worktree placement, not specloop run state. Omission uses this default:
+# worktree_root = "~/Projects/nightshift-wt"
+# Leading ~/ expands; spaces stay literal. Relative values now resolve beside
+# the selected config file, not the daemon cwd. To keep an old relative location,
+# set its absolute path before restart. Absolute paths and existing worktrees
+# stay in place; loading does not create or migrate directories. Wrong types,
+# blank strings, unsupported tilde forms and NUL/line breaks are rejected.
+# Example alternate root: worktree_root = "/alternate/nightshift-wt"
+# Host tool/checkout settings belong in process environments, not a TOML table:
+# NIGHTSHIFT_BIN_DIR defaults to /opt/homebrew/bin (Python and plugin tools);
+# NIGHTSHIFT_NODE_BIN to ~/n/bin (Factory); NIGHTSHIFT_UV to the resolved bin
+# directory plus /uv; NIGHTSHIFT_CHECKOUT to ~/Projects/nightshift (plugin).
+# Restart affected processes. The daemon env file wins over inherited settings
+# downstream, but neither frozen wrapper relocates its bootstrap paths.
+# See README.md#host-path-setup and KNOWN-LIMITATIONS.md#platform-assumptions
+# for service environments, deferred wrapper portability and pending host checks.
 poll_seconds = 120
 max_tasks_per_night = 8
 # `claude -p --max-turns` for each phase. Hardcoded 100/60 until 2026-08-08,
