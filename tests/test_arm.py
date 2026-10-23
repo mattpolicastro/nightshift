@@ -6,6 +6,8 @@ import subprocess
 import pytest
 
 from nightshift import arm
+from specloop import state
+from specloop.seal import IDENTITY, git
 
 
 def issue_record(number, *, body="", state="OPEN", reason=None):
@@ -381,3 +383,170 @@ def test_multiline_setext_heading_excludes_entire_title(underline):
     assert [(f.code, f.line) for f in arm.lint_body(76, body)] == [("named-test", 3)]
     section = next(s for s in arm.parse_sections(body) if s.name == "Definition of done")
     assert section.text == "\n"
+
+
+@pytest.fixture
+def concurrent_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(state, "ROOT", tmp_path / "run-home")
+    root = tmp_path / "checkout"
+    root.mkdir()
+    git(root, "init", "-q", "-b", "main")
+    (root / "README.md").touch()
+
+    def add_run(name, text, status="running", repo=None):
+        task = root / "openspec" / "changes" / name / "tasks.md"
+        task.parent.mkdir(parents=True)
+        task.write_text(f"- [ ] 1.1 Edit {text}\n")
+        git(root, "add", ".")
+        git(root, "commit", "-qm", "tasks", env=IDENTITY)
+        run = state.Run.for_change(name)
+        run.state.status = status
+        run.save()
+        git(root, "clone", "-q", "--bare", str(root), str(run.dir / "repo.git"))
+        (run.dir / "manifest.toml").write_text(f'''
+[run]
+repo = "{repo or root}"
+change = "{name}"
+branch = "main"
+[roles]
+implement = "p"
+review = "p"
+[profiles.p]
+adapter = "codex"
+model = "m"
+[paths]
+allowed = ["README.md", "src/**", "tests/**"]
+[[verify]]
+id = "tests"
+run = ["true"]
+''')
+        return run
+
+    return root, add_run
+
+
+def armed_reader(pages, repository="org/repo"):
+    calls = []
+
+    def runner(argv, **kwargs):
+        assert kwargs == dict(capture_output=True, text=True, check=True, timeout=30)
+        host, repo = (repository.split("/", 1) if repository.count("/") == 2
+                      else ("github.com", repository))
+        assert argv == ["gh", "api", "--hostname", host,
+                        f"repos/{repo}/issues?state=open&labels=spec%3Adraft&per_page=100&page={len(calls) + 1}"]
+        calls.append(argv)
+        page = pages[len(calls) - 1]
+        if isinstance(page, Exception):
+            raise page
+        return subprocess.CompletedProcess(argv, 0, json.dumps(page))
+
+    return arm.IssueCache(runner=runner), calls
+
+
+@pytest.mark.scenario("issue-arming/concurrent-path-collection/scope-and-path-rules-are-preserved")
+def test_scope_collection_preserves_helper_rules(concurrent_checkout, monkeypatch):
+    root, add_run = concurrent_checkout
+    tokens = "`README.md` `new/nested.py` `src/code.py:helper` `src/code.py::helper` `src/*.py`"
+    body = (f"**Scope:** {tokens}\n**What to do:** `outside/action.py`\n"
+            "**Definition of done:** `tests/outside.py::test_named`\n"
+            "**What CI cannot prove:** `outside/human.py`\n")
+    target = arm.Issue(76, body, "OPEN", None, frozenset())
+    cache, calls = armed_reader([[issue_record(77, body=body)]])
+    add_run("repo-issue-76-old-title", tokens)
+    add_run("repo-issue-78-running", tokens)
+    add_run("repo-issue-79-paused", "`tests/shared.py`", status="paused")
+    add_run("repo-issue-80-expanded", "`src/actual.py`")
+    add_run("repo-issue-81-done", tokens, status="done")
+    add_run("repo-issue-82-other", tokens, repo=root.parent / "other-checkout")
+    (root / "src").mkdir()
+    (root / "src" / "actual.py").touch()
+    alias = root.parent / "alias"
+    alias.symlink_to(root, target_is_directory=True)
+    monkeypatch.chdir(root.parent)
+    original = arm.propose.in_flight
+    flight_calls = []
+
+    def in_flight(source, change):
+        flight_calls.append((source, change))
+        return original(source, change)
+
+    monkeypatch.setattr(arm.propose, "in_flight", in_flight)
+    context = arm.collect_concurrent("org/repo", alias, [target], cache)
+    expected = {"README.md", "new/nested.py", "src/code.py", "src/*.py"}
+    assert arm.scope_paths(body, alias) == expected
+    overlaps = arm.concurrent_overlaps(target, alias, context)
+    assert {(e.path, e.issue, e.source) for e in overlaps} == {
+        (path, number, source) for path in expected
+        for number, source in [(77, "issue #77"), (78, "run repo-issue-78-running")]
+    }
+    assert arm.PathEvidence("tests/shared.py", 79, "run repo-issue-79-paused") in context.evidence
+    assert flight_calls == [(alias, "")] and len(calls) == 1 and not context.notes
+
+
+@pytest.mark.scenario("issue-arming/concurrent-path-collection/unattributed-run-overlap-is-visible")
+@pytest.mark.parametrize("status", ["running", "paused"])
+def test_unrecognized_run_overlap_has_no_guessed_blocker(concurrent_checkout, status):
+    root, add_run = concurrent_checkout
+    name = "repo-issue-99-Custom"
+    add_run(name, "`README.md`", status=status)
+    target = arm.Issue(76, "**Scope:** `README.md`\nblocked-by: #99", "OPEN", None, frozenset())
+    cache, _ = armed_reader([[]])
+    context = arm.collect_concurrent("org/repo", root, [target], cache)
+    findings = arm.unattributed_run_findings(target, root, context)
+    assert len(findings) == 1
+    finding = findings[0]
+    assert (finding.code, finding.issue, finding.path, finding.related_issue) == ("overlap", 76, "README.md", None)
+    assert name in finding.message and "README.md" in finding.message
+    assert "Identify" in finding.suggestion and "source issue" in finding.suggestion
+    assert "#99" not in str(findings) and "blocked-by:" not in str(findings)
+
+
+@pytest.mark.scenario("issue-arming/concurrent-path-collection/scope-and-path-rules-are-preserved")
+@pytest.mark.parametrize("body", [None, "", "**Scope:** `src/shared.py`"])
+def test_armed_rest_body_is_normalized_and_cached(concurrent_checkout, body):
+    root, _ = concurrent_checkout
+    row = {"number": 77, "body": body, "state": "open", "state_reason": None,
+           "labels": [{"name": "spec:draft"}]}
+    cache, calls = armed_reader([[row]])
+    target = arm.Issue(76, "**Scope:** `src/shared.py`", "OPEN", None, frozenset())
+    context = arm.collect_concurrent("org/repo", root, [target], cache)
+    issues, notes = cache.armed("org/repo")
+    expected = arm.Issue(77, body or "", "OPEN", None, frozenset({"spec:draft"}))
+    assert issues == [expected]
+    assert cache.get("org/repo", 77) == expected
+    assert not notes and not context.notes
+    assert arm.concurrent_overlaps(target, root, context) == (
+        [arm.PathEvidence("src/shared.py", 77, "issue #77")] if body else [])
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("tail", [[], [issue_record(78, body="**Scope:** `src/later.py`")],
+                                   subprocess.TimeoutExpired(["gh"], 30), {}])
+def test_armed_pages_are_cached_and_retain_evidence(concurrent_checkout, tail):
+    root, _ = concurrent_checkout
+    first = [issue_record(76, body="**Scope:** `src/self.py`"),
+             issue_record(79, body="**Scope:** `src/earlier.py`")]
+    first += [{"number": n, "pull_request": {}} for n in range(1, 99)]
+    repo = "github.example/org/repo"
+    cache, calls = armed_reader([first, tail], repo)
+    target = arm.Issue(76, "**Scope:** `src/batch.py`", "OPEN", None, frozenset())
+    other = arm.Issue(77, target.body, "OPEN", None, frozenset())
+    context = arm.collect_concurrent(repo, root, [target, other], cache)
+    assert arm.concurrent_overlaps(target, root, context) == [arm.PathEvidence("src/batch.py", 77, "issue #77")]
+    assert all(e.path != "src/self.py" for e in context.evidence)
+    assert arm.PathEvidence("src/earlier.py", 79, "issue #79") in context.evidence
+    assert cache.get(repo, 76).number == 76  # Listing bodies seed the shared issue cache.
+    assert (arm.PathEvidence("src/later.py", 78, "issue #78") in context.evidence) == bool(isinstance(tail, list) and tail)
+    assert bool(context.notes) == (not isinstance(tail, list))
+    assert cache.armed(repo) is cache.armed(repo) and len(calls) == 2
+
+
+@pytest.mark.parametrize("change,expected", [
+    ("r.po-issue-1-a", 1), ("r.po-issue-123-" + "a" * 40, 123),
+    ("r.po-issue-0-a", None), ("r.po-issue-01-a", None), ("r.po-issue-1-", None),
+    ("r.po-issue-1-" + "a" * 41, None), ("r.po-issue-1-A", None),
+    ("r.po-issue-1-a_b", None), ("rXpo-issue-1-a", None),
+    ("spec/r.po-issue-1-a", None), ("r.po-issue-1-a\n", None),
+])
+def test_front_door_identity_requires_full_producer_name(change, expected):
+    assert arm.front_door_issue("github.example/org/r.po", change) == expected

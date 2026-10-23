@@ -6,8 +6,10 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from nightshift.queue import blockers
+from specloop import propose
 
 REQUIRED_SECTIONS = ("Scope", "What to do", "Definition of done", "What CI cannot prove")
 _SECTION_NAMES = {name.casefold(): name for name in REQUIRED_SECTIONS}
@@ -86,6 +88,13 @@ def read_issue(repository: str, number: int, *, runner=None) -> Issue:
         raise IssueLookupError(f"Issue #{number} lookup failed.")
     try:
         data = json.loads(response.stdout)
+    except (ValueError, TypeError):
+        raise IssueLookupError(f"Issue #{number} lookup returned malformed data.") from None
+    return _parse_issue(data, number)
+
+
+def _parse_issue(data: object, number: int) -> Issue:
+    try:
         if not isinstance(data, dict):
             raise ValueError
         body, state, reason = data.get("body"), data.get("state"), data.get("stateReason")
@@ -111,6 +120,55 @@ class IssueCache:
     def __init__(self, *, runner=None):
         self.runner = runner
         self._issues: dict[tuple[str, int], Issue | IssueLookupError] = {}
+        self._armed: dict[str, tuple[list[Issue], list[str]]] = {}
+
+    def armed(self, repository: str) -> tuple[list[Issue], list[str]]:
+        """Cache all open intake issues, keeping earlier pages on a failed read."""
+        if repository in self._armed:
+            return self._armed[repository]
+        issues: dict[int, Issue] = {}
+        notes: list[str] = []
+        parts = repository.split("/")
+        host, repo = (parts[0], "/".join(parts[1:])) if len(parts) == 3 else ("github.com", repository)
+        page = 1
+        while True:
+            argv = ["gh", "api", "--hostname", host,
+                    f"repos/{repo}/issues?state=open&labels=spec%3Adraft&per_page=100&page={page}"]
+            try:
+                response = (self.runner or subprocess.run)(
+                    argv, capture_output=True, text=True, check=True, timeout=30)
+                if response.returncode:
+                    raise ValueError
+                rows = json.loads(response.stdout)
+                if not isinstance(rows, list):
+                    raise ValueError
+            except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+                notes.append(f"Armed issue page {page} could not be read.")
+                break
+            for row in rows:
+                if isinstance(row, dict) and "pull_request" in row:
+                    continue
+                try:
+                    if not isinstance(row, dict) or type(row.get("number")) is not int or row["number"] <= 0:
+                        raise ValueError
+                    # REST represents an issue without a description as null.
+                    data = {**row, "stateReason": row.get("state_reason")}
+                    if "body" in data and data["body"] is None:
+                        data["body"] = ""
+                    issue = _parse_issue(data, row["number"])
+                    if issue.state != "OPEN" or "spec:draft" not in issue.labels:
+                        continue
+                    key = (repository, issue.number)
+                    self._issues.setdefault(key, issue)
+                    issues[issue.number] = self.get(*key)
+                except (ValueError, IssueLookupError):
+                    notes.append(f"Armed issue page {page} contains an unreadable issue.")
+            if len(rows) < 100:
+                break
+            page += 1
+        result = (list(issues.values()), notes)
+        self._armed[repository] = result
+        return result
 
     def get(self, repository: str, number: int) -> Issue:
         key = (repository, number)
@@ -123,6 +181,61 @@ class IssueCache:
         if isinstance(result, IssueLookupError):
             raise result
         return result
+
+
+@dataclass(frozen=True)
+class PathEvidence:
+    path: str
+    issue: int | None
+    source: str
+
+
+@dataclass
+class ConcurrentContext:
+    evidence: list[PathEvidence]
+    notes: list[str]
+
+
+def scope_paths(body: str, root: Path) -> set[str]:
+    return propose.paths("\n".join(section.text for section in parse_sections(body)
+                                   if section.name == "Scope"), root=root)
+
+
+def front_door_issue(repository: str, change: str) -> int | None:
+    """Use the producer's stable change identity, independent of current titles."""
+    basename = re.escape(repository.rsplit("/", 1)[-1])
+    match = re.fullmatch(rf"{basename}-issue-([1-9][0-9]*)-[a-z0-9-]{{1,40}}", change)
+    return int(match[1]) if match else None
+
+
+def collect_concurrent(repository: str, root: Path, targets: list[Issue],
+                       cache: IssueCache) -> ConcurrentContext:
+    """Collect one shared snapshot; candidates participate even before labelling."""
+    armed, notes = cache.armed(repository)
+    issues = {issue.number: issue for issue in [*armed, *targets]}
+    evidence = [PathEvidence(path, issue.number, f"issue #{issue.number}")
+                for issue in issues.values() for path in sorted(scope_paths(issue.body, root))]
+    for path, changes in propose.in_flight(root, "").items():
+        for change in changes:
+            evidence.append(PathEvidence(path, front_door_issue(repository, change), f"run {change}"))
+    return ConcurrentContext(evidence, list(notes))
+
+
+def concurrent_overlaps(issue: Issue, root: Path, context: ConcurrentContext) -> list[PathEvidence]:
+    """Exact token intersections, excluding all evidence attributed to self."""
+    paths = scope_paths(issue.body, root)
+    return sorted((entry for entry in context.evidence
+                   if entry.issue != issue.number and entry.path in paths),
+                  key=lambda entry: (entry.path, entry.issue or 0, entry.source))
+
+
+def unattributed_run_findings(issue: Issue, root: Path, context: ConcurrentContext) -> list[Finding]:
+    """An unknown run cannot receive a dependency exemption or a guessed blocker."""
+    return sorted((Finding(
+        "overlap", issue.number, f"{entry.path} overlaps {entry.source} (source issue unknown).",
+        "Identify this run's source issue before adding a dependency.", path=entry.path,
+    ) for entry in concurrent_overlaps(issue, root, context) if entry.issue is None),
+        key=Finding.sort_key)
 
 
 def lint_dependencies(issue: int, body: str, repository: str, cache: IssueCache) -> list[Finding]:
