@@ -24,7 +24,7 @@
 
 ## 6. Limitations
 
-- [ ] 6.1 Reconcile `KNOWN-LIMITATIONS.md` with the preceding documentation and the design's fix/remaining-gap map. Remove only demonstrated fixes, split partially fixed bullets, retain unresolved gaps, and add the five required ledger limitations with issue #17 and #34 links. Do not infer a crash-boundary fix from consumed-ID tracking. Keep this session below 180 changed lines. Covers `specloop-documentation/current-limitations/fixed-limitations-leave-the-open-list`, `specloop-documentation/current-limitations/remaining-ledger-gaps-are-explicit`.
+- [x] 6.1 Reconcile `KNOWN-LIMITATIONS.md` with the preceding documentation and the design's fix/remaining-gap map. Remove only demonstrated fixes, split partially fixed bullets, retain unresolved gaps, and add the five required ledger limitations with issue #17 and #34 links. Do not infer a crash-boundary fix from consumed-ID tracking. Keep this session below 180 changed lines. Covers `specloop-documentation/current-limitations/fixed-limitations-leave-the-open-list`, `specloop-documentation/current-limitations/remaining-ledger-gaps-are-explicit`.
 
 ## 7. Documentation acceptance
 
