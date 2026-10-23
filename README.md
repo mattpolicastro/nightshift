@@ -223,6 +223,26 @@ parallel tests with `uv run pytest -n 4` and scenario reporting under xdist
 ([PR #54](https://github.com/mattpolicastro/nightshift/pull/54)); `uv run pytest`
 remains the implementation acceptance command.
 
+### Build timing report
+
+Read-only build timing and recorded profile outcomes come from local
+`~/.specloop/runs/*/events.jsonl` history; no external services are required:
+
+```sh
+uv run python -m nightshift.timings
+uv run python -m nightshift.timings --since 2026-10-23 --change NAME --json
+```
+
+`--since YYYY-MM-DD` includes whole runs first admitted on or after midnight
+UTC on that date; runs without admission are excluded. `--change NAME`
+matches an exact change name and combines with `--since`. `--json` emits
+the same measurements as JSON instead of the text table.
+
+These are local-history estimates: missing pairs are dropped, evidence/slot
+waits are endpoint proxies, and intervals may overlap. Recorded FAIL rates
+can differ from harness decisions; finish is not merge. The six phases need
+not sum to build hours. Unreadable runs are reported and skipped.
+
 ### Prepare dependencies before verification
 
 Put optional `[[prepare]]` steps in the **specloop manifest**, not in
