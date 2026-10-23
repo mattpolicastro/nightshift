@@ -1,6 +1,6 @@
 ## 1. Isolate infrastructure retry allowances
 
-- [ ] 1.1 In `specloop/loop.py`, introduce loop-local event-backed task/profile retry accounting, preserve the legacy `ts.infra` display/pause scalar and reset semantics, and add focused restart, independent-task and cross-role tests in new `tests/test_provider_retry_accounting.py`. Keep state schemas and all existing tests unchanged. Limit this session to the counter concern (about 300 changed lines maximum). Cover `provider-fallback/task-and-profile-retry-allowance/fallback-has-its-own-allowance`, `provider-fallback/task-and-profile-retry-allowance/tasks-and-roles-preserve-counter-identity`, and `provider-fallback/task-and-profile-retry-allowance/restart-retains-partial-allowance`.
+- [x] 1.1 In `specloop/loop.py`, introduce loop-local event-backed task/profile retry accounting, preserve the legacy `ts.infra` display/pause scalar and reset semantics, and add focused restart, independent-task and cross-role tests in new `tests/test_provider_retry_accounting.py`. Keep state schemas and all existing tests unchanged. Limit this session to the counter concern (about 300 changed lines maximum). Cover `provider-fallback/task-and-profile-retry-allowance/fallback-has-its-own-allowance`, `provider-fallback/task-and-profile-retry-allowance/tasks-and-roles-preserve-counter-identity`, and `provider-fallback/task-and-profile-retry-allowance/restart-retains-partial-allowance`.
 
 ## 2. Continue roles after provider unavailability
 
