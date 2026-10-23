@@ -155,6 +155,37 @@ def test_unreadable_target_is_cached_incomplete_context(issue_reader):
     assert calls == [("org/repo", 76)]
 
 
+@pytest.mark.scenario("issue-arming/dependency-completion-lint/unknown-blocker-state-stays-visible")
+def test_timeout_finding_identifies_issue_and_actual_read_budget(issue_body, issue_reader):
+    cache, calls = issue_reader({
+        ("org/repo", 76): issue_record(76, body=issue_body() + "blocked-by: #12"),
+        ("org/repo", 12): subprocess.TimeoutExpired(["gh"], 30),
+    })
+    findings = arm.lint_issue("org/repo", 76, cache)
+    assert [(f.code, f.issue, f.related_issue, f.message) for f in findings] == [
+        ("incomplete-context", 76, 12, "Issue #12 lookup timed out after 30 seconds."),
+    ]
+    assert calls == [("org/repo", 76), ("org/repo", 12)]
+
+
+def test_findings_sort_by_path_before_related_issue_and_message():
+    # Reverse the later tie breakers so they cannot disguise a lost path key.
+    first = arm.Finding("overlap", 76, "Z evidence", "Add a blocker.",
+                        path="docs/arming.md", related_issue=9)
+    last = arm.Finding("overlap", 76, "A evidence", "Add a blocker.",
+                       path="tests/test_arm.py", related_issue=1)
+    assert sorted([last, first], key=arm.Finding.sort_key) == [first, last]
+
+
+@pytest.mark.parametrize("missing_path", [None, ""])
+def test_findings_sort_missing_paths_before_named_paths(missing_path):
+    unlocated = arm.Finding("incomplete-context", 76, "Z lookup", "Retry.",
+                            path=missing_path, related_issue=9)
+    located = arm.Finding("incomplete-context", 76, "A lookup", "Retry.",
+                          path="docs/arming.md", related_issue=1)
+    assert sorted([located, unlocated], key=arm.Finding.sort_key) == [unlocated, located]
+
+
 @pytest.mark.scenario("issue-arming/issue-body-lint/missing-sections-accumulate")
 @pytest.mark.parametrize("body,missing,other", [
     ("", set(arm.REQUIRED_SECTIONS), []),
@@ -326,6 +357,19 @@ def test_setext_heading_after_list_context_ends(issue_body, separator):
     done = "\n- Check behavior\n  with a continuation\n" + separator
     body = issue_body(done + "Notes\n---\n`test_outside` visually inspect")
     assert [(f.code, f.line) for f in arm.lint_body(76, body)] == [("named-test", 3)]
+
+
+@pytest.mark.scenario("issue-arming/issue-body-lint/human-checks-stay-outside-done")
+@pytest.mark.scenario("issue-arming/issue-body-lint/named-tests-are-required")
+@pytest.mark.parametrize("rule", ["***", "* * *", "___", "_ _ _", "- - -"])
+def test_three_marker_rule_ends_list_context_before_setext_heading(issue_body, rule):
+    # A thematic break ends the list, allowing the next paragraph to be a
+    # Setext heading. Its test name and manual check are outside the section.
+    done = f"\n- Check behavior\n{rule}\n`test_outside` visually inspect\n---"
+    body = issue_body(done)
+    assert [(f.code, f.line) for f in arm.lint_body(76, body)] == [("named-test", 3)]
+    section = next(s for s in arm.parse_sections(body) if s.name == "Definition of done")
+    assert section.text == f" \n- Check behavior\n{rule}"
 
 
 @pytest.mark.scenario("issue-arming/issue-body-lint/named-tests-are-required")
