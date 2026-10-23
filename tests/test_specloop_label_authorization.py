@@ -13,7 +13,7 @@ from test_engine_routing import DraftGh
 from test_specloop_approval import ApprovalGh, Commands, poll as poll_admission
 from test_specloop_intake import BlockedDraftGh, Commands as DraftCommands, poll as poll_draft, repo
 from test_specloop_intake import idea_file
-from test_specloop_spec_revision import RevisionGh, Commands as RevisionCommands, HEAD, REVISED, TIP_DATE
+from test_specloop_spec_revision import RevisionGh, Commands as RevisionCommands, HEAD, REVISED, TIP_DATE, seed_consumed
 from test_specloop_build_revision import BuildCommands
 
 
@@ -386,13 +386,14 @@ def assert_no_revision_reads(gh):
 
 @pytest.mark.scenario("pr-revision/revision-actor-gate/trusted-label-does-not-trust-feedback")
 @pytest.mark.parametrize("stage", ["spec-revision", "build-revision"])
-def test_revision_label_trust_keeps_feedback_author_and_timestamp_filters(repo, tmp_path, stage):
+def test_revision_label_trust_keeps_feedback_author_and_consumption_filters(repo, tmp_path, stage):
     gh, commands = revision_case(stage)
     # Exercise each GitHub feedback shape with trusted, untrusted, absent
-    # association and stale entries. A trusted label cannot promote any text.
+    # association and consumed entries. A trusted label cannot promote any text.
+    seed_consumed(tmp_path, [f"{kind}:{i}" for kind in ("conversation", "review", "inline") for i in (4, 5)])
     for target, association, timestamp, author in (
-        (gh.feedback, "authorAssociation", "createdAt", "author"),
-        (gh.reviews, "authorAssociation", "submittedAt", "author"),
+        (gh.feedback, "author_association", "created_at", "user"),
+        (gh.reviews, "author_association", "submitted_at", "user"),
         (gh.inline, "author_association", "created_at", "user"),
     ):
         target.clear()
@@ -400,11 +401,11 @@ def test_revision_label_trust_keeps_feedback_author_and_timestamp_filters(repo, 
             ("MEMBER", "2026-10-20T13:00:00Z", "Keep the eligible instruction."),
             ("NONE", "2026-10-20T14:00:00Z", "Ignore this outsider instruction."),
             (None, "2026-10-20T14:00:00Z", "Ignore missing association."),
-            ("OWNER", TIP_DATE, "Ignore instruction at the branch tip."),
-            ("COLLABORATOR", "2026-10-19T12:00:00Z", "Ignore older instruction."),
+            ("OWNER", TIP_DATE, "Ignore consumed instruction at the branch tip."),
+            ("COLLABORATOR", "2026-10-19T12:00:00Z", "Ignore consumed older instruction."),
             ("MEMBER", "2026-10-20T14:00:00Z", queue.SELF_COMMENT_PREFIX + " Ignore self comment."),
         ):
-            item = {author: {"login": "reviewer"}, timestamp: date, "body": body}
+            item = {"id": len(target) + 1, author: {"login": "reviewer"}, timestamp: date, "body": body}
             if trust is not None:
                 item[association] = trust
             if target is gh.inline:
@@ -435,7 +436,7 @@ def test_revision_label_trust_keeps_feedback_author_and_timestamp_filters(repo, 
 @pytest.mark.parametrize("stage", ["spec-revision", "build-revision"])
 def test_authorized_empty_revision_refuses_without_status_or_dispatch(repo, tmp_path, stage):
     gh, commands = revision_case(stage)
-    gh.feedback[1]["createdAt"] = TIP_DATE
+    seed_consumed(tmp_path, ("conversation:101", "conversation:102"))
 
     def forbidden(*args, **kwargs):
         pytest.fail("empty revision must not read status, dispatch, or invoke git")
@@ -447,7 +448,7 @@ def test_authorized_empty_revision_refuses_without_status_or_dispatch(repo, tmp_
     assert result == {"outcome": "empty"}
     assert gh.head == HEAD and "agent:revise" not in gh.labels
     comment, = gh.comments
-    assert "nothing to revise" in comment["body"] and "since the branch tip" in comment["body"]
+    assert "nothing to revise" in comment["body"] and "no unconsumed review feedback" in comment["body"]
     assert "label-authorization" not in comment["body"]
     receipt = json.loads((tmp_path / "revisions/owner__sample/8.json").read_text())
     assert receipt["feedback"] == [] and receipt["delivered"]
@@ -529,7 +530,7 @@ def test_label_from_collaborator_is_acted_on(repo, tmp_path, armed, outcome, rel
         gh, commands = revision_case(armed)
         gh.feedback = []
         gh.inline = [
-            {"user": {"login": "reviewer"}, "author_association": "COLLABORATOR",
+            {"id": line, "user": {"login": "reviewer"}, "author_association": "COLLABORATOR",
              "path": path, "line": line, "body": body, "created_at": "2026-10-20T13:00:00Z"}
             for path, line, body in [("src/gate.py", 12, "Handle empty input."),
                                      ("tests/test_gate.py", 42, "Cover the empty case.")]
@@ -595,7 +596,7 @@ def test_label_from_collaborator_is_acted_on(repo, tmp_path, armed, outcome, rel
     assert receipt["delivered"] is True
     assert not any("label-authorization" in c["body"] for c in gh.comments)
     assert len(membership.calls) == {"OWNER": 1, "COLLABORATOR": 2, "MEMBER": 3}[relationship]
-    assert sum(c[0] == "api" and c[1].endswith("/events") for c in gh.calls) == 1
+    assert sum(c[0] == "api" and c[1].endswith("/events") for c in gh.calls) == (2 if revision else 1)
 
 
 @pytest.mark.scenario("issue-intake/latest-label-actor-authorization/trusted-actor-accepted")

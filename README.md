@@ -111,11 +111,36 @@ the code and complete those checks before merging; merging closes the linked
 issue. No second PR is needed for the build.
 
 To request changes at either stage, leave PR conversation, review or inline
-comments, then apply `agent:revise` to the PR. Only feedback newer than the
-branch tip is used; inline feedback retains its file and line. Before admission,
-the spec gets another commit; after admission, each feedback block becomes a
-task in `## N. Review round K`. The label is removed after success. Empty
-feedback is explained and the label removed without running an agent.
+comments, then have a trusted actor apply `agent:revise` to the PR. The daemon
+selects trusted, actionable feedback by GitHub ID and tracks consumed IDs per
+repository and PR, separately for conversation comments, reviews and inline
+comments. Eligibility does not depend on the branch tip's time; inline feedback
+retains its file and line. Before admission, the spec gets another commit;
+after admission, each feedback block becomes a task in `## N. Review round K`.
+
+Each round saves its selected IDs and feedback before starting. Those IDs are
+consumed after a successful spec push or a successful build revision result
+with a landed commit, before notifications and without waiting for build
+publication. Comments posted during a revision remain available for the next
+authorized request, even if they predate the newly published tip. Reapplying
+`agent:revise` does not replay a successful round, including before publication
+or after a daemon restart. Editing a consumed comment or review does not make
+it eligible again: post a new comment, which has a new ID, to request further
+changes. Edits after selection also do not alter that round's saved feedback.
+The corresponding label application is removed after success. If no eligible
+unconsumed feedback remains, the daemon explains this and removes the label
+without running an agent.
+
+Existing revision receipts without consumed IDs are initialized automatically
+after authorization. Trusted IDs created at or before the receipt's saved time
+are treated as consumed, using comment creation times and review submission
+times, not edit times; this includes blank and daemon-prefixed trusted records.
+If no saved time was recorded, the current PR head's committer time supplies
+that cutoff once. This compatibility baseline approximates previously handled
+feedback; it is saved before further processing and is never recomputed on a
+tip advance or restart. Later IDs remain eligible. No manual initialization is
+needed. A PR with no revision receipt starts with no consumed IDs, so eligible
+historical feedback is available too.
 
 ### Enroll a repository
 
