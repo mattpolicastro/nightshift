@@ -51,6 +51,7 @@ test('specloop-interface/isolated-run-status-failures/error-rows-remain-compatib
   assert.deepEqual(snapshot.runs[1], {
     change: errorRun.change, status: 'paused', tasks: { done: 0, total: 0 }, pr: '',
     context: errorRun.context,
+    pause: { auto_resumes_remaining: 0 },
   });
   assert.ok(!JSON.stringify(snapshot).includes('/private/unreadable-run'));
   for (const verb of ['resume', 'accept', 'publish', 'finish', 'abort'] as const) {
