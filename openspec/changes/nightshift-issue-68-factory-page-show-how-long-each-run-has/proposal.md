@@ -19,6 +19,9 @@ color after the three-hour stall-alert threshold.
 - Add Python, server, model, and rendered-view tests in new files. Preserve
   existing assertions; only necessary fixture/expected-data additions for the
   additive contract are permitted, explained in the implementation PR.
+  Specifically, add `pause: { auto_resumes_remaining: 0 }` to the existing
+  synthetic error-row expected result in `plugins/nightshift/tests/factory.test.ts`,
+  retaining its exact-equality assertion and all existing checks.
 - Implementation production scope is `specloop/cli.py` (JSON status only),
   `plugins/nightshift/shared/factory.ts`, `plugins/nightshift/server/factory.ts`
   (projection only), `plugins/nightshift/client/factory-model.ts`, and

@@ -111,7 +111,19 @@ even when that pause initially had automatic recovery available.
    exact-equality expectations necessarily need the additive `since` field;
    treat only these expected-data additions and deterministic timestamp fixture
    setup as the user's permitted fixture changes (including inline expected
-   dictionaries in `tests/test_specloop_status_json.py`). Do not strip the new
+   dictionaries in `tests/test_specloop_status_json.py`). The same permitted
+   additive expected-data exception applies to the existing synthetic error-row
+   test in `plugins/nightshift/tests/factory.test.ts`: its `errorRun` fixture
+   already supplies `auto_resumes_remaining: 0`, so add exactly
+   `pause: { auto_resumes_remaining: 0 }` to the expected row passed to
+   `assert.deepEqual(snapshot.runs[1], ...)`. Keep that exact-equality assertion,
+   every existing expected property, and the surrounding redaction, action
+   refusal, ordering, and command-call checks. Leave the input fixture unchanged;
+   it intentionally has no `since`, so the projected pause must not invent one.
+   This expectation migration lands with the projection in task 2.1; all new
+   server test cases remain in `factory-pause-projection.test.ts`. Explain in
+   the implementation PR that the newly retained display field requires this
+   expected-data addition without weakening the assertion. Do not strip the new
    field from actual output, switch equality to subset comparisons, skip tests,
    or relax validation. Explain fixture changes in the implementation PR. All
    new test cases, including server coverage, belong in new files. Completion
