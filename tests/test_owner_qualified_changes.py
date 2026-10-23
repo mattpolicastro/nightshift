@@ -190,6 +190,7 @@ def legacy_case(template):
     saved = {"repo": pipeline.repo.name, "issue": 7, "change": LEGACY,
              "title": "Add a gate", "idea": "Original idea", "job": "saved-job",
              "result": {"outcome": "drafted", "branch": f"spec/{LEGACY}", "commit": HEAD}}
+    (path.parent / "7.jobs" / saved["job"]).mkdir(parents=True)
     return pipeline, path, saved
 
 
@@ -218,7 +219,7 @@ def test_legacy_receipt_survives_title_edits(legacy_case, monkeypatch, pending_j
             assert receipt_path == path and receipt == saved
             return next(results)
 
-        monkeypatch.setattr(intake.specloop_job, "collect", collect)
+        monkeypatch.setattr(intake.specloop_job, "_collect_locked", collect)
     intake._save(path, saved)
     pipeline.issues[7]["title"] = "An edited title"
     if pending_job:

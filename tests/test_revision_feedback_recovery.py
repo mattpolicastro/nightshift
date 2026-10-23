@@ -95,7 +95,7 @@ def test_legacy_saved_work_finishes_before_exact_snapshot(
             assert "result" not in read(tmp_path)
             assert not dispatches(commands) and gh.comments[0]["body"] == marker
     if recovery == "paused":
-        collect = specloop_job.collect
+        collect = specloop_job._collect_locked
         pause = tmp_path / "pause"
 
         def collect_then_pause(*args):
@@ -104,7 +104,7 @@ def test_legacy_saved_work_finishes_before_exact_snapshot(
             return result
 
         with monkeypatch.context() as patch:
-            patch.setattr(specloop_job, "collect", collect_then_pause)
+            patch.setattr(specloop_job, "_collect_locked", collect_then_pause)
             patch.setattr(daemon, "STATE_DIR", tmp_path)
             patch.setattr(daemon, "PAUSE_FILE", pause)
             patch.setattr(daemon.subprocess, "run", commands)
@@ -301,7 +301,7 @@ def test_selected_job_survives_pause_stop_and_reauthorization(stage_setup, tmp_p
         specloop_job.save(directory / "stop.json", {"state": control})
     specloop_job.finalize(directory, {"result": commands.result})
     if control == "pause":
-        collect = specloop_job.collect
+        collect = specloop_job._collect_locked
         pause = tmp_path / "pause"
 
         def collect_then_pause(*args):
@@ -310,7 +310,7 @@ def test_selected_job_survives_pause_stop_and_reauthorization(stage_setup, tmp_p
             return result
 
         with monkeypatch.context() as patch:
-            patch.setattr(specloop_job, "collect", collect_then_pause)
+            patch.setattr(specloop_job, "_collect_locked", collect_then_pause)
             patch.setattr(daemon, "STATE_DIR", tmp_path)
             patch.setattr(daemon, "PAUSE_FILE", pause)
             patch.setattr(daemon.subprocess, "run", commands)

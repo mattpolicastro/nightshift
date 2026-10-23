@@ -578,28 +578,34 @@ def collect(path: Path, receipt: dict) -> dict | None:
     reap()
     directory = path.parent / f"{path.stem}.jobs" / receipt["job"]
     with control_lock(directory):
-        if _read_stop(directory) is not None:
+        return _collect_locked(path, receipt)
+
+
+def _collect_locked(path: Path, receipt: dict) -> dict | None:
+    """Collect with the caller already holding the attempt control lock."""
+    directory = path.parent / f"{path.stem}.jobs" / receipt["job"]
+    if _read_stop(directory) is not None:
+        return None
+    with (directory / "lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
             return None
-        with (directory / "lock").open("a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return None
-            result_path = directory / "result.json"
-            outcome = (json.loads(result_path.read_text()) if result_path.exists()
-                       else {"error": f"specloop job exited without a result; see {directory / 'log'}"})
-        if "error" in outcome:
-            receipt.pop("job")
-            save(path, receipt)
-            raise specloop_client.SpecloopError(outcome["error"])
-        result = outcome["result"]
-        # Persist acceptance before returning to intake, whose cached result
-        # bypasses collect on delivery retries. Stop must respect that interval.
-        if not (directory / "collected.json").exists():
-            save(directory / "collected.json", {
-                "collected_at": datetime.now(timezone.utc).isoformat(),
-            })
-        return result
+        result_path = directory / "result.json"
+        outcome = (json.loads(result_path.read_text()) if result_path.exists()
+                   else {"error": f"specloop job exited without a result; see {directory / 'log'}"})
+    if "error" in outcome:
+        receipt.pop("job")
+        save(path, receipt)
+        raise specloop_client.SpecloopError(outcome["error"])
+    result = outcome["result"]
+    # Persist acceptance before returning to intake, whose cached result
+    # bypasses collect on delivery retries. Stop must respect that interval.
+    if not (directory / "collected.json").exists():
+        save(directory / "collected.json", {
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+        })
+    return result
 
 
 def main() -> None:

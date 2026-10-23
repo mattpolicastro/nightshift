@@ -61,7 +61,7 @@ def test_denial_precedes_feedback_and_receipt_writes(stage_setup, tmp_path, monk
 
     monkeypatch.setattr(queue, "_pr_feedback_records", forbidden)
     monkeypatch.setattr(intake, "_save", forbidden)
-    monkeypatch.setattr(specloop_job, "collect", forbidden)
+    monkeypatch.setattr(specloop_job, "_collect_locked", forbidden)
     for _ in range(2):
         assert intake.revise_pending(repo, queue.Labels(), tmp_path, runner=gh,
                                      specloop_runner=forbidden, git_runner=forbidden,
@@ -355,10 +355,11 @@ def test_comments_during_revision_feed_the_next_round(stage_setup, tmp_path, mon
                 else saved["feedback"][0] in payload)
         jobs.append(args)
         receipt["job"] = "pending"
+        (path.parent / f"{path.stem}.jobs" / receipt["job"]).mkdir(parents=True, exist_ok=True)
         specloop_job.save(path, receipt)
 
     monkeypatch.setattr(specloop_job, "start", start)
-    monkeypatch.setattr(specloop_job, "collect", lambda *args: commands.result if ready else None)
+    monkeypatch.setattr(specloop_job, "_collect_locked", lambda *args: commands.result if ready else None)
 
     def tick():
         return intake.revise_pending(repo, queue.Labels(), tmp_path, runner=github,

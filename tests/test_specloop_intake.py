@@ -390,6 +390,7 @@ def test_running_draft_is_collected_and_delivered_after_blocker_reopens(
         assert args[args.index("--branch") + 1] == BRANCH
         starts.append(args)
         receipt["job"] = "running-draft-job"
+        (path.parent / "7.jobs" / receipt["job"]).mkdir(parents=True)
         specloop_intake.specloop_job.save(receipt_path, receipt)
 
     def collect(receipt_path, receipt):
@@ -402,7 +403,7 @@ def test_running_draft_is_collected_and_delivered_after_blocker_reopens(
         pytest.fail("background drafting must not launch a real process or report an error")
 
     monkeypatch.setattr(specloop_intake.specloop_job, "start", start)
-    monkeypatch.setattr(specloop_intake.specloop_job, "collect", collect)
+    monkeypatch.setattr(specloop_intake.specloop_job, "_collect_locked", collect)
 
     def background_poll():
         return specloop_intake.propose_pending(

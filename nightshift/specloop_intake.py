@@ -6,11 +6,13 @@ without spending another drafting session or duplicating a PR or comment.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import re
 import subprocess
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -542,7 +544,15 @@ def _initialize_revision_feedback(path: Path, receipt: dict | None, repo: str,
                "feedback_migration": {"source": source,
                                       "cutoff": cutoff.isoformat().replace("+00:00", "Z")}}
     _validate_revision_feedback(updated)
-    _save(path, updated)
+    if "job" in receipt:
+        with _job_receipt_lock(path, receipt) as current:
+            # Remote inputs were fetched without locks. Any intervening change
+            # invalidates this migration snapshot, including a released job.
+            if current != receipt:
+                raise _ReceiptChanged
+            _save(path, updated)
+    else:
+        _save(path, updated)
     return updated
 
 
@@ -652,8 +662,11 @@ def revise_pending(
         directory = repo.name.replace("/", "__")
         path = state_dir / "revisions" / directory / f"{number}.json"
         receipt = json.loads(path.read_text()) if path.exists() else None
-        receipt = _initialize_revision_feedback(
-            path, receipt, repo.name, number, pr["headRefOid"], runner=gh)
+        try:
+            receipt = _initialize_revision_feedback(
+                path, receipt, repo.name, number, pr["headRefOid"], runner=gh)
+        except _ReceiptChanged:
+            return _PENDING
         # A newer authorized event cannot replace a running job's snapshot.
         if receipt and not _collect(path, receipt, receipt.get("command", "propose")):
             return _PENDING
@@ -1110,21 +1123,57 @@ def _start(path: Path, receipt: dict, args: list[str], *, runner, launcher,
     return True
 
 
+class _ReceiptChanged(Exception):
+    """Defer a cached job-bearing receipt invalidated by another writer."""
+
+
+@contextmanager
+def _job_receipt_lock(path: Path, receipt: dict):
+    """Refresh under job control, then the release lock if it already exists."""
+    directory = path.parent / f"{path.stem}.jobs" / receipt["job"]
+    with specloop_job.control_lock(directory):
+        try:
+            release = path.with_suffix(".release.lock").open("r")
+        except FileNotFoundError:
+            release = None
+        try:
+            if release is not None:
+                fcntl.flock(release, fcntl.LOCK_EX)
+            current = json.loads(path.read_text())
+            if not isinstance(current, dict):
+                raise ValueError("job receipt must be an object")
+            if current.get("job") != receipt["job"]:
+                raise _ReceiptChanged
+            yield current
+        finally:
+            if release is not None:
+                release.close()
+
+
 def _collect(path: Path, receipt: dict, command: str) -> bool:
-    if "result" in receipt or "job" not in receipt:
+    if "job" not in receipt:
         return True
-    result = specloop_job.collect(path, receipt)
-    if result is None:
-        return False
+    specloop_job.reap()
     try:
-        _validate(result, command, receipt)
-    except specloop_client.SpecloopError:
-        receipt.pop("job")
-        _save(path, receipt)
-        raise
-    receipt["result"] = result
-    _save(path, receipt)
-    return True
+        with _job_receipt_lock(path, receipt) as current:
+            receipt.clear()
+            receipt.update(current)
+            if "result" in receipt:
+                return True
+            result = specloop_job._collect_locked(path, receipt)
+            if result is None:
+                return False
+            try:
+                _validate(result, command, receipt)
+            except specloop_client.SpecloopError:
+                receipt.pop("job")
+                _save(path, receipt)
+                raise
+            receipt["result"] = result
+            _save(path, receipt)
+            return True
+    except _ReceiptChanged:
+        return False
 
 
 def _comment(repo: str, number: int, change: str, body: str, *, runner,

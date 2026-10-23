@@ -206,6 +206,124 @@ def release_snapshot(root):
     return {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in root.rglob("*") if p.is_file()}
 
 
+@pytest.mark.real_trust
+@pytest.mark.scenario("background-job-control/release-collection-coordination/release-wins-stale-collection")
+@pytest.mark.scenario("background-job-control/release-collection-coordination/collection-observes-stop-first")
+@pytest.mark.scenario("pr-revision/feedback-state-compatibility/legacy-recovery-preserves-saved-work")
+@pytest.mark.scenario("pr-revision/feedback-state-compatibility/legacy-saved-time-initializes-consumption")
+@pytest.mark.scenario("pr-revision/feedback-state-compatibility/legacy-missing-time-uses-tip-once")
+@pytest.mark.parametrize("release_first,legacy", [
+    (first, mode) for first in (False, True) for mode in (None, "saved_at", "tip")
+] + [("remote", mode) for mode in ("saved_at", "tip")])
+def test_release_coordinates_cached_receipt(stopped_job, monkeypatch, release_first, legacy):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, current_thread
+    from nightshift import specloop_intake as intake
+    from test_revision_feedback_state import CUTOFF, LegacyGh, legacy_receipt
+
+    root, directory, path = stopped_job
+    if legacy:
+        saved = legacy_receipt(path, job=directory.name,
+                               **({"saved_at": CUTOFF} if legacy == "saved_at" else {}))
+        saved.pop("result")
+        jobs.save(path, saved)
+    cached = json.loads(path.read_text())
+    reached, proceed, contending = Event(), Event(), Event()
+    owner = []
+    save, flock, collect = jobs.save, fcntl.flock, jobs._collect_locked
+
+    def barrier():
+        reached.set()
+        assert proceed.wait(5), "first writer was not released"
+
+    def gated_save(target, data):
+        if target == path and current_thread() == owner[0] and release_first != "remote":
+            barrier()
+        save(target, data)
+
+    def gated_collect(*args):
+        if not legacy and not release_first:
+            barrier()
+        return collect(*args)
+
+    def observed_flock(fd, operation):
+        if owner and current_thread() != owner[0] and operation == fcntl.LOCK_EX:
+            contending.set()
+        return flock(fd, operation)
+
+    def remote(args):
+        if release_first == "remote" and not reached.is_set():
+            barrier()
+        # Migration must not hold either lock across a remote read.
+        for lock_path in (() if release_first else (
+                directory / "control.lock", path.with_suffix(".release.lock"))):
+            with lock_path.open("r") as probe:
+                flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return gh(args)
+
+    gh = LegacyGh()
+    # Also exercise polling after an earlier failed release left this lock.
+    path.with_suffix(".release.lock").touch()
+
+    def poll():
+        receipt = cached
+        if legacy:
+            try:
+                receipt = intake._initialize_revision_feedback(
+                    path, receipt, "owner/sample", 8, "current-head", runner=remote)
+            except intake._ReceiptChanged:
+                return False
+        return intake._collect(path, receipt, "propose")
+
+    release = lambda: jobs.release_job(root, directory.name)
+    first, second = (release, poll) if release_first is True else (poll, release)
+
+    def run_first():
+        owner.append(current_thread())
+        return first()
+
+    monkeypatch.setattr(jobs, "save", gated_save)
+    monkeypatch.setattr(intake, "_save", gated_save)
+    monkeypatch.setattr(jobs, "_collect_locked", gated_collect)
+    monkeypatch.setattr(fcntl, "flock", observed_flock)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        winner = pool.submit(run_first)
+        try:
+            assert reached.wait(5)
+            with (directory / "control.lock").open("r") as probe:
+                if release_first == "remote":
+                    flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    with pytest.raises(BlockingIOError):
+                        flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            loser = pool.submit(second)
+            if release_first == "remote":
+                assert loser.result(timeout=5) == "released"
+                newer = json.loads(path.read_text())
+                newer["future"] = {"newer": True}
+                save(path, newer)
+            else:
+                assert contending.wait(5)
+                assert not loser.done()
+        finally:
+            proceed.set()
+        results = winner.result(timeout=5), loser.result(timeout=5)
+    assert results == (("released", False) if release_first is True else (False, "released"))
+    durable = json.loads(path.read_text())
+    expected = {key: value for key, value in cached.items() if key != "job"}
+    if release_first == "remote":
+        expected["future"] = {"newer": True}
+    if legacy and not release_first:
+        assert durable["consumed_feedback_ids"] == sorted(
+            f"{kind}:{i}" for kind in ("conversation", "review", "inline") for i in (1, 2))
+        assert durable["feedback_migration"]["cutoff"] == CUTOFF
+        expected.update({key: durable[key] for key in (
+            "feedback_state_version", "consumed_feedback_ids", "legacy_snapshot", "feedback_migration")})
+    assert durable == expected
+    assert not (directory / "collected.json").exists()
+    assert json.loads((directory / "stop.json").read_text())["state"] == "stopped"
+
+
 @pytest.mark.scenario("background-job-control/explicit-stopped-job-release/release-each-tracked-stage")
 @pytest.mark.scenario("background-job-control/explicit-stopped-job-release/release-while-paused")
 @pytest.mark.parametrize("paused", [False, True])

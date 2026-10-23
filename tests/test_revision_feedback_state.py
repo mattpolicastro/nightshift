@@ -27,8 +27,11 @@ def snapshot(path, previous=None, items=(), **fields):
 
 
 @pytest.mark.scenario(COMPAT)
-def test_replacements_preserve_cumulative_ids_and_unknown_fields(tmp_path):
+@pytest.mark.parametrize("release_lock", [False, True])
+def test_replacements_preserve_cumulative_ids_and_unknown_fields(tmp_path, release_lock):
     path = tmp_path / "8.json"
+    if release_lock:
+        path.with_suffix(".release.lock").touch()
     items = [queue.FeedbackItem("review:9", "Fix λ\n\nKeep 🦉")]
     first = snapshot(path, items=items, future={"nested": [1, 2]})
     intake._acknowledge_revision_feedback(path, first)
@@ -208,6 +211,7 @@ def legacy_receipt(path, **fields):
     receipt = {"change": "example", "head": "old-head", "event": 7, "round_id": "7",
                "feedback": ["Original saved payload"], "job": "saved-job",
                "result": {"outcome": "drafted"}, "future": {"nested": [1]}, **fields}
+    (path.parent / f"{path.stem}.jobs" / receipt["job"]).mkdir(parents=True, exist_ok=True)
     intake._save(path, receipt)
     return receipt
 
@@ -271,10 +275,14 @@ def test_present_invalid_saved_time_never_falls_back(tmp_path, field, bad):
 @pytest.mark.real_trust
 @pytest.mark.scenario(FAILURE)
 @pytest.mark.parametrize("endpoint", ENDPOINTS)
+@pytest.mark.parametrize("release_lock", [False, True])
 @pytest.mark.parametrize("failure", ["page", "shape", "missing_time", "naive_time", "invalid_time",
                                     "missing_id", "bool_id", "invalid_id", "commit", "commit_time", "save"])
-def test_initialization_failure_preserves_receipt_and_retries(tmp_path, monkeypatch, endpoint, failure):
+def test_initialization_failure_preserves_receipt_and_retries(tmp_path, monkeypatch, endpoint, failure,
+                                                            release_lock):
     path, gh = tmp_path / "8.json", LegacyGh()
+    if release_lock:
+        path.with_suffix(".release.lock").touch()
     receipt = legacy_receipt(path)
     before = path.read_bytes()
     if failure in ("page", "shape"):
