@@ -162,6 +162,180 @@ def test_check_keeps_observing_after_fetch_failure(recording, capsys):
     assert "fetch unavailable" in output and "uv unavailable" in output
 
 
+def deployment_snapshot(r):
+    paths = [r.context.cwd, r.destination, r.state]
+    return {p: (p.lstat().st_mode, p.lstat().st_mtime_ns,
+                os.readlink(p) if p.is_symlink() else p.read_bytes() if p.is_file() else None)
+            for root in paths if root.exists() for p in [root, *root.rglob("*")]}
+
+
+@pytest.fixture
+def deployment(plugin_recording, monkeypatch):
+    r = plugin_recording
+    r.effects, r.heads, r.fail, r.busy = [], [], None, False
+    r.replies[CHECK] = STALE
+    r.replies["git pull --ff-only"] = ""
+    r.replies["paseo plugin reload nightshift"] = ""
+    commands = {"git pull --ff-only": "pull", "uv sync --frozen": "sync",
+                "paseo plugin reload nightshift": "reload"}
+    for name, path in (("daemon", "nightshift"), ("supervisor", "specloop")):
+        commands[f"launchctl kickstart -k gui/502/com.mattpolicastro.{path}"] = name
+        r.replies[f"git log -1 --format=%ct HEAD -- {path}/"] = "1704067201"
+    original_runner, original_rename = r.runner, Path.rename
+
+    def rename(path, target):
+        assert r.marker.read_bytes() == b""
+        r.effects.append("backup" if path == r.destination else "swap")
+        return original_rename(path, target)
+
+    def runner(argv, **kwargs):
+        key = " ".join(argv)
+        if key == "git fetch -- origin":
+            r.replies[COUNTS] = "0 1" if r.replies["git rev-parse HEAD"] == "before" else "0 0"
+        if key in {CHECK, r.tree} or key.startswith("git log"):
+            r.heads.append((key, r.replies["git rev-parse HEAD"]))
+        effect = commands.get(key)
+        if effect:
+            r.effects.append(effect)
+            r.replies[key] = (1, "", f"{effect} failed") if effect == r.fail else ""
+            if effect == "pull" and r.fail != effect:
+                r.replies[COUNTS] = "0 0"
+                r.replies["git cat-file blob 0"] = b"post-pull plugin"
+            if effect == "sync" and r.fail != effect:
+                r.replies[CHECK] = ""
+            if effect == "reload":
+                assert r.marker.exists() and (r.destination / "main.ts").read_bytes() == b"post-pull plugin"
+            if effect in {"daemon", "supervisor"}:
+                pid = 102 if effect == "daemon" else 202
+                r.replies[f"/bin/ps -p {pid} -o lstart="] = "Mon Jan  1 00:00:02 2024"
+                if effect == "daemon":
+                    (r.context.daemon_state / "heartbeat.json").write_text(json.dumps({"pid": pid}))
+                else:
+                    r.replies[SERVICE_STATUS] = json.dumps({"version": 1, "supervisor": {
+                        "state": f"running (pid {pid}, last poll 0s ago, driving nothing)"}, "runs": []})
+        return original_runner(argv, **kwargs)
+
+    def run(*args):
+        context = deploy.Context(r.context.cwd, dict(r.context.env), uid=502,
+            daemon_state=r.context.daemon_state, supervisor_state=r.context.supervisor_state,
+            inventory=lambda root: ([], ["busy"] if r.busy else []))
+        return deploy.main(list(args), runner=runner, context=context)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    r.run = run
+    return r
+
+
+@pytest.mark.scenario("deployment-drift/checkout-drift-and-refusal/fetch-reveals-behind-base")
+@pytest.mark.scenario("deployment-drift/ordered-repeatable-application/second-application-is-a-no-op")
+def test_apply_twice_is_a_no_op(deployment, capsys):
+    r = deployment
+    args = ["--apply", "--plugin-dir", str(r.destination)]
+    assert r.run(*args) == 0
+    assert r.effects == ["pull", "sync", "backup", "swap", "reload", "daemon", "supervisor"]
+    assert all(head == "after" for _, head in r.heads)
+    assert (r.destination / "main.ts").read_bytes() == b"post-pull plugin"
+    assert not r.marker.exists() and len(list(r.state.glob("rollback-*"))) == 1
+    assert "Nothing to do." not in capsys.readouterr().out
+    before, calls = deployment_snapshot(r), len(r.calls)
+    r.effects.clear()
+    assert r.run(*args) == 0
+    assert "Nothing to do." in capsys.readouterr().out
+    assert deployment_snapshot(r) == before and r.effects == []
+    assert r.calls[calls:] == ["git rev-parse --show-toplevel", STATUS,
+        "git symbolic-ref --quiet --short HEAD", "git rev-parse --verify @{upstream}",
+        "git config --get branch.main.remote", "git fetch -- origin", COUNTS, STATUS,
+        "git symbolic-ref --quiet --short HEAD", "git rev-parse --verify @{upstream}",
+        "git config --get branch.main.remote", COUNTS, "git rev-parse HEAD", CHECK,
+        r.tree, *[f"git cat-file blob {i}" for i in range(4)],
+        "/bin/ps -p 102 -o lstart=", "git log -1 --format=%ct HEAD -- nightshift/",
+        SERVICE_STATUS, "/bin/ps -p 202 -o lstart=", "git log -1 --format=%ct HEAD -- specloop/"]
+
+
+@pytest.mark.scenario("deployment-drift/ordered-repeatable-application/failure-and-rerun-preserve-completed-work")
+@pytest.mark.parametrize("failure", ["sync", "reload", "daemon"])
+def test_ordered_failure_and_fresh_rerun(deployment, failure, capsys):
+    r = deployment
+    r.fail = failure
+    order = ["pull", "sync", "backup", "swap", "reload", "daemon", "supervisor"]
+    args = ["--apply", "--plugin-dir", str(r.destination)]
+    assert r.run(*args) == 1
+    assert r.effects == order[:order.index(failure) + 1]
+    output = capsys.readouterr().out
+    assert "fast-forward completed" in output and f"{failure} failed" in output
+    if failure != "sync":
+        assert "frozen sync completed" in output and "committed tree installed" in output
+    assert r.marker.exists() == (failure == "reload")
+    installed = deployment_snapshot(r)
+    r.effects.clear()
+    r.fail = None
+    assert r.run(*args) == 0
+    assert r.effects == {"sync": order[1:], "reload": order[4:], "daemon": order[6:]}[failure]
+    assert not r.marker.exists()
+    if failure != "sync":
+        after = deployment_snapshot(r)
+        for path, value in installed.items():
+            if path.is_relative_to(r.destination) or path.name.startswith("rollback-"):
+                assert after[path] == value
+
+
+@pytest.mark.scenario("deployment-drift/guarded-service-restart/fresh-idle-or-forced-restart")
+@pytest.mark.parametrize("skip", ["reload", "plugin"])
+@pytest.mark.parametrize("force", [False, True])
+def test_pending_work_allows_independent_service_repairs(deployment, skip, force, capsys):
+    r = deployment
+    r.busy = True
+    plugin_before = {p: v for p, v in deployment_snapshot(r).items() if p.is_relative_to(r.destination)}
+    args = ["--apply", *(["--force"] if force else [])]
+    if skip == "reload":
+        args += ["--plugin-dir", str(r.destination), "--reload-cmd", ""]
+    assert r.run(*args) == int(skip == "reload" or not force)
+    assert r.effects == ["pull", "sync"] + (["backup", "swap"] if skip == "reload" else []) + (
+        ["daemon"] if force else []) + ["supervisor"]
+    output = capsys.readouterr().out
+    assert ("daemon restart pending" in output) == (not force)
+    assert r.marker.exists() == (skip == "reload")
+    assert "Nothing to do." not in output
+    if skip == "plugin":
+        assert "plugin check skipped" in output
+        assert plugin_before == {p: v for p, v in deployment_snapshot(r).items() if p.is_relative_to(r.destination)}
+    else:
+        assert "reload skipped" in output
+    r.busy = False
+    r.effects.clear()
+    assert r.run("--apply", *(["--plugin-dir", str(r.destination)] if skip == "reload" else [])) == 0
+    assert r.effects == (["reload"] if skip == "reload" else []) + ([] if force else ["daemon"])
+
+
+@pytest.mark.scenario("deployment-drift/standalone-deployment-command/check-reports-independent-results")
+@pytest.mark.parametrize("case", ["current", "drift", "errors", "plugin-error", "pending"])
+def test_check_aggregates_independent_results(plugin_recording, case, capsys):
+    r = plugin_recording
+    if case == "drift":
+        r.replies[COUNTS], r.replies[CHECK] = "0 1", STALE
+        (r.destination / "main.ts").write_text("old")
+    if case in {"errors", "plugin-error"}:
+        r.replies[r.tree] = (1, b"", b"tree unavailable")
+    if case == "errors":
+        r.replies["git fetch -- origin"] = (1, "", "fetch unavailable")
+        r.replies[CHECK] = FileNotFoundError("uv unavailable")
+        r.replies["/bin/ps -p 101 -o lstart="] = (1, "", "daemon unavailable")
+    if case == "pending":
+        r.state.mkdir()
+        r.marker.touch()
+    before = deployment_snapshot(r)
+    assert fresh_plugin_run(r) == int(case != "current")
+    output = capsys.readouterr().out
+    assert all(part in output for part in ("checkout", "environment" if case != "errors" else "uv unavailable",
+                                           "plugin", "daemon", "supervisor: current"))
+    if case in {"errors", "plugin-error"}:
+        assert "tree unavailable" in output
+    if case == "pending":
+        assert "plugin installed but not reloaded" in output
+    assert deployment_snapshot(r) == before
+    assert not any(c.startswith(("git pull", "launchctl", "paseo")) or c == "uv sync --frozen" for c in r.calls)
+
+
 @pytest.fixture(params=[b"main.ts", b"./main.ts"])
 def plugin_recording(recording, request):
     r = recording

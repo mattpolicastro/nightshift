@@ -32,6 +32,7 @@ class Context:
     cwd: Path = field(default_factory=Path.cwd)
     env: dict[str, str] = field(default_factory=lambda: dict(os.environ))
     head: str = ""
+    changed: bool = field(default=False, init=False)
     daemon_state: Path = field(default_factory=lambda: Path.home() / ".nightshift")
     supervisor_state: Path = field(default_factory=lambda: Path.home() / ".specloop")
     uid: int = field(default_factory=os.getuid)
@@ -128,6 +129,7 @@ def environment(context, runner, *, apply):
     stale = probe()
     if stale and apply:
         context.run(runner, ["uv", "sync", "--frozen"], env=env)
+        context.changed = True
         print("environment: frozen sync completed")
         stale = probe()
     return stale
@@ -211,6 +213,7 @@ def reload_plugin(context, runner, destination, marker, command):
             print(shlex.join(command))
         raise
     marker.unlink()
+    context.changed = True
     print("plugin: reload completed")
 
 
@@ -265,6 +268,7 @@ def plugin(context, runner, destination, *, apply, reload_cmd):
         for old in copies[:-3]:
             shutil.rmtree(old)
         print("plugin: committed tree installed")
+        context.changed = True
     if apply and marker.exists():
         reload_plugin(context, runner, destination, marker, reload_cmd)
     return (stale and not apply) or marker.exists()
@@ -347,6 +351,7 @@ def restart(context, runner, service, pid, command):
                     print(f"{service}: replacement confirmed (pid {new_pid})")
                     if errors:
                         raise RuntimeError("; ".join(errors))
+                    context.changed = True
                     return
                 diagnostic = "no new current PID"
             context.sleep(min(1, max(0, deadline - context.monotonic())))
@@ -373,6 +378,7 @@ def service(context, runner, name, label, *, apply, force):
 
 def main(argv=None, *, runner=default_runner, context=None) -> int:
     context = context or Context()
+    context.changed = False
     args = parse_options(argv, context)
     if args.plugin_dir is None:
         print("plugin check skipped: no plugin directory configured")
@@ -392,6 +398,7 @@ def main(argv=None, *, runner=default_runner, context=None) -> int:
             behind = checkout(context, runner, args.base_branch, fetch=False)
             if behind:
                 context.run(runner, ["git", "pull", "--ff-only"])
+                context.changed = True
                 print("checkout: fast-forward completed")
         else:
             failed = bool(behind)
@@ -414,7 +421,9 @@ def main(argv=None, *, runner=default_runner, context=None) -> int:
                             reload_cmd=args.reload_cmd) or failed
         except failures as exc:
             print(f"plugin failed: {exc}")
-            return 1
+            failed = True
+            if args.apply:
+                return 1
     for name in ("daemon", "supervisor"):
         try:
             failed = service(context, runner, name, getattr(args, f"{name}_label"),
@@ -424,6 +433,8 @@ def main(argv=None, *, runner=default_runner, context=None) -> int:
             failed = True
             if args.apply:
                 break
+    if args.apply and not failed and not context.changed:
+        print("Nothing to do.")
     return int(failed)
 
 
