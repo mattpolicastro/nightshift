@@ -4,14 +4,18 @@ import importlib.util
 import json
 import os
 import subprocess
+from contextlib import closing
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from nightshift import queue, specloop_intake as intake, specloop_job
 from test_revision_feedback_consumption import read, receipt_path, stage_setup
+from test_specloop_build_revision import setup as build_setup
+from test_specloop_jobs import identity
 from test_specloop_spec_revision import setup as spec_setup
 from test_specloop_intake import idea_file
 from test_revision_feedback_state import CUTOFF, ENDPOINTS, LegacyGh
@@ -277,6 +281,165 @@ def later_feedback(gh):
     gh.feedback.append({**gh.feedback[1], "id": 104, "body": "Later feedback"})
 
 
+@pytest.fixture
+def feedback_streams(monkeypatch):
+    streams = []
+    original = Path.open
+
+    def opened(path, mode="r", *args, **kwargs):
+        stream = original(path, mode, *args, **kwargs)
+        if path.name.startswith("feedback-") and mode == "x":
+            assert kwargs["encoding"] == "utf-8"
+            streams.append(stream)
+        return stream
+
+    monkeypatch.setattr(Path, "open", opened)
+    return streams
+
+
+@pytest.mark.scenario("pr-revision/immutable-build-revision-input/replacement-preserves-stopped-input")
+@pytest.mark.scenario("pr-revision/immutable-build-revision-input/delayed-reader-retains-complete-blocks")
+@pytest.mark.scenario("pr-revision/durable-round-snapshot/pause-and-stop-preserve-snapshots")
+@pytest.mark.parametrize("legacy", [False, True])
+def test_released_revision_keeps_stopped_attempt_input(
+    build_setup, tmp_path, monkeypatch, feedback_streams, legacy,
+):
+    _, gh, commands = build_setup
+    state = tmp_path / "state with spaces"
+    specloop_job.save(receipt_path(state), read(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    state = state.relative_to(tmp_path)  # Intake must turn even relative state into absolute input.
+    gh.inline[0]["body"] = "Preserve café λ\n\n---\n\n# Section\n...\n最後"
+    jobs, locks = [], []
+    monkeypatch.setattr(specloop_job, "_children", {})
+
+    def launch(args, **kwargs):
+        assert feedback_streams and all(stream.closed for stream in feedback_streams)
+        jobs.append(Path(args[-2]))
+        locks.append(os.dup(kwargs["pass_fds"][0]))
+        return SimpleNamespace(poll=lambda: None)
+
+    def request(directory):
+        return json.loads((directory / "request.json").read_text())["args"]
+
+    try:
+        tick(build_setup, state, background=True, launcher=launch)
+        saved = read(state)
+        original, = jobs
+        args = request(original)
+        source = Path(args[args.index("--feedback") + 1])
+        assert source.is_absolute()
+        if legacy:
+            # Model an attempt launched by the old event-named writer.
+            old = receipt_path(state).with_suffix(f".{saved['event']}.feedback.json").resolve()
+            source.rename(old)
+            args[args.index("--feedback") + 1] = str(old)
+            specloop_job.save(original / "request.json", {"args": args})
+            source = old
+        before = source.read_bytes()  # First read happens after the launching poll returns.
+        assert json.loads(before.decode("utf-8")) == saved["feedback"]
+        assert gh.inline[0]["body"] in saved["feedback"][0]
+        specloop_job.save(original / "process.json", identity(original))
+        specloop_job.request_stop(original, verify_identity=lambda: identity(original))
+        specloop_job.finalize(original, {"result": {**commands.result, "commit": "e" * 40}})
+        os.close(locks.pop())
+        specloop_job.finish_stop(original)
+        gh.inline[0]["body"] = "Edited λ feedback\n\n---\n\nKeep this block whole"
+        gh.inline.append({**gh.inline[0], "id": 4, "body": "Additional feedback"})
+        specloop_job._children.clear()
+        tick(build_setup, state, module=restart(), background=True, launcher=launch)
+        assert read(state) == saved and len(jobs) == 1 and not gh.comments
+        assert specloop_job.release_job(state, original.name) == "released"
+        tick(build_setup, state, module=restart(), background=True, launcher=launch)
+        replacement = read(state)
+        assert len(jobs) == 2 and replacement["job"] != saved["job"]
+        assert replacement["event"] == saved["event"]
+        assert replacement["consumed_feedback_ids"] == saved["consumed_feedback_ids"]
+        assert replacement["feedback_ids"] == ["inline:1", "inline:2", "inline:4"]
+        assert gh.inline[0]["body"] in replacement["feedback"][0]
+        assert "Additional feedback" in replacement["feedback"][-1]
+        replacement_bytes = Path(request(jobs[1])[3]).read_bytes()
+        specloop_job._children.clear()
+        tick(build_setup, state, module=restart(), background=True, launcher=launch)
+        assert len(jobs) == 2 and read(state) == replacement and not gh.comments
+        retained = [Path(request(job)[3]) for job in jobs]
+        assert retained[0] == source and retained[1].is_absolute() and retained[1] != source
+        assert retained[0].read_bytes() == before
+        assert retained[1].read_bytes() == replacement_bytes
+        assert json.loads(retained[1].read_text(encoding="utf-8")) == replacement["feedback"]
+        assert specloop_job.release_job(state, original.name) == "already released"
+        assert specloop_job.collect(receipt_path(state), saved) is None
+        assert not (original / "collected.json").exists()
+    finally:
+        for fd in locks:
+            os.close(fd)
+
+
+@pytest.mark.scenario("pr-revision/immutable-build-revision-input/delayed-reader-retains-complete-blocks")
+def test_synchronous_revision_invocations_keep_distinct_inputs(build_setup, tmp_path, feedback_streams):
+    _, gh, commands = build_setup
+    commands.result = {"version": 1, "outcome": "refused", "reasons": ["Try again"]}
+
+    def run(args, **kwargs):
+        if args[:2] == ["specloop", "revise"]:
+            assert feedback_streams and all(stream.closed for stream in feedback_streams)
+        return commands(args, **kwargs)
+
+    tick(build_setup, tmp_path, specloop_runner=run)
+    original = read(tmp_path)
+    first = Path(dispatches(commands)[0][4])
+    before = first.read_bytes()
+    gh.labels.remove("needs-human")
+    gh.inline[0]["body"] = "Changed under the same trigger"
+    tick(build_setup, tmp_path, module=restart(), specloop_runner=run)
+    second = Path(dispatches(commands)[1][4])
+    assert first.is_absolute() and second.is_absolute() and first != second
+    assert read(tmp_path)["event"] == original["event"]
+    assert first.read_bytes() == before
+    assert json.loads(second.read_text(encoding="utf-8")) == read(tmp_path)["feedback"]
+
+
+@pytest.mark.scenario("pr-revision/immutable-build-revision-input/feedback-file-preparation-fails")
+@pytest.mark.parametrize("failure", ["collision", "write"])
+def test_feedback_file_failure_prevents_dispatch(build_setup, tmp_path, monkeypatch, failure):
+    path = receipt_path(tmp_path)
+    before = path.read_bytes()
+    earlier = path.parent / "8.jobs" / ("feedback-" + "a" * 32 + ".json")
+    earlier.parent.mkdir()
+    earlier.write_text('["Retained original"]\n', encoding="utf-8")
+    retained = earlier.read_bytes()
+    token = "a" if failure == "collision" else "b"
+    errors = []
+    with monkeypatch.context() as patch:
+        patch.setattr(intake.uuid, "uuid4", lambda: SimpleNamespace(hex=token * 32))
+        opened = Path.open
+
+        def fail_write(file, mode="r", *args, **kwargs):
+            stream = opened(file, mode, *args, **kwargs)
+            if file.name.startswith("feedback-") and mode == "x":
+                def write(value):
+                    stream.write(value[:5])
+                    raise OSError("feedback write failed")
+
+                proxy = Mock(wraps=stream)
+                proxy.write.side_effect = write
+                return closing(proxy)
+            return stream
+
+        if failure == "write":
+            patch.setattr(Path, "open", fail_write)
+        tick(build_setup, tmp_path, background=True,
+             launcher=lambda *a, **k: pytest.fail("must not launch"),
+             on_error=lambda number, error: errors.append((number, error)))
+    assert len(errors) == 1 and errors[0][0] == 8 and isinstance(errors[0][1], OSError)
+    assert path.read_bytes() == before and earlier.read_bytes() == retained
+    assert not list(earlier.parent.glob("*/request.json"))
+    assert not dispatches(build_setup[2]) and not build_setup[1].comments
+    tick(build_setup, tmp_path, module=restart())
+    assert read(tmp_path)["feedback_ids"] == ["inline:1", "inline:2"]
+    assert read(tmp_path)["delivered"] and earlier.read_bytes() == retained
+
+
 @pytest.mark.scenario("pr-revision/durable-round-snapshot/pause-and-stop-preserve-snapshots")
 @pytest.mark.scenario("pr-revision/revision-actor-gate/unauthorized-revision-ignored-at-either-stage")
 @pytest.mark.parametrize("control", ["pause", "stopping", "stopped"])
@@ -375,6 +538,9 @@ def test_background_reader_retains_snapshot_across_restart(
         assert saved["consumed_feedback_ids"] == consumed
         directory = Path(args[-2])
         request = json.loads((directory / "request.json").read_text())["args"]
+        if request[0] == "revise":
+            assert Path(request[3]).is_absolute()
+            assert json.loads(Path(request[3]).read_text(encoding="utf-8")) == saved["feedback"]
         # Retain the real job lifetime lock while delaying the CLI's file read.
         jobs.append((directory, request, os.dup(kwargs["pass_fds"][0])))
         return SimpleNamespace(poll=lambda: None)
@@ -501,6 +667,11 @@ def test_new_application_finishes_original_round_before_remaining_ids(stage_setu
         assert read(tmp_path)["consumed_feedback_ids"] == remaining["consumed_feedback_ids"]
         assert "agent:revise" not in gh.labels
     assert len(dispatches(commands)) == 2
+    if commands.result["outcome"] == "revised":
+        inputs = [Path(args[4]) for args in dispatches(commands)]
+        assert len(set(inputs)) == 2
+        assert [json.loads(p.read_text(encoding="utf-8")) for p in inputs] == [
+            completed["feedback"], remaining["feedback"]]
 
 
 @pytest.mark.scenario("pr-revision/durable-round-snapshot/completion-delivery-retries-preserve-consumption")
@@ -560,6 +731,10 @@ def test_unsuccessful_work_preserves_eligibility(stage_setup, tmp_path, failure)
     assert read(tmp_path)["feedback_ids"] == saved["feedback_ids"]
     assert read(tmp_path)["consumed_feedback_ids"] == sorted([*consumed, "conversation:102"])
     assert read(tmp_path)["delivered"]
+    if success["outcome"] == "revised":
+        inputs = list(receipt_path(tmp_path).parent.glob("8.jobs/feedback-*.json"))
+        assert len(inputs) == 2
+        assert all(json.loads(p.read_text(encoding="utf-8")) == saved["feedback"] for p in inputs)
 
 
 @pytest.mark.scenario("pr-revision/durable-round-snapshot/unsuccessful-work-keeps-feedback-eligible")
@@ -665,3 +840,8 @@ def test_production_delivery_recovery(stage_setup, tmp_path, monkeypatch, failur
     assert read(tmp_path)["feedback"] == ["**reviewer:**\n\nLater feedback"]
     assert read(tmp_path)["consumed_feedback_ids"] == sorted([*consumed, "conversation:104"])
     assert len(dispatches(commands)) == 2
+    if commands.result["outcome"] == "revised":
+        inputs = [Path(args[4]) for args in dispatches(commands)]
+        assert len(set(inputs)) == 2
+        assert json.loads(inputs[0].read_text(encoding="utf-8")) == saved["feedback"]
+        assert json.loads(inputs[1].read_text(encoding="utf-8")) == read(tmp_path)["feedback"]

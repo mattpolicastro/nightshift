@@ -720,12 +720,14 @@ def revise_pending(
                         return None  # Never steer another repository's run.
                     receipt["command"] = "revise"
                     # The background CLI may outlive this poll or the daemon.
-                    # Keep the blocks on disk until its durable result arrives.
-                    feedback_path = path.with_suffix(f".{event}.feedback.json").resolve()
+                    # Retain immutable input with every attempt, even after release.
+                    feedback_path = (path.parent / f"{path.stem}.jobs"
+                                     / f"feedback-{uuid.uuid4().hex}.json").resolve()
                     feedback_path.parent.mkdir(parents=True, exist_ok=True)
                     # Review bodies may contain Markdown separators or YAML
                     # document boundaries. JSON preserves each complete block.
-                    feedback_path.write_text(json.dumps(feedback) + "\n")
+                    with feedback_path.open("x", encoding="utf-8") as stream:
+                        stream.write(json.dumps(feedback) + "\n")
                     receipt = _save_revision_snapshot(path, previous, items, **receipt)
                     if not _start(path, receipt, [
                         "revise", change, "--feedback", str(feedback_path),
