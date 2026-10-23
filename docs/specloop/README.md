@@ -19,12 +19,13 @@ manifest = "/absolute/path/to/sample.toml"
 base = "main"
 ```
 
-Use one existing trusted manifest per repository. Relative manifest paths
+Use one trusted regular-file manifest per repository. Relative manifest paths
 resolve beside `config.toml`; `~` expands. Set its `[run]` source `repo`,
 `github` and `pr_base` to match the repository, and supply provider profiles,
-roles, allowed/frozen paths and verification commands. Template `change` and
-`branch` values are overridden per issue and saved in the admitted run's
-manifest. The worker's `verify` setting is not needed for specloop.
+roles, allowed/frozen paths and verification commands. Template `run.change` and
+`run.branch` are optional: intake supplies both per change, overriding any
+defaults. Admission saves the effective manifest with the run. The worker's
+`verify` setting is not needed for specloop.
 See [enrollment and preparation](../../README.md#enroll-a-repository) and the
 [CLI contract](command-json.md).
 
@@ -68,11 +69,23 @@ reapply `spec:draft` or `agent:ready` to retry. Removing `needs-human` alone
 does not requeue the issue.
 
 For issue 7, "Add a gate", in `owner/sample`, the change is
-`sample-issue-7-add-a-gate`, on `spec/sample-issue-7-add-a-gate`. The draft PR
+`owner__sample-issue-7-add-a-gate`, on `spec/owner__sample-issue-7-add-a-gate`. The draft PR
 is titled `Spec: Add a gate`, links the issue with `Closes #7`, and carries
 the feasibility risks. Successful admission removes `spec:review` and
 `spec:approved`. Refusal removes `spec:approved` and adds `needs-human`;
 remove `needs-human` and reapply `spec:approved` after resolving the refusal.
+
+New identities use `<owner>__<repository>-issue-<number>-<title-slug>`.
+Owner/repository spelling and safe dots, underscores and hyphens are preserved;
+the title becomes lowercase ASCII alphanumerics separated by hyphens, at most
+40 characters, falling back to `issue`. Unsafe spellings such as
+`owner/widget..js` are unsupported for new work: repository health holds
+drafting, admission and spec re-drafting without encoding or sanitizing names.
+Recorded legacy identities remain authoritative after title edits; existing
+safe branches stay usable. Without a proposal receipt, lookup tries exact
+repository-scoped qualified and then legacy branches using the current title.
+An open legacy PR is reused; a new round after a closed legacy PR uses the
+qualified name. See [remaining discovery and migration limits](../../KNOWN-LIMITATIONS.md#open-gaps).
 
 Revision selects trusted, actionable feedback by source-qualified GitHub ID,
 with consumed IDs tracked per repository and PR: `conversation:123`,
@@ -140,6 +153,40 @@ existing behavior; retiring it is a later change. See [operations](#operations)
 for pause, job control and supervisor boundaries.
 
 ## Operations
+
+### Enrollment recovery
+
+Each unpaused poll validates the enrollment template, checking regular-file
+status before opening it. Symlinks to regular files are supported; directories,
+FIFOs and devices are rejected without reading. Missing, unreadable or invalid
+templates, or an omitted manifest path, cause repository-local health failures.
+The diagnostic identifies the repository, path and repair action. A continuing
+outage is notified once; recovery is logged and rearms notification. Healthy
+repositories continue ([issue #13](https://github.com/mattpolicastro/nightshift/issues/13)).
+
+New drafting, admission and spec-stage re-drafting hold with triggers, receipts
+and jobs retained, without `needs-human` or an agent session. Repair the file at
+the same path to retry on a later poll. Adding an omitted manifest entry or
+changing configuration requires a daemon restart; there is no hot reload.
+Malformed config TOML, invalid engines and empty or wrongly typed manifest
+values remain configuration-loading errors.
+
+Admitted runs continue publication and build-stage revisions with their copied
+manifest and recorded branch, even if enrollment becomes unhealthy. Durable run
+state counts as admission even while its notification is pending. Existing jobs
+can finish and be collected; delivery needing an unavailable manifest-derived
+source path retains the successful result until repair, without re-drafting.
+Authorization, publication checks, pause and stopped-job holds still apply.
+
+Worker-to-specloop recovery runs before new intake on unpaused startup and polls,
+even with an unhealthy manifest. Orphaned `agent:working` issues with no claim or
+surviving worktree return to `agent:ready` with a `needs_decision` outcome.
+Surviving branches/worktrees are preserved for human inspection, with their
+phase and location in an issue comment; `agent:working` becomes `needs-human`.
+Recovery does not resume or delete that work. A durable journal lets interrupted
+recovery finish after restart. Unreadable claims, unknown GitHub state or
+conflicting human label changes hold new intake and report repository health;
+eligible admitted publication/build revisions and other repositories continue.
 
 ### Pause, stop and the supervisor
 

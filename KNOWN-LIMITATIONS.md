@@ -48,11 +48,27 @@ Fixes land through Nightshift's own front door; these gaps remain unresolved.
   GitHub. Local drafting and verification do not require a GitHub host; they
   do not provide automated intake or publication for other hosts.
 - **Config:**
-  - An invalid specloop manifest stops `config.load`, and the worker repos
-    with it.
-  - Switching a repo from worker to specloop leaves `agent:working` issues
-    unrecovered.
-  - Change names drop the repo owner.
+  - Manifest failures now hold new drafting/admission/spec re-drafting locally;
+    admitted publication/build revisions continue. Worker leftovers are released
+    or preserved for human inspection, and new names include the owner
+    ([issue #13](https://github.com/mattpolicastro/nightshift/issues/13)). See
+    [enrollment recovery](docs/specloop/README.md#enrollment-recovery).
+  - Config edits still require a daemon restart; same-path manifest repairs
+    retry on a later poll. Manifests remain trusted operator-managed files:
+    regular-file checks do not protect against hostile path-replacement races
+    or an unavailable filesystem.
+  - Unsafe repository spellings such as `owner/widget..js` remain unsupported
+    for new work. Names are not encoded; branch safety checks remain in force.
+    The naming convention supports GitHub owners, not arbitrary namespaces.
+  - Recorded legacy identities remain usable, but deployed runs, branches and
+    PRs are not automatically migrated or renamed. Existing global name
+    collisions require operator decisions. Exact branch lookup cannot discover
+    an old PR after both proposal receipt loss and a title change; it does not
+    scan global runs to infer ownership or guarantee universal deduplication.
+  - GitHub transport retry risks are unchanged: internal label-write retries
+    do not reread labels. Recovery journals cannot guarantee exactly-once
+    effects within an ambiguous request, especially if a human rearms during
+    a retry. Surviving worker work requires inspection, not automatic resumption.
 
 ## Other known gaps
 

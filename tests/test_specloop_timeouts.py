@@ -8,6 +8,8 @@ from functools import partial
 
 import pytest
 
+from manifest_fixtures import manifest_text
+
 from nightshift import daemon, queue, specloop_intake
 from nightshift.config import Config, Repo
 from test_queue import FakeGh
@@ -23,7 +25,7 @@ def test_origin_timeout_allows_worker_claim_heartbeat_harvest_and_retry(
     monkeypatch.setattr(daemon, "PAUSE_FILE", tmp_path / "pause")
     monkeypatch.setattr(queue, "CLAIM_DIR", tmp_path / "claims")
     manifest = tmp_path / "manifest.toml"
-    manifest.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / "source"))}\n')
+    manifest.write_text(manifest_text(tmp_path / "source"))
     repo = Repo("owner/spec", engine="specloop", manifest=manifest)
     pipeline = Pipeline(repo)
     stage = "draft" if operation in ("push", "ls-remote") else "admit"
@@ -34,6 +36,7 @@ def test_origin_timeout_allows_worker_claim_heartbeat_harvest_and_retry(
         pipeline.issue(1)
         if operation == "ls-remote":
             pipeline.approved(1)
+            pipeline.prs[1]["headRefName"] = "spec/owner__spec-issue-1-gate"
             pipeline.prs[1]["state"] = "CLOSED"
     else:
         pipeline.approved(1)
@@ -136,7 +139,7 @@ def test_origin_timeout_allows_worker_claim_heartbeat_harvest_and_retry(
 def test_publication_timeout_after_remote_success_reconciles(tmp_path):
     """Losing the response must not publish again or lose the human checks."""
     manifest = tmp_path / "manifest.toml"
-    manifest.write_text(f'[run]\nrepo = {json.dumps(str(tmp_path / "source"))}\n')
+    manifest.write_text(manifest_text(tmp_path / "source"))
     pipeline = Pipeline(Repo("owner/spec", engine="specloop", manifest=manifest))
     pipeline.ready(1, tmp_path)
     publications = []

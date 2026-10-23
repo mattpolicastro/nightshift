@@ -178,14 +178,17 @@ class Repo:
     def __post_init__(self) -> None:
         if self.engine not in ("worker", "specloop"):
             raise ValueError(f"{self.name}: engine must be 'worker' or 'specloop'")
-        if self.engine == "specloop" and self.manifest is None:
-            raise ValueError(f"{self.name}: specloop requires a manifest path")
         if self.manifest is not None:
             if not isinstance(self.manifest, (str, Path)) or not str(self.manifest).strip():
                 raise ValueError(f"{self.name}: manifest must be a non-empty path")
-            manifest = Path(self.manifest).expanduser().resolve()
-            if not manifest.is_file():
-                raise ValueError(f"{self.name}: manifest is not a file: {manifest}")
+            manifest = Path(self.manifest)
+            try:
+                manifest = manifest.expanduser().absolute()
+                manifest = manifest.resolve()
+            except (OSError, RuntimeError, ValueError):
+                # Enrollment artifacts are checked on each poll. Retain the
+                # path so an unavailable filesystem or symlink can be repaired.
+                pass
             object.__setattr__(self, "manifest", manifest)
 
     @property
@@ -442,7 +445,11 @@ def _manifest_path(repo: dict, config_dir: Path) -> Path | None:
     value = repo["manifest"]
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{repo['name']}: manifest must be a non-empty path")
-    path = Path(value).expanduser()
+    path = Path(value)
+    try:
+        path = path.expanduser()
+    except (OSError, RuntimeError):
+        return path  # Retry failed home expansion during repository readiness.
     return path if path.is_absolute() else config_dir / path
 
 

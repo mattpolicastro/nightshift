@@ -7,6 +7,8 @@ from copy import deepcopy
 
 import pytest
 
+from manifest_fixtures import manifest_text
+
 from nightshift import daemon, queue, specloop_intake
 from nightshift.config import Config, Repo
 from test_engine_routing import DraftGh
@@ -123,7 +125,7 @@ def failure_responses():
 @pytest.mark.parametrize("response", failure_responses())
 def test_event_lookup_failure_preserves_admission_state_for_retry(tmp_path, response):
     manifest = tmp_path / "manifest.toml"
-    manifest.write_text('[run]\nrepo = "/unused/source"\n')
+    manifest.write_text(manifest_text("/unused/source"))
     repo = Repo("owner/sample", engine="specloop", manifest=manifest)
     gh, commands = ApprovalGh(), Commands()
     history = EventHistory(response)
