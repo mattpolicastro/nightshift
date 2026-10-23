@@ -194,6 +194,30 @@ def test_since_and_change_filters(tmp_path, logs, capsys):
         assert captured.out == "" and "YYYY-MM-DD" in captured.err
 
 
+@pytest.mark.scenario("build-timing-report/filtered-report-output/date-and-change-filters")
+def test_cli_help_describes_admission_date_filter(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"], runs_root=tmp_path)
+    assert exc.value.code == 0
+    output = capsys.readouterr()
+    # Ignore argparse's terminal-dependent wrapping, but preserve the wording.
+    help_text = " ".join(output.out.split())
+    assert "Report local build timings." in help_text
+    assert "include whole runs first admitted on or after this UTC date" in help_text
+    assert output.err == ""
+
+
+@pytest.mark.scenario("build-timing-report/filtered-report-output/date-and-change-filters")
+@pytest.mark.parametrize("args", [["--s", "2026-10-23"], ["--c", "example"], ["--j"]])
+def test_cli_rejects_abbreviated_options(tmp_path, capsys, args):
+    with pytest.raises(SystemExit) as exc:
+        main(args, runs_root=tmp_path)
+    assert exc.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert f"unrecognized arguments: {' '.join(args)}" in output.err
+
+
 @pytest.mark.scenario("build-timing-report/filtered-report-output/text-and-json-agree")
 def test_json_output_shape(tmp_path, logs, capsys):
     logs("example", event("admitted", 0), event("implement", 1),
@@ -206,6 +230,7 @@ def test_json_output_shape(tmp_path, logs, capsys):
     assert main(["--json"], runs_root=tmp_path) == 0
     output = capsys.readouterr()
     parsed = json.loads(output.out)
+    assert output.out == json.dumps(report, indent=2) + "\n"
     assert parsed == report and set(parsed) == {"phases", "changes", "profiles", "errors"}
     assert parsed["phases"]["implement"] == dict(count=1, total_seconds=20.5, median_seconds=20.5)
     assert parsed["changes"] == [dict(change="example", tasks_landed=1, failed_attempts=0,
