@@ -1,245 +1,139 @@
 ## Context
 
-`nightshift/touchpoints.py` establishes a standalone, standard-library report
-with injectable roots, deterministic output, diagnostics and no state writes.
-Its receipt joins and approximate draft-date selection are unnecessary here.
-Read event logs directly; do not import its private reader or construct a
-`specloop.state.Run`, load manifests, read Git refs or inspect credentials.
-
-`Run.event` writes JSON objects with numeric epoch-seconds `at` and string
-`event`. `specloop/loop.py` records task keys on phase events, but completion
-events do not repeat the starts' numeric session counters. `implemented` and
-`reviewed` carry the profile actually used. `landed` has a task key and label;
-`evidence` has a section number and no explicit start. `attempt_failed` is the
-harness's failed-attempt marker. `specloop/cli.py` records `admitted`, manual
-`resumed`, `published` and `finished`; `specloop/serve.py` separately records
-`auto_resumed`. Finishing archives and marks a PR ready; it is not a merge.
-
-The current review harness computes decisions from findings and waivers,
-rather than trusting `output.verdict`. This report must identify its failure
-statistic as the reviewer's reported FAIL rate, not a reconstructed harness
-decision or a measure of reviewer quality.
+`nightshift.touchpoints` provides the standalone module precedent; its receipt
+joins and recovery logic are unnecessary here. `specloop/state.py:Run.event`
+writes numeric epoch-seconds `at` and an `event` name. `specloop/loop.py`
+emits task keys, completion profiles and `attempt_failed`; `specloop/cli.py`
+emits admission, manual resume, publication and finish. No producer changes
+are needed. Issue #67's documentation change is archived in this checkout.
 
 ## Goals / Non-Goals
 
-Goals: reproduce the requested observable intervals, make retry and missing
-history semantics explicit, compare profiles, and run offline against small
-fixtures without the daemon, GitHub, launchd, a sandbox or real agent sessions.
+Provide useful before/after comparisons with a small standard-library report.
+Target about 400 implementation lines: roughly 220 module lines, 160 test
+lines and 20 README lines, in three tasks. Tests use temporary event logs
+without a running daemon, GitHub or other host application.
 
-Non-goals: instrumentation changes, CPU-time profiling, scheduling changes,
-cost accounting, model inference from manifests, worker-engine history,
-automatic attribution of every wall-clock second, merge-time measurement or
-backfilling missing events. Do not require the six phases to sum to build time.
+No state repair, partial-enumeration recovery, mid-read interruption handling,
+damage-invalidation rules, warning taxonomy, CPU profiling, scheduler
+attribution, merge detection or report framework.
 
 ## Decisions
 
-### Files, interfaces and concurrent work
+### Files and interfaces
 
-Implement only `nightshift/timings.py`, new `tests/test_timings.py`, and a short
-`### Build timing report` subsection after the README paragraph beginning
-"The [operations guide]" that describes touchpoints, before dependency preparation.
-Preserve the existing paragraph, links, commands and surrounding content.
-Issue #76 also edits README: apply this small insertion to the current file and
-preserve its arming/enrollment additions when reconciling concurrent changes.
-
-Explicitly avoid `KNOWN-LIMITATIONS.md`, `docs/arming.md`, `docs/landing.md`,
-`docs/specloop/README.md`, `nightshift/arm.py`, `nightshift/cli.py`,
-`nightshift/land.py`, `pyproject.toml`, `specloop/cli.py`, `specloop/critic.py`,
-`tests/test_arm.py` and `tests/test_land.py`. Also leave `nightshift/touchpoints.py`,
-`tests/test_touchpoints.py`, existing assertions and all event writers untouched.
-
-Expose `collect_report(runs_root: Path, *, since: date | None = None,
-change: str | None = None) -> dict`, `render_table(report: dict) -> str`, and
+In new `nightshift/timings.py`, expose
+`collect_report(runs_root: Path, *, since: date | None = None, change: str | None = None) -> dict`,
+`render_table(report: dict) -> str` and
 `main(argv: list[str] | None = None, *, runs_root: Path | None = None) -> int`.
-The default root is `Path.home() / ".specloop" / "runs"`. The keyword override
-is the testing seam; no extra CLI flag, dependency or entry-point registration.
-Use an ordinary module `__main__` guard. Private parsing/replay helpers are fine.
+Default the CLI root to `Path.home() / ".specloop" / "runs"`; the keyword
+override is the test seam. Use a normal module guard; no entry-point changes.
 
-### Discovery and damaged history
+Add tests only in new `tests/test_timings.py`. Insert `### Build timing report`
+after the README paragraph about the operations guide and touchpoints, before
+dependency preparation. This small insertion is the sole necessary overlap
+with #76; preserve its arming/enrollment additions and existing commands/links.
 
-Enumerate immediate run directories in name order and use the directory name
-as the change identity. Read only their `events.jsonl`, once per run, in append
-order. Non-directory entries are ignored. An absent root is empty history;
-missing or unreadable event files produce an error and omit that run. On a
-mid-read I/O failure discard that run's partial data. Discovery errors retain
-already discovered readable runs and appear in the report.
+Explicitly leave these concurrent files untouched: `KNOWN-LIMITATIONS.md`,
+`docs/arming.md`, `docs/deploy.md`, `docs/landing.md`, `docs/specloop/README.md`,
+`nightshift/arm.py`, `nightshift/cli.py`, `nightshift/deploy.py`,
+`nightshift/land.py`, `pyproject.toml`, `specloop/cli.py`, `specloop/critic.py`,
+`tests/test_arm.py`, `tests/test_deploy.py` and `tests/test_land.py`.
+Also leave `nightshift/touchpoints.py`, `tests/test_touchpoints.py` and every
+existing assertion unchanged. Only the three scoped files may be implemented.
 
-Decode JSONL per line. A malformed/undecodable line, non-object record, missing
-event kind, invalid timestamp or invalid field needed for a known event is
-diagnosed by path and one-based line. Clear pending pair state at that gap,
-then continue with valid lines. Do not repair a partial final line. `at` must
-be a finite int or float, excluding bool; allow zero and fractional seconds.
-Unknown fields and well-formed unknown event kinds are ignored. Validate task
-keys for task phases, `landed` and `attempt_failed` as nonempty strings.
-Do not require unused fields such as usage, label, SHA or output findings.
+### Reading and selection
 
-Malformed lines do not discard already completed samples or observed counters.
-The lifecycle timestamps remain observed endpoints despite gaps; both output
-formats retain the errors. Do not catch `KeyboardInterrupt` or `SystemExit`.
+Enumerate immediate run directories in name order, using directory names as
+change names. Read each selected `events.jsonl` as a whole text file, then
+parse lines in append order. A missing root yields empty history. On an
+ordinary file-read error, omit the run and retain one path-bearing error
+string. Skip malformed JSON/non-object lines and events without a string kind
+or finite numeric `at` (excluding booleans). Ignore unknown event kinds.
+Skipped lines neither reset pairing state nor produce diagnostics.
 
-### Phase pairing
+Apply exact `--change` matching before opening logs. `--since` selects whole
+runs whose first `admitted.at` is at or after UTC midnight on that date.
+Runs without admission remain eligible unfiltered but are omitted with
+`--since`. Combine both filters before aggregation. Invalid dates exit 2 via
+argparse. Do not use mtimes or cut individual events.
 
-Replay independently per run; never sort events by timestamp. Each completion
-consumes one pending start. A newer start for the same key replaces an
-unfinished start, with a warning. Missing endpoints are omitted with warnings,
-not zero-filled or extended to the current time. Reject negative or non-finite
-duration arithmetic with a diagnostic, consume the pair, and retain valid
-samples. Equal timestamps form a valid zero-second sample.
+### Pairing and summaries
 
-| JSON phase key | Start / end | Matching rule |
+Keep one pending start per phase and matching key. The next matching end
+consumes it; a new start for that key replaces an unfinished start, so a retry
+starts a fresh pair. Drop unmatched endpoints and negative durations.
+There are no additional cancellation or recovery transitions.
+
+| Phase key | Start → end | Key within each run |
 | --- | --- | --- |
-| `implement` | `implement` / `implemented` | Same task key, latest pending start. |
-| `verify` | `sealed` / `verified` | Same task key, latest pending start. |
-| `review` | `review` / `reviewed` | Same task key, latest pending start. |
-| `evidence_gate` | `landed` / `evidence` | Latest preceding unconsumed landing in this run; consume only that landing. |
-| `slot_wait` | `admitted` or `resumed` / `implement` | Run-wide latest pending eligibility marker, consumed by the first implementation start. |
-| `paused_wait` | `pause` / `resumed` | Run-wide latest unresolved pause, regardless of reason. |
+| `implement` | `implement` → `implemented` | task |
+| `verify` | `sealed` → `verified` | task |
+| `review` | `review` → `reviewed` | task |
+| `evidence_gate` | `landed` → `evidence` | run |
+| `slot_wait` | `admitted` or `resumed` → `implement` | run |
+| `paused_wait` | `pause` → `resumed` | run |
 
-New `implement` clears stale task-phase starts for that task before opening its
-own pair; `attempt_failed` and `landed` clear that task's pending starts.
-`pause` cancels a pending slot wait. `resumed` closes the pause before opening
-slot wait. `auto_resumed`, `human_accept` and `revised` clear pause and slot
-markers without forming samples; they are not aliases for manual resume.
-`revised`, `finished` and `aborted` clear all pending phase markers. Unexpected
-discarded starts and unmatched ends warn; superseded landings do not warn,
-because only the last task before an evidence check supplies its start.
+Task phases require a nonempty string task key. Multiple landings before
+evidence use the most recent landing. `resumed` closes pause wait and opens
+slot wait; `auto_resumed` is not an alias. Measured pairs count regardless of
+outcome. Pool samples across selected runs for `count`, `total_seconds` and
+`median_seconds`; empty phases have 0, 0 and null respectively.
 
-Other events, including `reverify`, do not introduce extra starts. A verify
-pair after `reverify` still uses its recorded seal time. Task and evidence
-pairs can span a pause; they measure endpoint wall time and can overlap a
-paused-wait sample. No synthetic automatic-resume, gate-review or inter-task
-slot intervals. Evidence after several landed tasks contributes once, from the
-last landing, even though earlier tasks also belonged to that section. An
-evidence retry with no intervening landing has no new measurable pair.
+Per change, count distinct landed task keys and `attempt_failed` records.
+Use first admission, first subsequent publication, and first finish after
+that publication for `build_hours` and `publication_wait_hours`, dividing
+seconds by 3600. Without admission, first publication can still supply the
+publication-to-finish interval. Missing endpoints or negative intervals yield
+null; never substitute now. Later revisions contribute counts and phase
+samples without resetting lifecycle clocks.
 
-For each phase, expose `count`, `total_seconds`, `median_seconds`. Compute
-medians over all individual included samples, including failed phase outcomes;
-do not average per-change medians. Empty phases have count 0, total 0 and
-median null. Preserve numeric precision in JSON; text rounds seconds to three
-decimal places.
+Group `implemented` and `reviewed` completions by their own `profile`, using
+`unknown` for missing/empty profiles. Count `implementation_attempts` and
+`review_attempts` separately, including completions without timed starts.
+`review_failures` counts reviewed events with `disposition == "ok"` and
+`output.verdict == "FAIL"`. Divide by all review completions for that profile;
+use null for no reviews. Missing output adds no failure. This is the recorded
+verdict rate: the harness can decide differently using findings and waivers.
+Do not reconstruct decisions or read attempt artifacts.
 
-### Changes and lifecycle
+### Output and acceptance
 
-Each readable selected run has a row, including active, aborted and empty logs.
-`tasks_landed` counts distinct task keys in valid `landed` events, so a repeated
-landing cannot inflate it. `failed_attempts` counts `attempt_failed` records;
-do not deduplicate using the numeric attempt field, which manual resume resets.
+Return one dictionary with `phases` (map keyed by the six phase names),
+`changes` (rows: `change`, `tasks_landed`, `failed_attempts`, `build_hours`,
+`publication_wait_hours`), `profiles` (rows: `profile`,
+`implementation_attempts`, `review_attempts`, `review_failures`,
+`review_failure_rate`), and `errors` (diagnostic strings).
+Sort change/profile rows by name. No versioned envelope or warning structures.
 
-Select the first `admitted`, the first subsequent `published`, and the first
-`finished` following that publication in append order. Later publications do
-not reset either clock: initial build ends at first publication, and later
-revision work is included in publication-to-finish elapsed time. Expose their
-epoch timestamps as `admitted_at`, `published_at`, `finished_at`; when admission
-is missing, retain the first observed publication and following finish so
-publication-to-finish can still be measured. Ignore earlier out-of-order
-lifecycle markers with a warning. A missing endpoint gives null; an inverted
-timestamp gives null and an error. Divide seconds by 3600 for
-`build_hours` and `publication_wait_hours`; never substitute file mtimes or now.
-Counts and phase samples cover all selected history, including later revisions,
-so they need not lie entirely within initial build hours.
+`--json` prints that dictionary as one document. Text flattens measurements
+into one table with `Kind`, `Name`, `Metric`, `Value`, `Unit` columns.
+Use seconds for phases, hours for lifecycle intervals, counts for tasks and
+attempts, percentages for rates, and `-` for unknowns. Both modes print each
+error once on stderr; JSON also retains it in `errors`. Completed reports
+exit 0 even when some runs were skipped. Add a short note to text and README;
+no limitations schema or exhaustive output contract.
 
-### Profile accounting
-
-Use a list keyed by the literal completion-event profile, shared across roles,
-with `implementation_attempts`, `review_attempts`, `review_failures`, and
-`review_failure_rate`. Every valid `implemented` increments implementation
-attempts; every valid `reviewed` increments review attempts, including infra
-and invalid-output completions and completions without a matching timed start.
-Starts without a completion cannot identify an actually used profile.
-
-A review failure is a `reviewed` event with `disposition == "ok"` and object
-`output` whose `verdict` equals `"FAIL"`. Count its reported verdict even if
-the harness later lands it; a raw PASS followed by `attempt_failed` does not
-become a reported FAIL. Do not count verification failures, `gate_reviewed` or
-arbiter decisions. Rate is `review_failures / review_attempts` in [0, 1], null
-when there are no review attempts; text displays a percentage to one decimal.
-Thus infra/invalid completions remain in the denominator. Explain that choice
-in the report limitations so comparisons do not imply adjudicated-review rates.
-
-A missing, empty or non-string profile goes in the JSON `profile: null` bucket,
-rendered `(unknown)` with a warning, never inferred from admission or a manifest.
-Missing/non-object review output or an unrecognized verdict contributes no
-reported FAIL and produces a warning, while retaining the attempt and timing.
-
-### Selection, output and exit status
-
-`--since` accepts only a valid `YYYY-MM-DD`, inclusive UTC midnight, and selects
-whole runs by their first observed admission time. It does not cut event pairs
-or use draft/mtime dates. Without a usable admission a run stays visible
-unfiltered, but is excluded with a diagnostic when `--since` is supplied.
-`--change` is exact equality against discovered directory names, never a glob
-or a path to join. Apply it before opening files; no match is an empty report.
-Both filters compose, and all aggregates use only included runs. Retain
-diagnostics encountered while reading date-filter candidates; do not open
-unselected names to collect their diagnostics.
-
-JSON version 1 has these fields:
-
-```text
-version: 1
-since: YYYY-MM-DD | null
-change: string | null
-coverage: "observed_local_history"
-limitations: [string, ...]
-phases: {<all six phase keys>: {count, total_seconds, median_seconds}}
-changes: [{change, tasks_landed, failed_attempts, admitted_at, published_at,
-           finished_at, build_hours, publication_wait_hours, warnings: [string]}]
-profiles: [{profile: string | null, implementation_attempts, review_attempts,
-            review_failures, review_failure_rate}]
-errors: [{path: string, line: integer | null, message: string}]
-```
-
-Sort changes by name, named profiles lexically with null last, warnings
-lexically, errors by path/line/message, and phases in the table's order. Use
-finite JSON numbers and null, never NaN/Infinity. Text shows the same three
-tables, selection, coverage, limitations, warnings and errors; show unknown
-values as `-`, hours to three decimals, and do not hide zero-count phases.
-JSON stdout is exactly one document, without log chatter.
-
-Like touchpoints, completed reports exit 1 when errors exist and 0 otherwise,
-including empty selection. Warnings alone do not fail the command. Invalid
-CLI syntax/date exits 2 with ordinary argparse stderr before reading history,
-even with `--json`; help exits 0. This standalone CLI does not alter the
-separate `specloop` JSON-argument-error contract.
-
-### Validation and human checklist
-
-Use temporary event logs, injected read/enumeration failures and forbidden
-external-call stubs. Snapshot fixture contents and directory entries around
-reporting. Add scenario markers in `tests/test_timings.py`, including the six
-test names required by the issue. Keep existing tests/assertions unchanged;
-implementation acceptance requires `uv run pytest` green and
-`uv run python scripts/check_types.py` without a baseline edit.
-
-Human checks for the implementation PR, never agent tasks:
-
-- On the host containing the original local history, run
-  `uv run python -m nightshift.timings --json` once and compare it with the
-  2026-10-23 analysis: evidence about 32%, implement 21%, slot wait 18%, verify
-  11%, review 4%. Record the selected runs, cutoff/snapshot, denominator,
-  absolute totals and any discrepancy in the PR. Use the same cohort and
-  denominator as the original analysis; `--since 2026-10-23` is not an
-  end-of-day snapshot and must not be used as one. Explain changes caused by
-  retained history, later revisions, pairing rules or overlapping intervals;
-  do not tune the report to force the historical percentages. If the original
-  cohort/denominator cannot be recovered, mark the comparison unresolved.
-- Confirm the README insertion reads naturally beside touchpoints and retains
-  any concurrently landed arming guidance. CI fixtures cannot establish that
-  the real host's retained logs reproduce a historical analysis.
+Keep these six tests with appropriate `pytest.mark.scenario` IDs:
+`test_phase_durations_from_event_pairs`, `test_per_change_build_and_wait_hours`,
+`test_review_failure_rate_by_profile`, `test_unreadable_run_is_reported_not_fatal`,
+`test_since_and_change_filters`, and `test_json_output_shape`. Include retries,
+malformed lines, missing endpoints, empty history, an injected read failure
+and unchanged source logs within those fixtures. Acceptance is green
+`uv run pytest` and `uv run python scripts/check_types.py`, without weakening
+existing assertions or changing the type baseline.
 
 ## Risks / Trade-offs
 
-- Evidence and slot timings are observed endpoint estimates, not exact gate
-  execution or scheduler-only delays. Uninstrumented work remains unassigned.
-- Incomplete or corrupt history undercounts pairs; explicit gaps and nulls
-  prevent apparent precision from fabricated durations. An active append can
-  produce a partial-line diagnostic; a later invocation can read the completion.
-- Rates measure recorded reviewer verdicts over observed completed calls.
-  Profile fallback, infra failures and missing historical profile fields limit
-  reviewer comparisons; profiles do not imply model identities or causality.
-- Later revision phases and overlapping pauses mean phase totals are not a
-  partition of first-admission-to-first-publication time. No percentage column
-  is added without a defined denominator.
-- README is the sole intentional shared implementation file with in-flight work.
-  The narrow insertion and named exclusions avoid taking ownership of arming
-  or landing changes. All other implementation files are new.
+The short reporting note should explain that these are local-history
+estimates: missing pairs are dropped, evidence/slot waits are endpoint proxies,
+intervals may overlap, recorded FAIL rates can differ from harness decisions,
+and finish is not merge. The six phases need not sum to build hours.
+
+Human PR checklist: on the real runs directory, run
+`uv run python -m nightshift.timings --json` once and compare the same cohort
+and denominator with the 2026-10-23 analysis (about 32% evidence, 21% implement,
+18% slot wait, 11% verify, 4% review). Record discrepancies or unavailable
+historical inputs in the PR; do not tune results to force those percentages.
+CI fixtures cannot establish historical agreement. This host-only check is
+not an implementation task.

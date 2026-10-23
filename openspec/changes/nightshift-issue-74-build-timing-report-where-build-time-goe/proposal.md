@@ -1,50 +1,38 @@
 ## Why
 
-Build-speed work and the reviewer trial need repeatable measurements. A
-2026-10-23 analysis of local `events.jsonl` files attributed about 32% of build
-time to evidence gates, 21% to implementation, 18% to waiting for a build slot,
-11% to verification and 4% to review. Turn that one-off analysis into a local
-report, alongside the touchpoint report, without changing the build engine.
+Build-speed work and the reviewer trial need repeatable numbers. The
+2026-10-23 one-off analysis found evidence gates at about 32% of build time,
+implementation 21%, slot waits 18%, verification 11% and review 4%. Productize
+that small analysis to compare build speed before and after #73 and #75.
 
 blocked-by: #67
 
-Issue #67's documentation change is archived in this checkout. Preserve its
-operator guidance; this proposal does not claim to establish the live issue's
-closure state.
-
 ## What Changes
 
-- Add `nightshift/timings.py`, invoked with `uv run python -m nightshift.timings`,
-  to read `~/.specloop/runs/*/events.jsonl` with an injectable runs root.
-- Report totals, completed-pair counts and medians for implementation,
-  verification, review, evidence gates, slot waits and manually resumed pauses.
-- Report each change's landed tasks, failed attempts, admission-to-publication
-  hours and publication-to-finish hours, with unknown durations left null.
-- Group observed implementation and review attempts by the profile recorded on
-  their completion events; show reported review failures and failure rates.
-- Support `--since YYYY-MM-DD`, exact `--change NAME`, and versioned `--json`.
-  Keep healthy history visible when another run is unreadable, with diagnostics.
-- Add all tests in new `tests/test_timings.py`, preserving existing assertions.
-  Add one short README subsection immediately beside the touchpoint-report
-  paragraph; this is the only necessary overlap with issue #76.
+- Add `nightshift/timings.py`, run with `uv run python -m nightshift.timings`,
+  reading local run events without writing state.
+- Summarize six phase pairings, per-change hours/tasks/failed attempts, and
+  implementation/review attempts and review-failure rates by recorded profile.
+- Support `--since YYYY-MM-DD`, `--change NAME`, and `--json`; produce one text
+  table or JSON from the same data. Skip malformed lines and emit one
+  diagnostic line per unreadable run before continuing.
+- Add the six requested tests in new `tests/test_timings.py` and a short README
+  subsection beside touchpoints. Target about 400 implementation lines total,
+  including tests and documentation, across three tasks.
 
-Implementation edits are limited to `nightshift/timings.py`,
-`tests/test_timings.py`, and that README subsection. Everything else is out of
-scope: event producers, persisted state, scheduling, reviewer policy, existing
-touchpoint code/tests, CLI registration, dependencies, dashboards and other
-documentation. No network calls, subprocesses, repairs or writes to run state.
-This drafting step writes only this OpenSpec change directory.
+Only those three implementation files are in scope. Everything else is out:
+event producers, run-state changes, scheduler/reviewer changes, recovery
+machinery, dependencies, CLI registration, touchpoint refactoring, dashboards
+and other documentation. This draft edits only its own change directory.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `build-timing-report`: read-only event-pair timing, change lifecycle summaries,
-  profile comparisons, selection and deterministic text/JSON reporting.
+- `build-timing-report`: a read-only local timing and outcome report.
 
 ### Modified Capabilities
 
-None. Preserve all existing requirements in `touchpoint-report`,
-`specloop-interface` and `specloop-documentation`. The new report neither alters
-those interfaces nor replaces their guidance; no MODIFIED or REMOVED delta is
-needed.
+None. Preserve existing `touchpoint-report`, `specloop-interface` and
+`specloop-documentation` requirements and assertions. The README addition
+retains existing operations guidance; no MODIFIED or REMOVED delta is needed.
