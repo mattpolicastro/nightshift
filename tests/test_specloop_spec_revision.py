@@ -24,9 +24,9 @@ class RevisionGh(ApprovalGh):
         self.fail_comment = False
         self.fail_needs_human = False
         self.feedback = [
-            {"author": {"login": "reviewer"}, "body": "Old feedback", "createdAt": "2026-10-19T12:00:00Z"},
-            {"author": {"login": "reviewer"}, "body": "Handle empty input", "createdAt": "2026-10-20T13:00:00Z"},
-            {"author": {"login": "bot"}, "body": queue.SELF_COMMENT_PREFIX + " Draft ready",
+            {"id": 101, "author": {"login": "reviewer"}, "body": "Old feedback", "createdAt": "2026-10-19T12:00:00Z"},
+            {"id": 102, "author": {"login": "reviewer"}, "body": "Handle empty input", "createdAt": "2026-10-20T13:00:00Z"},
+            {"id": 103, "author": {"login": "bot"}, "body": queue.SELF_COMMENT_PREFIX + " Draft ready",
              "createdAt": "2026-10-20T13:00:00Z"},
         ]
         for comment in self.feedback:
@@ -43,9 +43,17 @@ class RevisionGh(ApprovalGh):
         if args[0] == "api" and "/commits/" in args[1]:
             self.calls.append(args)
             return json.dumps({"commit": {"committer": {"date": TIP_DATE}}})
-        if args[0] == "api" and args[1].endswith("/pulls/8/comments"):
+        if args[0] == "api" and args[1].endswith(("/issues/8/comments", "/pulls/8/reviews", "/pulls/8/comments")):
             self.calls.append(args)
-            pages = [self.inline[i:i + 30] for i in range(0, len(self.inline), 30)] or [[]]
+            if self.feedback_error:
+                raise RuntimeError("feedback unavailable")
+            records = (self.inline if "/pulls/8/comments" in args[1] else
+                       self.reviews if args[1].endswith("/reviews") else self.feedback + self.comments)
+            records = [{**record, **{rest: record[graphql] for graphql, rest in (
+                ("author", "user"), ("authorAssociation", "author_association"),
+                ("createdAt", "created_at"), ("submittedAt", "submitted_at"),
+            ) if graphql in record}} for record in records]
+            pages = [records[i:i + 30] for i in range(0, len(records), 30)] or [[]]
             # Match gh's output: separate JSON arrays unless --slurp is used.
             return json.dumps(pages) if "--slurp" in args else "\n".join(map(json.dumps, pages))
         if args[:2] == ["pr", "comment"] and self.fail_comment:
@@ -107,6 +115,15 @@ class Commands:
         return [c for c in self.calls if c[:2] == ["specloop", "propose"]]
 
 
+def seed_consumed(tmp_path, ids=("conversation:101",)):
+    path = tmp_path / "revisions" / "owner__sample" / "8.json"
+    specloop_job.save(path, {"change": CHANGE, "head": HEAD, "event": 0, "round_id": "0",
+                           "feedback_state_version": 1, "consumed_feedback_ids": sorted(ids),
+                           "feedback_ids": [], "feedback": [],
+                           "result": {"outcome": "empty"}, "delivered": True})
+    return path
+
+
 @pytest.fixture
 def setup(tmp_path):
     manifest = tmp_path / "manifest.toml"
@@ -114,6 +131,7 @@ def setup(tmp_path):
     repo = Repo("owner/sample", engine="specloop", manifest=manifest)
     gh = RevisionGh()
     commands = Commands(gh)
+    seed_consumed(tmp_path, ("conversation:101", "inline:1000"))
     specloop_job.save(tmp_path / "proposals" / "owner__sample" / "7.json",
                       {"change": CHANGE, "idea": "Add a gate\n\nThe original issue and comments."})
     return repo, gh, commands
@@ -130,13 +148,13 @@ def poll(setup, tmp_path, **kwargs):
 def test_spec_revised_from_review_through_daemon(setup, tmp_path, monkeypatch, inline_count):
     repo, gh, commands = setup
     gh.inline = [
-        {"user": {"login": "reviewer"}, "path": "specs/gate/spec.md", "line": i + 1,
+        {"id": i + 1, "user": {"login": "reviewer"}, "path": "specs/gate/spec.md", "line": i + 1,
          "body": f"Clarify gate case {i + 1}.", "created_at": "2026-10-20T13:00:00Z"}
         for i in range(inline_count)
     ]
     if inline_count:
         # Filtering still applies after flattening, including on the last page.
-        gh.inline.append({"user": {"login": "reviewer"}, "body": "Old inline feedback",
+        gh.inline.append({"id": 1000, "user": {"login": "reviewer"}, "body": "Old inline feedback",
                           "created_at": "2026-10-19T12:00:00Z"})
     monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
     monkeypatch.setattr(daemon, "PAUSE_FILE", tmp_path / "pause")
@@ -153,6 +171,10 @@ def test_spec_revised_from_review_through_daemon(setup, tmp_path, monkeypatch, i
     assert "The original issue and comments." in idea and "Handle empty input" in idea
     assert "Old feedback" not in idea and "Draft ready" not in idea
     assert gh.head == REVISED and gh.labels == {"spec:review"}
+    receipt = json.loads((tmp_path / "revisions/owner__sample/8.json").read_text())
+    selected = ["conversation:102", *(f"inline:{i + 1}" for i in range(inline_count))]
+    assert receipt["feedback_ids"] == selected
+    assert receipt["consumed_feedback_ids"] == sorted(["conversation:101", "inline:1000", *selected])
     comment, = gh.comments
     assert "Handle empty input" in comment["body"] and REVISED in comment["body"]
     expected = [f"**reviewer on `specs/gate/spec.md:{i + 1}`:**\n\nClarify gate case {i + 1}."
@@ -189,7 +211,7 @@ def test_large_spec_feedback_uses_idea_file(setup, tmp_path, original_receipt):
     gh.feedback.append({"author": {"login": "outsider"}, "authorAssociation": "NONE",
                         "body": "Untrusted instruction", "createdAt": "2026-10-20T14:00:00Z"})
     gh.inline = [
-        {"user": {"login": "reviewer"}, "author_association": "MEMBER",
+        {"id": 1, "user": {"login": "reviewer"}, "author_association": "MEMBER",
          "path": "specs/gate/spec.md", "line": 9, "body": "Keep blank lines.\n\nAnd Unicode: café.",
          "created_at": "2026-10-20T14:00:00Z"},
         {"user": {"login": "outsider"}, "author_association": "NONE",
@@ -226,30 +248,44 @@ def test_large_spec_feedback_uses_idea_file(setup, tmp_path, original_receipt):
 
 
 @pytest.mark.scenario("issue-intake/durable-drafting-payload/later-round-preserves-earlier-input")
-def test_delivery_retry_does_not_redraft_or_duplicate_comment(setup, tmp_path):
+@pytest.mark.real_trust
+@pytest.mark.parametrize("lost_response", [False, True])
+def test_delivery_retry_does_not_redraft_or_duplicate_comment(setup, tmp_path, lost_response):
     _, gh, commands = setup
-    gh.fail_comment = True
-    with pytest.raises(RuntimeError, match="response lost"):
+    gh.fail_comment = lost_response
+    if lost_response:
+        with pytest.raises(RuntimeError, match="response lost"):
+            poll(setup, tmp_path)
+        assert "agent:revise" in gh.labels
+    else:
         poll(setup, tmp_path)
+    receipt = json.loads((tmp_path / "revisions/owner__sample/8.json").read_text())
+    assert "conversation:102" in receipt["consumed_feedback_ids"]
     earlier = idea_file(commands.proposals[0])
     saved = earlier.read_bytes()
-    assert gh.head == REVISED and "agent:revise" in gh.labels
+    assert gh.head == REVISED
     poll(setup, tmp_path)
     assert len(commands.proposals) == len(gh.comments) == 1
     assert gh.labels == {"spec:review"}
     assert list(earlier.parent.glob("idea-*.txt")) == [earlier]
     assert saved == ("Add a gate\n\nThe original issue and comments."
                      "\n\n## New PR review feedback\n\n**reviewer:**\n\nHandle empty input").encode("utf-8")
-    gh.feedback.append({"author": {"login": "reviewer"}, "body": "Second round: café.\n\nKeep it complete.",
+    calls = commands.calls.copy()
+    gh.label_event("agent:revise", "labeled")
+    assert poll(setup, tmp_path) == [{"outcome": "empty"}]
+    assert commands.calls == calls and gh.labels == {"spec:review"}
+    gh.feedback.append({"id": 104, "author": {"login": "reviewer"}, "authorAssociation": "COLLABORATOR",
+                        "body": "Second round: café.\n\nKeep it complete.",
                         "createdAt": "2026-10-20T14:00:00Z"})
     gh.label_event("agent:revise", "labeled")
     commands.fetch_head = REVISED
     poll(setup, tmp_path)
-    assert len(commands.proposals) == len(gh.comments) == 2
+    assert len(commands.proposals) == 2 and len(gh.comments) == 3
     later = idea_file(commands.proposals[-1])
     assert later != earlier and later.parent == earlier.parent
-    assert later.read_bytes() == saved + (
-        "\n\n---\n\n**reviewer:**\n\nSecond round: café.\n\nKeep it complete."
+    assert later.read_bytes() == (
+        "Add a gate\n\nThe original issue and comments.\n\n## New PR review feedback"
+        "\n\n**reviewer:**\n\nSecond round: café.\n\nKeep it complete."
     ).encode("utf-8")
     assert earlier.read_bytes() == saved
     assert set(earlier.parent.glob("idea-*.txt")) == {earlier, later}
@@ -257,7 +293,7 @@ def test_delivery_retry_does_not_redraft_or_duplicate_comment(setup, tmp_path):
     assert "Second round: café." in gh.comments[-1]["body"]
 
 
-@pytest.mark.parametrize("failure", ["feedback", "status", "fetch", "push"])
+@pytest.mark.parametrize("failure", ["feedback", "status", "fetch", "push", "branch", "commit"])
 def test_failures_preserve_revision_label(setup, tmp_path, failure):
     _, gh, commands = setup
     if failure == "feedback":
@@ -266,27 +302,81 @@ def test_failures_preserve_revision_label(setup, tmp_path, failure):
         commands.status_error = True
     elif failure == "fetch":
         commands.fetch_head = "c" * 40
-    else:
+    elif failure == "push":
         commands.push_error = True
+    elif failure == "branch":
+        commands.result["branch"] = "spec/another-change"
+    else:
+        del commands.result["commit"]
     with pytest.raises(RuntimeError):
         poll(setup, tmp_path)
     assert gh.head == HEAD and "agent:revise" in gh.labels and not gh.comments
-    assert len(commands.proposals) == (1 if failure == "push" else 0)
+    receipt = json.loads((tmp_path / "revisions/owner__sample/8.json").read_text())
+    assert receipt["consumed_feedback_ids"] == ["conversation:101", "inline:1000"]
+    assert len(commands.proposals) == (1 if failure in ("push", "branch", "commit") else 0)
     if failure == "push":
+        assert receipt["feedback_ids"] == ["conversation:102"]
+        assert receipt["result"]["commit"] == REVISED
         commands.push_error = False
         poll(setup, tmp_path)
         assert len(commands.proposals) == 1 and gh.head == REVISED
+        receipt = json.loads((tmp_path / "revisions/owner__sample/8.json").read_text())
+        assert "conversation:102" in receipt["consumed_feedback_ids"]
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("pr-revision/spec-stage-revision/spec-revised-from-review")
+@pytest.mark.parametrize("failure", ["push_response", "acknowledgment_save"])
+def test_landed_spec_push_reconciles_before_acknowledgment(setup, tmp_path, monkeypatch, failure):
+    repo, gh, commands = setup
+    path = tmp_path / "revisions/owner__sample/8.json"
+    original = json.loads(path.read_text())["consumed_feedback_ids"]
+    save = specloop_intake._save
+
+    def fail_ack(path, receipt):
+        if "conversation:102" in receipt.get("consumed_feedback_ids", []):
+            raise OSError("acknowledgment save failed")
+        save(path, receipt)
+
+    def run(args, **kwargs):
+        if args[0] == "git" and args[3] == "push":
+            saved = json.loads(path.read_text())
+            assert saved["result"]["commit"] == REVISED
+            assert saved["consumed_feedback_ids"] == original
+            commands(args, **kwargs)  # The push lands before delivery fails.
+            if failure == "push_response":
+                raise RuntimeError("push response lost")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return commands(args, **kwargs)
+
+    if failure == "acknowledgment_save":
+        monkeypatch.setattr(specloop_intake, "_save", fail_ack)
+    with pytest.raises((RuntimeError, OSError), match="response lost|save failed"):
+        specloop_intake.revise_pending(repo, queue.Labels(), tmp_path, runner=gh,
+                                      specloop_runner=commands, git_runner=run)
+    assert gh.head == REVISED and not gh.comments and "agent:revise" in gh.labels
+    assert json.loads(path.read_text())["consumed_feedback_ids"] == original
+    monkeypatch.setattr(specloop_intake, "_save", save)
+    # The matching remote head permits retrying the saved push, not redrafting.
+    poll(setup, tmp_path)
+    saved = json.loads(path.read_text())
+    assert saved["consumed_feedback_ids"] == sorted([*original, "conversation:102"])
+    assert saved["delivered"] and gh.labels == {"spec:review"}
+    assert len(commands.proposals) == len(gh.comments) == 1
+    assert sum(c[0] == "git" and c[3] == "push" for c in commands.calls) == 2
 
 
 def test_fetch_failure_explained_and_retried(setup, tmp_path):
     _, gh, commands = setup
+    path = tmp_path / "revisions" / "owner__sample" / "8.json"
+    before = path.read_bytes()
     commands.fetch_error = True
     with pytest.raises(RuntimeError, match=f"could not fetch {BRANCH}: remote unavailable"):
         poll(setup, tmp_path)
     assert gh.head == HEAD and gh.labels == {"spec:review", "agent:revise"}
     assert not gh.comments and not commands.proposals
     assert [c[3] for c in commands.calls if c[0] == "git"] == ["fetch"]
-    assert not (tmp_path / "revisions" / "owner__sample" / "8.json").exists()
+    assert path.read_bytes() == before
 
     commands.fetch_error = False
     poll(setup, tmp_path)
@@ -299,6 +389,8 @@ def test_fetch_failure_explained_and_retried(setup, tmp_path):
 ])
 def test_revision_rechecks_state_and_label_after_listing(setup, tmp_path, state, revise_label):
     repo, gh, commands = setup
+    path = tmp_path / "revisions" / "owner__sample" / "8.json"
+    before = path.read_bytes()
 
     def changed_after_listing(args):
         response = gh(args)
@@ -317,7 +409,7 @@ def test_revision_rechecks_state_and_label_after_listing(setup, tmp_path, state,
     assert not commands.calls and not gh.comments and gh.head == HEAD
     assert gh.state == state
     assert gh.labels == ({"spec:review", "agent:revise"} if revise_label else {"spec:review"})
-    assert not (tmp_path / "revisions").exists()
+    assert path.read_bytes() == before
 
 
 def test_admitted_change_is_not_redrafted(setup, tmp_path):
@@ -362,7 +454,7 @@ def test_answer_after_lost_needs_human_response_retries_propose(setup, tmp_path,
     assert not receipt.get("delivered")
     poll(setup, tmp_path)
     assert len(commands.proposals) == 1
-    gh.feedback.append({"author": {"login": "reviewer"}, "body": "Use stereo.",
+    gh.feedback.append({"id": 104, "author": {"login": "reviewer"}, "body": "Use stereo.",
                         "createdAt": "2026-10-20T14:00:00Z"})
     gh.label_event("needs-human", "unlabeled")
     commands.result = {"version": 1, "outcome": "drafted", "commit": REVISED, "branch": BRANCH}

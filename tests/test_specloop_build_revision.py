@@ -8,7 +8,7 @@ import pytest
 
 from nightshift import daemon, queue, specloop_intake, specloop_job
 from nightshift.config import Config, Repo
-from test_specloop_spec_revision import Commands, RevisionGh, CHANGE, HEAD, REVISED, TIP_DATE
+from test_specloop_spec_revision import Commands, RevisionGh, CHANGE, HEAD, REVISED, TIP_DATE, seed_consumed
 
 
 class BuildCommands(Commands):
@@ -40,14 +40,15 @@ def setup(tmp_path):
     gh.label_event("spec:review", "unlabeled")
     gh.feedback.pop(1)
     gh.inline = [
-        {"user": {"login": "reviewer"}, "path": "src/gate.py", "line": 12,
+        {"id": 1, "author_association": "COLLABORATOR", "user": {"login": "reviewer"}, "path": "src/gate.py", "line": 12,
          "body": "Handle empty input.", "created_at": "2026-10-20T13:00:00Z"},
-        {"user": {"login": "reviewer"}, "path": "tests/test_gate.py", "line": 42,
+        {"id": 2, "author_association": "COLLABORATOR", "user": {"login": "reviewer"}, "path": "tests/test_gate.py", "line": 42,
          "body": "Cover the empty case.\n\nInclude a regression assertion.",
          "created_at": "2026-10-20T14:00:00Z"},
-        {"user": {"login": "reviewer"}, "path": "old.py", "line": 1,
+        {"id": 3, "author_association": "COLLABORATOR", "user": {"login": "reviewer"}, "path": "old.py", "line": 1,
          "body": "Already addressed.", "created_at": TIP_DATE},
     ]
+    seed_consumed(tmp_path, ("conversation:101", "inline:3"))
     return repo, gh, BuildCommands(gh)
 
 
@@ -83,13 +84,14 @@ def test_inline_feedback_queued_through_daemon(setup, tmp_path, monkeypatch):
 def test_empty_feedback_refused_without_any_cli(setup, tmp_path, admitted):
     _, gh, commands = setup
     commands.runs = commands.runs if admitted else []
-    gh.inline = gh.inline[2:]  # Only feedback at/before the tip and a self comment remain.
+    gh.inline = gh.inline[2:]  # Only consumed feedback and a self comment remain.
     for _ in range(2):
         poll(setup, tmp_path)
     assert not commands.calls
     assert gh.head == HEAD and "agent:revise" not in gh.labels
     comment, = gh.comments
-    assert "nothing to revise" in comment["body"] and "since the branch tip" in comment["body"]
+    assert "nothing to revise" in comment["body"] and "no unconsumed review feedback" in comment["body"]
+    assert "branch tip" not in comment["body"]
 
 
 def test_lost_comment_response_does_not_queue_twice(setup, tmp_path):
@@ -103,7 +105,8 @@ def test_lost_comment_response_does_not_queue_twice(setup, tmp_path):
     assert "agent:revise" not in gh.labels
     gh.label_event("agent:revise", "labeled")
     poll(setup, tmp_path)
-    assert len(commands.feedback) == len(gh.comments) == 2
+    assert len(commands.feedback) == 1 and len(gh.comments) == 2
+    assert [c[1] for c in commands.calls] == ["status", "revise"]
 
 
 @pytest.mark.parametrize("write_landed", [False, True])

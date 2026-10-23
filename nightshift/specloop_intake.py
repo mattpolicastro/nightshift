@@ -12,6 +12,7 @@ import re
 import subprocess
 import tomllib
 import uuid
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from urllib.parse import quote
@@ -364,6 +365,127 @@ def admit_pending(
                  on_error=on_error, on_pending=on_pending)
 
 
+def _revision_instant(value) -> datetime:
+    """Migration cutoffs require an explicit timezone, never local time."""
+    try:
+        instant = datetime.fromisoformat(value) if isinstance(value, str) else None
+        if instant is not None and instant.utcoffset() is not None:
+            return instant.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        pass
+    raise ValueError(f"invalid revision timestamp: {value!r}")
+
+
+def _initialize_revision_feedback(path: Path, receipt: dict | None, repo: str,
+                                  number: int, head: str, *, runner=queue._gh) -> dict | None:
+    """After authorization, initialize legacy state before collection or delivery.
+
+    `head` must be the current PR head, not the old receipt's head. Return a
+    durable copy; read/validation/save failures leave the caller's state intact.
+    No receipt means no legacy baseline. Initialized receipts never reread it.
+    """
+    if receipt is None:
+        return None
+    if not isinstance(receipt, dict):
+        raise ValueError("revision feedback receipt must be an object")
+    metadata = {"feedback_state_version", "consumed_feedback_ids", "feedback_ids",
+                "feedback_migration", "legacy_snapshot"}
+    if metadata.intersection(receipt):
+        _validate_revision_feedback(receipt)
+        return receipt
+    if "saved_at" in receipt or "updated_at" in receipt:
+        cutoff = _revision_instant(receipt["saved_at"] if "saved_at" in receipt
+                                   else receipt["updated_at"])
+        source = "receipt_saved_at"
+    else:
+        tip = json.loads(runner(["api", f"repos/{repo}/commits/{head}"]))
+        cutoff = _revision_instant(tip["commit"]["committer"]["date"])
+        source = "branch_tip"
+    consumed = set()
+    for kind, record in queue._pr_feedback_records(repo, number, runner=runner):
+        identity = queue._feedback_id(kind, record)
+        created = _revision_instant(record.get("submitted_at" if kind == "review" else "created_at"))
+        if created <= cutoff:
+            consumed.add(identity)
+    updated = {**receipt, "feedback_state_version": 1,
+               "consumed_feedback_ids": sorted(consumed), "legacy_snapshot": True,
+               "feedback_migration": {"source": source,
+                                      "cutoff": cutoff.isoformat().replace("+00:00", "Z")}}
+    _validate_revision_feedback(updated)
+    _save(path, updated)
+    return updated
+
+
+def _validate_revision_feedback(receipt: dict) -> None:
+    """Validate an initialized ledger; legacy receipts must be migrated first."""
+    if not isinstance(receipt, dict):
+        raise ValueError("revision feedback receipt must be an object")
+    version = receipt.get("feedback_state_version")
+    if type(version) is not int or version != 1:
+        raise ValueError("unsupported or missing revision feedback_state_version")
+    if "feedback_migration" in receipt:
+        migration = receipt["feedback_migration"]
+        if (not isinstance(migration, dict)
+                or migration.get("source") not in ("receipt_saved_at", "branch_tip")):
+            raise ValueError("invalid revision feedback_migration")
+        _revision_instant(migration.get("cutoff"))
+    if "legacy_snapshot" in receipt and type(receipt["legacy_snapshot"]) is not bool:
+        raise ValueError("invalid revision legacy_snapshot")
+    legacy = receipt.get("legacy_snapshot", False)
+    for field in ("consumed_feedback_ids", "feedback_ids"):
+        if field == "feedback_ids" and legacy and field not in receipt:
+            continue
+        ids = receipt.get(field)
+        if (not isinstance(ids, list) or any(
+                not isinstance(identity, str)
+                or not re.fullmatch(r"(?:conversation|review|inline):[1-9][0-9]*", identity)
+                for identity in ids) or len(set(ids)) != len(ids)):
+            raise ValueError(f"invalid revision {field}")
+    feedback = receipt.get("feedback")
+    if not isinstance(feedback, list) or any(not isinstance(block, str) for block in feedback):
+        raise ValueError("invalid revision feedback")
+    if "feedback_ids" in receipt and (legacy or len(receipt["feedback_ids"]) != len(feedback)):
+        raise ValueError("revision feedback_ids must align with a non-legacy snapshot")
+
+
+def _save_revision_snapshot(path: Path, previous: dict | None,
+                            items: list[queue.FeedbackItem], **round_fields) -> dict:
+    """Replace a finished round, preserving its ledger and unknown fields.
+
+    Callers authorize and recover pending work first, then use this before
+    dispatch (including synchronous runners). No receipt means no baseline.
+    """
+    if previous is not None:
+        _validate_revision_feedback(previous)
+    consumed = set(previous["consumed_feedback_ids"]) if previous is not None else set()
+    selected = [item for item in items if item.id not in consumed]
+    receipt = dict(previous) if previous is not None else {}
+    for field in ("change", "head", "event", "round_id", "command", "job", "result",
+                  "delivered", "feedback", "feedback_ids", "legacy_snapshot"):
+        receipt.pop(field, None)
+    receipt.update(round_fields)
+    receipt.update(feedback_state_version=1, consumed_feedback_ids=sorted(consumed),
+                   feedback_ids=[item.id for item in selected],
+                   feedback=[item.block for item in selected])
+    _validate_revision_feedback(receipt)
+    _save(path, receipt)
+    return receipt
+
+
+def _acknowledge_revision_feedback(path: Path, receipt: dict) -> None:
+    """After validated success (and spec push), consume only the saved IDs.
+
+    Legacy snapshots have no exact IDs and add nothing beyond their baseline.
+    A failed save leaves the caller's receipt unchanged so delivery cannot
+    mistake an in-memory acknowledgement for durable consumption.
+    """
+    _validate_revision_feedback(receipt)
+    updated = {**receipt, "consumed_feedback_ids": sorted(
+        set(receipt["consumed_feedback_ids"]) | set(receipt.get("feedback_ids", [])))}
+    _save(path, updated)
+    receipt.update(updated)
+
+
 def revise_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
     git_runner=None, launcher=None, status_runner=None, on_error=None, on_pending=None,
@@ -401,31 +523,45 @@ def revise_pending(
         directory = repo.name.replace("/", "__")
         path = state_dir / "revisions" / directory / f"{number}.json"
         receipt = json.loads(path.read_text()) if path.exists() else None
+        receipt = _initialize_revision_feedback(
+            path, receipt, repo.name, number, pr["headRefOid"], runner=gh)
+        # A newer authorized event cannot replace a running job's snapshot.
         if receipt and not _collect(path, receipt, receipt.get("command", "propose")):
             return _PENDING
-        if receipt and (receipt["change"] != change or receipt["event"] != event
-                        or "result" not in receipt
-                        or (receipt.get("delivered")
-                            and receipt["result"]["outcome"] in ("needs_input", "rejected", "refused"))):
+        previous = receipt
+        # Finish successful work under its original event and marker first;
+        # the newer application selects remaining IDs on a later poll.
+        awaiting_success = (receipt and not receipt.get("delivered")
+                            and receipt.get("result", {}).get("outcome") in ("drafted", "revised"))
+        # Legacy results have no exact snapshot IDs. Deliver their saved
+        # outcome before comparing live feedback or replacing their event,
+        # including human-input outcomes that must retain the original marker.
+        awaiting_legacy = (receipt and receipt.get("legacy_snapshot")
+                           and not receipt.get("delivered") and "result" in receipt)
+        if receipt and not (awaiting_success or awaiting_legacy) and (
+                receipt["change"] != change or receipt["event"] != event or "result" not in receipt
+                or (receipt.get("delivered")
+                    and receipt["result"]["outcome"] in ("needs_input", "rejected", "refused"))):
             receipt = None
         git = partial(_bounded_run, runner=git_runner)
-        if receipt is None or receipt["result"]["outcome"] in ("needs_input", "rejected", "refused"):
-            tip = json.loads(gh(["api", f"repos/{repo.name}/commits/{pr['headRefOid']}"]))
-            since = tip["commit"]["committer"]["date"]
-            if not since:
-                raise RuntimeError("could not read the PR branch tip date")
-            feedback = queue.pr_feedback(repo.name, branch, since, runner=gh, strict=True, number=number)
-            feedback = [block for block in feedback if queue.has_instructions([block])]
+        if receipt is None or (not awaiting_legacy and receipt["result"]["outcome"] in (
+                "needs_input", "rejected", "refused")):
+            items = queue.pr_feedback_items(repo.name, number, runner=gh)
+            consumed = set(previous["consumed_feedback_ids"]) if previous else set()
+            items = [item for item in items if item.id not in consumed]
+            feedback = [item.block for item in items]
             # The needs-human write may have landed despite a lost response,
             # leaving delivered unset. A reviewer answer after clearing the
             # label must retry drafting rather than replay the old questions.
-            if receipt and feedback != receipt["feedback"]:
+            if receipt and (feedback != receipt["feedback"]
+                            or [item.id for item in items] != receipt.get("feedback_ids")):
                 receipt = None
         if receipt is None:
             receipt = {"change": change, "head": pr["headRefOid"], "event": event,
                        "feedback": feedback, "round_id": str(event)}
             if not queue.has_instructions(feedback):
                 receipt["result"] = {"outcome": "empty"}
+                receipt = _save_revision_snapshot(path, previous, items, **receipt)
             else:
                 # Empty feedback needs no CLI call, including status. Only
                 # instructions require choosing between spec and build stages.
@@ -444,6 +580,7 @@ def revise_pending(
                     # Review bodies may contain Markdown separators or YAML
                     # document boundaries. JSON preserves each complete block.
                     feedback_path.write_text(json.dumps(feedback) + "\n")
+                    receipt = _save_revision_snapshot(path, previous, items, **receipt)
                     if not _start(path, receipt, [
                         "revise", change, "--feedback", str(feedback_path),
                         "--feedback-format", "json",
@@ -472,6 +609,7 @@ def revise_pending(
                            capture_output=True, text=True, check=False)
                 if head.returncode or head.stdout.strip() != pr["headRefOid"]:
                     raise RuntimeError(f"{branch} changed during revision; retry on the next poll")
+                receipt = _save_revision_snapshot(path, previous, items, **receipt)
                 if not _start(path, receipt, [
                     "propose", str(repo.manifest), "--change", change, "--branch", branch,
                     "--from-branch", fetched_ref,
@@ -489,14 +627,16 @@ def revise_pending(
             ], capture_output=True, text=True, check=False)
             if pushed.returncode:
                 raise DeliveryError(f"could not push {branch}: {pushed.stderr.strip()}")
+            _acknowledge_revision_feedback(path, receipt)
             body = (f"Revised the spec in {result['commit']} from this review feedback:\n\n"
                     + "\n\n---\n\n".join(receipt["feedback"]))
             if result.get("risks"):
                 body += "\n\nFeasibility risks:\n" + "\n".join(f"- {risk}" for risk in result["risks"])
         elif result["outcome"] == "revised":
+            _acknowledge_revision_feedback(path, receipt)
             body = f"Queued review tasks for {change} in {result['commit']}; the build has resumed."
         elif result["outcome"] == "empty":
-            body = "There is nothing to revise: no new review feedback since the branch tip."
+            body = "There is nothing to revise: no unconsumed review feedback is available."
         else:
             body = "Revision needs human input.\n\n" + "\n".join(
                 "- " + (json.dumps(item, ensure_ascii=False) if isinstance(item, dict) else item)
@@ -504,13 +644,18 @@ def revise_pending(
                 for item in result.get(field, [])
             )
         _comment(repo.name, number, change, body, runner=gh, action="revise", kind="pr",
-                 round_id=receipt["round_id"])
+                 round_id=receipt.get("round_id"))
         edit = ["pr", "edit", str(number), "--repo", repo.name]
         if result["outcome"] in ("drafted", "revised", "empty"):
-            edit += ["--remove-label", labels.revise]
+            # Execution or comment delivery may have outlived the application.
+            latest = _latest_label_events(repo.name, number, {labels.revise}, runner=gh)
+            if latest.get(labels.revise, {}).get("id") == receipt["event"]:
+                edit += ["--remove-label", labels.revise]
         else:
             edit += ["--add-label", labels.needs_human]
-        gh(edit)
+        # mutation-equivalent: edit has 5 arguments or 7 after a flag/value pair, so > 5 and > 6 agree.
+        if len(edit) > 5:
+            gh(edit)
         receipt["delivered"] = True
         _save(path, receipt)
         return result

@@ -751,6 +751,7 @@ def revision_poll(repo, state, gh, *, module=specloop_intake,
 @pytest.mark.scenario(RECEIPT)
 @pytest.mark.scenario(TRUSTED)
 @pytest.mark.scenario("pr-revision/revision-actor-gate/unauthorized-revision-ignored-at-either-stage")
+@pytest.mark.scenario("pr-revision/durable-round-snapshot/new-label-preserves-completed-round")
 @pytest.mark.parametrize("stage", ["spec-revision", "build-revision"])
 @pytest.mark.parametrize("configured", [False, True])
 def test_revision_receipt_survives_untrusted_reapplication(repo, tmp_path, stage, configured):
@@ -780,6 +781,9 @@ def test_revision_receipt_survives_untrusted_reapplication(repo, tmp_path, stage
     path = tmp_path / "revisions/owner__sample/8.json"
     original = json.loads(path.read_text())
     assert "result" in original and not original.get("delivered")
+    assert original["feedback_ids"] == ["conversation:101", "conversation:102"]
+    assert original["consumed_feedback_ids"] == original["feedback_ids"]
+    gh.feedback.append({**gh.feedback[1], "id": 104, "body": "Feedback for the later request"})
     reapply(gh, labels.revise, "outsider")
     rejected_event = gh.events[-1]["id"]
     snapshot, original_labels = files_under(tmp_path), gh.labels.copy()
@@ -799,19 +803,39 @@ def test_revision_receipt_survives_untrusted_reapplication(repo, tmp_path, stage
     result, = revision_poll(repo, tmp_path, gh, module=restarted_intake(),
                             commands=commands, labels=labels)
     receipt = json.loads(path.read_text())
-    # Revision event IDs define rounds: a new application requests a new round,
-    # rather than delivering the older event's result as this event's work.
-    assert receipt["event"] == authorized_event != original["event"]
-    assert receipt["round_id"] == str(authorized_event) and receipt["delivered"]
+    # Finish the saved round before considering the newer authorized request.
+    assert receipt["event"] == original["event"] != authorized_event
+    assert receipt["round_id"] == original["round_id"] and receipt["delivered"]
+    for field in ("feedback", "feedback_ids", "consumed_feedback_ids", "result"):
+        assert receipt[field] == original[field]
     assert result["outcome"] == ("drafted" if stage == "spec-revision" else "revised")
-    dispatch = "propose" if stage == "spec-revision" else "revise"
-    assert sum(c[:2] == ["specloop", dispatch] for c in commands.calls) == 1
+    assert not any(c[0] == "specloop" for c in commands.calls)
     assert gh.comments[0] == rejection and len(gh.comments) == 2
-    assert labels.revise not in gh.labels
+    assert labels.revise in gh.labels
+    assert f"nightshift:revise:{receipt['change']}:{original['round_id']}" in gh.comments[-1]["body"]
     assert all((tmp_path / name).read_bytes() == data for name, data in snapshot.items()
                if name != path.relative_to(tmp_path))
+    original_comment = deepcopy(gh.comments[-1])
+    revision_poll(repo, tmp_path, gh, module=restarted_intake(), commands=commands, labels=labels)
+    remaining = json.loads(path.read_text())
+    assert remaining["event"] == authorized_event and remaining["round_id"] == str(authorized_event)
+    assert remaining["feedback_ids"] == ["conversation:104"]
+    assert remaining["feedback"] == ["**reviewer:**\n\nFeedback for the later request"]
+    assert remaining["consumed_feedback_ids"] == ["conversation:101", "conversation:102", "conversation:104"]
+    assert remaining["delivered"] and labels.revise not in gh.labels
+    dispatches = [c for c in commands.calls if c[:2] in (
+        ["specloop", "propose"], ["specloop", "revise"])]
+    assert len(dispatches) == 1
+    payload = (json.loads(commands.feedback[-1]) if stage == "build-revision"
+               else idea_file(dispatches[0]).read_text())
+    assert (payload == remaining["feedback"] if stage == "build-revision"
+            else remaining["feedback"][0] in payload and "Handle empty input" not in payload)
+    assert gh.comments[:2] == [rejection, original_comment] and len(gh.comments) == 3
+    assert f"nightshift:revise:{remaining['change']}:{authorized_event}" in gh.comments[-1]["body"]
+    reapply(gh, labels.revise, "maintainer")
     calls = commands.calls.copy()
-    assert revision_poll(repo, tmp_path, gh, labels=labels) == []
+    assert revision_poll(repo, tmp_path, gh, labels=labels) == [{"outcome": "empty"}]
+    assert labels.revise not in gh.labels
     assert commands.calls == calls
 
 
