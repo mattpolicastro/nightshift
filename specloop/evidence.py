@@ -385,36 +385,54 @@ def _mutate_one(number: int, mut: Mutant, baseline_src: Path, head: str,
 
 def mutate(repo: Path, head: str, mutants: list[Mutant], m: Manifest, out: Path) -> bool:
     """Classify each mutant. False when the unmutated head itself fails."""
-    steps = tuple(s for s in m.verify if s.id in m.mutation_steps)
+    resolved = [resolve_mutation_steps(mut.path, m)[1] for mut in mutants]
+    sequences = {tuple(s.id for s in steps): steps for steps in resolved}
+    if not mutants:
+        # Preserve the direct-call legacy baseline without starting a pool.
+        steps = tuple(s for s in m.verify + m.mutation_step if s.id in m.mutation_steps)
+        sequences[tuple(s.id for s in steps)] = steps
+    baseline_dirs = []
+    assignments = {}
     try:
-        receipts = verify.run_steps(repo, head, steps, m, out)
-        if not verify.ok(receipts, m.prepare + steps):
-            for mut in mutants:
-                mut.result = "invalid"
-            return False
-        # Snapshot the baseline's per-step limits once, before any mutant runs.
-        # Copies keep the baseline and shared manifest at their original ceilings.
-        budget = {r.id: max(MIN_MUTANT_SECONDS, MUTANT_TIME_FACTOR * r.seconds)
-                  for r in receipts if r.seconds is not None and r.seconds > 0}
-        steps = tuple(replace(s, timeout=min(s.timeout, budget.get(s.id, s.timeout)))
-                      for s in steps)
-        mutant_manifest = replace(m, prepare=tuple(
-            replace(s, timeout=min(s.timeout, budget.get(s.id, s.timeout)))
-            for s in m.prepare))
+        for number, (key, steps) in enumerate(sequences.items(), 1):
+            # Legacy commands keep their original manifest and variables. Direct
+            # Manifest construction may omit the reserved placeholder default.
+            full_manifest = m
+            if any("{mutant_path}" in arg for s in m.prepare + steps for arg in s.run):
+                full_manifest = replace(m, vars={**m.vars, "mutant_path": ""})
+            baseline_out = out if number == 1 else out / f"baseline-{number}"
+            baseline_dirs.append(baseline_out)
+            receipts = verify.run_steps(repo, head, steps, full_manifest, baseline_out)
+            if not verify.ok(receipts, m.prepare + steps):
+                for mut in mutants:
+                    mut.result = "invalid"
+                return False
+            # Snapshot limits from this sequence's full baseline, not another
+            # sequence that happens to share a step ID. Keep manifest ceilings.
+            budget = {r.id: max(MIN_MUTANT_SECONDS, MUTANT_TIME_FACTOR * r.seconds)
+                      for r in receipts if r.seconds is not None and r.seconds > 0}
+            limited_steps = tuple(replace(s, timeout=min(s.timeout, budget.get(s.id, s.timeout)))
+                                  for s in steps)
+            mutant_manifest = replace(full_manifest, prepare=tuple(
+                replace(s, timeout=min(s.timeout, budget.get(s.id, s.timeout)))
+                for s in m.prepare))
+            assignments[key] = (baseline_out / "src", limited_steps, mutant_manifest)
         if mutants:
             # The pool drains even on an unexpected worker error, before the
-            # outer finally releases the baseline source shared by all workers.
+            # outer finally releases any baseline source shared by workers.
             with ThreadPoolExecutor(max_workers=min(m.mutation_parallel, len(mutants))) as pool:
-                futures = {
-                    pool.submit(_mutate_one, index + 1, mut, out / "src", head,
-                                steps, mutant_manifest, out): index
-                    for index, mut in enumerate(mutants)
-                }
+                futures = {}
+                for index, (mut, steps) in enumerate(zip(mutants, resolved)):
+                    src, limited_steps, mutant_manifest = assignments[tuple(s.id for s in steps)]
+                    future = pool.submit(_mutate_one, index + 1, mut, src, head,
+                                         limited_steps, mutant_manifest, out)
+                    futures[future] = index
                 for future in as_completed(futures):
                     mutants[futures[future]].result = future.result()
         return True
     finally:
-        verify.cleanup(out)
+        for baseline_out in reversed(baseline_dirs):
+            verify.cleanup(baseline_out)
 
 
 def gather(repo: Path, base: str, head: str, section_scenarios: list[str], seen: set[str],
