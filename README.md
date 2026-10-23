@@ -104,11 +104,17 @@ An approval covers the PR head it was applied to: if the spec branch moves
 afterwards (a revision lands, or someone pushes), the daemon removes
 `spec:approved` and asks for a fresh review instead of building it.
 
-The harness seals, verifies and independently reviews each task. When the run
-pauses at `ready_to_publish`, the daemon publishes to the **same branch and
-PR**, commenting the remaining human checks and hosted CI reminder. Review
-the code and complete those checks before merging; merging closes the linked
-issue. No second PR is needed for the build.
+The harness seals, verifies and independently reviews each task. Before
+`ready_to_publish`, the driver fetches the configured base, merges it when
+needed and runs trusted preparation and verification. Publish refetches once
+with a 20-second limit; a moved base or pending integration checks return the
+run to `running` with no pause and a retryable error. `specloop serve` drives
+preparation, then the daemon retries publication to the **same branch and PR**.
+It comments the remaining human checks and hosted CI reminder after success.
+Review the code and complete those checks before merging; merging closes the
+linked issue. See [publication and base recovery](docs/specloop/README.md#publication-and-base-recovery)
+for `base_conflict`, `base_drift`, driver `base_fetch` and retryable publish
+fetch errors ([PR #59](https://github.com/mattpolicastro/nightshift/pull/59)).
 
 To request changes at either stage, leave PR conversation, review or inline
 comments, then have a trusted actor apply `agent:revise` to the PR. The daemon

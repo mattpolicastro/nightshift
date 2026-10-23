@@ -52,10 +52,12 @@ Revision uses only feedback newer than the branch tip, including inline file
 and line references. Empty revision requests are explained and cleared without
 running an agent.
 
-The separate `specloop serve` supervisor executes admitted tasks. At
-`ready_to_publish`, the daemon publishes to the same PR and comments the
-remaining human checks and hosted CI reminder. A human reviews, checks and
-merges; merging closes the linked issue. `nightshift attention` lists human
+The separate `specloop serve` supervisor executes admitted tasks and prepares
+the current base before `ready_to_publish`. The daemon then attempts
+[publication](#publication-and-base-recovery) to the same branch and PR,
+commenting the remaining human checks and hosted CI reminder after success.
+A human reviews, checks and merges; merging closes the linked issue.
+`nightshift attention` lists human
 pauses with reason, change and PR link; failed status reads retain the previous
 snapshot marked `STALE` and exit 1. JSON carries `specloop` beside worker
 `tasks`. The Paseo plugin source now includes the Factory section described
@@ -78,6 +80,54 @@ exists, there is no intake, approval, revision
 or publication; in-flight drafting/admission jobs may finish but delivery
 waits. Already-admitted runs continue under the separate specloop supervisor;
 unload its launchd job to stop that service.
+
+## Publication and base recovery
+
+Base preparation implements [issue #46](https://github.com/mattpolicastro/nightshift/issues/46)
+in [PR #59](https://github.com/mattpolicastro/nightshift/pull/59).
+After tasks land, the driver's `finals` / `prepare_publish` fetches the
+configured `pr_base` from the source repository's current `origin`. If that
+base is not already incorporated, it creates a two-parent merge on the run
+branch. Trusted `prepare` and `verify` steps check the integrated head before
+final coverage and acceptance checks permit `ready_to_publish`. Pending
+integration verification still runs when the base is already incorporated.
+
+`specloop publish <change>` refetches once with a 20-second limit. If the base
+moved or integration verification is outstanding, it saves `running` state
+with no pause and returns a retryable error; nothing is published. Publish
+does not merge or verify inline. `specloop serve` drives preparation; without
+it, run `specloop run <change>`. Retry publication after the driver restores
+`ready_to_publish`; the daemon retries on a later poll. A successful publish
+updates the recorded branch and PR and pauses at `human_checks`. Complete the
+human checks and hosted CI review before `specloop finish <change>` archives
+the change and marks the PR ready. A human merges it.
+
+Inspect `specloop status <change>` for the pause detail. Base preparation can
+stop at three distinct pauses:
+
+- **`base_conflict`:** the run head stays unchanged. The detail names the
+  conflicting paths and base/head commits; inspect those paths and
+  `final/base-sync/attempt-*/diagnostic.txt` under the run directory.
+- **`base_drift`:** the merge remains on the run branch, but trusted preparation
+  or verification failed. The detail names the base and retained head, failed
+  checks, `receipts.json` and step logs in `final/base-sync/attempt-*/`.
+- **`base_fetch`:** the driver cannot fetch the configured base. Inspect the
+  fetch diagnostic and repair access to the source origin or the missing base
+  branch, then run `specloop resume <change>` to fetch and prepare again.
+
+For conflicts or drift, bring the run branch from its `repo.git` into the
+source checkout's configured branch before committing a repair. Keep the
+current run head in its ancestry; resolve conflicts against the configured
+base or fix the failed checks. `specloop resume <change>` imports a repair
+that fast-forwards the run head and restarts the driver. It re-verifies even
+if the base has not moved or a manual merge already incorporated it. Resuming
+without a repair retries the checks; it does not accept a failure. Old
+receipts remain available, and publication waits for readiness.
+
+A fetch failure during **publish** instead leaves readiness and saved checks
+intact and returns a retryable error. Restore base access and retry
+`specloop publish <change>`; the daemon can retry on a later poll. This does
+not create a driver `base_fetch` pause or permit a push using a stale base.
 
 ## Paseo Factory section and `specloop act`
 
