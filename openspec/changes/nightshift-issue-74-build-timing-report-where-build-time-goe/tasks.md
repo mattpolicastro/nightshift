@@ -6,6 +6,7 @@
 ## 2. Expose the filtered command and output
 
 - [x] 2.1 Extend `nightshift/timings.py` with whole-run filters, `render_table`, `main` and the module guard, using one report dictionary for the single text table and JSON. Add `test_since_and_change_filters` and `test_json_output_shape` to `tests/test_timings.py`; complete `test_unreadable_run_is_reported_not_fatal` with stderr and exit-code assertions. Budget about 130 changed lines, with no CLI registration or dependency changes. Covers `build-timing-report/filtered-report-output/date-and-change-filters`, `build-timing-report/filtered-report-output/text-and-json-agree`, `build-timing-report/read-only-collection/readable-history-survives-bad-input` and `build-timing-report/read-only-collection/empty-history`.
+- [ ] 2.2 Strengthen the tests so each of these single-line mutations of code added in section 2 makes a test fail; where a mutation genuinely cannot change behaviour, say why in a comment on the line above it starting `mutation-equivalent:` (the reviewer judges it): nightshift/timings.py:159 `help="include whole runs first admitted on or after this UTC` -> `help="include whole runs first admitted on and after this UT`; nightshift/timings.py:157 `parser = argparse.ArgumentParser(description="Report local b` -> `parser = argparse.ArgumentParser(description="Report local b`; nightshift/timings.py:167 `print(json.dumps(report, indent=2) if args.json else render_` -> `print(json.dumps(report, indent=3) if args.json else render_`
 
 ## 3. Document the report and finish validation
 
