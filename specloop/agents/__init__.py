@@ -19,9 +19,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from nightshift.host_paths import tool_path
 from specloop.manifest import Profile
-
-PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 @dataclass
@@ -141,7 +140,7 @@ def run(call: Call) -> Result:
 
 
 def base_env(home_var: str, home: Path, **extra) -> dict:
-    env = {"PATH": PATH, "HOME": str(Path.home()), "LANG": "en_US.UTF-8", home_var: str(home)}
+    env = {"PATH": tool_path(), "HOME": str(Path.home()), "LANG": "en_US.UTF-8", home_var: str(home)}
     env.update({k: v for k, v in extra.items() if v})
     return env
 
