@@ -117,7 +117,8 @@ def test_fetch_and_post_pull_head(recording, apply):
 
 
 @pytest.mark.scenario("deployment-drift/standalone-deployment-command/flags-and-plugin-location")
-@pytest.mark.parametrize("env,flag,expected", [(None, None, None), ("env", None, "env"), ("env", "flag", "flag")])
+@pytest.mark.parametrize("env,flag,expected", [(None, None, None), ("env", None, "env"), ("env", "flag", "flag"),
+                                             (None, "flag", "flag")])
 def test_options(recording, env, flag, expected, capsys):
     if env is not None:
         recording.context.env["NIGHTSHIFT_PLUGIN_DIR"] = env
@@ -152,6 +153,8 @@ def test_path_expansion_and_empty_environment(recording, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         recording.run()
     assert exc.value.code == 2 and recording.calls == []
+    override = deploy.parse_options(["--plugin-dir", "plugin"], recording.context)
+    assert override.plugin_dir == recording.context.cwd / "plugin"
 
 
 def test_check_keeps_observing_after_fetch_failure(recording, capsys):
@@ -228,9 +231,13 @@ def deployment(plugin_recording, monkeypatch):
 
 @pytest.mark.scenario("deployment-drift/checkout-drift-and-refusal/fetch-reveals-behind-base")
 @pytest.mark.scenario("deployment-drift/ordered-repeatable-application/second-application-is-a-no-op")
-def test_apply_twice_is_a_no_op(deployment, capsys):
+@pytest.mark.parametrize("plugin_setting", ["flag", "environment"])
+def test_apply_twice_is_a_no_op(deployment, plugin_setting, capsys):
     r = deployment
     args = ["--apply", "--plugin-dir", str(r.destination)]
+    if plugin_setting == "environment":
+        r.context.env["NIGHTSHIFT_PLUGIN_DIR"] = str(r.destination)
+        args = ["--apply"]
     assert r.run(*args) == 0
     assert r.effects == ["pull", "sync", "backup", "swap", "reload", "daemon", "supervisor"]
     assert all(head == "after" for _, head in r.heads)
@@ -621,7 +628,9 @@ def test_reload_override_and_skip(plugin_recording, capsys):
     assert fresh_plugin_run(r, "--apply", "--reload-cmd", shlex.join(command)) == 0
     assert not r.marker.exists() and not results
     assert sorted(r.state.iterdir()) == sorted(p for p in before if p != r.marker)
+    installed = deployment_snapshot(r)
     assert fresh_plugin_run(r, "--apply", "--reload-cmd", "") == 0
+    assert deployment_snapshot(r) == installed
 
 
 @pytest.mark.scenario("deployment-drift/process-age-drift/process-predates-code")
@@ -676,6 +685,7 @@ def restarting(recording, monkeypatch):
         (r.context.daemon_state / filename).write_text('{"untouched": true}')
     r.now, r.replacement, r.mode, r.fresh, r.error = 0, 0, "idle", None, None
     r.kicks, r.observations = [], {"daemon": 0, "supervisor": 0}
+    r.kick_times = []
     r.context.uid = 502
     r.context.monotonic = lambda: r.now
     r.context.sleep = lambda seconds: setattr(r, "now", r.now + seconds)
@@ -697,6 +707,7 @@ def restarting(recording, monkeypatch):
             assert argv in [["launchctl", "kickstart", *flag, r.target] for flag in (["-k"], [])]
             assert kwargs["timeout"] == 30
             r.kicks.append(key)
+            r.kick_times.append(r.now)
             if r.error == "timeout":
                 raise subprocess.TimeoutExpired(key, kwargs["timeout"])
             if r.error == "missing":
@@ -784,6 +795,7 @@ def test_supervisor_restart_deferred_while_driving(restarting, name, mode, force
     assert (f"{name} restart pending" in output) == blocked
     expected = [] if blocked or mode in {"current", "unavailable"} else [f"launchctl kickstart -k {r.target}"] + ([f"launchctl kickstart {r.target}"] if delay >= 30 or timeout else [])
     assert r.kicks == expected and r.now == (0 if not expected else 60 if timeout else delay)
+    assert r.kick_times == [0, 30][:len(expected)]
     if timeout or error or mode == "unavailable":
         assert "launchctl kickstart 'gui/502/override label'" in output
     if timeout:
