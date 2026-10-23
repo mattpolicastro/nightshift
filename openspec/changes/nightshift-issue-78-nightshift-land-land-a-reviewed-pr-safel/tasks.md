@@ -16,7 +16,7 @@
 
 ## 4. Establish CI verdicts and deadlines
 
-- [ ] 4.1 Add expected-head CI polling, JSON/exit-status classification and the injected shared deadline. Add `test_land_refuses_failing_ci` and pending-to-green, empty/all-skipped, cancellation, malformed-result, timeout and head-change tests. Cover `reviewed-pr-landing/bounded-ci-wait/pending-then-green`, `reviewed-pr-landing/bounded-ci-wait/failing-ci-refused`, `reviewed-pr-landing/bounded-ci-wait/shared-deadline-expires`.
+- [x] 4.1 Add expected-head CI polling, JSON/exit-status classification and the injected shared deadline. Add `test_land_refuses_failing_ci` and pending-to-green, empty/all-skipped, cancellation, malformed-result, timeout and head-change tests. Cover `reviewed-pr-landing/bounded-ci-wait/pending-then-green`, `reviewed-pr-landing/bounded-ci-wait/failing-ci-refused`, `reviewed-pr-landing/bounded-ci-wait/shared-deadline-expires`.
 
 ## 5. Validate updates and synchronize main
 
