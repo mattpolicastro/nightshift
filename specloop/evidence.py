@@ -332,6 +332,29 @@ MUTANT_TIME_FACTOR = 3
 MIN_MUTANT_SECONDS = 30.0
 
 
+@dataclass(frozen=True)
+class _MutationBudgets:
+    prepare: tuple[Step, ...]
+    steps: tuple[Step, ...]
+
+
+def _mutation_budgets(prepare: tuple[Step, ...], steps: tuple[Step, ...],
+                      receipts: list[verify.Receipt]) -> _MutationBudgets:
+    """Snapshot limits from one sequence's full baseline without changing ceilings.
+
+    Shared step IDs are local to this baseline. Frozen steps retain these limits
+    independently of receipt changes, sibling execution, or time in the queue.
+    """
+    budget = {r.id: max(MIN_MUTANT_SECONDS, MUTANT_TIME_FACTOR * r.seconds)
+              for r in receipts if r.seconds is not None and r.seconds > 0}
+
+    def limited(group: tuple[Step, ...]) -> tuple[Step, ...]:
+        return tuple(replace(s, timeout=min(s.timeout, budget.get(s.id, s.timeout)))
+                     for s in group)
+
+    return _MutationBudgets(limited(prepare), limited(steps))
+
+
 def resolve_mutation_steps(path: str, m: Manifest) -> tuple[int | None, tuple[Step, ...]]:
     """Resolve a repository-relative POSIX path against a validated manifest.
 
@@ -407,16 +430,9 @@ def mutate(repo: Path, head: str, mutants: list[Mutant], m: Manifest, out: Path)
                 for mut in mutants:
                     mut.result = "invalid"
                 return False
-            # Snapshot limits from this sequence's full baseline, not another
-            # sequence that happens to share a step ID. Keep manifest ceilings.
-            budget = {r.id: max(MIN_MUTANT_SECONDS, MUTANT_TIME_FACTOR * r.seconds)
-                      for r in receipts if r.seconds is not None and r.seconds > 0}
-            limited_steps = tuple(replace(s, timeout=min(s.timeout, budget.get(s.id, s.timeout)))
-                                  for s in steps)
-            mutant_manifest = replace(full_manifest, prepare=tuple(
-                replace(s, timeout=min(s.timeout, budget.get(s.id, s.timeout)))
-                for s in m.prepare))
-            assignments[key] = (baseline_out / "src", limited_steps, mutant_manifest)
+            budgets = _mutation_budgets(m.prepare, steps, receipts)
+            mutant_manifest = replace(full_manifest, prepare=budgets.prepare)
+            assignments[key] = (baseline_out / "src", budgets.steps, mutant_manifest)
         if mutants:
             # The pool drains even on an unexpected worker error, before the
             # outer finally releases any baseline source shared by workers.
