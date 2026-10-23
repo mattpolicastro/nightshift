@@ -480,11 +480,95 @@ shortfall pauses. An unchanged score is called out in the pause.
 `mutation_steps` must include a step that runs the candidate's own tests:
 trusted checks alone can leave strengthening tasks unable to move the score.
 
-The unmutated baseline runs first and must pass before mutants execute. Each
+Full unmutated baselines run first and must pass before mutants execute. Each
 mutant has an isolated source copy and build directory. The default is
 `mutation_parallel = 2`; set `mutation_parallel = 1` for serial execution
 ([issue #4](https://github.com/mattpolicastro/nightshift/issues/4),
 [PR #27](https://github.com/mattpolicastro/nightshift/pull/27)).
+
+**Routed commands.** The [self-hosting manifest](../../examples/specloop/self-hosting.toml)
+routes `specloop/**` and `nightshift/**` to `python-mutation`. Copy the
+[selector](../../examples/specloop/select_tests.py) into the trusted `{checks}`
+directory beside `scenario_plugin.py` and `negative_control.py`, then adjust
+the manifest's paths. Its `[[mutation_step]]` uses that trusted selector and
+keeps the existing interpreter, environment and pytest options. Normal
+verification, negative-control and coverage commands stay intact.
+Mutation-only steps use the verify-step shape (`id`, argv `run`, `expect`
+defaulting to `0`, and `timeout` defaulting to `300` seconds); they do not join
+normal verification, preparation, acceptance or coverage.
+
+Routes are ordered: the first matching table wins, with steps in listed order.
+Patterns match repository-relative POSIX paths using case-sensitive
+`fnmatchcase`: `*` crosses `/`, `?` and character classes work, and `**` has no
+extra directory semantics. Absolute paths, backslashes and `..` components are
+invalid. These rules do not change `mutation_paths` or allowed/frozen paths.
+Unmatched files use the required nonempty `mutation_steps` fallback, in verify
+declaration order followed by mutation-only declaration order. With no routes,
+existing fallback behavior remains.
+
+For a manifest that already defines a separate `plugin-tests` suite and its
+preparation, the route tables can be:
+
+```toml
+[[gates.mutation_route]]
+paths = ["specloop/**", "nightshift/**"]
+steps = ["python-mutation"]
+
+[[gates.mutation_route]]
+paths = ["plugins/nightshift/**"]
+steps = ["plugin-tests"]
+```
+
+`plugin-tests` must name a separately defined `[[verify]]` or `[[mutation_step]]`
+that runs the full plugin suite; a route does not define a command. Keep the
+combined verification command as the fallback in a combined Python/plugin
+manifest, and include plugin paths in `mutation_paths` if they are eligible.
+The shipped Python-only example keeps `unit-tests` as its fallback and adds no
+plugin installation pipeline. Review route boundaries: full confirmation only
+protects the suites selected by that route.
+
+Each distinct ordered step sequence used by selected mutants gets one full
+baseline, including a used fallback. Identical sequences share a baseline;
+reversed sequences do not. Unused routes get none. Baselines run serially in
+first-use order, with ordinary preparation and manifest timeouts; any failure
+stops all mutants as invalid. Each mutant step's timeout comes from its own
+full baseline: the lesser of its manifest timeout and
+`max(30 seconds, 3 * baseline step seconds)`. A missing or zero duration uses
+the manifest timeout. Narrowed timings do not reduce confirmation budgets.
+
+**Selection and confirmation.** `{mutant_path}` is the repository-relative
+mutated path during narrowing and an empty argv value for baselines, ordinary
+verification and full confirmation. Do not configure a nonempty override.
+The example's Python argv adapter preserves spaces, prefixes selected paths
+with `{src}`, and substitutes `{src}/tests` when selection is empty. It
+propagates pytest's exit status. Empty or unresolvable input, no matches, a
+missing test tree or any scan read/parse failure therefore runs all tests.
+
+The selector parses direct Python imports without executing repository code.
+It supports repository-root modules/packages, aliases and resolvable relative
+imports, but does not chase transitive or dynamic imports or guess arbitrary
+`src/` layouts. A narrowed pass reruns the entire selected sequence with empty
+`{mutant_path}`, the same mutation and a freshly prepared build. Only this
+full confirmation can establish survival. A narrowed test failure kills;
+timeout or invalid results trigger no confirmation. Sequences without the
+placeholder run once in full mode. Scoring and classifications stay unchanged.
+
+Inspect `mutation-runs.json` at the gate output root for each mutant's route
+index (or null fallback), ordered steps, baseline, result and `decided_by`
+phase. Its relative receipt links identify the deciding run. Initial receipts
+remain in `mutant-N/receipts.json`; confirmation uses
+`mutant-N/confirmation/receipts.json`. The first baseline uses the gate root;
+additional baselines use `baseline-2/`, etc. `precheck` and `baseline` decisions
+have no mutant runs. Existing evidence JSON and step receipts retain their
+shape.
+
+After merge, the human rollout copies the reviewed selector and updates the
+private trusted manifest, checks language boundaries and verifies that empty
+input runs each complete routed suite. Compare the next few real section gates
+with the approximately 14-minute baseline using the existing timing report;
+record mutant counts, route mix, narrowed kills and confirmations alongside
+timings. Extra baselines, survivors and machine load affect the result. This
+does not claim a measured speed-up or add a timing-report command.
 
 Only `killed` and `survived` results enter the score:
 `killed / (killed + survived)`. A selected-test timeout is `timeout`, excluded
