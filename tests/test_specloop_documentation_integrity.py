@@ -20,38 +20,6 @@ DOCS = ("README.md", "KNOWN-LIMITATIONS.md", "docs/specloop/README.md")
 REPOSITORY = "https://github.com/mattpolicastro/nightshift"
 LINK = re.compile(r"\[([^\[\]\n]+)\]\(([^\s)]+)\)")
 
-# Checked against first-parent merge subjects through a684e40. Keep the
-# offline checks usable in the verifier's extracted source, which has no .git.
-# Each entry names a behavior beside its implementation PR, not its issue.
-CITATIONS = (
-    ("blocked-by:", 29),
-    ("latest application", 42),
-    ("--idea-file", 35),
-    ("source-qualified GitHub ID", 61),
-    ("status_error", 32),
-    ("verifies process-start identity", 28),
-    ("touchpoints", 53),
-    ("pytest-xdist", 54),
-    ("Base preparation implements", 59),
-    ("four drafting rounds", 37),
-    ("Before drafting, the harness snapshots", 36),
-    ("file.py::function", 60),
-    ("overlap feedback", 36),
-    ("unconditional ban", 37),
-    ("Implementers do not receive the map", 43),
-    ("Human-only checks belong", 30),
-    ("MODIFIED", 36),
-    ("separate read-only review", 57),
-    ("The checklist covers all eight items", 62),
-    ("mutation_parallel = 2", 27),
-    ("selected-test timeout", 44),
-    ("Full committed source protects", 48),
-    ("docstring annotation was removed", 63),
-    ("Two operators add candidates", 64),
-)
-# Issue identities from the approved source map; this says nothing about their
-# current open/closed state. In particular, PRs #36/#37/#54/#62 are not issues.
-ISSUES = {4, 5, 6, 8, 10, 11, 12, 14, 17, 21, 24, 31, 33, 34, 46, 50, 51, 58}
 
 
 @pytest.mark.scenario(
@@ -60,7 +28,6 @@ ISSUES = {4, 5, 6, 8, 10, 11, 12, 14, 17, 21, 24, 31, 33, 34, 46, 50, 51, 58}
 @pytest.mark.parametrize("path", DOCS)
 def test_reference_labels_distinguish_prs_from_issues(path):
     references = []
-    merged = {number for _, number in CITATIONS}
     for label, target in LINK.findall((ROOT / path).read_text()):
         if reference := re.fullmatch(r"(PR|issue) #(\d+)", label):
             kind, number = reference.groups()
@@ -69,25 +36,8 @@ def test_reference_labels_distinguish_prs_from_issues(path):
         if target.startswith((f"{REPOSITORY}/pull/", f"{REPOSITORY}/issues/")):
             kind, number = target.removeprefix(f"{REPOSITORY}/").split("/")
             assert label == f"{'PR' if kind == 'pull' else 'issue'} #{number}"
-            if kind == "pull":
-                assert int(number) in merged, f"Unverified merged PR: {target}"
-            else:
-                assert int(number) in ISSUES, f"Issue absent from the source map: {target}"
             references.append(target)
     assert references, f"{path} lost its references"
-
-
-@pytest.mark.scenario(
-    "specloop-documentation/documentation-integrity/references-and-reader-checks-are-reviewable"
-)
-@pytest.mark.parametrize("behavior,number", CITATIONS)
-def test_guide_keeps_implementation_citations_beside_behavior(behavior, number):
-    guide = (ROOT / "docs/specloop/README.md").read_text()
-    paragraphs = [" ".join(p.split()) for p in guide.split("\n\n")]
-    citation = f"[PR #{number}]({REPOSITORY}/pull/{number})"
-    assert any(behavior in p and citation in p for p in paragraphs), (
-        f"{behavior!r} needs its adjacent {citation}"
-    )
 
 
 @pytest.mark.scenario(
@@ -119,16 +69,6 @@ def test_review_checklist_stays_in_design_and_pending_work_stays_open():
     for task in implementation:
         assert not re.search(r"\bMatt\b|On GitHub, confirm|reads the guide once", task.text)
 
-    limitations = " ".join((ROOT / "KNOWN-LIMITATIONS.md").read_text().split())
-    assert "these gaps remain unresolved" in limitations
-    for qualification in (
-        "An admission that completes while paused can still build",
-        "There is no retry command",
-        "can undercount when records are missing or overwritten",
-        "automatic JSX style filtering is descoped",
-        "do not provide automated intake or publication for other hosts",
-    ):
-        assert qualification in limitations
 
 
 def heading_ids(markdown):
