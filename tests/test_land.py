@@ -137,6 +137,8 @@ def test_module_help(monkeypatch, capsys):
         runpy.run_module("nightshift.land", run_name="__main__")
     assert error.value.code == 0
     output = capsys.readouterr()
+    assert ("Land a reviewed PR in an enrolled repository (CI and merge currently disabled)."
+            in " ".join(output.out.split()))
     for flag in ["--repo", "--config", "--checks-done", "--timeout"]:
         assert flag in output.out
     assert output.err == ""
@@ -1330,6 +1332,10 @@ def test_land_rechecks_human_inputs_before_finish(config_path, scripted_runner, 
     error = capsys.readouterr().err
     assert {"head": "head changed", "closed": "PR must be open"}.get(
         change, "human check sources changed") in error
+    if change not in {"head", "closed"}:
+        assert error == (
+            "land: human check sources changed during landing; inspect checks and rerun land\n"
+        )
     assert not any(argv == FINISH for argv, _ in scripted_runner.calls)
 
 
@@ -1371,7 +1377,17 @@ def test_land_partial_finish_must_establish_same_done_run(
     scripted_runner.expect(FINISH, subprocess.CompletedProcess(FINISH, 0, "Finished", ""), timeout=300)
     scripted_runner.expect(STATUS, status_rows(*rows))
     assert invoke(config_path, scripted_runner, URL) == 1
-    assert reason in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert reason in error
+    if reason == "run identity changed":
+        assert error == "land: run identity changed during landing; inspect status and rerun land\n"
+    elif reason == "expected the same run done":
+        row = rows[0]
+        pause_reason = row["pause"]["reason"] if row["pause"] else None
+        assert error == (
+            "land: finish reviewed-change: expected the same run done, "
+            f"found {row['status']} ({pause_reason}); inspect status and rerun land\n"
+        )
     assert scripted_runner.calls[-1][0] == STATUS
 
 
@@ -1394,7 +1410,13 @@ def test_land_finished_head_and_remote_pr_must_agree(
         {**RUN, "status": "done", "pause": None, "head": FINISHED_HEAD}))
     scripted_runner.expect(VIEW, {**PR, "headRefOid": FINISHED_HEAD, **patch})
     assert invoke(config_path, scripted_runner, URL) == 1
-    assert reason in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert reason in error
+    if reason == "does not equal remote PR head":
+        assert error == (
+            f"land: finish reviewed-change: finished run head {FINISHED_HEAD} does not equal "
+            f"remote PR head {patch['headRefOid']}; inspect status and rerun land\n"
+        )
     assert scripted_runner.calls[-1][0] == VIEW
 
 
@@ -1554,7 +1576,9 @@ def test_land_run_identity_must_survive_pre_finish_refresh(
     expect_initial_run(scripted_runner, PR, RUN)
     scripted_runner.expect(STATUS, status_rows(*rows))
     assert invoke(config_path, scripted_runner, URL) == 1
-    assert "run identity changed" in capsys.readouterr().err
+    assert capsys.readouterr().err == (
+        "land: run identity changed during landing; inspect status and rerun land\n"
+    )
     assert scripted_runner.calls[-1][0] == STATUS
 
 
