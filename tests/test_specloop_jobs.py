@@ -488,6 +488,7 @@ def test_refused_stop_does_not_accept_intent_and_retry_preserves_it(tmp_path):
 
 
 @pytest.mark.scenario("background-job-control/owned-process-group-termination/stop-wrapper-and-descendants")
+@pytest.mark.scenario("specloop-documentation/operations-guidance/operator-distinguishes-pause-and-stop")
 @pytest.mark.scenario("background-job-control/durable-cancellation/repeat-stop-safely")
 @pytest.mark.parametrize("ignoring_descendant, fresh_cli", [
     (False, False), pytest.param(True, False, marks=pytest.mark.scenario(

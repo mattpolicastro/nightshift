@@ -223,16 +223,25 @@ def checkout_run(base_env):
 
 
 @pytest.mark.scenario("publish-base-sync/recover-pending-verification/repair-against-unchanged-base")
+@pytest.mark.scenario("specloop-documentation/publication-guidance/base-preparation-pauses")
 @pytest.mark.parametrize("repair", [False, True])
 def test_resume_drift_rechecks_unchanged_or_repaired_head(base_env, monkeypatch, repair):
     ctx = base_env.ctx
+    head = ctx.head()
     base = advance_base(base_env)
     verification(monkeypatch, ctx, passing=False)
     assert not loop.prepare_publish(ctx)
     merged = ctx.head()
+    assert sh(ctx.repo, "git", "show", "-s", "--format=%P", merged).split() == [head, base]
+    pause = ctx.run.state.pause
+    assert pause.reason == "base_drift" and base in pause.detail and merged in pause.detail
     ctx.run.state.pr = "https://example.test/pull/17"
     ctx.run.save()
     old_receipt = Path(ctx.run.state.base_sync["receipts"][0]) / "receipts.json"
+    assert str(old_receipt) in pause.detail
+    assert str(old_receipt.parent / "ok.log") in pause.detail
+    assert (old_receipt.parent / "ok.log").is_file()
+    assert "specloop resume c" in pause.detail
     failed = old_receipt.read_bytes()
     if repair:
         checkout_run(base_env)
@@ -250,20 +259,31 @@ def test_resume_drift_rechecks_unchanged_or_repaired_head(base_env, monkeypatch,
     assert sync["retry_verify"] is not repair
     assert len(sync["receipts"]) == 2 and old_receipt.read_bytes() == failed
     assert ctx.run.state.pr == "https://example.test/pull/17"
+    # Resume and a successful integration check alone do not authorize a push.
+    assert cli._publish(SimpleNamespace(change="c"), ctx.run) == 1
     if not repair:
         assert ctx.run.state.pause.reason == "base_drift"
         assert cli._publish(SimpleNamespace(change="c"), ctx.run) == 1
 
 
 @pytest.mark.scenario("publish-base-sync/recover-pending-verification/repair-against-unchanged-base")
+@pytest.mark.scenario("specloop-documentation/publication-guidance/base-preparation-pauses")
 def test_resume_conflict_after_manual_base_integration_requires_verification(base_env, monkeypatch):
     ctx = base_env.ctx
     commit(base_env.src, "base.txt", "run edits\n")
     cli._sync(ctx)
+    head = ctx.head()
     base = advance_base(base_env)
     calls = verification(monkeypatch, ctx)
     assert not loop.prepare_publish(ctx) and calls == []
     assert ctx.run.state.pause.reason == "base_conflict"
+    assert ctx.head() == head
+    detail = ctx.run.state.pause.detail
+    assert all(value in detail for value in ("base.txt", base, head, "specloop resume c"))
+    diagnostic = Path(ctx.run.state.base_sync["receipts"][0]) / "diagnostic.txt"
+    assert diagnostic.parent.parent == ctx.run.dir / "final" / "base-sync"
+    assert diagnostic.read_text() == detail
+    assert cli._publish(SimpleNamespace(change="c"), ctx.run) == 1
     assert ctx.run.state.base_sync["retry_verify"]
     # The human resolves the conflicting file in their source checkout.
     sh(base_env.src, "git", "fetch", "origin", "release/stable")
@@ -277,6 +297,37 @@ def test_resume_conflict_after_manual_base_integration_requires_verification(bas
     assert [h for h, _ in calls] == [repaired]
     assert ctx.run.state.base_sync["base"] == base
     assert ctx.run.state.base_sync["verified_head"] == repaired
+    assert diagnostic.read_text() == detail
+
+
+@pytest.mark.scenario("specloop-documentation/publication-guidance/base-preparation-pauses")
+def test_resume_after_restoring_base_fetch_runs_integration_checks(base_env, monkeypatch):
+    """Follow the guide's base_fetch repair without accepting or pushing a stale head."""
+    ctx = base_env.ctx
+    head, base = ctx.head(), advance_base(base_env)
+    calls = verification(monkeypatch, ctx)
+    sh(base_env.origin, "git", "update-ref", "-d", "refs/heads/release/stable")
+    assert loop.run(ctx) == "paused"
+    ctx.run.reload()
+    assert ctx.run.state.pause.reason == "base_fetch"
+    detail = ctx.run.state.pause.detail
+    assert "refs/heads/release/stable" in detail and "couldn't find remote ref" in detail
+    assert "specloop resume c" in detail
+    assert ctx.head() == head and calls == []
+    assert cli._publish(SimpleNamespace(change="c"), ctx.run) == 1
+
+    sh(base_env.origin, "git", "update-ref", "refs/heads/release/stable", base)
+    resume(base_env, monkeypatch)
+    assert ctx.head() == head and calls == []
+    assert cli._publish(SimpleNamespace(change="c"), ctx.run) == 1
+    assert loop.run(ctx) == "paused"
+    ctx.run.reload()
+    merged = ctx.head()
+    assert sh(ctx.repo, "git", "show", "-s", "--format=%P", merged).split() == [head, base]
+    assert [checked for checked, _ in calls] == [merged]
+    assert ctx.run.state.base_sync["verified_head"] == merged
+    assert not ctx.run.state.base_sync["retry_verify"]
+    assert ctx.run.state.pause.reason == "ready_to_publish"
 
 
 @pytest.mark.scenario("publish-base-sync/recover-pending-verification/repair-against-unchanged-base")

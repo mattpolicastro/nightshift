@@ -336,6 +336,9 @@ def test_cached_entries_and_recovery(status, monkeypatch, capsys, recovered_runs
     FileNotFoundError("specloop missing"),
     subprocess.TimeoutExpired("specloop", 8),
 ])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/input-and-status-remain-usable"
+)
 def test_unreadable_status_preserves_snapshot_and_recovers(status, capsys, failure):
     assert cli.main(["attention", "--json"]) == 0
     before = json.loads(capsys.readouterr().out)["specloop"][0]

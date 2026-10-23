@@ -4,7 +4,7 @@ import { AppState, Linking, Pressable, Text, TextInput, View } from 'react-nativ
 import {
   factoryRuns, factoryAct, type FactoryRun, type FactorySnapshot, type FactoryActInput,
 } from '../shared/factory';
-import { decideFactoryAction, factoryButtons, factoryDetails, groupFactoryRuns, matchWorkspace, type ActionDecision } from './factory-model';
+import { decideFactoryAction, factoryButtons, factoryDetails, factoryWaitingTime, groupFactoryRuns, matchWorkspace, type ActionDecision } from './factory-model';
 
 type Colors = PluginSurfaceProps['theme']['colors'];
 type Confirmation = Extract<ActionDecision, { kind: 'confirm' }>;
@@ -38,6 +38,7 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
   const [detailsOpen, setDetailsOpen] = useState(false);
   const buttons = factoryButtons(run);
   const details = factoryDetails(run);
+  const waiting = factoryWaitingTime(run);
   const workspace = matchWorkspace(run.context?.repo ?? '', workspaces);
   const showChangeLink = detailsOpen && Boolean(details.github);
   const showWorkspaceLink = detailsOpen && workspace !== null && typeof navigation?.openWorkspace === 'function';
@@ -47,6 +48,11 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
     paused: colors.statusWarning, running: colors.accent,
     done: colors.statusSuccess, aborted: colors.foregroundMuted,
   }[run.status];
+  const statusProgress = <Text style={{ color: colors.foregroundMuted }}>
+    <Text style={{ color: statusColor, backgroundColor: colors.surface2, borderRadius: 6,
+      paddingHorizontal: 6, paddingVertical: 2, fontWeight: '600' }}>{run.status}</Text>
+    {' · '}{run.tasks.done}/{run.tasks.total} tasks done
+  </Text>;
 
   function choose(verb: FactoryActInput['verb'], confirmed = false) {
     if (disabled) return;
@@ -64,11 +70,10 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
 
   return <View style={{ padding: 16, gap: 8, borderWidth: 1, borderColor: colors.border, borderRadius: 12, backgroundColor: colors.surface1 }}>
     <Text style={{ color: colors.foreground, fontSize: 17, fontWeight: '600' }}>{run.change}</Text>
-    <Text style={{ color: colors.foregroundMuted }}>
-      <Text style={{ color: statusColor, backgroundColor: colors.surface2, borderRadius: 6,
-        paddingHorizontal: 6, paddingVertical: 2, fontWeight: '600' }}>{run.status}</Text>
-      {' · '}{run.tasks.done}/{run.tasks.total} tasks done
-    </Text>
+    {waiting ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+      {statusProgress}
+      <Text style={{ color: waiting.warning ? colors.statusWarning : colors.foregroundMuted }}>{waiting.text}</Text>
+    </View> : statusProgress}
     {run.action ? <>
       <Text style={{ color: colors.foreground, fontWeight: '600' }}>{run.action.headline}</Text>
       <Text style={{ color: colors.foreground }}>{run.action.why}</Text>

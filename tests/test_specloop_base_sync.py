@@ -400,6 +400,8 @@ def test_drift_that_breaks_verify_pauses_with_receipts(base_env, monkeypatch, ex
     assert (calls[0][1] / "receipts.json").read_bytes() == (calls[1][1] / "receipts.json").read_bytes()
 
 
+@pytest.mark.scenario("specloop-documentation/publication-guidance/base-moves-before-publication")
+@pytest.mark.scenario("specloop-documentation/publication-guidance/base-preparation-pauses")
 @pytest.mark.parametrize("prepare_fails", [
     pytest.param(False, marks=pytest.mark.scenario("publish-base-sync/verify-integrated-head/merged-head-passes")),
     pytest.param(True, marks=pytest.mark.scenario("publish-base-sync/verify-integrated-head/preparation-fails")),
@@ -709,6 +711,7 @@ def publish_without_preparing(monkeypatch, command, code):
 @pytest.mark.scenario("publish-base-sync/fetch-current-base/publish-fetches-again")
 @pytest.mark.scenario("publish-base-sync/verify-integrated-head/merged-head-passes")
 @pytest.mark.scenario("publish-base-sync/driver-preparation-handoff/moved-base-schedules-preparation")
+@pytest.mark.scenario("specloop-documentation/publication-guidance/base-moves-before-publication")
 @pytest.mark.parametrize("pr_kind", ["adopted", "reconciled", "new"])
 @pytest.mark.parametrize("failed_push", [False, True])
 def test_moved_base_is_merged_and_verified_before_publish(publish_env, monkeypatch, capfd,
@@ -790,6 +793,7 @@ def test_unmoved_base_publishes_without_merge(publish_env, monkeypatch, capfd, p
 
 
 @pytest.mark.scenario("publish-base-sync/driver-preparation-handoff/pending-verification-schedules-preparation")
+@pytest.mark.scenario("specloop-documentation/publication-guidance/base-moves-before-publication")
 @pytest.mark.parametrize("obligation", ["intent", "retry", "changed-head"])
 def test_pending_verification_schedules_preparation(publish_env, monkeypatch, capfd, obligation):
     env, ctx = publish_env, publish_env.ctx
@@ -831,6 +835,16 @@ def test_pending_verification_schedules_preparation(publish_env, monkeypatch, ca
     assert ctx.run.state.base_sync["verified_head"] == ctx.head()
     assert not ctx.run.state.base_sync["retry_verify"]
     assert ctx.run.state.pause.reason == "ready_to_publish"
+
+    # Follow the guide's retry through delivery to the already recorded PR.
+    checked = ctx.head()
+    assert env.operations == [("fetch", 20), ("fetch", 300)]
+    publish_without_preparing(monkeypatch, ["publish", "c", "--json"], 0)
+    assert json.loads(capfd.readouterr().out) == {"version": 1, "outcome": "published", "pr": env.url}
+    assert env.operations == [("fetch", 20), ("fetch", 300), ("fetch", 20), ("push", checked)]
+    ctx.run.reload()
+    assert ctx.run.state.pr == env.url and ctx.run.state.pause.reason == "human_checks"
+    assert ctx.head() == checked and verified == [checked]
 
 
 @pytest.mark.scenario("publish-base-sync/driver-preparation-handoff/moved-base-schedules-preparation")

@@ -35,6 +35,7 @@ def scenarios(tmp_path, *workers):
 
 
 @pytest.mark.parametrize("workers", [(), ("-n", "2")], ids=["serial", "xdist"])
+@pytest.mark.scenario("specloop-documentation/operations-guidance/parallel-tests-retain-scenario-evidence")
 def test_scenario_plugin_reports_passed_scenarios_serially_and_under_xdist(tmp_path, workers):
     # Before 2026-10-21 the plugin collected IDs inside xdist workers and printed
     # from the controller, so parallel runs reported no scenarios at all.
