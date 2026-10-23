@@ -261,3 +261,32 @@ def test_json_output_shape(tmp_path, logs, capsys):
                                  str(value * 100 if unit == "%" else value), unit])
     assert lines == expected
     assert "Local-history estimates" in note
+
+
+@pytest.mark.scenario("build-timing-report/operator-guidance/discover-the-timing-command")
+def test_readme_timing_guidance_beside_touchpoints():
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    before, section = readme.split("### Build timing report\n", 1)
+    guidance, after = section.split("### Prepare dependencies before verification\n", 1)
+    touchpoints = before.strip().rsplit("\n\n", 1)[-1]
+    assert "[operations guide](docs/specloop/README.md#operations)" in touchpoints
+    assert "uv run python -m nightshift.touchpoints" in touchpoints
+    assert "`--since YYYY-MM-DD` and `--json`" in touchpoints
+    assert "remains the implementation acceptance command." in touchpoints
+    text = " ".join(guidance.split())
+    for required in (
+        "uv run python -m nightshift.timings",
+        "--since YYYY-MM-DD", "--change NAME", "--json",
+        "Read-only", "~/.specloop/runs/*/events.jsonl", "no external services",
+        "whole runs first admitted on or after midnight UTC",
+        "runs without admission are excluded", "exact change name",
+        "combines with `--since`", "JSON instead of the text table",
+        "local-history estimates", "missing pairs are dropped",
+        "evidence/slot waits are endpoint proxies", "intervals may overlap",
+        "Recorded FAIL rates can differ from harness decisions",
+        "finish is not merge", "six phases need not sum to build hours",
+    ):
+        assert required in text
+    assert "### Enroll a repository" in before
+    assert 'engine = "specloop"' in before
+    assert "Put optional `[[prepare]]` steps in the **specloop manifest**" in after
