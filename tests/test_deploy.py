@@ -9,6 +9,12 @@ import pytest
 
 from nightshift import deploy
 
+
+def _stat(path):
+    """Stat fields a write would change. Access time moves on reads, so it is left out."""
+    s = path.stat()
+    return s.st_mode, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns
+
 CHECK = "uv sync --check --frozen --offline"
 STATUS = "git status --porcelain=v1 --untracked-files=all"
 COUNTS = "git rev-list --left-right --count HEAD...@{upstream}"
@@ -651,7 +657,7 @@ def test_check_reports_process_older_than_code(recording, name, pid, path, case,
     else:
         r.replies[f"/bin/ps -p {pid} -o lstart="] = {"older": "Sun Dec 31 23:59:59 2023",
             "newer": "Mon Jan  1 00:00:01 2024", "dead": (1, "", "dead"), "start": "unreadable"}.get(case, CURRENT_START)
-    before = {p: (p.read_bytes() if p.is_file() else None, p.stat()) for p in r.context.cwd.rglob("*")}
+    before = {p: (p.read_bytes() if p.is_file() else None, _stat(p)) for p in r.context.cwd.rglob("*")}
     assert r.run() == int(case not in {"equal", "newer"})
     output = capsys.readouterr().out
     assert (f"{name}: process older than code" in output) == (case == "older")
@@ -659,7 +665,7 @@ def test_check_reports_process_older_than_code(recording, name, pid, path, case,
         assert r.run("--apply", "--force") == 1
         assert f"{name} unavailable:" in output
         assert f"Manual {name} start: launchctl kickstart gui/{r.context.uid}/com.mattpolicastro.{path}" in output
-    assert before == {p: (p.read_bytes() if p.is_file() else None, p.stat()) for p in r.context.cwd.rglob("*")}
+    assert before == {p: (p.read_bytes() if p.is_file() else None, _stat(p)) for p in r.context.cwd.rglob("*")}
     assert not any(c.startswith("launchctl") for c in r.calls)
 
 
@@ -736,9 +742,9 @@ def restarting(recording, monkeypatch):
         return original_runner(argv, **kwargs)
 
     def run(*args):
-        before = {p: (p.read_bytes() if p.is_file() else None, p.stat()) for p in r.context.cwd.rglob("*")}
+        before = {p: (p.read_bytes() if p.is_file() else None, _stat(p)) for p in r.context.cwd.rglob("*")}
         result = deploy.main(["--apply", *args], runner=runner, context=r.context)
-        assert before == {p: (p.read_bytes() if p.is_file() else None, p.stat()) for p in r.context.cwd.rglob("*")}
+        assert before == {p: (p.read_bytes() if p.is_file() else None, _stat(p)) for p in r.context.cwd.rglob("*")}
         return result
 
     monkeypatch.setattr(Path, "read_text", read)
