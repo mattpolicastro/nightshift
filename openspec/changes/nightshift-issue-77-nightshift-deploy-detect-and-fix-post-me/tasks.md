@@ -4,7 +4,7 @@
 
 ## 2. Committed plugin comparison and replacement
 
-- [ ] 2.1 Add committed manifest comparison, safe staging, the empty marker before renames, simple directory swap, and three-copy retention in `nightshift/deploy.py`. Add `test_check_reports_plugin_drift` and `test_apply_swaps_plugin_keeping_rollback` in `tests/test_deploy.py`, including missing/changed/obsolete files, ignored extras, modes/links, unsafe destinations, failed marker/staging/rename, first install, and unrelated backups. Do not add transaction records or automatic restoration. Target 240 changed lines, at most 300, including tests. Covers `deployment-drift/committed-plugin-drift/plugin-differs-from-committed-tree`, `deployment-drift/staged-plugin-replacement/swap-retains-rollback-copies`, `deployment-drift/staged-plugin-replacement/unsafe-destination-or-failed-swap`.
+- [x] 2.1 Add committed manifest comparison, safe staging, the empty marker before renames, simple directory swap, and three-copy retention in `nightshift/deploy.py`. Add `test_check_reports_plugin_drift` and `test_apply_swaps_plugin_keeping_rollback` in `tests/test_deploy.py`, including missing/changed/obsolete files, ignored extras, modes/links, unsafe destinations, failed marker/staging/rename, first install, and unrelated backups. Do not add transaction records or automatic restoration. Target 240 changed lines, at most 300, including tests. Covers `deployment-drift/committed-plugin-drift/plugin-differs-from-committed-tree`, `deployment-drift/staged-plugin-replacement/swap-retains-rollback-copies`, `deployment-drift/staged-plugin-replacement/unsafe-destination-or-failed-swap`.
 
 ## 3. Pending reload and manual rollback advice
 
