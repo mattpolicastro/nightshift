@@ -161,7 +161,10 @@ is refused ([issue #8](https://github.com/mattpolicastro/nightshift/issues/8),
 Logs, requests, results and receipts remain on disk. Stopped jobs stay held
 across polling, daemon restart, resume and label removal/reapplication: none
 delivers the stopped result or starts a replacement. There is no job retry
-command. Follow the existing [pause and job recovery instructions](../../README.md#pause-and-job-control)
+command ([PR #28](https://github.com/mattpolicastro/nightshift/pull/28)); see
+[issue #34](https://github.com/mattpolicastro/nightshift/issues/34) in the
+[remaining limitations](../../KNOWN-LIMITATIONS.md#open-gaps).
+Follow the existing [pause and job recovery instructions](../../README.md#pause-and-job-control)
 before changing receipts; pause and stop do not roll back committed effects.
 
 Admission can finish while paused and commit runnable state. The independent
@@ -501,9 +504,14 @@ strings and JSX styles are not automatically excluded
 ([issue #21](https://github.com/mattpolicastro/nightshift/issues/21),
 [PR #48](https://github.com/mattpolicastro/nightshift/pull/48)).
 
+Python docstrings need no `mutation-equivalent:` annotation; the touchpoint
+report's docstring annotation was removed in
+[PR #63](https://github.com/mattpolicastro/nightshift/pull/63).
+
 `mutation_skip` contains case-sensitive literal substrings, not regexes or
 globs. A match anywhere on the whole line excludes every candidate on that
-line before sampling, without consuming the mutation budget. For example:
+line before sampling, without consuming the mutation budget
+([PR #48](https://github.com/mattpolicastro/nightshift/pull/48)). For example:
 
 ```toml
 [gates]
@@ -522,8 +530,7 @@ An all-equivalent set is not a successful measurement. A `mutation-equivalent:`
 annotation on the same or preceding line is a claim judged by the reviewer;
 equivalent results do not enter the score. If exclusions leave no mutable
 lines, mutation is instead skipped with no score; scenario coverage checks
-still apply ([PR #48](https://github.com/mattpolicastro/nightshift/pull/48),
-[PR #63](https://github.com/mattpolicastro/nightshift/pull/63)).
+still apply ([PR #48](https://github.com/mattpolicastro/nightshift/pull/48)).
 
 **Python guards.** Two operators add candidates for eligible `.py` / `.pyi`
 guards ([issue #33](https://github.com/mattpolicastro/nightshift/issues/33),

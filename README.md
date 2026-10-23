@@ -20,8 +20,8 @@ for you to review. When you label that PR `spec:approved`, its build engine,
 When enabled, [section evidence gates](docs/specloop/README.md#section-evidence)
 check scenario coverage and score killed/survived mutants. Generated mutants
 with no judged result pause; no mutable lines skips mutation but retains
-coverage checks. The result lands on the same PR, with a checklist of what
-only a human can check.
+coverage checks ([PR #48](https://github.com/mattpolicastro/nightshift/pull/48)).
+The result lands on the same PR, with a checklist of what only a human can check.
 
 Each repository chooses an engine: `engine = "specloop"` for that flow, or the
 original `worker` engine, which runs headless
@@ -107,7 +107,8 @@ keeping idea text out of argv
 [PR #35](https://github.com/mattpolicastro/nightshift/pull/35)).
 `specloop status --json` preserves healthy runs alongside non-actionable
 `status_error` rows in version-1 JSON with exit 0. Top-level failures exit 1;
-failed attention reads retain a `STALE` snapshot. See the
+per-run errors refresh alongside healthy attention entries, while a failed
+top-level status read retains a `STALE` snapshot. See the
 [front-door guide](docs/specloop/README.md#github-front-door-nightshift--specloop)
 for details ([issue #10](https://github.com/mattpolicastro/nightshift/issues/10),
 [PR #32](https://github.com/mattpolicastro/nightshift/pull/32)).
