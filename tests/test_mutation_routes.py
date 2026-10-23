@@ -1,7 +1,9 @@
+import json
+import shutil
 import sys
 import tomllib
 from copy import deepcopy
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, asdict, replace
 
 import pytest
 
@@ -336,14 +338,14 @@ def test_routes_require_fallback(explicit_empty):
 
 
 @pytest.mark.scenario("mutation-selection/ordered-mutation-routes/legacy-manifest-is-unchanged")
-@pytest.mark.parametrize("evidence", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("fallback", [None, [], ["tests", "build"]])
-def test_manifest_without_routes_unchanged(evidence, fallback):
+def test_manifest_without_routes_unchanged(tmp_path, monkeypatch, enabled, fallback):
     data = tomllib.loads(TEMPLATE)
     del data["mutation_step"]
     data["vars"] = {"custom": "unchanged"}
     data["verify"].insert(0, {"id": "build", "run": ["true"]})
-    data["gates"] = {"evidence": evidence}
+    data["gates"] = {"evidence": enabled}
     if fallback is not None:
         data["gates"]["mutation_steps"] = fallback
     m = manifest.parse(data)
@@ -351,7 +353,7 @@ def test_manifest_without_routes_unchanged(evidence, fallback):
     assert manifest.parse(data) == m
     assert m.mutation_routes == ()
     assert m.mutation_step == ()
-    assert m.evidence is evidence
+    assert m.evidence is enabled
     assert m.mutation_steps == tuple(fallback or [])
     assert [s.id for s in m.verify] == ["build", "tests"]
     assert all(s.expect == 0 and s.timeout == 300 for s in m.verify)
@@ -364,6 +366,100 @@ def test_manifest_without_routes_unchanged(evidence, fallback):
     assert direct.mutation_routes == ()
     assert direct.mutation_steps == ()
     assert direct.evidence is False
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = "value = 1\nunused = 1 # mutation-equivalent: unused\n"
+    (repo / "calc.py").write_text(source)
+    data["run"]["repo"] = str(repo)
+    data["verify"][0]["run"] = [sys.executable, "-B", "-c",
+        "from pathlib import Path; compile(Path('project/calc.py').read_text(), 'calc.py', 'exec')"]
+    data["verify"][1]["run"] = [sys.executable, "-B", "-c",
+        "import sys; sys.path.insert(0, 'project'); from calc import value; sys.exit(value == 0)"]
+    data["prepare"][0]["run"] = [sys.executable, "-B", "-c",
+        "import shutil, sys; shutil.copytree(sys.argv[1], 'project')", "{src}"]
+    selected = [evidence.Mutant("calc.py", 1, "int", "value = 1", after)
+                for after in ("value = 0", "value = 2", "value =", "value = 3")]
+    selected[3].before = "source mismatch"
+    selected.append(evidence.Mutant("calc.py", 2, "int", source.splitlines()[1], "unused = 2"))
+
+    def extract(repo, head, src):
+        shutil.copytree(repo, src)
+        (src / "calc.py").chmod(0o444)
+
+    monkeypatch.setattr(verify, "extract", extract)
+    monkeypatch.setattr(evidence, "git", lambda *args: b"")
+    monkeypatch.setattr(evidence, "generate", lambda *args, **kwargs: deepcopy(selected))
+    real_run = verify.run_extracted
+    calls, saved = [], []
+
+    def run(src, head, steps, run_m, run_out):
+        calls.append(run_out)
+        assert [s.id for s in run_m.prepare + steps] == ["dependencies", "build", "tests"]
+        assert run_m.vars == {"custom": "unchanged"}
+        assert [s.timeout for s in run_m.prepare + steps] == (
+            [33, 30, 300] if run_out.name.startswith("mutant-") else [300] * 3)
+        result = real_run(src, head, steps, run_m, run_out)
+        if not run_out.name.startswith("mutant-"):
+            for receipt, seconds in zip(result, (11, 0.1, 0)):
+                receipt.seconds = seconds
+        return result
+
+    monkeypatch.setattr(verify, "run_extracted", run)
+    for empty_routes in (False, True):
+        data["gates"].pop("mutation_route", None)
+        if empty_routes:
+            data["gates"]["mutation_route"] = []
+        legacy = manifest.parse(data)
+        original = deepcopy(legacy)
+        out = tmp_path / str(empty_routes)
+        calls.clear()
+        ev = evidence.gather(repo, "base", "head", ["covered", "missing"], {"covered"}, legacy, out, 7)
+        stored = json.loads((out / "evidence.json").read_text())
+        assert stored == {**asdict(ev), "score": ev.score}
+        assert set(stored) == {"section", "covered", "uncovered", "mutants", "skipped", "baseline_failed", "score"}
+        assert ev.section == 7 and ev.covered == ["covered"] and ev.uncovered == ["missing"]
+        assert not ev.baseline_failed and legacy == original
+        if not fallback:
+            assert ev.skipped == "no mutation_steps in the manifest"
+            assert ev.mutants == [] and ev.score is None and calls == []
+            assert {p.name for p in out.iterdir()} == {"evidence.json"}
+            saved.append((stored, None))
+            continue
+        assert ev.skipped == "" and ev.score == 0.5
+        assert [mut.result for mut in ev.mutants] == ["killed", "survived", "invalid", "invalid", "equivalent"]
+        assert calls[0] == out and set(calls[1:]) == {out / f"mutant-{i}" for i in (1, 2, 3)}
+        assert len(calls) == 4
+        index = json.loads((out / "mutation-runs.json").read_text())
+        assert index["baselines"] == [{"number": 1, "steps": ["build", "tests"], "receipts": "receipts.json", "failed": False}]
+        assert [entry["decided_by"] for entry in index["mutants"]] == ["full"] * 3 + ["precheck"] * 2
+        assert [entry["runs"] for entry in index["mutants"]] == [
+            [{"phase": "full", "receipts": f"mutant-{i}/receipts.json"}] if i <= 3 else [] for i in range(1, 6)]
+        for run_out in calls:
+            ids = ["dependencies", "build"] + ([] if run_out.name == "mutant-3" else ["tests"])
+            expected_files = {"prepare.sb", "verify.sb", "receipts.json", *(f"{name}.log" for name in ids)}
+            if run_out == out:
+                expected_files.update({"evidence.json", "mutation-runs.json", "mutant-1", "mutant-2", "mutant-3"})
+            assert {p.name for p in run_out.iterdir()} == expected_files
+            receipts = json.loads((run_out / "receipts.json").read_text())
+            assert [r["id"] for r in receipts] == ids
+            for receipt, step in zip(receipts, legacy.prepare + legacy.verify):
+                assert receipt["argv"] == [arg.replace("{src}", str(run_out / "src")) for arg in step.run]
+                assert set(receipt) == {"id", "argv", "expect", "exit", "passed", "seconds", "tail"}
+        saved.append((stored, index))
+    assert saved[0] == saved[1]
+    assert (repo / "calc.py").read_text() == source
+    if fallback:
+        def unexpected_pool(*args, **kwargs):
+            pytest.fail("direct empty-mutant call must not create a pool")
+
+        monkeypatch.setattr(evidence, "ThreadPoolExecutor", unexpected_pool)
+        calls.clear()
+        out = tmp_path / "direct-empty"
+        assert evidence.mutate(repo, "head", [], legacy, out)
+        assert calls == [out]
+        assert json.loads((out / "mutation-runs.json").read_text()) == {"baselines": index["baselines"], "mutants": []}
+        assert not (out / "src").exists() and not (out / "build").exists()
 
 
 @pytest.mark.scenario("mutation-selection/ordered-mutation-routes/routes-validate-and-round-trip")

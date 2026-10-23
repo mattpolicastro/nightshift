@@ -1,8 +1,11 @@
 import json
+import os
 import shutil
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 from threading import Event, get_ident
 
 import pytest
@@ -408,6 +411,9 @@ def test_persisted_indexes_ignore_completion_order(narrowing, monkeypatch):
     assert [e["baseline"] for e in saved["mutants"]] == [1, 1, 2, 2, 1]
     assert [e["decided_by"] for e in saved["mutants"]] == ["narrowed", "confirmation", "full", "precheck", "precheck"]
     assert [e["result"] for e in saved["mutants"]] == ["killed", "survived", "survived", "equivalent", "invalid"]
+    for selected, entry, stored in zip(mutants, saved["mutants"], ev["mutants"]):
+        assert stored == {**asdict(selected), "result": entry["result"]}
+        assert (entry["path"], entry["line"], entry["op"]) == (selected.path, selected.line, selected.op)
     assert set(ev) == {"section", "covered", "uncovered", "mutants", "skipped", "baseline_failed", "score"}
     assert ev["score"] == 1 / 3
     for root in (out / "serial", out / "parallel"):
@@ -421,3 +427,146 @@ def test_persisted_indexes_ignore_completion_order(narrowing, monkeypatch):
                 assert (root / run["receipts"]).is_file()
     text = json.dumps(saved)
     assert str(out) not in text and "seconds" not in text and "duration" not in text
+
+
+@pytest.mark.scenario("parallel-evidence-mutants/narrow-then-confirm/two-phases-preserve-isolation-and-cleanup")
+@pytest.mark.parametrize("prepared", [False, True])
+@pytest.mark.parametrize("parallel,crashes", [(1, False), (2, False), (2, True)])
+def test_phase_lifecycle(narrowing, monkeypatch, prepared, parallel, crashes):
+    repo, m, out, _ = narrowing
+    original = (repo / "calc.py").read_text()
+    mutants = [mutant(f"    return x >= 0 # worker {i}") for i in range(1, 4)]
+    inspect = manifest.Step("inspect", (sys.executable, "-B", "-c", '''import os, subprocess, sys
+from pathlib import Path
+src, build = map(Path, sys.argv[1:3])
+assert Path.cwd() == build
+assert not (src / "calc.py").stat().st_mode & 0o222
+assert not Path("visited").exists()
+for name, variable in [("home", "HOME"), ("tmp", "TMPDIR")]:
+    assert Path(os.environ[variable]) == build / name
+    assert not list(Path(name).iterdir())
+    Path(name, "used").touch()
+Path("visited").touch()
+Path("artifacts").mkdir(exist_ok=True)
+Path("artifacts/source.txt").write_text((src / "calc.py").read_text())
+Path("artifacts/phase.txt").write_text(sys.argv[3])
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+Path("artifacts/group.txt").write_text(str(os.getpgrp()))
+print((src / "calc.py").read_text(), end="")
+''', "{src}", "{build}", "{mutant_path}"))
+    test = m.verify[1]
+    if not prepared:
+        test = replace(test, run=tuple(arg.replace('"project"', 'sys.argv[2]') for arg in test.run) + ("{src}",))
+    m = replace(m, prepare=m.prepare if prepared else (), verify=(inspect, test),
+                mutation_steps=("test",), mutation_parallel=parallel,
+                mutation_routes=(manifest.MutationRoute(("*.py",), ("inspect", "test")),))
+    snapshot = deepcopy(m)
+    entered = {(i, phase): Event() for i in range(1, 4) for phase in ("narrowed", "confirmation")}
+    release = {key: Event() for key in entered}
+    cleaned_events = {i: Event() for i in range(1, 4)}
+    cleaned, identities, initial = [], {}, {}
+    error = RuntimeError("confirmation crashed with sibling active")
+    real_run, real_cleanup = verify.run_extracted, verify.cleanup
+
+    def run(src, head, steps, run_m, run_out):
+        if run_out == out:
+            return real_run(src, head, steps, run_m, run_out)
+        phase = "confirmation" if run_out.name == "confirmation" else "narrowed"
+        worker = run_out.parent if phase == "confirmation" else run_out
+        number = int(worker.name.split("-")[1])
+        if number > parallel:
+            assert any(cleaned_events[i].is_set() for i in range(1, number))
+        assert identities.setdefault(number, (src, get_ident())) == (src, get_ident())
+        assert src == worker / "src"
+        expected = original.replace(mutants[number - 1].before, mutants[number - 1].after)
+        assert (src / "calc.py").read_text() == expected
+        assert not (src / "calc.py").samefile(out / "src/calc.py")
+        assert (out / "src/calc.py").read_text() == original
+        assert (out / "build/visited").exists()
+        result = real_run(src, head, steps, run_m, run_out)
+        assert all(r.passed for r in result)
+        if prepared:
+            assert (run_out / "build/project/calc.py").read_text() == expected
+        if phase == "narrowed":
+            initial[number] = (run_out / "receipts.json").read_bytes()
+        entered[number, phase].set()
+        assert release[number, phase].wait(15)
+        if crashes and number == 1 and phase == "confirmation":
+            raise error
+        return result
+
+    def cleanup(run_out):
+        if run_out == out:
+            assert all(event.is_set() for event in cleaned_events.values())
+        else:
+            assert (out / "src/calc.py").read_text() == original
+            assert (out / "build/visited").exists()
+            if run_out.name.startswith("mutant-"):
+                assert run_out / "confirmation" in cleaned
+                assert (run_out / "src/calc.py").exists()
+        real_cleanup(run_out)
+        cleaned.append(run_out)
+        if run_out.name.startswith("mutant-"):
+            cleaned_events[int(run_out.name.split("-")[1])].set()
+
+    monkeypatch.setattr(verify, "run_extracted", run)
+    monkeypatch.setattr(verify, "cleanup", cleanup)
+    with ThreadPoolExecutor(max_workers=1) as coordinator:
+        future = coordinator.submit(gather_selected, repo, m, out, mutants, monkeypatch)
+        try:
+            for number in range(1, parallel + 1):
+                assert entered[number, "narrowed"].wait(15)
+            release[1, "narrowed"].set()
+            assert entered[1, "confirmation"].wait(15)
+            assert not entered[parallel + 1, "narrowed"].is_set()
+            assert not future.done() and not cleaned_events[1].is_set()
+            release[1, "confirmation"].set()
+            assert cleaned_events[1].wait(15)
+            if parallel == 2:
+                assert not future.done() and not cleaned_events[2].is_set()
+                assert (out / "mutant-2/src/calc.py").exists()
+                assert (out / "src/calc.py").read_text() == original
+            for event in release.values():
+                event.set()
+            if crashes:
+                with pytest.raises(RuntimeError, match="confirmation crashed") as caught:
+                    future.result(timeout=15)
+                assert caught.value is error
+            else:
+                index, ev = future.result(timeout=15)
+                assert [entry["decided_by"] for entry in index["mutants"]] == ["confirmation"] * 3
+                assert [entry["result"] for entry in ev["mutants"]] == ["survived"] * 3
+        finally:
+            for event in release.values():
+                event.set()
+    assert cleaned[-1] == out and len(cleaned) == 7
+    assert m == snapshot and (repo / "calc.py").read_text() == original
+    if crashes:
+        assert not (out / "evidence.json").exists() and not (out / "mutation-runs.json").exists()
+    for run_out in cleaned:
+        assert not (run_out / "src").exists() and not (run_out / "build").exists()
+        worker = run_out.parent if run_out.name == "confirmation" else run_out
+        number = 0 if worker == out else int(worker.name.split("-")[1])
+        expected = original if not number else original.replace(mutants[number - 1].before, mutants[number - 1].after)
+        assert (run_out / "artifacts/source.txt").read_text() == expected
+        assert (run_out / "inspect.log").read_text() == expected
+        assert (run_out / "artifacts/phase.txt").read_text() == ("calc.py" if run_out.name.startswith("mutant-") else "")
+        assert [r["id"] for r in receipts(run_out)] == (["prepare"] if prepared else []) + ["inspect", "test"]
+        profile = (run_out / "verify.sb").read_text()
+        assert '(deny network*)' in profile and '(deny file-write*)' in profile
+        assert str(run_out / "build") in profile
+        if prepared:
+            profile = (run_out / "prepare.sb").read_text()
+            assert str(worker / "src") in profile and '(deny file-write*)' in profile
+            assert all(name in profile for name in verify.CREDENTIAL_DIRS)
+        if number:
+            assert (worker / "receipts.json").read_bytes() == initial[number]
+        group = int((run_out / "artifacts/group.txt").read_text())
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                os.killpg(group, 0)
+            except ProcessLookupError:
+                break
+            assert time.monotonic() < deadline, f"phase process group {group} survived"
+            time.sleep(0.01)
