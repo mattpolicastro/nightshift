@@ -232,6 +232,8 @@ work, and runs even when the enrollment manifest is unhealthy.
 
 Make `specloop` available on the daemon's PATH and run the separate supervisor
 (`uv run specloop serve`, or its existing launchd job) to drive admitted runs.
+For an alternate layout, use the [host path setup](#host-path-setup); the
+bundled service wrappers retain fixed bootstrap paths.
 Worker quotas and endpoint/model settings do not provide specloop quota pacing;
 specloop uses its manifest's provider profiles.
 
@@ -297,9 +299,15 @@ id = "tests"
 run = ["/usr/bin/env", "PATH={node_bin}:/usr/bin:/bin", "pnpm", "--dir", "{build}/project", "test"]
 ```
 
-Steps run with a fixed `PATH` (`/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin`). Tools installed
-elsewhere, such as `node` and `pnpm` under `~/n/bin` (from the `n` version manager), need a manifest variable and an
-explicit `PATH`, as above; pnpm's `#!/usr/bin/env node` line needs `node` on it too. With `n`, `~/n/bin/pnpm` is a Corepack shim that downloads pnpm on first use; prepare
+Steps use `NIGHTSHIFT_BIN_DIR` (default `/opt/homebrew/bin`) followed by
+`/usr/bin:/bin:/usr/sbin:/sbin`, without appending the inherited PATH. Set it in
+the Python process environment; see [host path setup](#host-path-setup).
+`NIGHTSHIFT_NODE_BIN` affects plugin Factory only. Tools elsewhere, such as
+`node` and `pnpm` under `~/n/bin` (from the `n` version manager), can use a
+manifest variable and explicit `PATH`, as above; pnpm's `#!/usr/bin/env node`
+line needs `node` on it too. PATH selection grants no sandbox read access:
+home-local tools still need manifest variables or `[sandbox].prepare_read`,
+and credential denials remain. With `n`, `~/n/bin/pnpm` is a Corepack shim that downloads pnpm on first use; prepare
 steps have network and share the build's `HOME` with verify steps, so running pnpm in a prepare step
 leaves it cached for the offline verify steps.
 
@@ -381,8 +389,9 @@ holding a tool loop are different claims.
 > **Scope.** This is a personal system shaped around one person's machine, quota
 > and repositories. These controls reduce risk; they are not a security sandbox.
 > Enroll trusted repositories, review queued issue content and keep human review
-> at merge time. macOS, launchd, Homebrew paths and a Paseo host are assumed in
-> places; [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) lists them.
+> at merge time. macOS, launchd and a Paseo host remain assumptions. Python and
+> plugin paths are configurable; bundled wrappers still use fixed paths. See
+> [platform limits and pending checks](KNOWN-LIMITATIONS.md#platform-assumptions).
 
 ## Layout
 
@@ -421,6 +430,63 @@ uv run nightshift resume      # resume eligible delivery; stopped jobs stay held
 
 Copy `config.example.toml` to `config.toml` (gitignored) before running the
 daemon.
+
+### Host path setup
+
+The [platform settings table](KNOWN-LIMITATIONS.md#platform-assumptions) lists
+consumers, path rules and pending manual checks. `NIGHTSHIFT_BIN_DIR` defaults
+to `/opt/homebrew/bin`; Python uses it for prepare/verify, agent and Codex quota
+tool lookup. The plugin also uses `NIGHTSHIFT_NODE_BIN` (default `~/n/bin`),
+`NIGHTSHIFT_UV` (default `<resolved NIGHTSHIFT_BIN_DIR>/uv`) and
+`NIGHTSHIFT_CHECKOUT` (default `~/Projects/nightshift`). An unset uv setting
+follows the selected bin directory. Install the tools first; these settings
+do not discover or install them.
+
+For a **direct CLI** supervisor invocation, substitute your actual paths:
+
+```sh
+cd "/alternate/nightshift"
+NIGHTSHIFT_BIN_DIR="/alternate/tools" "/alternate/tools/uv" run --no-sync specloop serve
+```
+
+This explicitly selects the checkout and executable: `NIGHTSHIFT_CHECKOUT`
+and `NIGHTSHIFT_UV` configure plugin adapters, not shell commands. Host settings
+accept absolute paths or leading `~/`, expanded against the host user's home.
+Use single quotes in shell assignments to preserve spaces and literal
+characters; the resolver does not expand `$VAR`, globs or shell substitutions. Blank/relative paths,
+unsupported tilde forms, NUL/line breaks and colons in PATH directories are
+invalid rather than falling back to defaults.
+
+Supply settings in the actual Python service environment and separately in
+the [Paseo host environment](plugins/nightshift/README.md#installation), then
+restart each affected process. Terminal exports do not update running services;
+launchd reads no shell configuration, and there is no hot reload.
+`bin/nightshift-daemon` exports `~/.config/nightshift/env`, whose file values
+win over inherited values for downstream settings. `bin/specloop-serve` does
+not source that file; provide its Python settings in the service environment.
+Candidate files and manifest env files do not configure the harness resolver.
+
+**Bundled service startup is still fixed.** Both unchanged wrappers use
+`$HOME/Projects/nightshift` and `/opt/homebrew/bin/uv`. `bin/nightshift-daemon`
+prepends `/opt/homebrew/bin:$HOME/n/bin` to incoming PATH;
+`bin/specloop-serve` sets
+`$HOME/n/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin`.
+Environment settings do not relocate these bootstrap commands, nor does moving
+the wrapper pathname in a plist. Wrapper portability is deferred because
+`bin/**` is frozen; no new helper fixes it. Full daemon rollout on another
+layout remains pending separate wrapper work or an independently provisioned
+operator service preserving equivalent credential and preflight guards,
+including required tokens, credential isolation, tool checks and startup
+refusals. The direct supervisor example does not replace those daemon guards.
+
+Worker worktrees use `[daemon].worktree_root` in `config.toml`, default
+`~/Projects/nightshift-wt`; see [config.example.toml](config.example.toml).
+Leading `~/` expands. Relative roots now resolve beside the selected config
+file, instead of the daemon's working directory; set the old location's
+absolute path before restart if you need to retain it. Absolute paths and
+existing worktrees stay in place; loading neither creates nor migrates them.
+This setting does not relocate specloop run state. Second-install macOS and
+actual Paseo host validation remain pending as described in the platform limits.
 
 ### Pause and job control
 

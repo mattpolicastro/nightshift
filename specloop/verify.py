@@ -23,9 +23,9 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from nightshift.host_paths import tool_path
 from specloop.manifest import Manifest, Step
 
-PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 CREDENTIAL_DIRS = (".codex", ".claude", ".specloop/homes", ".ssh", ".config", ".aws", "Library/Keychains")
 
 
@@ -128,6 +128,7 @@ def run_steps(repo: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out: P
 
 def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out: Path) -> list[Receipt]:
     """Prepare a fresh build from an already read-only source tree, then check it."""
+    path = tool_path()
     build = out / "build"
     _make_writable(build)
     shutil.rmtree(build, ignore_errors=True)
@@ -139,7 +140,7 @@ def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out
     if m.prepare:
         prep_sb.write_text(profile(build, m, prepare=True, src=src))
     values = {**m.vars, "src": str(src), "build": str(build), "sha": sha}
-    env = {"PATH": PATH, "HOME": str(build / "home"), "TMPDIR": str(build / "tmp"),
+    env = {"PATH": path, "HOME": str(build / "home"), "TMPDIR": str(build / "tmp"),
            "LANG": "en_US.UTF-8", "COPYFILE_DISABLE": "1"}
     receipts = []
     scheduled = [(s, prep_sb) for s in m.prepare] + [(s, sb) for s in steps]

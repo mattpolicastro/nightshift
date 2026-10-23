@@ -3,8 +3,8 @@
 One host-level sidebar page for outstanding Nightshift tasks and specloop runs.
 Requires Paseo 0.10.1–0.12.x, daemon and app alike (`paseo-plugin.json` pins
 `>=0.10.1 <0.13.0`; built against SDK 0.12.0), and the Nightshift
-checkout at `~/Projects/nightshift` on the Paseo host (the path is fixed for now;
-see KNOWN-LIMITATIONS.md).
+checkout on the Paseo host (`NIGHTSHIFT_CHECKOUT`, default `~/Projects/nightshift`;
+see [platform settings and limits](../../KNOWN-LIMITATIONS.md#platform-assumptions)).
 The existing outcome database must be present. The page creates no agents.
 
 Select the host and open **Nightshift** in the sidebar, or search
@@ -123,6 +123,34 @@ for development; this plugin has no install/build hooks.
 
 ## Installation
 
+Both server adapters use `NIGHTSHIFT_CHECKOUT` (default `~/Projects/nightshift`)
+as their working directory and `NIGHTSHIFT_UV` as the exact executable. An
+unset `NIGHTSHIFT_UV` follows `NIGHTSHIFT_BIN_DIR` (default `/opt/homebrew/bin`)
+plus `/uv`. Attention uses that bin directory followed by
+`/usr/bin:/bin:/usr/sbin:/sbin`; Factory prepends `NIGHTSHIFT_NODE_BIN` (default
+`~/n/bin`) for Node/`npx`, including finish. Neither appends arbitrary inherited
+PATH entries. Attention's installation check uses the same configured checkout.
+
+For an alternate layout, supply these assignments in the **Paseo host process
+environment** before starting it (substitute actual installed paths):
+
+```sh
+export NIGHTSHIFT_BIN_DIR="/alternate/tools"
+export NIGHTSHIFT_NODE_BIN="/alternate/node/bin"
+export NIGHTSHIFT_UV="/alternate/tools/uv"
+export NIGHTSHIFT_CHECKOUT="/alternate/nightshift"
+```
+
+Restart the Paseo host after changing its environment. Exporting in a terminal
+or reloading the plugin cannot update an already-running host's environment;
+there is no hot reload of host settings. These are server-local operator
+settings, never RPC inputs. Paths accept absolute or leading `~/` forms;
+spaces stay literal and the resolver does not expand `$VAR`, globs or shell
+substitutions. Blank/relative paths, unsupported tilde forms, NUL/line breaks
+and colons in PATH directories are rejected. Tools must already be installed.
+
+The installation pathname below selects plugin source, not its CLI checkout:
+
 ```sh
 paseo plugin install /absolute/path/to/nightshift/plugins/nightshift
 paseo plugin ls --json
@@ -135,6 +163,17 @@ this source directory; after editing it, run:
 paseo plugin reload nightshift
 paseo plugin logs nightshift --json
 ```
+
+Python services need their own applicable environment and restart; see
+[host setup](../../README.md#host-path-setup). The unchanged
+`bin/nightshift-daemon` and `bin/specloop-serve` retain fixed bootstrap checkout,
+uv and PATH locations. These settings do not relocate their commands. Wrapper
+portability is deferred because `bin/**` is frozen; direct CLI examples do not
+configure bundled service startup. Full daemon rollout requires separate
+wrapper work or an independently provisioned operator service preserving
+equivalent credential and preflight guards. Second-install and actual Paseo
+host integration validation for alternate paths remain pending; see the
+[manual checks](../../KNOWN-LIMITATIONS.md#platform-assumptions).
 
 ## Nightshift task refresh behavior
 
@@ -153,8 +192,9 @@ after a minute. Reopened historical items therefore appear on a later historical
 check, not necessarily the next minute. Large backlogs need multiple refreshes.
 Checks deferred by the work/time limit retain their prior state and show stale.
 
-The server calls a fixed `/opt/homebrew/bin/uv run --no-sync nightshift attention
---json` command in the fixed checkout. RPC input is only a refresh boolean.
+The server calls the configured uv executable with `run --no-sync nightshift
+attention --json` in the configured checkout, using literal argv without a
+shell. RPC input is only a refresh boolean.
 It accepts CLI exit 1 as a valid stale-data response. Timeouts, malformed output
 and transport errors retain the last list with an error. Limits: 15 seconds for
 a cache read, 60 seconds for GitHub refresh, 2 MiB for command output. A missing
