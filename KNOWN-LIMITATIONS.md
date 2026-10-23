@@ -27,9 +27,16 @@ Fixes land through Nightshift's own front door; these gaps remain unresolved.
   it does not pause an already admitted run.
 - **Stopped-job holds:** stopped jobs stay held across resume, daemon restart
   and relabeling ([PR #28](https://github.com/mattpolicastro/nightshift/pull/28)).
-  There is no retry command
+  Explicit `nightshift jobs release <id>` now detaches a confirmed stopped
+  attempt's matching receipt reference
   ([issue #34](https://github.com/mattpolicastro/nightshift/issues/34)); follow
-  the [pause and job recovery instructions](README.md#pause-and-job-control).
+  the [pause, inspection and release instructions](README.md#pause-and-job-control).
+  The historical attempt stays stopped and its result cannot be delivered;
+  evidence and inputs remain on disk. Release launches nothing: a later poll
+  uses normal authorization, pause, blockers, health, approval and recovery
+  rules. There is no automatic retry or rollback of committed effects; the
+  revision commit/result crash boundary and independent admitted builds above
+  still apply.
 - **Background jobs:**
   - No deadline for a hung job. `nightshift jobs` shows the local inventory
     ([PR #28](https://github.com/mattpolicastro/nightshift/pull/28)), but does

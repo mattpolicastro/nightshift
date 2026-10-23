@@ -205,14 +205,31 @@ before sending SIGTERM, then SIGKILL if needed, to that group. It records
 is refused ([issue #8](https://github.com/mattpolicastro/nightshift/issues/8),
 [PR #28](https://github.com/mattpolicastro/nightshift/pull/28)).
 
-Logs, requests, results and receipts remain on disk. Stopped jobs stay held
-across polling, daemon restart, resume and label removal/reapplication: none
-delivers the stopped result or starts a replacement. There is no job retry
-command ([PR #28](https://github.com/mattpolicastro/nightshift/pull/28)); see
-[issue #34](https://github.com/mattpolicastro/nightshift/issues/34) in the
-[remaining limitations](../../KNOWN-LIMITATIONS.md#open-gaps).
-Follow the existing [pause and job recovery instructions](../../README.md#pause-and-job-control)
-before changing receipts; pause and stop do not roll back committed effects.
+Logs, requests, results and receipts remain on disk without automatic cleanup.
+Stopped jobs stay held across polling, daemon restart, resume and label
+removal/reapplication. Only explicit release can enable a replacement;
+the stopped result remains ineligible for delivery.
+Pause first, list jobs, stop the selected exact full ID and confirm `stopped`
+in inventory. Inspect the log, request/result, stop record and parent receipt,
+local checkout and admission/run state, and remote refs, PRs, comments and
+labels. Then run `nightshift jobs release <id>` with that same full ID
+([issue #34](https://github.com/mattpolicastro/nightshift/issues/34)). It works
+offline without daemon, configuration or credentials, requiring durable stop
+confirmation, matching process identity, an idle lifetime lock and a consistent
+receipt. It removes only the matching `job` reference, preserving other fields
+and evidence. Historical attempts remain stopped and their results stay
+suppressed. A repeated release cannot detach a replacement attempt.
+
+Release launches nothing and leaves pause unchanged. After safe resume, the
+next poll uses normal eligibility: an open, armed, authorized item with
+`needs-human` clear, applicable dependency and health blockers clear, and
+approval-head checks satisfied. Existing PR/admission recovery precedes new
+work; no fresh label event is required. See the
+[release outcomes and recovery instructions](../../README.md#pause-and-job-control)
+for success/no-op (exit 0), refusal (exit 1) and invalid syntax (exit 2).
+There is no automatic retry or rollback of committed effects. A revision that
+commits before saving its result can append a duplicate round on retry; release
+does not fix that [crash boundary](../../KNOWN-LIMITATIONS.md#open-gaps).
 
 Admission can finish while paused and commit runnable state. The independent
 `specloop serve` supervisor can start or continue that build while the daemon
