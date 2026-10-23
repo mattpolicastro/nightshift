@@ -24,6 +24,7 @@ VIEW = ["gh", "pr", "view", "78", "--repo", REPO, "--json",
 MAIN = ["gh", "api", f"repos/{REPO}/git/ref/heads/main"]
 COMMENTS = ["gh", "api", f"repos/{REPO}/issues/78/comments", "--paginate", "--slurp"]
 STATUS = ["specloop", "status", "--json"]
+ACTOR = ["gh", "api", "user"]
 EMPTY_STATUS = {"version": 1, "supervisor": {"state": "not running"}, "runs": []}
 PR = {"number": 78, "url": URL, "state": "OPEN", "isDraft": False,
       "headRefOid": HEAD, "baseRefName": "main", "body": ""}
@@ -36,6 +37,7 @@ class ScriptedRunner:
     """Expect exact argv/order and subprocess options, with no live fallback.
 
     Responses may be JSON values, raw CompletedProcess results, or exceptions.
+    Callbacks model remote writes, including writes whose response was lost.
     This also models reads failing without accidentally retrying a mutation.
     """
 
@@ -55,6 +57,8 @@ class ScriptedRunner:
         assert argv == expected
         assert kwargs == {"capture_output": True, "text": True, "check": False,
                           "timeout": timeout}
+        if callable(response):
+            response = response()
         if isinstance(response, Exception):
             raise response
         if isinstance(response, subprocess.CompletedProcess):
@@ -696,6 +700,9 @@ def test_no_listed_checks_reaches_remaining_gates(
 @pytest.mark.parametrize("checks_done", [False, True])
 def test_missing_publication_still_checks_body(config_path, scripted_runner, capsys, checks_done):
     expect_check_sources(scripted_runner, "- [ ] Body check remains", [[]])
+    if checks_done:
+        scripted_runner.expect(ACTOR, {"login": "operator"})
+        scripted_runner.expect(check_patch("- [x] Body check remains"), {})
     assert invoke(config_path, scripted_runner, URL, *(["--checks-done"] if checks_done else [])) == 1
     output = capsys.readouterr()
     assert ("PR body: Body check remains" in output.err) == (not checks_done)
@@ -730,3 +737,138 @@ def test_unreadable_pr_body_refuses(config_path, scripted_runner, capsys, body):
     scripted_runner.expect(VIEW, {**PR, "body": body})
     assert invoke(config_path, scripted_runner, URL) == 1
     assert "malformed PR body" in capsys.readouterr().err
+
+
+def check_patch(body, comment_id=None):
+    endpoint = (f"repos/{REPO}/pulls/78" if comment_id is None
+                else f"repos/{REPO}/issues/comments/{comment_id}")
+    return ["gh", "api", "--method", "PATCH", endpoint, "-f", f"body={body}"]
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/record-checks-in-place/tick-each-source-once")
+@pytest.mark.parametrize("complete", ["neither", "body", "comment", "both"])
+def test_checks_done_ticks_each_source_once_and_retains_snapshot(
+    config_path, scripted_runner, capsys, monkeypatch, complete,
+):
+    body = ("Prose\r\n- [X] Keep uppercase\r\n- [x] Keep lowercase\n"
+            "> * [ ] First\r\n```\n\t+ [ ] Second\n```\nInline - [ ] prose\n"
+            "- [ ]No space\n- [y] Unrecognized\nEnd")
+    ticked_body = body.replace("> * [ ]", "> * [x]").replace("\t+ [ ]", "\t+ [x]")
+    comment = publication(42, checks="Prose\r\n- [X] Old\r\n- [ ] New\r\n+ [ ] More")
+    ticked_comment = comment["body"].replace("- [ ] New", "- [x] New").replace(
+        "+ [ ] More", "+ [x] More")
+    if complete in {"body", "both"}:
+        body = ticked_body
+    if complete in {"comment", "both"}:
+        comment["body"] = ticked_comment
+    old = publication(1, created_at="2026-10-21T12:00:00Z")
+    unrelated = publication(99, change="another-change")
+    untrusted = publication(100, author_association="CONTRIBUTOR")
+    pages = [[old, unrelated], [comment, untrusted]]
+    original_pages = json.dumps(pages)
+    snapshots = []
+    prepare = land.prepare_human_checks
+
+    def retain(*args, **kwargs):
+        snapshot = prepare(*args, **kwargs)
+        snapshots.append(snapshot)
+        return snapshot
+
+    monkeypatch.setattr(land, "prepare_human_checks", retain)
+    expect_check_sources(scripted_runner, body, pages)
+    scripted_runner.expect(ACTOR, {"login": "operator"})
+    if complete not in {"body", "both"}:
+        scripted_runner.expect(check_patch(ticked_body), {})
+    if complete not in {"comment", "both"}:
+        scripted_runner.expect(check_patch(ticked_comment, 42), {})
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    assert "mutations disabled" in capsys.readouterr().err
+    assert snapshots == [land.CheckSnapshot(HEAD, (
+        land.CheckSource(ticked_body), land.CheckSource(ticked_comment, 42)), "operator")]
+    assert json.dumps(pages) == original_pages
+
+    # A retry reads completed remote sources and still identifies its actor for
+    # the later attestation step, without writing any source a second time.
+    expect_check_sources(scripted_runner, ticked_body, [[{**comment, "body": ticked_comment}]])
+    scripted_runner.expect(ACTOR, {"login": "second-operator"})
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    assert "mutations disabled" in capsys.readouterr().err
+    assert snapshots[1].actor == "second-operator"
+    assert snapshots[1].sources == snapshots[0].sources
+    assert snapshots[1].head == HEAD
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/record-checks-in-place/partial-edits-recover")
+@pytest.mark.parametrize("failed_stage", ["actor", "body", "comment"])
+@pytest.mark.parametrize("failure", ["rejected", "timeout", "lost-response"])
+def test_partial_check_edits_recover_from_remote_state(
+    config_path, scripted_runner, capsys, failed_stage, failure,
+):
+    remote = {"body": "Before\r\n- [ ] First\r\n- [X] Existing\r\n",
+              "comment": publication(42)["body"]}
+    complete = {key: value.replace("- [ ]", "- [x]") for key, value in remote.items()}
+
+    def edit(source):
+        if source != failed_stage or failure == "lost-response":
+            remote[source] = complete[source]
+        if source == failed_stage:
+            return error
+        return {}
+
+    error = (subprocess.CompletedProcess([], 1, "", "permission denied")
+             if failure == "rejected" else subprocess.TimeoutExpired([], 30))
+    expect_check_sources(scripted_runner, remote["body"], [[publication(42, body=remote["comment"])]])
+    scripted_runner.expect(ACTOR, error if failed_stage == "actor" else {"login": "operator"})
+    if failed_stage != "actor":
+        scripted_runner.expect(check_patch(complete["body"]), lambda: edit("body"))
+    if failed_stage == "comment":
+        scripted_runner.expect(check_patch(complete["comment"], 42), lambda: edit("comment"))
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    reason = capsys.readouterr().err
+    assert ("permission denied" if failure == "rejected" else "timed out") in reason
+    assert ("authenticated actor lookup" if failed_stage == "actor" else
+            "PR body" if failed_stage == "body" else "publication comment 42") in reason
+    assert "mutations disabled" not in reason  # Stopped at the failed operation.
+    assert not scripted_runner.steps
+    if failed_stage == "comment":
+        assert remote["body"] == complete["body"]
+
+    # Build the next read from actual remote state, including writes applied
+    # before a lost acknowledgement. Only unfinished sources may be patched.
+    expect_check_sources(scripted_runner, remote["body"], [[publication(42, body=remote["comment"])]])
+    scripted_runner.expect(ACTOR, {"login": "operator"})
+    failed_stage = None
+    for source, comment_id in [("body", None), ("comment", 42)]:
+        if remote[source] != complete[source]:
+            scripted_runner.expect(check_patch(complete[source], comment_id),
+                                   lambda source=source: edit(source))
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    assert "mutations disabled" in capsys.readouterr().err
+    assert remote == complete
+
+
+@pytest.mark.scenario("reviewed-pr-landing/record-checks-in-place/partial-edits-recover")
+@pytest.mark.parametrize("response", [
+    {}, {"login": None}, {"login": 3}, {"login": ""}, {"login": "  "}, {"login": "two users"},
+    [], subprocess.CompletedProcess(ACTOR, 0, "not json", ""), FileNotFoundError("gh missing"),
+])
+def test_invalid_actor_refuses_before_check_writes(config_path, scripted_runner, capsys, response):
+    expect_check_sources(scripted_runner, "- [ ] Check")
+    scripted_runner.expect(ACTOR, response)
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    assert "authenticated actor lookup" in capsys.readouterr().err
+    assert [argv for argv, _ in scripted_runner.calls] == [VIEW, MAIN, STATUS, ACTOR]
+
+
+@pytest.mark.scenario("reviewed-pr-landing/record-checks-in-place/tick-each-source-once")
+@pytest.mark.parametrize("checks_done", [False, True])
+def test_complete_direct_sources_only_lookup_actor_when_recording(
+    config_path, scripted_runner, capsys, checks_done,
+):
+    expect_check_sources(scripted_runner, "- [X] Complete\r\n")
+    if checks_done:
+        scripted_runner.expect(ACTOR, {"login": "operator"})
+    assert invoke(config_path, scripted_runner, URL, *(["--checks-done"] if checks_done else [])) == 1
+    assert "mutations disabled" in capsys.readouterr().err

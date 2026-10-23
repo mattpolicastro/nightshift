@@ -1,7 +1,7 @@
 """Explicit operator entry point for landing an enrolled, reviewed PR.
 
-Read-only identity, run validation, and human-check discovery are wired so far.
-Mutations remain disabled until recording, lifecycle, CI, and merge gates are implemented.
+Identity, run validation, and in-place human-check recording are wired so far.
+Finish and merge remain disabled until attestation and subsequent gates are implemented.
 """
 
 from __future__ import annotations
@@ -77,6 +77,28 @@ class CheckSource:
         return tuple(HumanCheck(match["text"], match["state"] != " ")
                      for match in _TASK_LINE.finditer(self.body))
 
+    def completed(self) -> CheckSource:
+        def tick(match: re.Match[str]) -> str:
+            if match["state"] != " ":
+                return match[0]
+            offset = match.start("state") - match.start()
+            return match[0][:offset] + "x" + match[0][offset + 1:]
+
+        return CheckSource(_TASK_LINE.sub(tick, self.body), self.comment_id)
+
+
+@dataclass(frozen=True)
+class CheckSnapshot:
+    """Expected post-edit sources and pre-finish head for later revalidation.
+
+    Keep the authenticated actor even when every box was already ticked, so
+    a later attestation can recover independently of the source edits.
+    """
+
+    head: str
+    sources: tuple[CheckSource, ...]
+    actor: str | None
+
 
 @dataclass(frozen=True)
 class LandingRun:
@@ -99,7 +121,7 @@ class Operations:
     sleep: Callable[[float], None]
     monotonic: Callable[[], float]
 
-    def _read_json(self, argv: list[str], *, stage: str) -> Any:
+    def run(self, argv: list[str], *, stage: str) -> subprocess.CompletedProcess[str]:
         try:
             result = self.runner(
                 argv, capture_output=True, text=True, check=False,
@@ -112,6 +134,10 @@ class Operations:
         if result.returncode:
             detail = (result.stderr or result.stdout or "command failed").strip()
             raise Refusal(f"{stage}: {detail} (exit {result.returncode})")
+        return result
+
+    def _read_json(self, argv: list[str], *, stage: str) -> Any:
+        result = self.run(argv, stage=stage)
         try:
             value = json.loads(result.stdout)
         except (ValueError, TypeError) as exc:
@@ -144,7 +170,7 @@ def _positive_timeout(value: str) -> float:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="python -m nightshift.land",
-        description="Land a reviewed PR in an enrolled repository (mutations currently disabled).",
+        description="Land a reviewed PR in an enrolled repository (finish and merge currently disabled).",
         allow_abbrev=False,
     )
     result.add_argument("pr", help="GitHub.com HTTPS pull URL or positive PR number")
@@ -379,6 +405,42 @@ def validate_human_checks(sources: tuple[CheckSource, ...], *, checks_done: bool
         raise Refusal("unticked human checks remain:\n" + "\n".join(remaining))
 
 
+def read_actor(operations: Operations) -> str:
+    data = operations.read_json(["gh", "api", "user"], stage="authenticated actor lookup")
+    login = data.get("login")
+    if not isinstance(login, str) or not login or any(char.isspace() for char in login):
+        raise Refusal("authenticated actor lookup: malformed or missing login")
+    return login
+
+
+def prepare_human_checks(
+    pr: PullRequest, sources: tuple[CheckSource, ...], operations: Operations, *, checks_done: bool,
+) -> CheckSnapshot:
+    validate_human_checks(sources, checks_done=checks_done)
+    if not checks_done or not any(source.checks for source in sources):
+        return CheckSnapshot(pr.head, sources, None)
+
+    # Resolve identity before the first write, including on retries where the
+    # boxes are complete but a subsequent attestation still needs recording.
+    actor = read_actor(operations)
+    completed = []
+    for source in sources:
+        updated = source.completed()
+        if updated.body != source.body:
+            endpoint = (f"repos/{pr.identity.repo}/pulls/{pr.identity.number}"
+                        if source.comment_id is None
+                        else f"repos/{pr.identity.repo}/issues/comments/{source.comment_id}")
+            # One full-source PATCH, with raw text fields preserving newlines.
+            # Stop on failure without rollback or blind retry: the next operator
+            # invocation reads actual remote state, including ambiguous writes.
+            operations.run(
+                ["gh", "api", "--method", "PATCH", endpoint, "-f", f"body={updated.body}"],
+                stage=f"record human checks in {source.reference}; rerun land to recover",
+            )
+        completed.append(updated)
+    return CheckSnapshot(pr.head, tuple(completed), actor)
+
+
 def main(
     argv: list[str] | None = None, *, runner: Runner | None = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -395,10 +457,11 @@ def main(
         run = discover_run(identity, operations)
         validate_run_eligibility(pr, run)
         sources = read_check_sources(pr, run, operations)
-        validate_human_checks(sources, checks_done=args.checks_done)
-        # Fail closed until every subsequent safety gate is wired. In
-        # particular, --checks-done must not authorize mutations on its own.
-        raise Refusal(f"{identity.url}: mutations disabled until all landing gates are wired")
+        snapshot = prepare_human_checks(pr, sources, operations, checks_done=args.checks_done)
+        # Retain the expected post-edit snapshot for attestation and later
+        # revalidation. Finish/CI/merge must wait for their remaining gates.
+        raise Refusal(f"{identity.url}: mutations disabled beyond check edits until all landing "
+                      f"gates are wired (checks read at head {snapshot.head})")
     except Refusal as exc:
         print(f"land: {exc}", file=sys.stderr)
         return 1
