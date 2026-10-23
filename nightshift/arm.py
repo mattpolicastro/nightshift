@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from nightshift.queue import blockers
 from specloop import critic, propose
@@ -530,3 +533,101 @@ def lint_body(issue: int, body: str) -> list[Finding]:
                 line=section.line + section.text.count("\n", 0, match.start()),
             ))
     return sorted(findings, key=Finding.sort_key)
+
+
+def _issue_number(value: str) -> int:
+    if not re.fullmatch(r"#?[0-9]+", value):
+        raise argparse.ArgumentTypeError("expected a positive issue number, optionally prefixed by #")
+    try:
+        number = int(value.removeprefix("#"))
+        if number > 0:
+            return number
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("issue numbers must be positive integers")
+
+
+def resolve_checkout(*, runner=None) -> tuple[Path, str]:
+    """Resolve the current checkout and preserve enterprise GitHub hostnames."""
+    runner = runner or subprocess.run
+    try:
+        result = runner(["git", "rev-parse", "--show-toplevel"],
+                        capture_output=True, text=True, check=True, timeout=30)
+        if result.returncode or not result.stdout.strip():
+            raise ValueError
+        root = Path(result.stdout.strip()).resolve()
+        result = runner(["gh", "repo", "view", "--json", "nameWithOwner,url"], cwd=root,
+                        capture_output=True, text=True, check=True, timeout=30)
+        if result.returncode:
+            raise ValueError
+        data = json.loads(result.stdout)
+        repository, url = data["nameWithOwner"], urlparse(data["url"])
+        if (not isinstance(repository, str) or not re.fullmatch(r"[^/\s]+/[^/\s]+", repository)
+                or url.scheme != "https" or not url.hostname):
+            raise ValueError
+        if url.hostname != "github.com":
+            repository = f"{url.hostname}/{repository}"
+        return root, repository
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError):
+        raise IssueLookupError("Could not resolve the checkout and GitHub repository.") from None
+
+
+def report_finding(finding: Finding) -> None:
+    location = f" line {finding.line}" if finding.line is not None else ""
+    if finding.path:
+        location += f" path {finding.path}"
+    related = f" (issue #{finding.related_issue})" if finding.related_issue is not None else ""
+    print(f"#{finding.issue}{location} [{finding.code}]{related}: "
+          f"{finding.message} Suggestion: {finding.suggestion}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m nightshift.arm", allow_abbrev=False,
+                                     description="Check issue wording and overlap before arming.")
+    parser.add_argument("issues", metavar="ISSUE", nargs="+", type=_issue_number)
+    parser.add_argument("--check", action="store_true", help="report only; never apply labels")
+    parser.add_argument("--force", action="store_true", help="arm despite findings; --check takes precedence")
+    args = parser.parse_args(argv)
+    try:
+        root, repository = resolve_checkout()
+    except IssueLookupError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    cache = IssueCache(runner=subprocess.run)
+    results = check_candidates(repository, list(dict.fromkeys(args.issues)), root, cache)
+    failed = False
+    for number, findings in results.items():
+        for finding in sorted(findings, key=Finding.sort_key):
+            report_finding(finding)
+        try:
+            issue = cache.get(repository, number)
+        except IssueLookupError:
+            disposition, success = "unarmed (issue unreadable)", False
+        else:
+            if issue.state != "OPEN":
+                disposition, success = "unarmed (issue is not open)", False
+            elif args.check:
+                disposition, success = ("check failed", False) if findings else ("check clean", True)
+            elif findings and not args.force:
+                disposition, success = "unarmed (findings)", False
+            elif "spec:draft" in issue.labels:
+                disposition, success = "already armed", True
+            else:
+                command = ["gh", "issue", "edit", str(number), "--repo", repository,
+                           "--add-label", "spec:draft"]
+                try:
+                    response = subprocess.run(command, capture_output=True, text=True,
+                                              check=True, timeout=30)
+                    if response.returncode:
+                        raise subprocess.CalledProcessError(response.returncode, command)
+                except (OSError, subprocess.SubprocessError):
+                    disposition, success = "unconfirmed (label write failed)", False
+                else:
+                    disposition, success = "forced arming" if args.force else "armed", True
+        print(f"#{number}: {disposition}")
+        failed |= not success
+    return int(failed)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

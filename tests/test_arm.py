@@ -919,3 +919,163 @@ def test_unlabelled_batch_overlap_is_checked_before_writes(tmp_path, issue_body,
         assert [(f.code, f.related_issue) for f in results[number]] == [("overlap", other)]
         assert f"blocked-by: #{other}" in results[number][0].suggestion
         assert cache.get("org/repo", number).labels == frozenset()
+
+
+@pytest.fixture
+def command_reader(tmp_path, monkeypatch, issue_reader):
+    monkeypatch.setattr(state, "ROOT", tmp_path / "run-home")
+
+    def make(records, host="github.com"):
+        repository = "org/repo" if host == "github.com" else f"{host}/org/repo"
+        cache, _ = issue_reader({(repository, n): row for n, row in records.items()})
+        calls = []
+        context = [
+            ["gh", "api", "--hostname", host,
+             "repos/org/repo/issues?state=open&labels=spec%3Adraft&per_page=100&page=1"],
+            ["gh", "api", "repos/org/repo/pulls?state=open&per_page=100&page=1",
+             *(["--hostname", host] if host != "github.com" else []), "--method", "GET"],
+            ["gh", "api", "--hostname", host,
+             "repos/org/repo/pulls?state=open&per_page=100&page=1"],
+        ]
+
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            expected = dict(capture_output=True, text=True, check=True, timeout=30)
+            if argv == ["gh", "repo", "view", "--json", "nameWithOwner,url"]:
+                expected["cwd"] = tmp_path.resolve()
+                output = json.dumps({"nameWithOwner": "org/repo", "url": f"https://{host}/org/repo"})
+            elif argv == ["git", "rev-parse", "--show-toplevel"]:
+                output = str(tmp_path) + "\n"
+            elif argv[:3] == ["gh", "issue", "view"]:
+                return cache.runner(argv, **kwargs)
+            elif argv[:3] == ["gh", "issue", "edit"]:
+                assert argv == ["gh", "issue", "edit", argv[3], "--repo", repository,
+                                "--add-label", "spec:draft"]
+                assert int(argv[3]) in records
+                assert all(read in calls for read in context)  # Snapshot precedes writes.
+                output = ""
+            else:
+                assert argv in context  # No unexpected reads or mutations.
+                output = "[]"
+            assert kwargs == expected
+            return subprocess.CompletedProcess(argv, 0, output)
+
+        monkeypatch.setattr(arm.subprocess, "run", runner)
+        return calls, context, repository
+    return make
+
+
+def unarmed_record(number, body):
+    return {**issue_record(number, body=body), "labels": [{"name": "bug"}]}
+
+
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/clean-issue-is-armed")
+@pytest.mark.parametrize("host", ["github.com", "github.example"])
+def test_arm_labels_when_clean(command_reader, issue_body, capsys, host):
+    calls, context, repository = command_reader({76: unarmed_record(76, issue_body())}, host)
+    assert arm.main(["#76", "76"]) == 0
+    assert calls == [
+        ["git", "rev-parse", "--show-toplevel"],
+        ["gh", "repo", "view", "--json", "nameWithOwner,url"],
+        ["gh", "issue", "view", "76", "--repo", repository,
+         "--json", "number,body,state,stateReason,labels"],
+        *context,
+        ["gh", "issue", "edit", "76", "--repo", repository, "--add-label", "spec:draft"],
+    ]
+    assert capsys.readouterr().out == "#76: armed\n"
+
+
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/check-mode-never-labels")
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("failing", [False, True])
+def test_arm_check_mode_never_labels(command_reader, issue_body, capsys, force, failing):
+    records = {76: unarmed_record(76, issue_body())}
+    if failing:
+        records[77] = unarmed_record(77, "")
+    calls, _, _ = command_reader(records)
+    args = ["--check", *(["--force"] if force else []), *map(str, records)]
+    assert arm.main(args) == int(failing)
+    assert not any(call[:3] == ["gh", "issue", "edit"] for call in calls)
+    output = capsys.readouterr().out
+    assert output.startswith("#76: check clean\n")
+    assert output.count("[missing-section]") == (4 if failing else 0)
+    if failing:
+        for section in arm.REQUIRED_SECTIONS:
+            assert f"Missing **{section}:** section." in output
+        assert output.endswith("#77: check failed\n")
+
+
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/findings-prevent-default-arming")
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/force-labels-and-reports")
+@pytest.mark.parametrize("force", [False, True], ids=["default-refusal", "force"])
+def test_arm_force_labels_and_reports(command_reader, issue_body, capsys, force):
+    body = issue_body("manually inspect") + "Do not edit existing tests.\nblocked-by: #90"
+    calls, _, _ = command_reader({76: unarmed_record(76, body),
+                                 77: unarmed_record(77, issue_body()),
+                                 90: OSError("private diagnostic")})
+    assert arm.main([*(["--force"] if force else []), "77", "#76", "77"]) == (0 if force else 1)
+    edits = [call for call in calls if call[:3] == ["gh", "issue", "edit"]]
+    assert edits == ([["gh", "issue", "edit", str(n), "--repo", "org/repo",
+                      "--add-label", "spec:draft"] for n in (77, 76)] if force else [])
+    output = capsys.readouterr().out
+    assert "private diagnostic" not in output
+    codes = [line.split("[")[1].split("]")[0] for line in output.splitlines() if "[" in line]
+    assert codes == ["incomplete-context", "overlap", "discouraged-phrase",
+                     "incomplete-context", "manual-check", "named-test", "overlap"]
+    for text in ("existing assertions are preserved", "Move this check under **What CI cannot prove:**",
+                 "Name a test", "Issue #90 lookup failed.", "blocked-by: #76", "blocked-by: #77",
+                 "line 5", "line 3", "path nightshift/arm.py"):
+        assert text in output
+    disposition = "forced arming" if force else "unarmed (findings)"
+    assert output.count(f": {disposition}\n") == 2
+    assert output.index(f"#77: {disposition}\n") < output.index("#76 line 5")
+    assert output.endswith(f"#76: {disposition}\n")
+
+
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/invalid-arguments-fail-before-reads")
+@pytest.mark.parametrize("args", [[], ["--check"], ["0"], ["#0"], ["-1"], ["abc"],
+                                  ["76", "1.5"], ["org/repo#1"], ["##1"], ["1", "--unknown"]])
+def test_arm_invalid_arguments_fail_before_reads(monkeypatch, capsys, args):
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid arguments must fail before any subprocess call")
+
+    monkeypatch.setattr(arm.subprocess, "run", unexpected)
+    with pytest.raises(SystemExit) as error:
+        arm.main(args)
+    assert error.value.code == 2
+    assert "usage: python -m nightshift.arm" in capsys.readouterr().err
+
+
+def test_arm_module_entry_point(monkeypatch, capsys):
+    import runpy
+
+    monkeypatch.setattr("sys.argv", ["nightshift.arm"])
+    monkeypatch.setattr(arm.subprocess, "run", lambda *a, **kw: pytest.fail("unexpected read"))
+    with pytest.warns(RuntimeWarning, match="found in sys.modules"):
+        with pytest.raises(SystemExit) as error:
+            runpy.run_module("nightshift.arm", run_name="__main__")
+    assert error.value.code == 2
+    assert "usage:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("stage", ["git", "gh"])
+@pytest.mark.parametrize("failure", [OSError("private diagnostic"),
+                                    subprocess.CompletedProcess([], 1, ""),
+                                    subprocess.CompletedProcess([], 0, "")])
+def test_arm_resolution_failure_stops_before_collection(monkeypatch, tmp_path, capsys, stage, failure):
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        assert argv in (["git", "rev-parse", "--show-toplevel"],
+                        ["gh", "repo", "view", "--json", "nameWithOwner,url"])
+        if argv[0] == stage:
+            if isinstance(failure, Exception):
+                raise failure
+            return failure
+        return subprocess.CompletedProcess(argv, 0, str(tmp_path))
+
+    monkeypatch.setattr(arm.subprocess, "run", runner)
+    assert arm.main(["76"]) == 1
+    assert len(calls) == (1 if stage == "git" else 2)
+    assert capsys.readouterr().err == "Could not resolve the checkout and GitHub repository.\n"
