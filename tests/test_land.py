@@ -2690,3 +2690,113 @@ def test_land_real_merge_retry_keeps_done_run(config_path, scripted_runner, caps
     calls = [argv for argv, _ in scripted_runner.calls]
     assert calls.count(FINISH) == 1 and calls.count(CHECKS) == 2
     assert [argv for argv in calls if "merge" in argv] == [merge_command(FINISHED_HEAD), merge_command()]
+
+
+def operator_landing_script():
+    """One complete operator invocation, including both edits and real gates.
+
+    Also supplies every external failure boundary below. No helper replaces a
+    production landing stage, and the script never falls back to live commands.
+    """
+    runner = ScriptedRunner()
+    body = "- [ ] Review the current head"
+    comment = publication(checks="- [ ] Exercise the published behavior")
+    ticked_body = body.replace("[ ]", "[x]")
+    ticked_comment = {**comment, "body": comment["body"].replace("[ ]", "[x]")}
+    expect_check_sources(runner, body, [[comment]])
+    runner.expect(ACTOR, {"login": "operator"})
+    runner.expect(check_patch(ticked_body), {})
+    runner.expect(check_patch(ticked_comment["body"], comment["id"]), {})
+    recorded = expect_attestation(runner, [
+        ("PR body", ["Review the current head"]),
+        ("publication comment 1", ["Exercise the published behavior"]),
+    ])
+    pages = [[ticked_comment, recorded]]
+    expect_finish_gate(runner, ticked_body, pages, ci=False)
+    pr = {**PR, "body": ticked_body, "headRefOid": FINISHED_HEAD}
+    done = {**RUN, "status": "done", "pause": None, "head": FINISHED_HEAD}
+    expect_round_start(runner, head=FINISHED_HEAD)
+    expect_ci_poll(runner, [ci_check()], pr=pr)
+    expect_round_end(runner, pr=pr, row=done, comments=pages)
+    runner.expect(merge_command(FINISHED_HEAD), {})
+    runner.expect(CONFIRM_MERGED, {"number": 78, "url": URL, "state": "MERGED"})
+    return list(runner.steps)
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/operator-entry-point/explicit-invocation")
+@pytest.mark.scenario("reviewed-pr-landing/head-conditioned-merge/verified-pr-merged")
+@pytest.mark.parametrize("pr_argument", [URL, "78"])
+def test_operator_module_invocation_with_all_flags_merges(
+    config_path, scripted_runner, monkeypatch, capsys, pr_argument,
+):
+    scripted_runner.steps.extend(operator_landing_script())
+    monkeypatch.setattr(subprocess, "run", scripted_runner)
+    monkeypatch.setattr(sys, "argv", [
+        "nightshift.land", pr_argument, "--repo", REPO, "--config", str(config_path),
+        "--checks-done", "--timeout", "1800",
+    ])
+    monkeypatch.delitem(sys.modules, "nightshift.land", raising=False)
+    with pytest.raises(SystemExit) as result:
+        runpy.run_module("nightshift.land", run_name="__main__")
+    assert result.value.code == 0
+    output = capsys.readouterr()
+    assert output.out == f"Merged {URL}\n" and output.err == ""
+    assert_guarded_merge(scripted_runner, FINISHED_HEAD)
+    calls = [argv for argv, _ in scripted_runner.calls]
+    posts = [argv for argv in calls if "POST" in argv]
+    assert len(posts) == 1
+    assert f"<!-- nightshift:land-checks:78:{HEAD} -->" in posts[0][-1]
+    assert FINISHED_HEAD not in posts[0][-1]  # Attest the human-check pass before finish.
+    assert calls.index(ACTOR) < calls.index(posts[0]) < calls.index(FINISH) < calls.index(CHECKS)
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/actionable-refusal-output/operator-can-recover")
+@pytest.mark.parametrize("failure_index", range(len(operator_landing_script())))
+def test_every_operator_external_refusal_stops_later_mutations(
+    config_path, scripted_runner, capsys, failure_index,
+):
+    plan = operator_landing_script()
+    argv, _, timeout = plan[failure_index]
+    reason = f"HTTP 403: operation {failure_index} denied"
+    scripted_runner.steps.extend(plan[:failure_index])
+    scripted_runner.expect(argv, subprocess.CompletedProcess(argv, 1, "", reason), timeout=timeout)
+    # Ambiguous writes may be followed by read-only reconciliation, never by
+    # finish, an update, a new edit, or a second merge after the refusal.
+    if "POST" in argv:
+        scripted_runner.expect(COMMENTS, [[]])
+    elif argv == CHECKS:
+        scripted_runner.expect(*plan[failure_index + 1][:2])  # Bracketing head read.
+    elif argv == merge_command(FINISHED_HEAD):
+        scripted_runner.expect(CONFIRM_MERGED, {"number": 78, "url": URL, "state": "OPEN"})
+
+    assert invoke(config_path, scripted_runner, URL, "--repo", REPO,
+                  "--checks-done", "--timeout", "1800") == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err.startswith("land: ") and reason in output.err
+    assert "Merged " not in output.err and "deploy" not in output.err
+    later_calls = [call for call, _ in scripted_runner.calls[failure_index + 1:]]
+    assert all(call in (COMMENTS, VIEW, CONFIRM_MERGED) for call in later_calls)
+    assert len(later_calls) <= 1
+
+
+@pytest.mark.scenario("reviewed-pr-landing/operator-entry-point/background-paths-excluded")
+@pytest.mark.parametrize("entry_point", ["nightshift.daemon", "specloop.serve"])
+def test_background_inspection_follows_package_helper_dispatch(tmp_path, entry_point):
+    package, module = entry_point.split(".")
+    package_root = tmp_path / package
+    helper = package_root / "helper"
+    helper.mkdir(parents=True)
+    (package_root / "__init__.py").write_text("")
+    (package_root / f"{module}.py").write_text("from . import helper\n")
+    (helper / "__init__.py").write_text("from . import dispatch\n")
+    (helper / "dispatch.py").write_text(
+        "def background_job():\n"
+        "    import subprocess\n"
+        "    subprocess.run(['uv', 'run', 'python', '-m', 'nightshift.land', '78'])\n"
+    )
+    visited, violations = background_references(tmp_path, [entry_point])
+    assert {entry_point, f"{package}.helper", f"{package}.helper.dispatch"} <= visited
+    assert any(f"{package}.helper.dispatch:" in violation for violation in violations)
