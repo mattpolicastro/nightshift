@@ -70,6 +70,17 @@ MODIFIED or REMOVED delta.
 - `tasks.md` with `## N. Title` sections and `- [ ] N.M ...` tasks.
   - Each task is a single session's work: about 300 changed lines at most, one
     concern.
+  - Combine work touching the same file for one concern into one task within
+    that ceiling. Split when distinct concerns, dependencies or the ceiling
+    require it, not by document heading.
+  - For documentation-only changes (documentation updates without changing
+    executable behavior), use one or two tasks in one section, subject to the
+    same single-session task ceiling.
+  - Most changes should use six tasks or fewer and as few sections as
+    dependencies allow. Six is a normal target, not a hard rejection limit.
+    Every task incurs a full implement, verify and review cycle; every section
+    incurs an evidence gate. Size boundaries by risk and dependencies to avoid
+    paying those costs for unnecessary splits.
   - Each task names the scenario IDs it covers, in backticks, as
     `capability/requirement-slug/scenario-slug`. A slug is the name lowercased,
     with every run of other characters replaced by `-`.
