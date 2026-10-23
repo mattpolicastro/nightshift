@@ -8,7 +8,7 @@
 - [x] 2.1 Update drafting guidance in `docs/specloop/README.md` for the in-flight map, normalized paths, overlap feedback, four-round default, human-task lint and preserved spec guarantees; add the source-map PR citations and name the files an avoidance instruction must identify. Keep this session below 150 changed lines. Covers `specloop-documentation/spec-drafting-guidance/concurrent-files-inform-a-draft`, `specloop-documentation/spec-drafting-guidance/drafting-rules-preserve-feasible-tasks`.
 - [x] 2.2 Extend the same guide's proposal sequence with the independent critic, all eight checklist items, both concurrent-file sources, single correction and contradiction/risk outcomes, citing PRs #57 and #62. Keep this session below 100 changed lines. Covers `specloop-documentation/spec-critic-guidance/critic-checklist-is-complete`, `specloop-documentation/spec-critic-guidance/critic-outcome-is-actionable`.
 - [x] 2.3 Add tagged tests covering `specloop-documentation/spec-critic-guidance/critic-checklist-is-complete`, `specloop-documentation/spec-critic-guidance/critic-outcome-is-actionable`, fixing the code where a scenario does not hold
-- [ ] 2.4 Add tagged tests covering `specloop-documentation/spec-drafting-guidance/concurrent-files-inform-a-draft`, `specloop-documentation/spec-drafting-guidance/drafting-rules-preserve-feasible-tasks`, fixing the code where a scenario does not hold
+- [x] 2.4 Add tagged tests covering `specloop-documentation/spec-drafting-guidance/concurrent-files-inform-a-draft`, `specloop-documentation/spec-drafting-guidance/drafting-rules-preserve-feasible-tasks`, fixing the code where a scenario does not hold
 
 ## 3. Front door
 
