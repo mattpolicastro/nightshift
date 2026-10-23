@@ -18,3 +18,7 @@
 ## 4. Align guidance and validate acceptance
 
 - [x] 4.1 Replace only the existing `**Usage limits**` paragraph in `docs/specloop/README.md` with the behavior specified by this change; preserve concurrent #76 edits everywhere else. Add narrow offline documentation/link checks in new `tests/test_provider_fallback_docs.py`, retaining existing documentation integrity checks and all assertions. Do not edit `KNOWN-LIMITATIONS.md`, root `README.md`, `docs/arming.md`, `docs/landing.md`, `nightshift/arm.py`, `nightshift/cli.py`, `nightshift/land.py`, `pyproject.toml`, `specloop/cli.py`, `specloop/critic.py`, `tests/test_arm.py`, or `tests/test_land.py`. Run the new tests and relevant existing loop/adapter/serve/message/status/attention/documentation tests, then require green `uv run pytest` and the existing runtime type checker without changing protected files or weakening assertions. Validate the OpenSpec deltas and scenario references; retain the design's live-login checklist for the implementation PR rather than assigning it to an agent. Cover `specloop-documentation/provider-fallback-guidance/reader-understands-provider-recovery`, `specloop-documentation/documentation-integrity/scope-and-regression-checks-remain-intact`, and `specloop-documentation/documentation-integrity/references-and-reader-checks-are-reviewable`.
+
+## 5. Acceptance fixes
+
+- [ ] 5.1 Make the harness's verification pass on the branch head: (details: tests: expected exit 0, got 2 (FAIL, 195.33s))
