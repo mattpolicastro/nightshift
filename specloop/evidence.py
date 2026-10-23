@@ -14,6 +14,7 @@ the inherited tests (13/15 planted bugs caught) from the phase-1 tests (15/15).
 """
 
 import ast
+import fnmatch
 import io
 import json
 import random
@@ -329,6 +330,24 @@ BUILD_STEPS = ("configure", "build")
 # suite, seen on 2026-10-20).
 MUTANT_TIME_FACTOR = 3
 MIN_MUTANT_SECONDS = 30.0
+
+
+def resolve_mutation_steps(path: str, m: Manifest) -> tuple[int | None, tuple[Step, ...]]:
+    """Resolve a repository-relative POSIX path against a validated manifest.
+
+    Return the one-based route index (None for fallback) and immutable steps.
+    Route globs use case-sensitive fnmatch: * crosses / and ** adds no special
+    directory semantics. Routes preserve their listed step order; fallback
+    preserves verify declaration order, then mutation-only declaration order.
+    The ordered tuple of step IDs can be used as a baseline key independently
+    of the route index. This helper neither executes steps nor changes m.
+    """
+    definitions = m.verify + m.mutation_step
+    for index, route in enumerate(m.mutation_routes, 1):
+        if any(fnmatch.fnmatchcase(path, pattern) for pattern in route.paths):
+            by_id = {step.id: step for step in definitions}
+            return index, tuple(by_id[step_id] for step_id in route.steps)
+    return None, tuple(step for step in definitions if step.id in m.mutation_steps)
 
 
 def _mutate_one(number: int, mut: Mutant, baseline_src: Path, head: str,

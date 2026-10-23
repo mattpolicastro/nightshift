@@ -5,7 +5,7 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
-from specloop import manifest, verify
+from specloop import evidence, manifest, verify
 
 
 TEMPLATE = '''[run]
@@ -381,3 +381,125 @@ def test_route_globs_do_not_relax_path_policy(namespace, key):
     assert not manifest.matches("src/module.py", ("src/*.py",))
     assert not manifest.matches("SRC/module.py", ("src/**",))
     assert not manifest.matches("src-other/module.py", ("src/**",))
+
+
+@pytest.mark.scenario("mutation-selection/ordered-mutation-routes/first-matching-route-wins")
+@pytest.mark.parametrize("reverse", [False, True])
+def test_resolver_first_matching_route_wins(reverse):
+    data = tomllib.loads(TEMPLATE)
+    routes = [
+        {"paths": ["plugins/**", "src/**"], "steps": ["negative", "tests"]},
+        {"paths": ["src/special.py"], "steps": ["narrow"]},
+    ]
+    data["gates"]["mutation_route"] = routes[::-1] if reverse else routes
+    m = manifest.parse(data)
+    original = deepcopy(m)
+    index, steps = evidence.resolve_mutation_steps("src/special.py", m)
+    assert index == 1
+    assert steps == ((m.mutation_step[0],) if reverse
+                     else (m.mutation_step[1], m.verify[0]))
+    assert m == original
+    # A path matching only the broad route still reports its declaration index.
+    index, steps = evidence.resolve_mutation_steps("plugins/core.ts", m)
+    assert index == (2 if reverse else 1)
+    assert steps == (m.mutation_step[1], m.verify[0])
+
+
+@pytest.mark.scenario("mutation-selection/ordered-mutation-routes/unmatched-file-uses-fallback")
+@pytest.mark.parametrize("routed", [False, True])
+def test_resolver_fallback_uses_declaration_order_across_namespaces(routed):
+    data = tomllib.loads(TEMPLATE)
+    data["verify"].insert(0, {"id": "build", "run": ["compile"], "timeout": 17})
+    data["verify"].insert(1, {"id": "unused", "run": ["unused"]})
+    data["mutation_step"].insert(1, {"id": "unused-mutation", "run": ["unused"]})
+    data["gates"]["mutation_steps"] = ["negative", "tests", "narrow", "build", "tests"]
+    if routed:
+        data["gates"]["mutation_route"] = [{"paths": ["src/**"], "steps": ["narrow"]}]
+    m = manifest.parse(data)
+    original = deepcopy(m)
+    index, steps = evidence.resolve_mutation_steps("docs/file with spaces.md", m)
+    assert index is None
+    assert steps == (m.verify[0], m.verify[2], m.mutation_step[0], m.mutation_step[2])
+    assert tuple(s.id for s in steps) == ("build", "tests", "narrow", "negative")
+    assert m == original
+
+
+@pytest.mark.scenario("mutation-selection/ordered-mutation-routes/unmatched-file-uses-fallback")
+@pytest.mark.parametrize("selected, expected", [([], ()), (["tests", "build"], ("build", "tests"))])
+def test_resolver_legacy_fallback(selected, expected):
+    data = tomllib.loads(TEMPLATE)
+    del data["mutation_step"]
+    data["verify"].insert(0, {"id": "build", "run": ["compile"]})
+    data["gates"]["mutation_steps"] = selected
+    m = manifest.parse(data)
+    index, steps = evidence.resolve_mutation_steps("src/core.py", m)
+    assert index is None
+    assert isinstance(steps, tuple)
+    assert tuple(s.id for s in steps) == expected
+
+
+@pytest.mark.scenario("mutation-selection/ordered-mutation-routes/first-matching-route-wins")
+def test_resolver_sequences_preserve_order_and_support_baseline_keys():
+    data = tomllib.loads(TEMPLATE)
+    data["gates"]["mutation_steps"] = ["negative", "tests"]
+    data["gates"]["mutation_route"] = [
+        {"paths": ["src/**"], "steps": ["negative", "tests"]},
+        {"paths": ["plugins/**"], "steps": ["negative", "tests"]},
+        {"paths": ["examples/**"], "steps": ["tests", "negative"]},
+    ]
+    m = manifest.parse(data)
+    resolved = [evidence.resolve_mutation_steps(path, m) for path in (
+        "src/core.py", "plugins/core.ts", "examples/core.py", "unmatched.txt")]
+    assert [index for index, _ in resolved] == [1, 2, 3, None]
+    sequences = [steps for _, steps in resolved]
+    assert sequences[0] == sequences[1] == (m.mutation_step[1], m.verify[0])
+    assert sequences[2] == sequences[3] == (m.verify[0], m.mutation_step[1])
+    keys = [tuple(s.id for s in steps) for steps in sequences]
+    assert list(dict.fromkeys(keys)) == [("negative", "tests"), ("tests", "negative")]
+    for steps in sequences:
+        assert isinstance(steps, tuple)
+        with pytest.raises(FrozenInstanceError):
+            steps[0].timeout = 1
+    assert m.mutation_step[1].expect == 1
+    assert m.mutation_step[1].timeout == 42
+
+
+@pytest.mark.scenario("mutation-selection/ordered-mutation-routes/globs-have-explicit-semantics")
+@pytest.mark.parametrize("pattern, path, matched", [
+    ("src/*.py", "src/core.py", True),
+    ("src/*.py", "src/nested/core.py", True),
+    ("src/*.py", "SRC/core.py", False),
+    ("src/*.py", "src/core.PY", False),
+    ("src/*.py", "src-other/core.py", False),
+    ("src/*.py", "prefix/src/core.py", False),
+    ("src/*.py", "src/core.py.bak", False),
+    ("src/file?.py", "src/fileA.py", True),
+    ("src/file?.py", "src/fileAB.py", False),
+    ("src/file?.py", "src/file.py", False),
+    ("src?core.py", "src/core.py", True),
+    ("src/[ab].py", "src/a.py", True),
+    ("src/[ab].py", "src/A.py", False),
+    ("src/[ab].py", "src/c.py", False),
+    ("src/[!ab].py", "src/c.py", True),
+    ("src/[!ab].py", "src/a.py", False),
+    ("src/[a-c].py", "src/b.py", True),
+    ("src/[a-c].py", "src/d.py", False),
+    ("src/**", "src/nested/core.py", True),
+    ("src/**", "src/core.py", True),
+    ("src/**", "src", False),
+    ("src/**/*.py", "src/core.py", False),
+    ("src/**/*.py", "src/nested/core.py", True),
+    ("src/**/*.py", "src/deep/nested/core.py", True),
+    ("src/", "src/core.py", False),
+    ("src/core.py", "src/core.py", True),
+    ("src/core.py", "src/Core.py", False),
+    ("src/file with spaces.py", "src/file with spaces.py", True),
+])
+def test_resolver_glob_semantics(pattern, path, matched):
+    data = tomllib.loads(TEMPLATE)
+    data["gates"]["mutation_steps"] = ["tests"]
+    data["gates"]["mutation_route"] = [{"paths": [pattern], "steps": ["negative"]}]
+    m = manifest.parse(data)
+    index, steps = evidence.resolve_mutation_steps(path, m)
+    assert index == (1 if matched else None)
+    assert steps == ((m.mutation_step[1],) if matched else m.verify)
