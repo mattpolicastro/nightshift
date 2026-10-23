@@ -150,6 +150,9 @@ def test_worker_cutoff_and_best_effort_reads_remain_independent(failure):
 @pytest.mark.scenario("pr-revision/build-stage-revision/review-comments-become-tasks")
 @pytest.mark.scenario("pr-revision/consumption-based-eligibility/relabel-does-not-requeue-consumed-feedback")
 @pytest.mark.scenario("pr-revision/no-instruction-no-revision/empty-revise-refused")
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/revision-feedback-survives-a-long-round"
+)
 def test_relabel_does_not_requeue_consumed_feedback(setup, tmp_path):
     repo, gh, commands = setup
     consumed = ["conversation:101", "inline:1", "inline:2", "inline:3"]
@@ -327,6 +330,9 @@ def test_first_selection_includes_historical_ids_without_commit_read(stage_setup
 @pytest.mark.scenario("pr-revision/consumption-based-eligibility/edited-consumed-comment-stays-consumed")
 @pytest.mark.parametrize("source", ["conversation", "review"])
 @pytest.mark.parametrize("same_body", [False, True])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/revision-feedback-survives-a-long-round"
+)
 def test_comments_during_revision_feed_the_next_round(stage_setup, tmp_path, monkeypatch, source, same_body):
     repo, gh, commands = stage_setup
     a = {**gh.feedback[1], "submittedAt": gh.feedback[1]["createdAt"]}

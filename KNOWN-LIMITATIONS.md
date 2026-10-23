@@ -1,8 +1,8 @@
 # Known limitations
 
-Open gaps and queued follow-ups for Nightshift and its specloop engine. Each is
-tracked as a GitHub issue (see the tracking issue, #17), and fixes land through
-Nightshift's own front door.
+Open gaps and queued follow-ups for Nightshift and its specloop engine. See the
+tracking ledger, [issue #17](https://github.com/mattpolicastro/nightshift/issues/17).
+Fixes land through Nightshift's own front door; these gaps remain unresolved.
 
 ## Queued follow-ups
 
@@ -11,44 +11,48 @@ Nightshift's own front door.
 - **Retire the worker engine,** once one real issue has gone through the
   specloop front door end to end. Then rename specloop's CLI and state into
   Nightshift's, so one name remains.
-- **Parallel mutants:** the evidence gate runs its mutants one after another,
-  each a full verify. At about a minute per mutant this is a modest win.
 
 ## Open gaps
 
-- **Who applied a label is not checked.** On GitHub only collaborators can
-  label, so this matters only if collaborators are untrusted.
-- **Revision loop:**
-  - Feedback is anything newer than the branch tip's commit time, so comments
-    posted during a long revision session are skipped, and re-labelling before
-    the next publish re-queues the last round's comments.
-  - A revise job that crashes after committing appends a duplicate round.
-- **Kill switch:** jobs already running finish, including an admission, while
-  paused. Jobs are their own sessions, so unloading the daemon does not stop
-  them, and there is no command to stop one.
+- **Revision crash boundary:** a revise job that crashes after committing but
+  before saving its result can append a duplicate round on retry. Consumed
+  feedback IDs prevent replay after durable success
+  ([PR #61](https://github.com/mattpolicastro/nightshift/pull/61)); they do not
+  make the commit and result persistence atomic.
+- **Pause boundary:** jobs already running can finish while the daemon is
+  paused. An admission that completes while paused can still build under the
+  independent `specloop serve` supervisor. Jobs have their own sessions, so
+  unloading the daemon does not stop them. `nightshift jobs stop <id>` stops
+  a background job ([PR #28](https://github.com/mattpolicastro/nightshift/pull/28));
+  it does not pause an already admitted run.
+- **Stopped-job holds:** stopped jobs stay held across resume, daemon restart
+  and relabeling ([PR #28](https://github.com/mattpolicastro/nightshift/pull/28)).
+  There is no retry command
+  ([issue #34](https://github.com/mattpolicastro/nightshift/issues/34)); follow
+  the [pause and job recovery instructions](README.md#pause-and-job-control).
 - **Background jobs:**
-  - No deadline and no status line for a hung job.
+  - No deadline for a hung job. `nightshift jobs` shows the local inventory
+    ([PR #28](https://github.com/mattpolicastro/nightshift/pull/28)), but does
+    not enforce deadlines or automatically retry jobs.
   - Job directories are never cleaned, and their `request.json` keeps the full
     idea text.
   - Daemon git timeouts kill only the direct child, not its process group.
-- **Front end:**
-  - One unreadable run makes `specloop status --json` fail for every repo. For
-    example, `finish` archives before pushing, so a failed push leaves
-    `human_checks` with an archived `tasks.md`.
-  - `HUMAN_REASONS` omits an infra pause whose automatic resumes ran out, and
-    `requested`.
-  - `--idea` travels in argv. `--idea-file` exists.
+- **Touchpoint history:** the report counts observed local history and can
+  undercount when records are missing or overwritten; it cannot reconstruct
+  missing actions ([PR #53](https://github.com/mattpolicastro/nightshift/pull/53)).
+- **JSX styles:** automatic JSX style filtering is descoped. Explicit
+  `mutation_skip` patterns are available as case-sensitive literal whole-line
+  substring exclusions before sampling; styles are not automatically excluded
+  ([PR #48](https://github.com/mattpolicastro/nightshift/pull/48)).
+- **GitHub-only automation:** the automated front door and publication use
+  GitHub. Local drafting and verification do not require a GitHub host; they
+  do not provide automated intake or publication for other hosts.
 - **Config:**
   - An invalid specloop manifest stops `config.load`, and the worker repos
     with it.
   - Switching a repo from worker to specloop leaves `agent:working` issues
     unrecovered.
   - Change names drop the repo owner.
-- **specloop CLI:**
-  - The `propose` JSON `branch` field ignores its fallback ref.
-  - A backticked `a/b/c` in review feedback parses as a scenario ID.
-  - The implementer recipe and feasibility review don't show prepare steps.
-  - argparse errors print no JSON.
 
 ## Other known gaps
 

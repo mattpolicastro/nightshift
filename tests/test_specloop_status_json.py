@@ -443,6 +443,9 @@ def assert_status_error(entry, change, error_class, since=None):
     ("message", "AttributeError"),
     ("action", "TypeError"),
 ])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/input-and-status-remain-usable"
+)
 def test_status_reports_broken_run_and_keeps_others(admitted, monkeypatch, capsys, failure, error_class):
     # Each admission has its own source and bare repository. Create out of order.
     last, _ = admitted("z-healthy", proposal="## Why\n\nLast repository.\n")
@@ -531,6 +534,9 @@ def test_status_reports_broken_run_and_keeps_others(admitted, monkeypatch, capsy
 @pytest.mark.scenario("specloop-interface/isolated-run-status-failures/error-rows-remain-compatible-and-non-actionable")
 @pytest.mark.scenario("specloop-interface/isolated-run-status-failures/broken-run-keeps-other-repositories-visible")
 @pytest.mark.parametrize("message", ["", 'private path: /repo\n"failed"', "x" * 1000])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/input-and-status-remain-usable"
+)
 def test_error_row_shape_and_diagnostic(admitted, monkeypatch, capsys, message):
     from nightshift import outcomes, specloop_attention, specloop_client
 
@@ -614,6 +620,9 @@ def test_unsafe_named_status(home, monkeypatch, capsys, change):
 @pytest.mark.parametrize("stage", ["discovery", "supervisor"])
 @pytest.mark.parametrize("error", [PermissionError("unreadable"), TypeError("bad data"),
                                  subprocess.TimeoutExpired("lookup", 60), RuntimeError()])
+@pytest.mark.scenario(
+    "specloop-documentation/front-door-guidance/input-and-status-remain-usable"
+)
 def test_document_failures(admitted, monkeypatch, capsys, stage, error):
     admitted("healthy")
 

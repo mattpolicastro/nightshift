@@ -46,6 +46,7 @@ def snapshot(root):
 
 
 @pytest.mark.scenario("background-job-control/local-job-inventory/list-jobs-after-daemon-restart")
+@pytest.mark.scenario("specloop-documentation/current-limitations/fixed-limitations-leave-the-open-list")
 def test_jobs_lists_persisted_fields_history_and_numeric_order(local_state, capsys):
     directories = []
     with ExitStack() as locks:
@@ -155,6 +156,8 @@ def test_jobs_work_with_missing_or_broken_config_offline(local_state, tmp_path, 
     ["jobs", "unknown"], ["jobs", "stop"], ["jobs", "list"],
     ["jobs", "stop", "a" * 32, "extra"], ["jobs", "unknown", "a" * 32],
     ["jobs", "--unknown"], ["status", "stop", "a" * 32], ["pause", "extra"],
+    pytest.param(["jobs", "retry", "a" * 32], marks=pytest.mark.scenario(
+        "specloop-documentation/current-limitations/remaining-ledger-gaps-are-explicit")),
 ])
 def test_malformed_jobs_syntax_has_no_side_effects(local_state, monkeypatch, capsys, args):
     attempt(local_state)
