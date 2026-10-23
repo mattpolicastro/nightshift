@@ -638,6 +638,28 @@ def revalidate_check_sources(
         raise Refusal("human check sources changed during landing; inspect checks and rerun land")
 
 
+def revalidate_landing_inputs(
+    identity: Identity, run: LandingRun | None, snapshot: CheckSnapshot, operations: Operations,
+    *, require_done: bool = False,
+) -> tuple[PullRequest, LandingRun | None]:
+    """Read-only gate before finish and before each round's final main read.
+
+    Compare with the post-edit snapshot, never prepare or attest checks again:
+    additions need a new operator decision even with --checks-done. Only the
+    validated finish and branch-update paths may advance the snapshot's head.
+    """
+    current = refresh_run(identity, run, operations)
+    pr = read_pr(identity, operations)
+    validate_run_eligibility(pr, current)
+    if (current is not None and current.status != "done"
+            and (require_done or (run is not None and run.status == "done"))):
+        raise Refusal(f"run {current.change} is no longer done; inspect status before retrying land")
+    if require_done and pr.draft:
+        raise Refusal("PR became draft during landing")
+    revalidate_check_sources(pr, current, snapshot, operations)
+    return pr, current
+
+
 def finish_run(
     pr: PullRequest, run: LandingRun | None, snapshot: CheckSnapshot, operations: Operations,
 ) -> tuple[PullRequest, LandingRun | None, CheckSnapshot]:
@@ -646,12 +668,7 @@ def finish_run(
     Never reset state or repair a partial finish here. The plain finish command
     owns archive/push recovery, including after a lost acknowledgement.
     """
-    current = refresh_run(pr.identity, run, operations)
-    refreshed_pr = read_pr(pr.identity, operations)
-    validate_run_eligibility(refreshed_pr, current)
-    if run is not None and run.status == "done" and current is not None and current.status != "done":
-        raise Refusal(f"run {run.change} is no longer done; inspect status before retrying land")
-    revalidate_check_sources(refreshed_pr, current, snapshot, operations)
+    refreshed_pr, current = revalidate_landing_inputs(pr.identity, run, snapshot, operations)
     if current is not None and run is not None and run.status != "done":
         if current.status == "paused":
             operations.run(
@@ -694,15 +711,9 @@ def continue_landing(
         # Retain the immediately pre-update base even if main moved while the
         # asynchronous update was being observed. Only a new round adopts it.
         wait_for_ci(pr.identity, snapshot.head, bounded)
-        current = refresh_run(pr.identity, run, bounded)
-        pr = read_pr(pr.identity, bounded)
-        validate_run_eligibility(pr, current)
-        if current is not None and current.status != "done":
-            raise Refusal(f"run {current.change} is no longer done; inspect status before retrying land")
-        if pr.draft:
-            raise Refusal("PR became draft during landing")
-        revalidate_check_sources(pr, current, snapshot, bounded)
-        run = current
+        pr, run = revalidate_landing_inputs(
+            pr.identity, run, snapshot, bounded, require_done=True,
+        )
         observed_base = read_main(pr.identity, bounded)
         if observed_base == baseline:
             return after_ci(pr, run, snapshot, bounded)

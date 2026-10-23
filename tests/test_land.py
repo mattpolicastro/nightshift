@@ -1347,6 +1347,191 @@ def test_land_rechecks_human_inputs_before_finish(config_path, scripted_runner, 
     assert not any(argv == FINISH for argv, _ in scripted_runner.calls)
 
 
+def expect_input_boundary(runner, boundary, *, checks_done=False, direct=False):
+    """Reach a real gate with the original sources, including our own edits."""
+    checks = "- [x] First check\n- [x] Second check"
+    pr = {**PR, "body": checks}
+    comment = publication(checks=checks)
+    initial = checks.replace("[x]", "[ ]") if checks_done else checks
+    expect_check_sources(runner, initial, None if direct else [[publication(checks=initial)]])
+    if checks_done:
+        runner.expect(ACTOR, {"login": "operator"})
+        runner.expect(check_patch(checks), {})
+        sources = [("PR body", ["First check", "Second check"])]
+        if not direct:
+            runner.expect(check_patch(comment["body"], 1), {})
+            sources.append(("publication comment 1", ["First check", "Second check"]))
+        expect_attestation(runner, sources)
+    row = None if direct else RUN
+    if boundary == "before-main":
+        expect_finish_gate(runner, checks, None if direct else [[comment]], ci=False)
+        if not direct:
+            pr = {**pr, "headRefOid": FINISHED_HEAD}
+            row = {**RUN, "status": "done", "pause": None, "head": FINISHED_HEAD}
+        expect_round_start(runner, head=pr["headRefOid"])
+        expect_ci_poll(runner, [ci_check()], pr=pr)
+    return pr, row, comment
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/stable-landing-inputs/inputs-change-during-landing")
+@pytest.mark.parametrize("boundary", ["before-finish", "before-main"])
+@pytest.mark.parametrize("checks_done", [False, True])
+@pytest.mark.parametrize("source", ["body", "publication", "direct-body"])
+@pytest.mark.parametrize("change", ["text", "unchecked-addition", "checked-addition",
+                                   "unticked", "removed", "reordered"])
+def test_land_refuses_checklist_changes_at_both_boundaries(
+    config_path, scripted_runner, capsys, boundary, checks_done, source, change,
+):
+    pr, row, comment = expect_input_boundary(
+        scripted_runner, boundary, checks_done=checks_done, direct=source == "direct-body",
+    )
+    text = comment["body"] if source == "publication" else pr["body"]
+    changed = {
+        "text": text.replace("First check", "Different requirement"),
+        "unchecked-addition": text + "\n- [ ] Newly required",
+        "checked-addition": text + "\n- [x] Newly required",
+        "unticked": text.replace("[x]", "[ ]", 1),
+        "removed": text.replace("- [x] First check\n", ""),
+        "reordered": text.replace("First check", "TEMP").replace(
+            "Second check", "First check").replace("TEMP", "Second check"),
+    }[change]
+    if source == "publication":
+        comment = {**comment, "body": changed}
+    else:
+        pr = {**pr, "body": changed}
+    boundary_start = len(scripted_runner.steps)
+    scripted_runner.expect(STATUS, status_rows(*([row] if row else []))).expect(VIEW, pr)
+    if row:
+        scripted_runner.expect(COMMENTS, [[comment]])
+    assert invoke(config_path, scripted_runner, URL, *(["--checks-done"] if checks_done else [])) == 1
+    assert capsys.readouterr().err == (
+        "land: human check sources changed during landing; inspect checks and rerun land\n"
+    )
+    # The strict script also forbids a final main read, a second attestation,
+    # ticking the new item, or any downstream finish/update/merge after refusal.
+    calls = [argv for argv, _ in scripted_runner.calls[boundary_start:]]
+    assert calls == [STATUS, VIEW] + ([COMMENTS] if row else [])
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/stable-landing-inputs/inputs-change-during-landing")
+@pytest.mark.parametrize("boundary", ["before-finish", "before-main"])
+@pytest.mark.parametrize("change", ["head", "closed", "running", "aborted", "other-pause",
+                                   "missing-run", "replacement-run", "new-publication",
+                                   "missing-publication"])
+def test_land_refuses_concurrent_inputs_at_both_boundaries(
+    config_path, scripted_runner, capsys, boundary, change,
+):
+    pr, row, comment = expect_input_boundary(scripted_runner, boundary, checks_done=True)
+    rows, comments = [row], [[comment]]
+    reason = "human check sources changed"
+    if change == "head":
+        pr = {**pr, "headRefOid": "e" * 40}
+        reason = "PR head changed during landing"
+    elif change == "closed":
+        pr = {**pr, "state": "CLOSED"}
+        reason = "PR must be open"
+    elif change in {"running", "aborted", "other-pause"}:
+        rows = [{**row, "status": change, "pause": None}] if change != "other-pause" else [
+            {**row, "status": "paused", "pause": {"reason": "ready_to_publish"}}]
+        reason = f"run reviewed-change is {rows[0]['status']}"
+    elif change in {"missing-run", "replacement-run"}:
+        rows = [] if change == "missing-run" else [{**row, "change": "replacement"}]
+        reason = "run identity changed"
+    elif change == "new-publication":
+        # Identical checks on a later page still replace the selected source.
+        comments = [[comment], [publication(2, checks=pr["body"], round_id="round-2")]]
+    else:
+        comments = [[]]
+    boundary_start = len(scripted_runner.steps)
+    scripted_runner.expect(STATUS, status_rows(*rows))
+    if change not in {"missing-run", "replacement-run"}:
+        scripted_runner.expect(VIEW, pr)
+        if change in {"new-publication", "missing-publication"}:
+            scripted_runner.expect(COMMENTS, comments)
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    assert reason in capsys.readouterr().err
+    assert all(argv in (STATUS, VIEW, COMMENTS)
+               for argv, _ in scripted_runner.calls[boundary_start:])
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/stable-landing-inputs/inputs-change-during-landing")
+@pytest.mark.parametrize("boundary", ["before-finish", "before-main"])
+@pytest.mark.parametrize("change", ["late-publication", "new-run", "done-regressed"])
+def test_land_refuses_new_sources_or_regressed_done_run(
+    config_path, scripted_runner, capsys, boundary, change,
+):
+    done = {**RUN, "status": "done", "pause": None}
+    direct = change == "new-run"
+    if direct:
+        expect_check_sources(scripted_runner, "")
+    else:
+        expect_initial_run(scripted_runner, PR, done)
+    if boundary == "before-main":
+        expect_finish_gate(scripted_runner, comments=None if direct else [[]],
+                           row=None if direct else done, ci=False)
+        expect_round_start(scripted_runner)
+        expect_ci_poll(scripted_runner, [ci_check()])
+    boundary_start = len(scripted_runner.steps)
+    scripted_runner.expect(STATUS, status_rows(RUN if change != "late-publication" else done))
+    if not direct:
+        scripted_runner.expect(VIEW, PR)
+        if change == "late-publication":
+            scripted_runner.expect(COMMENTS, [[publication()]])
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 1
+    reason = {"late-publication": "human check sources changed",
+              "new-run": "run identity changed", "done-regressed": "no longer done"}[change]
+    assert reason in capsys.readouterr().err
+    assert all(argv in (STATUS, VIEW, COMMENTS)
+               for argv, _ in scripted_runner.calls[boundary_start:])
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("reviewed-pr-landing/stable-landing-inputs/inputs-change-during-landing")
+@pytest.mark.parametrize("updated", [False, True])
+def test_land_revalidation_preserves_completed_snapshot(
+    config_path, scripted_runner, monkeypatch, updated,
+):
+    pr, row, comment = expect_input_boundary(scripted_runner, "before-main", checks_done=True)
+    if updated:
+        # A second round may advance only the head after exact parent validation.
+        moved_base = "f" * 40
+        expect_round_end(scripted_runner, pr=pr, row=row, comments=[[comment]], base=moved_base)
+        main_ref = {**MAIN_REF, "object": {"type": "commit", "sha": moved_base}}
+        scripted_runner.expect(MAIN, main_ref).expect(VIEW, pr).expect(MAIN, main_ref)
+        scripted_runner.expect(
+            [*UPDATE[:-1], f"expected_head_sha={FINISHED_HEAD}"], {},
+        )
+        pr = {**pr, "headRefOid": UPDATED_HEAD}
+        scripted_runner.expect(VIEW, pr).expect(UPDATED_COMMIT, merge_commit(FINISHED_HEAD, moved_base))
+        expect_ci_poll(scripted_runner, [ci_check()], pr=pr)
+    # The comparison is of checklist content and source identity; prose and the
+    # spelling of an already-completed tick do not introduce new requirements.
+    pr = {**pr, "body": "Updated prose\n" + pr["body"].replace("[x]", "[X]")}
+    comment = {**comment, "body": comment["body"].replace("[x]", "[X]") + "\nMore prose"}
+    expect_round_end(scripted_runner, pr=pr, row=row, comments=[[comment]],
+                     base="f" * 40 if updated else BASE)
+    reached = []
+
+    def final_gate(current_pr, current_run, snapshot, operations):
+        reached.append(current_pr.head)
+        assert snapshot.head == current_pr.head == (UPDATED_HEAD if updated else FINISHED_HEAD)
+        assert current_run.status == "done"
+        assert snapshot.actor == "operator"
+        assert snapshot.sources == (
+            land.CheckSource("- [x] First check\n- [x] Second check"),
+            land.CheckSource(publication(checks="- [x] First check\n- [x] Second check")["body"], 1),
+        )
+        assert scripted_runner.calls[-1][0] == MAIN
+        return 0
+
+    monkeypatch.setattr(land, "after_ci", final_gate)
+    assert invoke(config_path, scripted_runner, URL, "--checks-done") == 0
+    assert len(reached) == 1
+
+
 UPDATE = ["gh", "api", "--method", "PUT", f"repos/{REPO}/pulls/78/update-branch",
           "-f", f"expected_head_sha={HEAD}"]
 UPDATED_HEAD = "d" * 40
