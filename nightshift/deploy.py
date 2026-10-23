@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -12,7 +13,13 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
+
+from nightshift.specloop_job import list_jobs
+
+FAILURES = (RuntimeError, OSError, ValueError, subprocess.SubprocessError)
 
 
 def default_runner(argv, *, cwd, env, timeout, text):
@@ -25,6 +32,12 @@ class Context:
     cwd: Path = field(default_factory=Path.cwd)
     env: dict[str, str] = field(default_factory=lambda: dict(os.environ))
     head: str = ""
+    daemon_state: Path = field(default_factory=lambda: Path.home() / ".nightshift")
+    supervisor_state: Path = field(default_factory=lambda: Path.home() / ".specloop")
+    uid: int = field(default_factory=os.getuid)
+    monotonic: Callable = time.monotonic
+    sleep: Callable = time.sleep
+    inventory: Callable = list_jobs
 
     def run(self, runner, argv, *, env=None, check=True, timeout=120, text=True):
         result = runner(argv, cwd=self.cwd, env=self.env if env is None else env,
@@ -86,12 +99,17 @@ def checkout(context, runner, base_branch, *, fetch):
     return behind
 
 
-def environment(context, runner, *, apply):
+def uv_environment(context):
     env = dict(context.env)
     for key in ("VIRTUAL_ENV", "CONDA_PREFIX", "UV_PROJECT", "UV_WORKING_DIR",
                 "UV_NO_DEV", "UV_NO_GROUP", "UV_NO_DEFAULT_GROUPS"):
         env.pop(key, None)
     env["UV_PROJECT_ENVIRONMENT"] = str(context.cwd / ".venv")
+    return env
+
+
+def environment(context, runner, *, apply):
+    env = uv_environment(context)
 
     def probe():
         result = context.run(runner, ["uv", "sync", "--check", "--frozen", "--offline"],
@@ -252,12 +270,113 @@ def plugin(context, runner, destination, *, apply, reload_cmd):
     return (stale and not apply) or marker.exists()
 
 
+def read_object(text):
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise ValueError("expected a JSON object")
+    return value
+
+
+def process_probe(context, runner, service, *, activity=False, deadline=None):
+    def run(argv, **kwargs):
+        remaining = 30 if deadline is None else deadline - context.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("confirmation deadline elapsed")
+        return context.run(runner, argv, timeout=remaining, **kwargs).stdout.strip()
+
+    idle = False
+    if service == "daemon":
+        pid = read_object((context.daemon_state / "heartbeat.json").read_text()).get("pid")
+    else:
+        status = read_object(run(["uv", "run", "--no-sync", "specloop", "status", "--json"],
+                                 env=uv_environment(context)))
+        supervisor = status.get("supervisor")
+        state = supervisor.get("state") if isinstance(supervisor, dict) else None
+        match = re.fullmatch(r"(?:running \(pid ([1-9]\d*), last poll \d+s ago(?:, driving (.+))?\)|"
+                             r"WEDGED \(pid ([1-9]\d*) alive, but no poll for \d+s\))",
+                             state if isinstance(state, str) else "")
+        if type(status.get("version")) is not int or status["version"] != 1 or not match:
+            raise ValueError(f"unsupported supervisor status: {status}")
+        pid = int(match[1] or match[3])
+        if activity:
+            driving = match[2]
+            idle = driving == "nothing"
+            try:
+                heartbeat = read_object((context.supervisor_state / "serve.json").read_text())
+                idle = (type(heartbeat.get("pid")) is int and heartbeat["pid"] == pid and heartbeat.get("driving") == []
+                        and driving in (None, "nothing"))
+            except FileNotFoundError:
+                pass
+            except FAILURES:
+                idle = False
+            rows = status.get("runs")
+            idle = idle and isinstance(rows, list) and all(isinstance(row, dict) and
+                row.get("status") in ("paused", "done", "aborted") and "error" not in row for row in rows)
+    if type(pid) is not int or pid <= 0:
+        raise ValueError(f"invalid {service} PID: {pid}")
+    started = datetime.strptime(run(["/bin/ps", "-p", str(pid), "-o", "lstart="],
+        env={**context.env, "LC_ALL": "C", "TZ": "UTC"}), "%a %b %d %H:%M:%S %Y").replace(tzinfo=timezone.utc)
+    committed = int(run(["git", "log", "-1", "--format=%ct", "HEAD", "--",
+                         "nightshift/" if service == "daemon" else "specloop/"]))
+    if activity and service == "daemon":
+        try:
+            jobs, diagnostics = context.inventory(context.daemon_state)
+            idle = not diagnostics and all(job.state in {"finished", "failed", "stopped"} for job in jobs)
+        except FAILURES:
+            idle = False
+    return pid, int(started.timestamp()) < committed, idle
+
+
+def restart(context, runner, service, pid, command):
+    errors = []
+    diagnostic = "no new current PID"
+    for killing in (True, False):
+        try:
+            context.run(runner, command[:2] + (["-k"] if killing else []) + command[2:], timeout=30)
+        except FAILURES as exc:
+            errors.append(str(exc))
+            print(f"{service} restart command failed: {exc}")
+        deadline = context.monotonic() + 30
+        while context.monotonic() < deadline:
+            try:
+                new_pid, stale, _ = process_probe(context, runner, service, deadline=deadline)
+            except FAILURES as exc:
+                diagnostic = str(exc)
+            else:
+                if new_pid != pid and not stale and context.monotonic() <= deadline:
+                    print(f"{service}: replacement confirmed (pid {new_pid})")
+                    if errors:
+                        raise RuntimeError("; ".join(errors))
+                    return
+                diagnostic = "no new current PID"
+            context.sleep(min(1, max(0, deadline - context.monotonic())))
+    raise RuntimeError(f"{service} restart failed: {'; '.join(errors) or diagnostic}")
+
+
+def service(context, runner, name, label, *, apply, force):
+    command = ["launchctl", "kickstart", f"gui/{context.uid}/{label}"]
+    try:
+        _, stale, _ = process_probe(context, runner, name)
+        print(f"{name}: {'process older than code' if stale else 'current'}")
+        if stale and apply:
+            pid, stale, idle = process_probe(context, runner, name, activity=True)
+            if stale and not idle and not force:
+                print(f"{name} restart pending: busy or unknown activity")
+            elif stale:
+                restart(context, runner, name, pid, command)
+                stale = False
+        return stale
+    except FAILURES:
+        print(f"Manual {name} start: {shlex.join(command)}")
+        raise
+
+
 def main(argv=None, *, runner=default_runner, context=None) -> int:
     context = context or Context()
     args = parse_options(argv, context)
     if args.plugin_dir is None:
         print("plugin check skipped: no plugin directory configured")
-    failures = (RuntimeError, OSError, ValueError, subprocess.SubprocessError)
+    failures = FAILURES
     try:
         root = context.run(runner, ["git", "rev-parse", "--show-toplevel"]).stdout.strip()
         if not root:
@@ -296,6 +415,15 @@ def main(argv=None, *, runner=default_runner, context=None) -> int:
         except failures as exc:
             print(f"plugin failed: {exc}")
             return 1
+    for name in ("daemon", "supervisor"):
+        try:
+            failed = service(context, runner, name, getattr(args, f"{name}_label"),
+                             apply=args.apply, force=args.force) or failed
+        except failures as exc:
+            print(f"{name} unavailable: {exc}")
+            failed = True
+            if args.apply:
+                break
     return int(failed)
 
 

@@ -1,3 +1,4 @@
+import json
 import os
 import shlex
 import subprocess
@@ -12,18 +13,28 @@ CHECK = "uv sync --check --frozen --offline"
 STATUS = "git status --porcelain=v1 --untracked-files=all"
 COUNTS = "git rev-list --left-right --count HEAD...@{upstream}"
 STALE = (1, "", "Would install 1 package\n + mypy==2.4.0\nThe environment is outdated; run `uv sync`")
+SERVICE_STATUS = "uv run --no-sync specloop status --json"
+CURRENT_START = "Mon Jan  1 00:00:00 2024"
 
 
 @pytest.fixture
 def recording(tmp_path):
+    (tmp_path / ".nightshift").mkdir()
+    (tmp_path / ".nightshift/heartbeat.json").write_text('{"pid": 101}')
     (tmp_path / ".venv").mkdir()
     context = deploy.Context(tmp_path, {"VIRTUAL_ENV": "/wrong", "UV_PROJECT": "/wrong",
-        "UV_PROJECT_ENVIRONMENT": "/wrong", "UV_WORKING_DIR": "/wrong", "UV_NO_DEV": "1"})
+        "UV_PROJECT_ENVIRONMENT": "/wrong", "UV_WORKING_DIR": "/wrong", "UV_NO_DEV": "1"},
+        daemon_state=tmp_path / ".nightshift", supervisor_state=tmp_path / ".specloop")
     replies = {"git rev-parse --show-toplevel": str(tmp_path), STATUS: "",
         "git symbolic-ref --quiet --short HEAD": "main", "git rev-parse --verify @{upstream}": "upstream",
         "git config --get branch.main.remote": "origin", "git fetch -- origin": "",
         COUNTS: "0 0", "git rev-parse HEAD": "before", CHECK: "", "uv sync --frozen": ""}
     calls = []
+    replies.update({f"git log -1 --format=%ct HEAD -- {path}/": "1704067200"
+                    for path in ("nightshift", "specloop")})
+    replies.update({f"/bin/ps -p {pid} -o lstart=": CURRENT_START for pid in (101, 201)})
+    replies[SERVICE_STATUS] = json.dumps({"version": 1, "supervisor": {
+        "state": "running (pid 201, last poll 2s ago, driving nothing)"}, "runs": []})
 
     def runner(argv, *, cwd, env, timeout, text):
         key = " ".join(argv)
@@ -302,7 +313,8 @@ def test_apply_swaps_plugin_keeping_rollback(plugin_recording, failure, monkeypa
 
 def fresh_plugin_run(r, *args):
     return deploy.main(["--plugin-dir", str(r.destination), *args], runner=r.runner,
-                       context=deploy.Context(r.context.cwd, dict(r.context.env)))
+                       context=deploy.Context(r.context.cwd, dict(r.context.env),
+                           daemon_state=r.context.daemon_state, supervisor_state=r.context.supervisor_state))
 
 
 @pytest.mark.scenario("deployment-drift/pending-plugin-reload/interrupted-reload-succeeds-on-rerun")
@@ -405,7 +417,9 @@ def test_rename_gap_stages_current_head_afresh(plugin_recording, monkeypatch, ca
     assert len(renames) == 3 and renames[1][0] != renames[2][0]
     assert (r.destination / "main.ts").read_bytes() == b"new HEAD"
     assert sorted(r.state.iterdir()) == backups and (backups[0] / "main.ts").read_text() == "old"
-    assert r.calls[-1] == "paseo plugin reload nightshift"
+    assert r.calls[-6:] == ["paseo plugin reload nightshift",
+        "/bin/ps -p 101 -o lstart=", "git log -1 --format=%ct HEAD -- nightshift/",
+        SERVICE_STATUS, "/bin/ps -p 201 -o lstart=", "git log -1 --format=%ct HEAD -- specloop/"]
 
 
 @pytest.mark.scenario("deployment-drift/pending-plugin-reload/reload-override-and-explicit-skip")
@@ -434,3 +448,150 @@ def test_reload_override_and_skip(plugin_recording, capsys):
     assert not r.marker.exists() and not results
     assert sorted(r.state.iterdir()) == sorted(p for p in before if p != r.marker)
     assert fresh_plugin_run(r, "--apply", "--reload-cmd", "") == 0
+
+
+@pytest.mark.scenario("deployment-drift/process-age-drift/process-predates-code")
+@pytest.mark.scenario("deployment-drift/process-age-drift/process-identity-is-unavailable")
+@pytest.mark.parametrize("name,pid,path", [("daemon", 101, "nightshift"), ("supervisor", 201, "specloop")])
+@pytest.mark.parametrize("case", ["older", "equal", "newer", "missing", "malformed", "dead", "unsupported", "history", "start"])
+def test_check_reports_process_older_than_code(recording, name, pid, path, case, capsys):
+    r = recording
+    heartbeat = r.context.daemon_state / "heartbeat.json"
+    if case in {"missing", "malformed", "unsupported"}:
+        if name == "daemon":
+            heartbeat.unlink() if case == "missing" else heartbeat.write_text("{" if case == "malformed" else '{"pid": true}')
+        else:
+            r.replies[SERVICE_STATUS] = {"missing": (1, "", "missing"), "malformed": "{",
+                "unsupported": '{"version": 2, "supervisor": {"state": "not running"}}'}[case]
+    elif case == "history":
+        r.replies[f"git log -1 --format=%ct HEAD -- {path}/"] = ""
+    else:
+        r.replies[f"/bin/ps -p {pid} -o lstart="] = {"older": "Sun Dec 31 23:59:59 2023",
+            "newer": "Mon Jan  1 00:00:01 2024", "dead": (1, "", "dead"), "start": "unreadable"}.get(case, CURRENT_START)
+    before = {p: (p.read_bytes() if p.is_file() else None, p.stat()) for p in r.context.cwd.rglob("*")}
+    assert r.run() == int(case not in {"equal", "newer"})
+    output = capsys.readouterr().out
+    assert (f"{name}: process older than code" in output) == (case == "older")
+    if case not in {"older", "equal", "newer"}:
+        assert r.run("--apply", "--force") == 1
+        assert f"{name} unavailable:" in output
+        assert f"Manual {name} start: launchctl kickstart gui/{r.context.uid}/com.mattpolicastro.{path}" in output
+    assert before == {p: (p.read_bytes() if p.is_file() else None, p.stat()) for p in r.context.cwd.rglob("*")}
+    assert not any(c.startswith("launchctl") for c in r.calls)
+
+
+@pytest.fixture
+def restarting(recording, monkeypatch):
+    r = recording
+    for filename in ("worker-tasks.json", "pause.json", "receipt.json", "run.json"):
+        (r.context.daemon_state / filename).write_text('{"untouched": true}')
+    r.now, r.replacement, r.mode, r.fresh, r.error = 0, 0, "idle", None, None
+    r.kicks, r.observations = [], {"daemon": 0, "supervisor": 0}
+    r.context.uid = 502
+    r.context.monotonic = lambda: r.now
+    r.context.sleep = lambda seconds: setattr(r, "now", r.now + seconds)
+    original_read, original_runner = Path.read_text, r.runner
+
+    def identity(name):
+        r.observations[name] += 1
+        mode = (r.fresh if r.observations[name] > 1 else None) or r.mode
+        replaced = r.kicks and r.now >= r.replacement and r.fresh != "same-pid"
+        return (102 if name == "daemon" else 202) if replaced else (101 if name == "daemon" else 201), mode
+
+    def read(path, *args, **kwargs):
+        assert path.name in {"heartbeat.json", "serve.json"}, "unexpected state/worker-task inspection"
+        return json.dumps({"pid": identity("daemon")[0]}) if path.name == "heartbeat.json" else original_read(path, *args, **kwargs)
+
+    def runner(argv, **kwargs):
+        key = " ".join(argv)
+        if argv[:2] == ["launchctl", "kickstart"]:
+            assert argv in [["launchctl", "kickstart", *flag, r.target] for flag in (["-k"], [])]
+            r.kicks.append(key)
+            if r.error == "timeout":
+                raise subprocess.TimeoutExpired(key, kwargs["timeout"])
+            if r.error == "missing":
+                raise FileNotFoundError("launchctl missing")
+            return subprocess.CompletedProcess(argv, int(r.error == "exit"), "", "command error")
+        if key == SERVICE_STATUS:
+            pid, mode = identity("supervisor")
+            state = f"running (pid {pid}, last poll 2s ago" + ({"busy": ", driving run)", "unknown": ")",
+                "wedged": ")"}.get(mode, ", driving nothing)"))
+            if mode == "wedged":
+                state = f"WEDGED (pid {pid} alive, but no poll for 301s)"
+            r.replies[key] = json.dumps({"version": 1, "supervisor": {"state": state}, "runs":
+                {"running": [{"status": "running"}], "error": [{"status": "paused", "error": "bad run"}],
+                 "missing-runs": None, "bad-row": [{"status": []}]}.get(mode, []), "future": "ignored"})
+        if argv[0] == "/bin/ps":
+            assert kwargs["env"]["LC_ALL"] == "C" and kwargs["env"]["TZ"] == "UTC"
+            assert 0 < kwargs["timeout"] <= 30 - (r.now % 30)
+            if r.fresh == "probe-timeout" and r.kicks:
+                r.now += kwargs["timeout"]
+                raise subprocess.TimeoutExpired(key, kwargs["timeout"])
+            current = (argv[2] in {"102", "202"} and r.fresh != "replacement-stale"
+                or r.fresh == "current" and max(r.observations.values()) > 1 or r.fresh == "same-pid" and r.kicks)
+            r.replies[key] = CURRENT_START if current else "Sun Dec 31 23:59:59 2023"
+            if r.fresh == "unavailable" and max(r.observations.values()) > 1:
+                r.replies[key] = (1, "", "process disappeared")
+        return original_runner(argv, **kwargs)
+
+    def run(*args):
+        before = {p: (p.read_bytes() if p.is_file() else None, p.stat()) for p in r.context.cwd.rglob("*")}
+        result = deploy.main(["--apply", *args], runner=runner, context=r.context)
+        assert before == {p: (p.read_bytes() if p.is_file() else None, p.stat()) for p in r.context.cwd.rglob("*")}
+        return result
+
+    monkeypatch.setattr(Path, "read_text", read)
+    r.run = run
+    return r
+
+
+@pytest.mark.scenario("deployment-drift/guarded-service-restart/background-jobs-defer-daemon-restart")
+@pytest.mark.parametrize("state", ["starting", "running", "stopping", "unknown", "diagnostic", "finished", "failed", "stopped"])
+def test_daemon_restart_waits_for_background_jobs(restarting, state, capsys):
+    r = restarting
+    r.target = "gui/502/com.mattpolicastro.specloop" if state not in {"finished", "failed", "stopped"} else "gui/502/com.mattpolicastro.nightshift"
+    def inventory(root):
+        assert root == r.context.daemon_state
+        return [SimpleNamespace(state=state, delivery="pending")], ["bad inventory"] if state == "diagnostic" else []
+    r.context.inventory = inventory
+    blocked = state not in {"finished", "failed", "stopped"}
+    assert r.run() == int(blocked)
+    assert ("daemon restart pending" in capsys.readouterr().out) == blocked
+    assert r.kicks == [f"launchctl kickstart -k {r.target}"]  # Independent supervisor still repairs.
+
+
+@pytest.mark.scenario("deployment-drift/guarded-service-restart/driving-supervisor-defers-restart")
+@pytest.mark.scenario("deployment-drift/guarded-service-restart/fresh-idle-or-forced-restart")
+@pytest.mark.scenario("deployment-drift/bounded-restart-confirmation/first-wait-confirms-replacement")
+@pytest.mark.scenario("deployment-drift/bounded-restart-confirmation/second-wait-or-final-failure")
+@pytest.mark.parametrize("name", ["daemon", "supervisor"])
+@pytest.mark.parametrize("mode,force,delay,error", [("idle", False, 2, None), ("idle", False, 32, None),
+    ("idle", False, 99, None), ("busy", False, 0, None), ("busy", True, 0, None),
+    ("unknown", False, 0, None), ("unknown", True, 0, None), ("running", False, 0, None),
+    ("error", False, 0, None), ("contradictory", False, 0, None), ("wedged", False, 0, None),
+    ("mismatch", False, 0, None), ("bad-serve", False, 0, None), ("missing-runs", False, 0, None), ("bad-row", False, 0, None),
+    ("replacement-stale", False, 0, None), ("same-pid", False, 0, None), ("probe-timeout", False, 0, None), ("unavailable", True, 0, None),
+    ("current", False, 0, None), ("idle", False, 0, "exit"), ("idle", False, 32, "timeout"), ("idle", False, 99, "missing")])
+def test_supervisor_restart_deferred_while_driving(restarting, name, mode, force, delay, error, monkeypatch, capsys):
+    r = restarting
+    r.fresh, r.replacement, r.error, r.target = mode, delay, error, "gui/502/override label"
+    original_probe = deploy.process_probe
+    def probe(context, runner, service, **kw):
+        assert not (error and r.kicks and service != name), "command errors must stop later repairs"
+        return original_probe(context, runner, service, **kw) if service == name else (301, False, True)
+    monkeypatch.setattr(deploy, "process_probe", probe)
+    idle = mode in {"idle", "current", "wedged", "replacement-stale", "same-pid", "probe-timeout"}
+    r.context.inventory = lambda root: ([], []) if idle else ([], ["unknown activity"])
+    if mode in {"contradictory", "wedged", "mismatch", "bad-serve"}:
+        r.context.supervisor_state.mkdir()
+        (r.context.supervisor_state / "serve.json").write_text("{" if mode == "bad-serve" else json.dumps(
+            {"pid": 999 if mode == "mismatch" else 201, "driving": ["run"] if mode == "contradictory" else []}))
+    blocked = not idle and not force
+    timeout = delay == 99 or mode in {"replacement-stale", "same-pid", "probe-timeout"}
+    assert r.run(f"--{name}-label", "override label", *(["--force"] if force else [])) == int(blocked or timeout or error is not None or mode == "unavailable")
+    output = capsys.readouterr().out
+    assert (f"{name} restart pending" in output) == blocked
+    expected = [] if blocked or mode in {"current", "unavailable"} else [f"launchctl kickstart -k {r.target}"] + ([f"launchctl kickstart {r.target}"] if delay >= 30 or timeout else [])
+    assert r.kicks == expected and r.now == (0 if not expected else 60 if timeout else delay)
+    if timeout or error or mode == "unavailable":
+        assert "launchctl kickstart 'gui/502/override label'" in output
