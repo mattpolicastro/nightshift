@@ -57,12 +57,15 @@ Put at least one named test in Definition of done. These forms satisfy the rule:
 "test_arm_check_mode_never_labels"
 test "check mode never labels"
 test 'check mode never labels'
+`waiting time turns to warning after three hours`
 ```
 
 These forms do not satisfy it:
 
 ```text
 uv run pytest
+`uv run pytest`
+`npm run test`
 "the command behaves correctly"
 test_arm_check_mode_never_labels
 ```
@@ -71,6 +74,8 @@ An empty section also fails. A test named only in another section does not count
 The rule checks syntax, not whether a test exists or proves the claimed behavior;
 proposed tests are allowed. Backticked identifiers start with `test_`, followed
 by letters, digits, or underscores; qualified pytest nodes may end in that name.
+Backticked titles of at least three words also count, unless they start with
+`uv `, `npm `, `python`, `node `, or `git ` (case-insensitively).
 
 ## Wording replacements
 
@@ -156,9 +161,11 @@ their actor, edits bodies, posts comments, creates PRs, or writes local receipts
 ## Coverage limits
 
 - Paths come only from Scope using the existing lexical path helper. Prefer
-  explicit backticked file paths. Existing root files such as `README.md` and
-  new nested files such as `docs/new-guide.md` participate; new root filenames
-  are missed. Function suffixes (`nightshift/arm.py::main` or `:main`) are removed.
+  explicit backticked file paths. Text from “out of bounds” onward is ignored
+  (case-insensitively), as are clauses such as “do not edit” or “leave alone”.
+  This applies to both target and other armed issues. Existing root files such as
+  `README.md` and new nested files such as `docs/new-guide.md` participate; new root
+  filenames are missed. Function suffixes (`nightshift/arm.py::main` or `:main`) are removed.
   Absolute, home-relative, URL, and `openspec/` tokens are excluded by the helper.
 - Matching uses exact normalized tokens, including production, documentation,
   and test files. Globs remain literal: `tests/*.py` does not intersect a concrete

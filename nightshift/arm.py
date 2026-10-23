@@ -239,8 +239,16 @@ class ConcurrentContext:
 
 
 def scope_paths(body: str, root: Path) -> set[str]:
-    return propose.paths("\n".join(section.text for section in parse_sections(body)
-                                   if section.name == "Scope"), root=root)
+    scope = "\n".join(re.split(r"out of bounds", section.text, maxsplit=1,
+                               flags=re.IGNORECASE)[0]
+                      for section in parse_sections(body) if section.name == "Scope")
+    edited = propose.edited_paths(scope)
+    # edited_paths has no checkout-root argument. Preserve existing root files
+    # using the same clause and negation rules, without changing the shared helper.
+    for clause in re.split(r"(?<=[.;])\s+", scope):
+        if not propose.NEGATED.search(clause):
+            edited.update(path for path in propose.paths(clause, root=root) if "/" not in path)
+    return edited
 
 
 def front_door_issue(repository: str, change: str) -> int | None:
@@ -364,9 +372,11 @@ def overlap_findings(issue: Issue, root: Path, context: ConcurrentContext,
             chained, notes = cache.reaches(repository, other, issue.number)
             failures.update(notes)
         if not chained:
+            details = "; ".join(sorted(sources - {f"issue #{other}"}))
+            evidence = f": {details}" if details else ""
             findings.append(Finding(
                 "overlap", issue.number,
-                f"{path} overlaps issue #{other}: {'; '.join(sorted(sources))}.",
+                f"{path} overlaps issue #{other}{evidence}.",
                 f"Add blocked-by: #{other} to sequence this work.",
                 path=path, related_issue=other,
             ))
@@ -502,6 +512,16 @@ def parse_sections(body: str) -> list[Section]:
     return sections
 
 
+def has_named_test(text: str) -> bool:
+    if _NAMED_TEST.search(text):
+        return True
+    for span in re.findall(r"`([^`\n]+)`", text):
+        title = " ".join(span.split()).casefold()
+        if len(title.split()) >= 3 and not title.startswith(("uv ", "npm ", "python", "node ", "git ")):
+            return True
+    return False
+
+
 def lint_body(issue: int, body: str) -> list[Finding]:
     """Return every wording finding without IO or repository test lookup.
 
@@ -515,7 +535,7 @@ def lint_body(issue: int, body: str) -> list[Finding]:
         for name in REQUIRED_SECTIONS if name not in present
     ]
     done = [section for section in sections if section.name == "Definition of done"]
-    if done and not any(_NAMED_TEST.search(section.text) for section in done):
+    if done and not any(has_named_test(section.text) for section in done):
         findings.append(Finding(
             "named-test", issue, "Definition of done needs a named test.",
             "Name a test, for example `test_expected_behavior`.", line=done[0].line,

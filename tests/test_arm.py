@@ -220,6 +220,32 @@ def test_arm_requires_a_named_test(issue_body, done, valid):
         assert findings[0].line == 3
 
 
+@pytest.mark.parametrize("title", [
+    "waiting time turns to warning after three hours",
+    "check mode works", "  check   mode works  ",
+])
+def test_arm_accepts_backticked_test_titles(issue_body, command_reader, capsys, title):
+    calls, _, _ = command_reader({76: unarmed_record(76, issue_body(f"`{title}`"))})
+    assert arm.main(["--check", "76"]) == 0
+    assert "check clean" in capsys.readouterr().out
+    assert not any(call[:3] == ["gh", "issue", "edit"] for call in calls)
+
+
+@pytest.mark.parametrize("done", [
+    "`uv run pytest`", "`npm run test`", "`python -m pytest`",
+    "`python3 -m pytest`", "`node --test tests/arm.test.js`", "`git diff --check`",
+    "`  NPM   run test  `", "`uv\trun pytest`",
+    "`warning`", "`warning appears`", '"warning appears later"',
+])
+def test_arm_rejects_commands_and_short_test_titles(issue_body, done):
+    assert [finding.code for finding in arm.lint_body(76, issue_body(done))] == ["named-test"]
+
+
+def test_backticked_test_title_only_counts_in_done(issue_body):
+    body = issue_body("`uv run pytest`", "`waiting time turns to warning after three hours`")
+    assert [finding.code for finding in arm.lint_body(76, body)] == ["named-test"]
+
+
 @pytest.mark.scenario("issue-arming/issue-body-lint/named-tests-are-required")
 @pytest.mark.parametrize("boundary", [
     "**What CI cannot prove:**", "**Notes:**", "# Notes", "### Notes",
@@ -488,6 +514,34 @@ def test_scope_collection_preserves_helper_rules(concurrent_checkout, monkeypatc
     }
     assert arm.PathEvidence("tests/shared.py", 79, "run repo-issue-79-paused") in context.evidence
     assert flight_calls == [(alias, "")] and len(calls) == 1 and not context.notes
+
+
+@pytest.mark.parametrize("restricted_issue", [76, 77])
+@pytest.mark.parametrize("exclusion", [
+    "Out of bounds: `src/excluded.py`, `README.md`",
+    "oUt Of BoUnDs: `src/excluded.py`, `README.md`",
+    "Do not edit `src/excluded.py`, `README.md`.",
+    "Leave `src/excluded.py`, `README.md` alone.",
+    "Do not edit `src/excluded.py`. Out of bounds: `README.md`",
+])
+def test_arm_ignores_out_of_bounds_paths(tmp_path, monkeypatch, restricted_issue, exclusion):
+    monkeypatch.setattr(state, "ROOT", tmp_path / "run-home")
+    (tmp_path / "README.md").touch()
+    other_issue = 77 if restricted_issue == 76 else 76
+    scopes = {
+        restricted_issue: f"**Scope:** Edit `src/shared.py`. {exclusion}",
+        other_issue: "**Scope:** `src/shared.py`, `src/excluded.py`, `README.md`",
+    }
+    target = arm.Issue(76, scopes[76], "OPEN", None, frozenset())
+    cache, _ = armed_reader([[issue_record(77, body=scopes[77])]])
+    context = arm.collect_concurrent("org/repo", tmp_path, [target], cache)
+    assert arm.scope_paths(scopes[restricted_issue], tmp_path) == {"src/shared.py"}
+    assert {entry.path for entry in context.evidence if entry.issue == restricted_issue} == {
+        "src/shared.py",
+    }
+    assert arm.concurrent_overlaps(target, tmp_path, context) == [
+        arm.PathEvidence("src/shared.py", 77, "issue #77"),
+    ]
 
 
 @pytest.mark.scenario("issue-arming/concurrent-path-collection/unattributed-run-overlap-is-visible")
@@ -785,6 +839,24 @@ def test_arm_reports_unchained_overlap(tmp_path, issue_body, issue_reader):
     assert all(source in findings[1].message for source in sources)
     assert arm.overlap_findings(target, tmp_path, context, "org/repo", cache) == findings
     assert calls == [("org/repo", n) for n in (76, 77, 78)]
+
+
+@pytest.mark.parametrize("extra_sources", [
+    [], ["run repo-issue-77-old-title", "PR #901 https://github.example/org/repo/pull/901"],
+])
+def test_overlap_message_prints_source_issue_once(tmp_path, issue_body, issue_reader, extra_sources):
+    cache, _ = issue_reader({
+        ("org/repo", n): issue_record(n, body=issue_body()) for n in (76, 77)
+    })
+    context = arm.ConcurrentContext([
+        arm.PathEvidence("nightshift/arm.py", 77, source)
+        for source in ["issue #77", *extra_sources]
+    ], [])
+    finding, = arm.overlap_findings(cache.get("org/repo", 76), tmp_path, context, "org/repo", cache)
+    assert finding.message.count("issue #77") == 1
+    assert all(source in finding.message for source in extra_sources)
+    if not extra_sources:
+        assert finding.message == "nightshift/arm.py overlaps issue #77."
 
 
 @pytest.mark.scenario("issue-arming/dependency-aware-overlap-decisions/unchained-overlap-suggests-a-blocker")
