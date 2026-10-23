@@ -1,9 +1,13 @@
-"""Pure issue-body parsing and lexical lint for issue arming."""
+"""Issue-body lint and bounded GitHub reads for issue arming."""
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 from dataclasses import dataclass
+
+from nightshift.queue import blockers
 
 REQUIRED_SECTIONS = ("Scope", "What to do", "Definition of done", "What CI cannot prove")
 _SECTION_NAMES = {name.casefold(): name for name in REQUIRED_SECTIONS}
@@ -48,6 +52,118 @@ class Section:
     name: str
     line: int
     text: str
+
+
+@dataclass(frozen=True)
+class Issue:
+    number: int
+    body: str
+    state: str
+    state_reason: str | None
+    labels: frozenset[str]
+
+
+class IssueLookupError(Exception):
+    """A failed or malformed GitHub issue read, safe to show in findings."""
+
+
+def read_issue(repository: str, number: int, *, runner=None) -> Issue:
+    """Read one issue with a subprocess-compatible boundary and a 30s bound.
+
+    Repository may include a GitHub hostname. Never include raw command output
+    in errors; a failed lookup must not hide independent lint findings.
+    """
+    runner = runner or subprocess.run
+    argv = ["gh", "issue", "view", str(number), "--repo", repository,
+            "--json", "number,body,state,stateReason,labels"]
+    try:
+        response = runner(argv, capture_output=True, text=True, check=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise IssueLookupError(f"Issue #{number} lookup timed out after 30 seconds.") from None
+    except (OSError, subprocess.SubprocessError):
+        raise IssueLookupError(f"Issue #{number} lookup failed.") from None
+    if response.returncode:
+        raise IssueLookupError(f"Issue #{number} lookup failed.")
+    try:
+        data = json.loads(response.stdout)
+        if not isinstance(data, dict):
+            raise ValueError
+        body, state, reason = data.get("body"), data.get("state"), data.get("stateReason")
+        labels = data.get("labels")
+        if (type(data.get("number")) is not int or data["number"] != number
+                or not isinstance(body, str)
+                or (state is not None and not isinstance(state, str))
+                or (reason is not None and not isinstance(reason, str))
+                or not isinstance(labels, list)
+                or any(not isinstance(label, dict) or not isinstance(label.get("name"), str)
+                       for label in labels)):
+            raise ValueError
+        return Issue(number, body, (state or "").upper(),
+                     reason.upper() if reason is not None else None,
+                     frozenset(label["name"] for label in labels))
+    except (ValueError, TypeError):
+        raise IssueLookupError(f"Issue #{number} lookup returned malformed data.") from None
+
+
+class IssueCache:
+    """Invocation-local snapshot, including failures, keyed by repository and number."""
+
+    def __init__(self, *, runner=None):
+        self.runner = runner
+        self._issues: dict[tuple[str, int], Issue | IssueLookupError] = {}
+
+    def get(self, repository: str, number: int) -> Issue:
+        key = (repository, number)
+        if key not in self._issues:
+            try:
+                self._issues[key] = read_issue(repository, number, runner=self.runner)
+            except IssueLookupError as error:
+                self._issues[key] = error
+        result = self._issues[key]
+        if isinstance(result, IssueLookupError):
+            raise result
+        return result
+
+
+def lint_dependencies(issue: int, body: str, repository: str, cache: IssueCache) -> list[Finding]:
+    """Check only direct blockers; open dependencies are eligible for arming."""
+    findings = []
+    for number in blockers(body):
+        try:
+            blocker = cache.get(repository, number)
+        except IssueLookupError as error:
+            message = str(error)
+        else:
+            if blocker.state == "OPEN":
+                continue
+            if blocker.state == "CLOSED" and blocker.state_reason == "COMPLETED":
+                continue
+            if blocker.state == "CLOSED" and blocker.state_reason == "NOT_PLANNED":
+                findings.append(Finding(
+                    "dependency-completion", issue, f"Blocker #{number} is closed as NOT_PLANNED.",
+                    f"Resolve the unfinished work or correct blocked-by: #{number}.",
+                    related_issue=number,
+                ))
+                continue
+            message = f"Blocker #{number} has unknown state or completion reason."
+        findings.append(Finding(
+            "incomplete-context", issue, message,
+            f"Verify blocker #{number}'s state and completion reason, then rerun.",
+            related_issue=number,
+        ))
+    return sorted(findings, key=Finding.sort_key)
+
+
+def lint_issue(repository: str, number: int, cache: IssueCache) -> list[Finding]:
+    """Accumulate body and direct-dependency findings from the shared snapshot."""
+    try:
+        issue = cache.get(repository, number)
+    except IssueLookupError as error:
+        return [Finding("incomplete-context", number, str(error),
+                        f"Restore access to issue #{number}, then rerun.")]
+    return sorted(lint_body(number, issue.body)
+                  + lint_dependencies(number, issue.body, repository, cache),
+                  key=Finding.sort_key)
 
 
 def parse_sections(body: str) -> list[Section]:

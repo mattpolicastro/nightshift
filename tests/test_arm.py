@@ -1,8 +1,39 @@
-"""Fixture-driven checks of the pure issue arming rules."""
+"""Fixture-driven checks of issue arming rules and bounded reads."""
+
+import json
+import subprocess
 
 import pytest
 
 from nightshift import arm
+
+
+def issue_record(number, *, body="", state="OPEN", reason=None):
+    return {"number": number, "body": body, "state": state, "stateReason": reason,
+            "labels": [{"name": "spec:draft"}, {"name": "bug"}]}
+
+
+@pytest.fixture
+def issue_reader():
+    def make(records):
+        calls = []
+
+        def runner(argv, **kwargs):
+            assert kwargs == dict(capture_output=True, text=True, check=True, timeout=30)
+            assert argv[:3] == ["gh", "issue", "view"]
+            assert argv[4] == "--repo"
+            assert argv[6:] == ["--json", "number,body,state,stateReason,labels"]
+            key = (argv[5], int(argv[3]))
+            calls.append(key)
+            result = records[key]
+            if isinstance(result, Exception):
+                raise result
+            if isinstance(result, subprocess.CompletedProcess):
+                return result
+            return subprocess.CompletedProcess(argv, 0, json.dumps(result))
+
+        return arm.IssueCache(runner=runner), calls
+    return make
 
 
 @pytest.fixture
@@ -13,6 +44,115 @@ def issue_body():
                 f"**Definition of done:** {done}\n"
                 f"**What CI cannot prove:** {human}\n")
     return body
+
+
+@pytest.mark.scenario("issue-arming/dependency-completion-lint/closed-incomplete-blocker-is-reported")
+@pytest.mark.parametrize("marker", [
+    "blocked-by: #3, #1, #2, #3", "  - BlOcKeD-bY: #3 #1 #2",
+    "> * BLOCKED-BY: #3, #1\n> blocked-by: #2",
+])
+def test_direct_blocker_completion_uses_queue_syntax(issue_body, issue_reader, marker):
+    body = issue_body() + marker + "\nsee #99\nprose blocked-by: #98"
+    cache, calls = issue_reader({
+        ("org/repo", 76): issue_record(76, body=body),
+        ("org/repo", 1): issue_record(1),
+        ("org/repo", 2): issue_record(2, state="CLOSED", reason="COMPLETED"),
+        ("org/repo", 3): issue_record(3, state="CLOSED", reason="NOT_PLANNED"),
+    })
+    findings = arm.lint_issue("org/repo", 76, cache)
+    assert [(f.code, f.issue, f.related_issue) for f in findings] == [
+        ("dependency-completion", 76, 3),
+    ]
+    assert "#3" in findings[0].message and "NOT_PLANNED" in findings[0].message
+    assert findings[0].suggestion
+    assert calls == [("org/repo", n) for n in (76, 3, 1, 2)]
+
+
+@pytest.mark.scenario("issue-arming/dependency-completion-lint/closed-incomplete-blocker-is-reported")
+@pytest.mark.scenario("issue-arming/dependency-completion-lint/unknown-blocker-state-stays-visible")
+@pytest.mark.parametrize("state,reason,code", [
+    ("OPEN", None, None), ("OPEN", "REOPENED", None),
+    ("OPEN", "NOT_PLANNED", None), ("CLOSED", "COMPLETED", None),
+    ("closed", "completed", None), ("CLOSED", "NOT_PLANNED", "dependency-completion"),
+    ("CLOSED", None, "incomplete-context"), ("CLOSED", "", "incomplete-context"),
+    ("CLOSED", "REOPENED", "incomplete-context"),
+    ("CLOSED", "FUTURE_REASON", "incomplete-context"),
+    (None, "COMPLETED", "incomplete-context"), ("", None, "incomplete-context"),
+    ("FUTURE_STATE", "COMPLETED", "incomplete-context"),
+])
+def test_blocker_states_and_reasons(issue_reader, state, reason, code):
+    cache, calls = issue_reader({
+        ("org/repo", 1): issue_record(1, state=state, reason=reason, body="blocked-by: #99"),
+    })
+    findings = arm.lint_dependencies(76, "blocked-by: #1", "org/repo", cache)
+    assert [f.code for f in findings] == ([] if code is None else [code])
+    assert all(f.issue == 76 and f.related_issue == 1 and "#1" in f.message for f in findings)
+    assert calls == [("org/repo", 1)]  # Completion lint does not follow transitive blockers.
+
+
+@pytest.mark.scenario("issue-arming/dependency-completion-lint/unknown-blocker-state-stays-visible")
+@pytest.mark.parametrize("failure", [
+    OSError("private diagnostic"), subprocess.TimeoutExpired(["gh"], 30),
+    subprocess.CalledProcessError(1, ["gh"], stderr="private diagnostic"),
+    subprocess.CompletedProcess(["gh"], 1, "", "private diagnostic"),
+    subprocess.CompletedProcess(["gh"], 0, "not JSON"),
+    [], {}, {**issue_record(1), "number": 99}, {**issue_record(1), "body": None},
+    {**issue_record(1), "state": []}, {**issue_record(1), "stateReason": {}},
+    {**issue_record(1), "labels": ["spec:draft"]},
+])
+def test_blocker_lookup_failures_preserve_other_findings(issue_body, issue_reader, failure):
+    body = issue_body("manually run pytest") + "blocked-by: #1 #3 #2\n"
+    cache, calls = issue_reader({
+        ("org/repo", 76): issue_record(76, body=body),
+        ("org/repo", 1): failure,
+        ("org/repo", 2): issue_record(2, state="CLOSED", reason="NOT_PLANNED"),
+        ("org/repo", 3): issue_record(3, state="CLOSED"),
+    })
+    findings = arm.lint_issue("org/repo", 76, cache)
+    assert [f.code for f in findings] == [
+        "dependency-completion", "incomplete-context", "incomplete-context",
+        "manual-check", "named-test",
+    ]
+    assert [f.related_issue for f in findings[:3]] == [2, 1, 3]
+    assert all(f.issue == 76 and f.suggestion for f in findings)
+    assert "private diagnostic" not in str(findings)
+    assert arm.lint_issue("org/repo", 76, cache) == findings
+    assert calls == [("org/repo", n) for n in (76, 1, 3, 2)]
+    # A shared failed lookup still produces a finding for each affected target.
+    other = arm.lint_dependencies(77, "blocked-by: #1", "org/repo", cache)
+    assert other[0].issue == 77 and other[0].related_issue == 1
+    assert len(calls) == 4
+
+
+def test_issue_cache_keeps_repository_identity_and_empty_bodies(issue_reader, monkeypatch):
+    cache, calls = issue_reader({
+        (repo, 1): issue_record(1, body=body)
+        for repo, body in [("org/repo", ""), ("other/repo", "other"),
+                           ("github.example/org/repo", "enterprise")]
+    })
+    first = cache.get("org/repo", 1)
+    assert first.body == "" and first.state == "OPEN" and first.state_reason is None
+    assert first.labels == frozenset({"spec:draft", "bug"})
+    assert cache.get("org/repo", 1) is first
+    assert cache.get("other/repo", 1).body == "other"
+    assert cache.get("github.example/org/repo", 1).body == "enterprise"
+    assert [f.code for f in arm.lint_issue("org/repo", 1, cache)] == ["missing-section"] * 4
+    assert len(calls) == 3
+    # The default subprocess boundary is also injectable by monkeypatching.
+    monkeypatch.setattr(arm.subprocess, "run", cache.runner)
+    assert arm.read_issue("org/repo", 1) == first
+    assert len(calls) == 4
+
+
+def test_unreadable_target_is_cached_incomplete_context(issue_reader):
+    cache, calls = issue_reader({("org/repo", 76): FileNotFoundError("gh unavailable")})
+    findings = arm.lint_issue("org/repo", 76, cache)
+    assert [(f.code, f.issue, f.related_issue) for f in findings] == [
+        ("incomplete-context", 76, None),
+    ]
+    assert "#76" in findings[0].message
+    assert arm.lint_issue("org/repo", 76, cache) == findings
+    assert calls == [("org/repo", 76)]
 
 
 @pytest.mark.scenario("issue-arming/issue-body-lint/missing-sections-accumulate")
