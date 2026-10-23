@@ -260,9 +260,10 @@ uv run specloop drill <change>        # seeded defects through the review gate
 **`propose`** has an agent draft the OpenSpec change. The harness then:
 1. validates and lints it;
 2. runs the feasibility review;
-3. feeds problems back within a default budget of four drafting rounds
+3. runs an independent read-only spec critic after lint and feasibility pass;
+4. feeds problems back within a default budget of four drafting rounds
    ([PR #37](https://github.com/mattpolicastro/nightshift/pull/37));
-4. leaves the draft on a local `spec/<change>` branch for a human to approve.
+5. leaves the draft on a local `spec/<change>` branch for a human to approve.
    For daemon-managed issues, Nightshift pushes it and opens the spec review PR.
 
 **Work in flight.** Before drafting, the harness snapshots paths named in
@@ -297,6 +298,37 @@ commands. Preserve existing `openspec/specs/` guarantees: feasibility rejects
 a change that removes, hides or breaks one without a justified `MODIFIED` or
 `REMOVED` delta for that requirement
 ([PR #36](https://github.com/mattpolicastro/nightshift/pull/36)).
+
+**Spec critic.** Proposals and spec revisions receive a separate read-only
+review after lint and feasibility pass
+([issue #51](https://github.com/mattpolicastro/nightshift/issues/51),
+[PR #57](https://github.com/mattpolicastro/nightshift/pull/57)). The critic
+receives the full in-flight file map, including production and test paths,
+and changed files from open PRs. These are snapshots, not proof of another
+change's future behavior. Unavailable or partial PR context stays visible as
+a risk; missing context does not establish safety.
+
+The checklist covers all eight items
+([PR #57](https://github.com/mattpolicastro/nightshift/pull/57), expanded by
+[PR #62](https://github.com/mattpolicastro/nightshift/pull/62)):
+
+1. Over-engineering.
+2. File collisions and hidden instructions.
+3. Invalidated protected assertions.
+4. Conflicts with unowned behavior.
+5. Tests broken by pending changes.
+6. Unplanned migrations.
+7. Retry and idempotency gaps.
+8. Stale operator docs and manual steps.
+
+Blocking findings get at most one correction within the remaining drafting
+budget, followed by lint, feasibility and critic review again. Remaining
+blockers are contradictions naming the task, problem and evidence; exhausted
+budgets and unchanged corrections leave them unresolved. Non-blocking notes
+appear as `Critic: ` risks. Overlap alone is not a blocker: the critic must
+explain why the plan is unsafe or unworkable. A failed critic review stops the
+draft with an error; it is not a pass
+([PR #57](https://github.com/mattpolicastro/nightshift/pull/57)).
 
 **`drill`** plants the manifest's declared one-line defects into landed
 candidates. A drill counts only if the defect survives verification, and is
