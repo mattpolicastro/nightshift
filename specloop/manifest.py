@@ -8,7 +8,7 @@ import json
 import tomllib
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 ADAPTERS = ("codex", "claude")
 
@@ -28,6 +28,12 @@ class Step:
     run: tuple[str, ...]
     expect: int = 0
     timeout: int = 300
+
+
+@dataclass(frozen=True)
+class MutationRoute:
+    paths: tuple[str, ...]
+    steps: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -58,7 +64,7 @@ class Manifest:
     coverage_exempt: dict[str, str] = field(default_factory=dict)  # scenario id -> who checks it instead
     chains: dict[str, tuple[Profile, ...]] = field(default_factory=dict)  # role -> fallback order
     evidence: bool = False  # gather coverage + mutation evidence at every section boundary
-    mutation_steps: tuple[str, ...] = ()  # verify step ids that build and test a mutant
+    mutation_steps: tuple[str, ...] = ()  # verify or mutation-only ids that build and test a mutant
     mutation_paths: tuple[str, ...] = ()
     mutation_count: int = 12
     mutation_min: float = 0.8
@@ -68,6 +74,8 @@ class Manifest:
     prepare: tuple[Step, ...] = ()
     mutation_parallel: int = 2
     mutation_skip: tuple[str, ...] = ()  # literal, case-sensitive whole-line exclusions
+    mutation_step: tuple[Step, ...] = ()
+    mutation_routes: tuple[MutationRoute, ...] = ()
 
 
 def _path(s: str) -> Path:
@@ -82,16 +90,23 @@ def _pattern(p: str) -> str:
     return p
 
 
-def _steps(raw) -> tuple[Step, ...]:
+def _steps(raw, setting: str = "step") -> tuple[Step, ...]:
+    if raw is not None and not isinstance(raw, list):
+        raise ValueError(f"{setting}: must be an array of step tables")
     steps = []
     for s in raw or []:
-        run = s["run"]
+        if not isinstance(s, dict) or not isinstance(s.get("id"), str) or not s["id"]:
+            raise ValueError(f"{setting}: step must be a table with a nonempty string id: {s!r}")
+        run = s.get("run")
         if not isinstance(run, list) or not run or not all(isinstance(a, str) for a in run):
-            raise ValueError(f"step {s.get('id')!r}: run must be a non-empty argv list")
-        steps.append(Step(s["id"], tuple(run), int(s.get("expect", 0)), int(s.get("timeout", 300))))
+            raise ValueError(f"{setting} {s['id']!r}: run must be a non-empty argv list")
+        try:
+            steps.append(Step(s["id"], tuple(run), int(s.get("expect", 0)), int(s.get("timeout", 300))))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{setting} {s['id']!r}: invalid expect or timeout") from exc
     ids = [s.id for s in steps]
     if len(ids) != len(set(ids)):
-        raise ValueError("duplicate step ids")
+        raise ValueError(f"{setting}: duplicate step ids: {ids}")
     return tuple(steps)
 
 
@@ -133,6 +148,15 @@ def parse(data: dict, roles_override: dict[str, str] | None = None) -> Manifest:
     acceptance = _steps(data.get("acceptance"))
     if {s.id for s in prepare} & {s.id for s in verify + acceptance}:
         raise ValueError("prepare step ids must not duplicate verify or acceptance step ids")
+    mutation_step = _steps(data.get("mutation_step"), "mutation_step")
+    collisions = {s.id for s in mutation_step} & {s.id for s in verify + prepare + acceptance}
+    if collisions:
+        raise ValueError(f"mutation_step ids collide with verify, prepare or acceptance: {sorted(collisions)}")
+    variables = dict(data.get("vars", {}))
+    if any("{mutant_path}" in arg for s in verify + mutation_step + prepare + acceptance for arg in s.run):
+        if variables.get("mutant_path", "") != "":
+            raise ValueError("vars.mutant_path is reserved and must be empty")
+        variables["mutant_path"] = ""
     return Manifest(
         repo=_path(run["repo"]),
         change=run["change"],
@@ -145,6 +169,7 @@ def parse(data: dict, roles_override: dict[str, str] | None = None) -> Manifest:
         verify=verify,
         prepare=prepare,
         acceptance=acceptance,
+        mutation_step=mutation_step,
         phase_gates=tuple(int(n) for n in data.get("gates", {}).get("phases", [])),
         max_attempts=int(limits.get("max_attempts", 3)),
         max_infra=int(limits.get("max_infra", 3)),
@@ -155,31 +180,63 @@ def parse(data: dict, roles_override: dict[str, str] | None = None) -> Manifest:
         writable=tuple(sandbox.get("writable", [])),
         deny_read=tuple(str(_path(p)) for p in sandbox.get("deny_read", [])),
         prepare_read=tuple(str(_path(p)) for p in sandbox.get("prepare_read", [])),
-        vars={k: str(_path(v)) if v.startswith("~") else v for k, v in data.get("vars", {}).items()},
+        vars={k: str(_path(v)) if v.startswith("~") else v for k, v in variables.items()},
         env_file=_path(run["env_file"]) if run.get("env_file") else None,
         coverage_step=_coverage_step(data.get("coverage", {}), verify),
         coverage_exempt=dict(data.get("coverage", {}).get("exempt", {})),
         chains=chains,
-        **_gates(data.get("gates", {}), verify),
+        **_gates(data.get("gates", {}), verify + mutation_step),
         drills=tuple(dict(d) for d in data.get("drill", [])),
     )
 
 
-def _gates(g: dict, verify: tuple[Step, ...]) -> dict:
+def _gates(g: dict, definitions: tuple[Step, ...]) -> dict:
     skip = g.get("mutation_skip", [])
     if not isinstance(skip, list) or any(not isinstance(p, str) or not p for p in skip):
         raise ValueError("gates.mutation_skip must be an array of nonempty strings")
     parallel = g.get("mutation_parallel", 2)
     if type(parallel) is not int or parallel <= 0:
         raise ValueError(f"gates.mutation_parallel must be a positive integer, not {parallel!r}")
-    steps = tuple(g.get("mutation_steps", []))
-    unknown = set(steps) - {s.id for s in verify}
+    references = g.get("mutation_steps", [])
+    if not isinstance(references, list) or any(not isinstance(s, str) or not s for s in references):
+        raise ValueError("gates.mutation_steps must be an array of nonempty step ids")
+    steps = tuple(references)
+    unknown = set(steps) - {s.id for s in definitions}
     if unknown:
-        raise ValueError(f"mutation_steps names unknown verify steps: {sorted(unknown)}")
+        raise ValueError(f"gates.mutation_steps names unknown verify or mutation-only steps: {sorted(unknown)}")
+    raw_routes = g.get("mutation_route", [])
+    if not isinstance(raw_routes, list):
+        raise ValueError(f"gates.mutation_route must be an array of tables: {raw_routes!r}")
+    routes = []
+    known = {s.id for s in definitions}
+    for index, route in enumerate(raw_routes, 1):
+        setting = f"gates.mutation_route[{index}]"
+        if not isinstance(route, dict):
+            raise ValueError(f"{setting} must be a table: {route!r}")
+        for key in ("paths", "steps"):
+            values = route.get(key)
+            if (not isinstance(values, list) or not values
+                    or any(not isinstance(v, str) or not v for v in values)):
+                raise ValueError(f"{setting}.{key} must be a nonempty array of nonempty strings: {values!r}")
+        for pattern in route["paths"]:
+            if (pattern.startswith("/") or PureWindowsPath(pattern).is_absolute()
+                    or "\\" in pattern or ".." in pattern.split("/")):
+                raise ValueError(f"{setting}.paths has bad path pattern {pattern!r}")
+        seen = set()
+        for step in route["steps"]:
+            if step not in known:
+                raise ValueError(f"{setting}.steps names unknown verify or mutation-only step {step!r}")
+            if step in seen:
+                raise ValueError(f"{setting}.steps repeats step {step!r}")
+            seen.add(step)
+        routes.append(MutationRoute(tuple(route["paths"]), tuple(route["steps"])))
+    if routes and not steps:
+        raise ValueError(f"gates.mutation_route requires nonempty gates.mutation_steps fallback: {references!r}")
     for key in ("review", "stuck"):
         if g.get(key, "human") not in ("human", "agent"):
             raise ValueError(f"gates.{key} must be \"human\" or \"agent\", not {g[key]!r}")
     return {"evidence": bool(g.get("evidence", False)), "mutation_steps": steps,
+            "mutation_routes": tuple(routes),
             "mutation_parallel": parallel,
             "mutation_skip": tuple(skip),
             "gate_review": g.get("review", "human"), "stuck": g.get("stuck", "human"),
