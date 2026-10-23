@@ -21,4 +21,4 @@
 
 ## 5. Acceptance fixes
 
-- [ ] 5.1 Make the harness's verification pass on the branch head: (details: tests: expected exit 0, got 2 (FAIL, 195.33s))
+- [x] 5.1 Make the harness's verification pass on the branch head: (details: tests: expected exit 0, got 2 (FAIL, 195.33s))
