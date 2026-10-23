@@ -302,6 +302,78 @@ def read_main(identity: Identity, operations: Operations) -> str:
     return obj["sha"]
 
 
+def update_branch(
+    identity: Identity, expected_head: str, operations: Operations,
+) -> tuple[PullRequest, str]:
+    """Return the exact update head and its retained, immediately pre-PUT base.
+
+    The caller supplies the shared CI deadline and must obtain fresh CI for the
+    returned head. A queued acknowledgement is not provenance: only the observed
+    commit's ordered parents can authorize advancing the expected head. Never
+    retry the PUT, even when its response is lost.
+    """
+    if operations.deadline is None:
+        raise Refusal("branch update requires the shared CI deadline")
+    pr = read_pr(identity, operations)
+    if pr.head != expected_head:
+        raise Refusal(f"PR head changed before branch update: expected {expected_head}, "
+                      f"found {pr.head}; review the current head and rerun land")
+    if pr.draft:
+        raise Refusal("PR became draft before branch update")
+    base = read_main(identity, operations)
+    lost_response: Refusal | None = None
+    try:
+        result = operations.run(
+            ["gh", "api", "--method", "PUT",
+             f"repos/{identity.repo}/pulls/{identity.number}/update-branch",
+             "-f", f"expected_head_sha={expected_head}"],
+            stage="branch update", allowed_returncodes=(0, 1),
+        )
+    except Refusal as exc:
+        if not isinstance(exc.__cause__, (OSError, subprocess.SubprocessError)):
+            raise
+        lost_response = exc
+    else:
+        if result.returncode:
+            detail = (result.stderr or result.stdout or "request rejected").strip()
+            # gh reports HTTP rejections in stderr. Only recognizable transport
+            # loss is ambiguous; unknown errors fail closed. An HTTP rejection
+            # takes precedence even if its message mentions a transport error.
+            transport_loss = re.search(
+                r"\b(EOF|connection reset|connection lost|broken pipe|timed out|timeout)\b",
+                detail, re.IGNORECASE,
+            )
+            failure = Refusal(f"branch update: {detail} (exit {result.returncode})")
+            if re.search(r"\bHTTP\s+[45][0-9]{2}\b", detail, re.IGNORECASE) or not transport_loss:
+                raise failure
+            lost_response = failure
+
+    try:
+        while True:
+            observed = read_pr(identity, operations)
+            if observed.draft:
+                raise Refusal("PR became draft during branch update")
+            if observed.head != expected_head:
+                commit = operations.read_json(
+                    ["gh", "api", f"repos/{identity.repo}/commits/{observed.head}"],
+                    stage="branch update parent inspection",
+                )
+                parents = commit.get("parents")
+                if (commit.get("sha") != observed.head or not isinstance(parents, list)
+                        or len(parents) != 2
+                        or any(not isinstance(parent, dict) for parent in parents)
+                        or [parent.get("sha") for parent in parents] != [expected_head, base]):
+                    raise Refusal(f"branch update provenance refused for {observed.head}: "
+                                  f"expected exactly ordered parents [{expected_head}, {base}]; "
+                                  "review the current head and rerun land")
+                return observed, base
+            operations.poll_sleep()
+    except Refusal as exc:
+        if lost_response is not None:
+            raise Refusal(f"{lost_response}; branch update reconciliation failed: {exc}") from exc
+        raise
+
+
 def discover_run(identity: Identity, operations: Operations) -> LandingRun | None:
     """A missing match is meaningful only after every row is readable.
 

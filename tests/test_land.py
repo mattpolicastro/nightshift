@@ -1344,6 +1344,225 @@ def test_land_rechecks_human_inputs_before_finish(config_path, scripted_runner, 
     assert not any(argv == FINISH for argv, _ in scripted_runner.calls)
 
 
+UPDATE = ["gh", "api", "--method", "PUT", f"repos/{REPO}/pulls/78/update-branch",
+          "-f", f"expected_head_sha={HEAD}"]
+UPDATED_HEAD = "d" * 40
+UPDATED_PR = {**PR, "headRefOid": UPDATED_HEAD}
+UPDATED_COMMIT = ["gh", "api", f"repos/{REPO}/commits/{UPDATED_HEAD}"]
+
+
+def update_operations(runner, clock, *, budget=60):
+    return land.Operations(runner, clock.sleep, clock.monotonic, deadline=clock.now + budget)
+
+
+def merge_commit(*parents, head=UPDATED_HEAD):
+    return {"sha": head, "parents": [{"sha": parent} for parent in parents]}
+
+
+def expect_update_request(runner, response=None, *, base=BASE, timeout=30):
+    runner.expect(VIEW, PR, timeout=timeout)
+    runner.expect(MAIN, {**MAIN_REF, "object": {"type": "commit", "sha": base}}, timeout=timeout)
+    runner.expect(UPDATE, {"message": "Updating pull request branch."} if response is None else response,
+                  timeout=timeout)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/guarded-rest-branch-update/expected-head-supplied")
+@pytest.mark.scenario("reviewed-pr-landing/exact-update-provenance/exact-merge-accepted")
+@pytest.mark.parametrize("ci_bucket", ["pass", "fail"])
+def test_land_exact_update_requires_new_head_ci(scripted_runner, ci_bucket):
+    clock = FakeClock()
+    operations = update_operations(scripted_runner, clock)
+    # Only the immediate pre-PUT main read is authoritative.
+    scripted_runner.expect(MAIN, MAIN_REF)
+    assert land.read_main(land.Identity(REPO, 78), operations) == BASE
+    fresh_base = "e" * 40
+    remote = {"main": fresh_base}
+
+    def observe_update_after_main_moves():
+        remote["main"] = "f" * 40
+        return UPDATED_PR
+
+    expect_update_request(scripted_runner, base=fresh_base)
+    scripted_runner.expect(VIEW, PR).expect(VIEW, PR).expect(VIEW, observe_update_after_main_moves)
+    scripted_runner.expect(UPDATED_COMMIT, merge_commit(HEAD, fresh_base))
+    updated, baseline = land.update_branch(land.Identity(REPO, 78), HEAD, operations)
+    assert updated.head == UPDATED_HEAD and baseline == fresh_base
+    assert baseline != remote["main"]  # A later round must detect this move.
+    assert operations.deadline == 160 and clock.sleeps == [10, 10]
+    # Use the real CI gate with the returned head; round orchestration and
+    # merging belong to later tasks. Old HEAD checks cannot authorize this head.
+    expect_ci_poll(scripted_runner, [ci_check("pending")], code=8, pr=UPDATED_PR)
+    expect_ci_poll(scripted_runner, [ci_check(ci_bucket)],
+                   code=1 if ci_bucket == "fail" else 0, pr=UPDATED_PR)
+    if ci_bucket == "fail":
+        with pytest.raises(land.Refusal, match="CI check unit tests: fail"):
+            land.wait_for_ci(updated.identity, updated.head, operations)
+    else:
+        land.wait_for_ci(updated.identity, updated.head, operations)
+    assert operations.deadline == 160 and clock.sleeps == [10, 10, 10]
+    assert [argv for argv, _ in scripted_runner.calls][1:4] == [VIEW, MAIN, UPDATE]
+    assert sum(argv == UPDATE for argv, _ in scripted_runner.calls) == 1
+    assert not any("merge" in argv for argv, _ in scripted_runner.calls)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/guarded-rest-branch-update/expected-head-supplied")
+@pytest.mark.parametrize("code, detail", [
+    (1, "gh: expected_head_sha does not match (HTTP 422)"),
+    (1, "gh: merge conflict (HTTP 409)"),
+    (1, "gh: Forbidden (HTTP 403)"),
+    (1, "gh: timeout upstream (HTTP 503)"),
+    (1, "permission denied"),
+    (2, "invalid arguments"),
+    (4, "authentication required"),
+])
+def test_land_rejected_update_stops_without_observation(scripted_runner, code, detail):
+    clock = FakeClock()
+    expect_update_request(scripted_runner, subprocess.CompletedProcess(UPDATE, code, "", detail))
+    with pytest.raises(land.Refusal, match="branch update:") as error:
+        land.update_branch(land.Identity(REPO, 78), HEAD, update_operations(scripted_runner, clock))
+    assert detail in str(error.value)
+    assert [argv for argv, _ in scripted_runner.calls] == [VIEW, MAIN, UPDATE]
+    assert clock.sleeps == []
+
+
+@pytest.mark.scenario("reviewed-pr-landing/guarded-rest-branch-update/expected-head-supplied")
+@pytest.mark.parametrize("stage", ["changed-head", "draft", "main"])
+def test_land_update_refresh_refuses_before_put(scripted_runner, stage):
+    clock = FakeClock()
+    pr = UPDATED_PR if stage == "changed-head" else {**PR, "isDraft": stage == "draft"}
+    scripted_runner.expect(VIEW, pr)
+    if stage == "main":
+        scripted_runner.expect(MAIN, subprocess.CompletedProcess(MAIN, 1, "", "main read failed"))
+    with pytest.raises(land.Refusal):
+        land.update_branch(land.Identity(REPO, 78), HEAD, update_operations(scripted_runner, clock))
+    assert not any(argv == UPDATE for argv, _ in scripted_runner.calls)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/exact-update-provenance/intervening-push-refused")
+@pytest.mark.parametrize("parents", [
+    [UPDATED_HEAD],                        # Push on top of the requested merge.
+    [UPDATED_HEAD, BASE],                  # Descendant that also merges main.
+    ["e" * 40, BASE],                      # Unreviewed commits before main merge.
+    [HEAD, "f" * 40],                      # GitHub merged a newer main.
+    [BASE, HEAD],                          # Reversed parents.
+    [HEAD, BASE, "f" * 40],                # Additional parent.
+    [HEAD], [],                            # Non-merge or root.
+])
+def test_land_push_between_put_and_first_observation_refused(scripted_runner, parents):
+    clock = FakeClock()
+    pushed_head = "9" * 40
+    remote = {"head": HEAD}
+
+    def update_then_push():
+        remote["head"] = UPDATED_HEAD
+        remote["head"] = pushed_head
+        return {"message": "Updating pull request branch."}
+
+    expect_update_request(scripted_runner, update_then_push)
+    scripted_runner.expect(VIEW, lambda: {**PR, "headRefOid": remote["head"]})
+    scripted_runner.expect(["gh", "api", f"repos/{REPO}/commits/{pushed_head}"],
+                           merge_commit(*parents, head=pushed_head))
+    with pytest.raises(land.Refusal, match="expected exactly ordered parents"):
+        land.update_branch(land.Identity(REPO, 78), HEAD, update_operations(scripted_runner, clock))
+    assert remote["head"] == pushed_head
+    assert clock.sleeps == []
+    assert sum(argv == UPDATE for argv, _ in scripted_runner.calls) == 1
+    assert not any("merge" in argv or argv == CHECKS for argv, _ in scripted_runner.calls)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/exact-update-provenance/intervening-push-refused")
+@pytest.mark.parametrize("commit", [
+    {}, {"sha": UPDATED_HEAD}, {"sha": UPDATED_HEAD, "parents": None},
+    {"sha": UPDATED_HEAD, "parents": [HEAD, BASE]},
+    {"sha": UPDATED_HEAD, "parents": [{"sha": HEAD}, {}]},
+    merge_commit(HEAD, BASE, head="f" * 40), [],
+    subprocess.CompletedProcess(UPDATED_COMMIT, 0, "not JSON", ""),
+    subprocess.CompletedProcess(UPDATED_COMMIT, 1, "", "commit unavailable"),
+])
+def test_land_update_requires_readable_matching_commit(scripted_runner, commit):
+    clock = FakeClock()
+    expect_update_request(scripted_runner)
+    scripted_runner.expect(VIEW, UPDATED_PR).expect(UPDATED_COMMIT, commit)
+    with pytest.raises(land.Refusal, match="branch update"):
+        land.update_branch(land.Identity(REPO, 78), HEAD, update_operations(scripted_runner, clock))
+
+
+@pytest.mark.scenario("reviewed-pr-landing/exact-update-provenance/lost-update-response")
+@pytest.mark.parametrize("loss", [
+    subprocess.TimeoutExpired(UPDATE, 30), OSError("connection lost"),
+    subprocess.CompletedProcess(UPDATE, 1, "", "Put https://api.github.com/: EOF"),
+    subprocess.CompletedProcess(UPDATE, 1, "", "connection reset by peer"),
+    subprocess.CompletedProcess(UPDATE, 0, "", ""),
+])
+@pytest.mark.parametrize("valid", [True, False])
+def test_land_lost_update_response_reconciles_once(scripted_runner, loss, valid):
+    clock = FakeClock()
+    remote = {"pr": dict(PR)}
+
+    def apply_but_lose_response():
+        remote["pr"] = dict(UPDATED_PR)
+        return loss
+
+    expect_update_request(scripted_runner, apply_but_lose_response)
+    scripted_runner.expect(VIEW, PR)  # Asynchronous read still sees the old head.
+    scripted_runner.expect(VIEW, lambda: remote["pr"])
+    scripted_runner.expect(UPDATED_COMMIT, merge_commit(HEAD, BASE if valid else "f" * 40))
+    operations = update_operations(scripted_runner, clock)
+    if valid:
+        updated, baseline = land.update_branch(land.Identity(REPO, 78), HEAD, operations)
+        assert updated.head == remote["pr"]["headRefOid"] == UPDATED_HEAD
+        assert baseline == BASE
+    else:
+        with pytest.raises(land.Refusal, match="provenance refused"):
+            land.update_branch(land.Identity(REPO, 78), HEAD, operations)
+    assert clock.sleeps == [10] and operations.deadline == 160
+    assert sum(argv == UPDATE for argv, _ in scripted_runner.calls) == 1
+    assert not any("merge" in argv for argv, _ in scripted_runner.calls)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/exact-update-provenance/lost-update-response")
+@pytest.mark.parametrize("observation", ["unchanged", "read-error", "closed", "draft", "slow-put"])
+def test_land_uncertain_update_refuses_without_second_put(scripted_runner, observation):
+    clock = FakeClock()
+
+    def lose_response():
+        if observation == "slow-put":
+            clock.now += 7
+        return subprocess.TimeoutExpired(UPDATE, 7)
+
+    expect_update_request(scripted_runner, lose_response, timeout=7)
+    if observation != "slow-put":
+        response = {
+            "unchanged": PR,
+            "read-error": subprocess.CompletedProcess(VIEW, 1, "", "read unavailable"),
+            "closed": {**UPDATED_PR, "state": "CLOSED"},
+            "draft": {**UPDATED_PR, "isDraft": True},
+        }[observation]
+        scripted_runner.expect(VIEW, response, timeout=7)
+    with pytest.raises(land.Refusal, match="branch update reconciliation failed"):
+        land.update_branch(land.Identity(REPO, 78), HEAD,
+                           update_operations(scripted_runner, clock, budget=7))
+    assert clock.sleeps == ([7] if observation == "unchanged" else [])
+    assert sum(argv == UPDATE for argv, _ in scripted_runner.calls) == 1
+    assert not any("merge" in argv for argv, _ in scripted_runner.calls)
+
+
+@pytest.mark.scenario("reviewed-pr-landing/exact-update-provenance/exact-merge-accepted")
+def test_land_update_parent_inspection_must_finish_within_deadline(scripted_runner):
+    clock = FakeClock()
+    expect_update_request(scripted_runner, timeout=5)
+    scripted_runner.expect(VIEW, UPDATED_PR, timeout=5)
+
+    def slow_parents():
+        clock.now += 5
+        return merge_commit(HEAD, BASE)
+
+    scripted_runner.expect(UPDATED_COMMIT, slow_parents, timeout=5)
+    with pytest.raises(land.Refusal, match="shared CI deadline expired"):
+        land.update_branch(land.Identity(REPO, 78), HEAD,
+                           update_operations(scripted_runner, clock, budget=5))
+
+
 class FakeClock:
     def __init__(self):
         self.now = 100.0
