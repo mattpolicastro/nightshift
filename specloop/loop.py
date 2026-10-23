@@ -29,6 +29,7 @@ class Ctx:
         self.ref = f"refs/heads/{m.branch}"
         self.tasks_path = f"openspec/changes/{m.change}/tasks.md"
         self.credentials = seal.credential_values(secrets)
+        self.infra_retries: _InfraRetries | None = None
 
     def head(self) -> str:
         return git(self.repo, "rev-parse", self.ref).decode().strip()
@@ -252,6 +253,8 @@ def prepare_publish(ctx: Ctx) -> bool:
 
 def run(ctx: Ctx) -> str:
     """Advance until a pause or completion. Returns the final run status."""
+    # The CLI constructs Ctx before writing its resume event.
+    ctx.infra_retries = _InfraRetries(ctx.run)
     st = ctx.run.state
     while st.status == "running":
         if ctx.run.pause_requested():
@@ -745,8 +748,75 @@ def _advance(ctx: Ctx, old: str, new: str) -> bool:
 INFRA_COOLDOWN = 15 * 60
 
 
+class _InfraRetries:
+    """Task/profile allowances recovered once per driver, without a state schema change."""
+
+    def __init__(self, run: Run):
+        self.counts: dict[tuple[str, str], int] = {}
+        self.legacy = {key: ts.infra for key, ts in run.state.tasks.items()}
+        self.previous: dict[str, str] = {}
+        paused = ""
+        for event in agents.read_jsonl(run.dir / "events.jsonl"):
+            if not isinstance(event, dict):
+                continue
+            kind, key = event.get("event"), event.get("task", "")
+            if not isinstance(key, str):
+                continue
+            if kind == "pause":
+                paused = key
+            elif kind == "resumed" or (kind == "auto_resumed" and event.get("reason") == "infra"):
+                key = paused if kind == "resumed" else key
+                self.counts = {pair: n for pair, n in self.counts.items() if pair[0] != key}
+                self.previous.pop(key, None)
+                paused = ""
+            elif kind == "infra_retry":
+                profile, count = event.get("profile"), event.get("count")
+                if isinstance(profile, str) and profile and type(count) is int and count >= 0:
+                    self.counts[key, profile] = count
+                    self.legacy.pop(key, None)
+            elif kind in ("implemented", "reviewed", "gate_reviewed"):
+                if kind == "gate_reviewed":
+                    key = f"section:{event.get('section')}"
+                profile = event.get("profile")
+                self.previous.pop(key, None)
+                if isinstance(profile, str) and profile:
+                    self.previous[key] = profile
+
+    def record(self, ctx: Ctx, key: str, profile: str, role: str, count: int) -> int:
+        self.counts[key, profile] = count
+        ctx.run.event("infra_retry", task=key, role=role, profile=profile, count=count)
+        return count
+
+    def count(self, ctx: Ctx, key: str, profile: str, role: str) -> int:
+        if key in self.legacy:
+            saved = self.legacy.pop(key)
+            previous = self.previous.get(key)
+            if previous is None and len(_chain(ctx, role)) == 1:
+                previous = profile
+            if previous and saved:
+                # Persist attribution even if the next retry belongs to a different profile.
+                self.record(ctx, key, previous, role, saved)
+        return self.counts.get((key, profile), 0)
+
+    def reset_profile(self, ctx: Ctx, profile: str, role: str) -> None:
+        keys = {key for key, name in self.counts if name == profile}
+        default = profile if len(_chain(ctx, role)) == 1 else ""
+        keys.update(key for key in self.legacy if self.previous.get(key, default) == profile)
+        for key in keys:
+            self.legacy.pop(key, None)
+            self.record(ctx, key, profile, role, 0)
+
+
+def _infra_retries(ctx: Ctx) -> _InfraRetries:
+    if ctx.infra_retries is None:
+        ctx.infra_retries = _InfraRetries(ctx.run)
+    return ctx.infra_retries
+
+
 def _infra(ctx: Ctx, task: tasks.Task | None, ts: TaskState, res: agents.Result, call: agents.Call, role: str,
            key: str = "") -> bool:
+    retries = _infra_retries(ctx)
+    key = task.key if task else key
     if res.disposition == "usage_limit":
         p = call.profile
         limits = quota.codex_limits(call.home) if p.adapter == "codex" and not p.base_url else None
@@ -757,11 +827,13 @@ def _infra(ctx: Ctx, task: tasks.Task | None, ts: TaskState, res: agents.Result,
         if nxt is None:
             _all_exhausted(ctx, task, role, key)
         else:
+            ts.infra = retries.count(ctx, key, nxt.name, role)
             ctx.run.save()
             ctx.notify(messages.fyi(ctx.m.change, f"{p.name} hit its usage limit; {role} continues on {nxt.name}."))
         return True
     if res.disposition == "infra":
-        ts.infra += 1
+        count = retries.count(ctx, key, call.profile.name, role) + 1
+        ts.infra = retries.record(ctx, key, call.profile.name, role, count)
         if ts.infra > ctx.m.max_infra:
             ctx.pause("infra", task, res.detail, key=key, resume_at=time.time() + INFRA_COOLDOWN)
         else:
@@ -776,10 +848,12 @@ def _chain(ctx: Ctx, role: str) -> tuple:
 
 def _pick(ctx: Ctx, role: str):
     """The first profile in the role's chain that is not usage-limited right now."""
+    retries = _infra_retries(ctx)  # Snapshot legacy attribution before the next call is recorded.
     now = time.time()
     for p in _chain(ctx, role):
         if ctx.run.state.exhausted.get(p.name, 0) <= now:
-            ctx.run.state.exhausted.pop(p.name, None)
+            if ctx.run.state.exhausted.pop(p.name, None) is not None:
+                retries.reset_profile(ctx, p.name, role)
             return p
     return None
 
