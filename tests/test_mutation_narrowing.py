@@ -190,7 +190,9 @@ if is_mutant and is_target:
 sys.exit(7)
 '''
     target = manifest.Step(stage, (sys.executable, "-B", "-c", script,
-                                  "{src}", "{mutant_path}", phase, str(code)), expect=7, timeout=0.5)
+                                  "{src}", "{mutant_path}", phase, str(code)), expect=7, timeout=3)
+    # 3 s, not 0.5: the baseline is a fresh Python process, and under a loaded base-sync
+    # verify its startup alone exceeded 0.5 s (#7). The timeout case sleeps 60 s regardless.
     # A selected placeholder is present even when preparation is the target.
     test = replace(m.verify[1], run=(sys.executable, "-c", "import sys; sys.exit(7)", "{mutant_path}"), expect=7)
     steps = (test, m.verify[-1]) if stage == "prepare" else (target, m.verify[-1])
