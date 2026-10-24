@@ -2,6 +2,8 @@
 
 import fcntl
 import os
+import re
+import shlex
 import socket
 import subprocess
 from contextlib import ExitStack
@@ -322,7 +324,11 @@ def test_status_empty_inventory_preserves_worker_output(status_state, capsys, ar
 
 
 @pytest.mark.scenario("background-job-control/active-jobs-in-status/active-attempts-are-visible")
-@pytest.mark.parametrize("args", [[], ["status"]])
+@pytest.mark.scenario("specloop-documentation/active-job-status-guidance/operator-reads-job-status")
+@pytest.mark.parametrize("args", [[], ["status"], *[
+    shlex.split(re.search(r"`nightshift (status)`", (Path(__file__).resolve().parents[1] / path).read_text())[1])
+    for path in ("README.md", "docs/specloop/README.md")
+]])
 def test_status_active_jobs_before_network(status_state, capsys, args):
     root, before_network = status_state
     with ExitStack() as locks:
