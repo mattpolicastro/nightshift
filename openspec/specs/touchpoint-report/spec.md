@@ -186,3 +186,13 @@ When proposal records are missing, the report SHALL infer issue identity from ex
 - **WHEN** fallback evidence includes a correctly qualified name for owner/widget.js_tools-x alongside another owner's prefix, regex-lookalike punctuation, a zero or leading-zero issue number, an invalid or overlong slug, a path-like change, a conflicting issue field or an ambiguous receipt directory without an explicit repository
 - **THEN** the valid row is recovered with its exact repository spelling, invalid evidence retains diagnostics without speculative attribution or unsafe event reads, and healthy rows remain available
 - **THEN** matching proposal/job identities continue to take precedence over name inference under the existing attribution rules
+
+### Requirement: Compaction preserves history
+
+Delivered-attempt compaction SHALL preserve the existing report's identities, round counts, deduplication and date selection through retained requests/results and original request mtimes. It SHALL require no change to reporting code, output schema or offline read-only behavior.
+
+#### Scenario: Cleanup preserves touchpoint history
+- **WHEN** multiple proposal question rounds, spec revisions, build revisions and refused admissions are reported before compaction, after compaction, and after current receipts are replaced by later rounds
+- **THEN** each historical round retains its original attribution and count, current-result and build-event duplicates are still collapsed, and new rounds add only their normal observations
+- **THEN** request mtimes remain unchanged, including across cleanup interruption/restart, and --since boundaries before, exactly at and after the original proposal date select the same historical changes
+- **THEN** offline reporting succeeds without new cleanup-induced diagnostics, state writes, subprocesses or network calls
