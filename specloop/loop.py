@@ -850,7 +850,7 @@ def _infra(ctx: Ctx, task: tasks.Task | None, ts: TaskState, res: agents.Result,
     key = task.key if task else key
     if res.disposition == "usage_limit":
         p = call.profile
-        limits = quota.codex_limits(call.home) if p.adapter == "codex" and not p.base_url else None
+        limits = quota.codex_limits(call.home) if p.adapter == "codex" and not p.base_url and not p.auth else None
         until = quota.resume_at(limits)
         ctx.run.state.exhausted[p.name] = until
         ctx.run.event("exhausted", profile=p.name, until=until, detail=res.detail[:300])

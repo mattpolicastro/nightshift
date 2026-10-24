@@ -126,3 +126,16 @@ touchpoint recovery contracts SHALL remain unchanged.
 - **THEN** driver recovery clears that unavailable block and resets the task/profile retry allowance so the profile can be probed immediately, without clearing quota deadlines or replenishing the supervisor's automatic-resume budget
 - **WHEN** an existing manual resume follows a multi-profile infra pause
 - **THEN** the paused task's pair counters reset while profile deadlines remain in force
+
+### Requirement: Per-profile codex login
+
+A codex profile without `base_url` MAY name its own login file with `auth` (for example an API-key login at `~/.codex-api/auth.json`); its session SHALL use that login instead of `~/.codex/auth.json`, and the subscription quota read SHALL be skipped for it. `auth` SHALL be refused on any other profile. The seal SHALL treat the values in every `~/.codex*/auth.json` as secrets a diff must never contain.
+
+#### Scenario: A profile names its own login
+- **WHEN** a role's chain lists a subscription codex profile and then a codex profile with `auth = "~/.codex-api/auth.json"`
+- **THEN** sessions for the second profile link that login in their private home, and a changed `auth` replaces the stale link
+
+#### Scenario: Every codex login is a sealed secret
+- **WHEN** `~/.codex/auth.json` and `~/.codex-api/auth.json` both exist
+- **THEN** the seal's credential values include the token values from both
+

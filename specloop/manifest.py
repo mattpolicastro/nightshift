@@ -20,6 +20,7 @@ class Profile:
     model: str
     effort: str = ""
     base_url: str = ""  # empty: the CLI's own subscription login
+    auth: str = ""  # codex only: a separate auth.json (e.g. an API-key login) instead of ~/.codex/auth.json
 
 
 @dataclass(frozen=True)
@@ -117,7 +118,10 @@ def parse(data: dict, roles_override: dict[str, str] | None = None) -> Manifest:
     for name, p in data.get("profiles", {}).items():
         if p["adapter"] not in ADAPTERS:
             raise ValueError(f"profile {name}: unknown adapter {p['adapter']!r}")
-        profiles[name] = Profile(name, p["adapter"], p["model"], p.get("effort", ""), p.get("base_url", ""))
+        auth = p.get("auth", "")
+        if auth and (p["adapter"] != "codex" or p.get("base_url")):
+            raise ValueError(f"profile {name}: auth applies only to a codex profile without base_url")
+        profiles[name] = Profile(name, p["adapter"], p["model"], p.get("effort", ""), p.get("base_url", ""), auth)
     chains = {}
     role_names = {**data["roles"], **{k: v for k, v in (roles_override or {}).items() if v}}
     # `feasibility` is optional and falls back to the review chain. A refusal
