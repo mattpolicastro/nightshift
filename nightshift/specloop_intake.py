@@ -888,6 +888,57 @@ def revise_pending(
                  on_error=on_error, on_pending=on_pending)
 
 
+def _readiness_ci(repo: Repo, number: int, *, runner=None) -> list[str]:
+    """Classify one ordinary PR-check snapshot through the string-returning runner."""
+    try:
+        raw = (runner or queue._gh)([
+            "pr", "checks", str(number), "--repo", repo.name, "--json", "name,bucket,state",
+        ])
+    except Paused:
+        raise
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return ["CI: checks unavailable; green CI could not be established"]
+    try:
+        checks = json.loads(raw)
+    except (ValueError, TypeError):
+        return ["CI: malformed check results"]
+    if not isinstance(checks, list) or any(
+            not isinstance(check, dict) or any(
+                not isinstance(check.get(field), str) or not check[field].strip()
+                for field in ("name", "bucket", "state")) for check in checks):
+        return ["CI: malformed check results"]
+    buckets = {check["bucket"] for check in checks}
+    if "pass" in buckets and buckets <= {"pass", "skipping"}:
+        return []
+    return ["CI: checks are not green; require at least one pass and only pass or skipping buckets"]
+
+
+def _readiness_assessment(repo: Repo, labels: queue.Labels, state_dir: Path, number: int,
+                          row: dict, pr: dict, *, runner=None, git_runner=None) -> dict:
+    """Compose all conditions in stable order without delivering or modifying state."""
+    head = pr.get("headRefOid")
+    head = head if isinstance(head, str) and head.strip() else ""
+    reasons = []
+    if not head:
+        reasons.append("head: PR head is missing or unknown")
+    elif head != row.get("head"):
+        reasons.append(f"head: PR head {head} does not match run head {row.get('head') or '(unknown)'}")
+    reasons.extend(_readiness_ci(repo, number, runner=runner))
+    reasons.extend(_readiness_evidence(row, git_runner=git_runner))
+    current = {label["name"] for label in pr["labels"]}
+    reasons.extend(_readiness_revision(repo, labels, state_dir, number, row, current))
+    reasons.extend(_readiness_human_checks(row, pr.get("body"), git_runner=git_runner))
+    label = "merge:blocked" if reasons else "merge:ready"
+    advisory = (f"Advisory snapshot for {head or '(unknown)'}. Recheck CI and current main when landing; "
+                "this label does not authorize merge.")
+    explanation = ("\n".join(f"- {reason}" for reason in reasons) if reasons else
+                   "PR head matches the run; CI checks are green; section evidence passed with zero "
+                   "timeouts (or an allowed measurement exemption); no build revision is pending; "
+                   "human checks are empty or explicitly post-deploy.")
+    return {"head": head, "run_head": row.get("head"), "label": label, "reasons": reasons,
+            "body": f"Merge readiness: `{label}`.\n\n{advisory}\n\n{explanation}"}
+
+
 def _readiness_human_checks(row: dict, body: object, *, git_runner=None) -> list[str]:
     """Apply the literal checklist/spec line rules, using only committed run-head specs."""
     unknown = ["human checks: unknown checklist or scenario annotation"]
