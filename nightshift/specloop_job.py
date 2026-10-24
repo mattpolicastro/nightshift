@@ -48,6 +48,9 @@ class Job:
     started_at: float | None = None
     timeout_seconds: float | None = None
     deadline_at: float | None = None
+    # Optional item-level display metadata, never attempt cleanup authority.
+    delivered: bool = False
+    diagnostics: tuple[str, ...] = ()
 
     @property
     def identity_available(self) -> bool:
@@ -355,9 +358,36 @@ def revision_attempt(path: Path, receipt: dict):
             yield "pending"
 
 
-def list_jobs(state_dir: Path) -> tuple[list[Job], list[str]]:
+def _read_delivery(path: Path) -> tuple[bool, tuple[str, ...]]:
+    """Read display metadata without following a receipt link or creating state."""
+    try:
+        # O_NOFOLLOW also rejects dangling links and replacement races at open.
+        # Nonblocking open lets us diagnose a FIFO instead of waiting on it.
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError("expected a regular receipt file")
+            with os.fdopen(descriptor, "r", encoding="utf-8", closefd=False) as stream:
+                receipt = json.load(stream)
+        finally:
+            # Also close non-regular files and descriptors fdopen rejects.
+            os.close(descriptor)
+        if not isinstance(receipt, dict):
+            raise ValueError("expected a JSON object")
+        if "delivered" in receipt and type(receipt["delivered"]) is not bool:
+            raise ValueError("delivered must be a JSON boolean")
+        return receipt.get("delivered") is True, ()
+    except FileNotFoundError:
+        return False, ()  # Missing legacy receipts are normal.
+    except (OSError, ValueError) as exc:
+        return False, (f"{path}: {exc}",)
+
+
+def list_jobs(state_dir: Path, *, include_delivery: bool = False) -> tuple[list[Job], list[str]]:
     """Return local attempts and diagnostics, independent of receipts/handles."""
 
+    # Opt-in delivery metadata reads each item receipt once, for display only.
+    # Receipt diagnostics attach to every affected row without changing its state.
     # Rows sort by stage, repository, numeric item and full ID. Malformed jobs
     # remain visible as unknown when their directory context can be recovered;
     # errors are returned separately so callers can display good rows and fail.
@@ -365,6 +395,7 @@ def list_jobs(state_dir: Path) -> tuple[list[Job], list[str]]:
     # process metadata is always exposed as None, never guessed from a PID.
     # identity_available also distinguishes failed process-start lookups.
     jobs, errors = [], []
+    delivery: dict[Path, tuple[bool, tuple[str, ...]]] = {}
 
     def directories(parent: Path) -> list[Path]:
         try:
@@ -415,11 +446,21 @@ def list_jobs(state_dir: Path) -> tuple[list[Job], list[str]]:
                     if record_errors:
                         state = "unknown"
                         errors.extend(f"{directory}: {error}" for error in record_errors)
+                    delivered = False
+                    receipt_errors: tuple[str, ...] = ()
+                    if include_delivery:
+                        path = directory.parent.with_suffix(".json")
+                        if path not in delivery:
+                            delivery[path] = _read_delivery(path)
+                            errors.extend(delivery[path][1])
+                        delivered, receipt_errors = delivery[path]
                     # Only the owner/repository separator is encoded; the
                     # repository name itself may contain double underscores.
                     jobs.append(Job(directory.name, stage, repo.name.replace("__", "/", 1),
                                     number, command, state, directory, process,
-                                    started_at, timeout_seconds, deadline_at))
+                                    started_at, timeout_seconds, deadline_at, delivered,
+                                    tuple(f"{directory}: {error}" for error in record_errors)
+                                    + receipt_errors))
     jobs.sort(key=lambda job: (job.stage, job.repository, job.number, job.id))
     return jobs, errors
 
