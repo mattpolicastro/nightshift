@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import re
 import signal
@@ -27,6 +28,7 @@ from . import specloop_client
 
 
 _children: dict[str, subprocess.Popen] = {}
+COMMAND_TIMEOUT_SECONDS = {"propose": 3600, "admit": 300, "revise": 1800}
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,9 @@ class Job:
     directory: Path
     # None explicitly identifies legacy jobs with unavailable identity.
     process: dict | None
+    started_at: float | None = None
+    timeout_seconds: float | None = None
+    deadline_at: float | None = None
 
     @property
     def identity_available(self) -> bool:
@@ -121,6 +126,32 @@ def _read_process(directory: Path) -> dict | None:
     return process
 
 
+def _read_timing(request: dict, stage: str) -> tuple[float | None, float | None, float | None]:
+    """Validate persisted timing without inferring or migrating legacy values."""
+    if "stage" in request and request["stage"] != stage:
+        raise ValueError("request.json: stage does not match inventory stage")
+    keys = ("started_at", "timeout_seconds", "deadline_at")
+    if not any(key in request for key in keys):
+        return None, None, None
+    if not all(key in request for key in keys):
+        raise ValueError("request.json: partial timing")
+    if all(request[key] is None for key in keys):
+        return None, None, None
+    values = tuple(request[key] for key in keys)
+    try:
+        valid = all(type(value) in (int, float) and math.isfinite(value) for value in values)
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise ValueError("request.json: timing must contain finite numbers")
+    started_at, timeout_seconds, deadline_at = values
+    if request.get("stage") != stage:
+        raise ValueError("request.json: timed request requires its inventory stage")
+    if timeout_seconds <= 0 or deadline_at != started_at + timeout_seconds:
+        raise ValueError("request.json: inconsistent timing or nonpositive timeout")
+    return started_at, timeout_seconds, deadline_at
+
+
 def _job_state(directory: Path, process: dict | None) -> str:
     # Read-only open: inventory must never create state or replace a lock.
     with (directory / "lock").open("r") as lock:
@@ -180,12 +211,15 @@ def list_jobs(state_dir: Path) -> tuple[list[Job], list[str]]:
                         errors.append(f"{directory}: {exc}")
                         continue
                     command, process, state = (), None, "unknown"
+                    started_at = timeout_seconds = deadline_at = None
                     record_errors = []
                     try:
-                        args = _read_object(directory / "request.json").get("args")
+                        request = _read_object(directory / "request.json")
+                        args = request.get("args")
                         if not isinstance(args, list) or not args or not all(isinstance(a, str) for a in args):
                             raise ValueError("request.json: expected a nonempty string argument list")
                         command = tuple(args)
+                        started_at, timeout_seconds, deadline_at = _read_timing(request, stage)
                     except (OSError, ValueError) as exc:
                         record_errors.append(str(exc))
                     try:
@@ -202,7 +236,8 @@ def list_jobs(state_dir: Path) -> tuple[list[Job], list[str]]:
                     # Only the owner/repository separator is encoded; the
                     # repository name itself may contain double underscores.
                     jobs.append(Job(directory.name, stage, repo.name.replace("__", "/", 1),
-                                    number, command, state, directory, process))
+                                    number, command, state, directory, process,
+                                    started_at, timeout_seconds, deadline_at))
     jobs.sort(key=lambda job: (job.stage, job.repository, job.number, job.id))
     return jobs, errors
 
@@ -541,12 +576,20 @@ def reap() -> None:
             del _children[key]
 
 
-def start(path: Path, receipt: dict, args: list[str], *, launcher=None) -> None:
+def start(path: Path, receipt: dict, args: list[str], *, launcher=None, clock=None) -> None:
     reap()
+    started_at = (clock or time.time)()
+    timeout_seconds = COMMAND_TIMEOUT_SECONDS[args[0]]
+    request = {
+        "stage": path.parent.parent.name, "args": args,
+        "started_at": started_at, "timeout_seconds": timeout_seconds,
+        "deadline_at": started_at + timeout_seconds,
+    }
+    _read_timing(request, path.parent.parent.name)
     job = uuid.uuid4().hex
     directory = path.parent / f"{path.stem}.jobs" / job
     directory.mkdir(parents=True)
-    save(directory / "request.json", {"args": args})
+    save(directory / "request.json", request)
     with (directory / "lock").open("w") as lock, (directory / "log").open("w") as log:
         fcntl.flock(lock, fcntl.LOCK_EX)
         receipt["job"] = job
