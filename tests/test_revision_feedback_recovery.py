@@ -12,6 +12,8 @@ from unittest.mock import Mock
 
 import pytest
 
+from revision_result_fixtures import revision_success
+
 from nightshift import queue, specloop_intake as intake, specloop_job
 from test_revision_feedback_consumption import read, receipt_path, stage_setup
 from test_specloop_build_revision import setup as build_setup
@@ -462,7 +464,9 @@ def test_selected_job_survives_pause_stop_and_reauthorization(stage_setup, tmp_p
     later_feedback(gh)
     if control != "pause":
         specloop_job.save(directory / "stop.json", {"state": control})
-    specloop_job.finalize(directory, {"result": commands.result})
+    expected = revision_success(json.loads((directory / "request.json").read_text())["args"],
+                                commands.result)
+    specloop_job.finalize(directory, {"result": expected})
     if control == "pause":
         collect = specloop_job._collect_locked
         pause = tmp_path / "pause"
@@ -480,12 +484,12 @@ def test_selected_job_survives_pause_stop_and_reauthorization(stage_setup, tmp_p
             health = daemon.RepoHealth()
             daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
             paused = read(tmp_path)
-            assert paused["result"] == commands.result and not paused.get("delivered")
+            assert paused["result"] == expected and not paused.get("delivered")
             assert fixed(paused) == fixed(saved)
             # Build success is acknowledged before notification; specs wait for push.
-            expected = sorted([*saved["consumed_feedback_ids"], "conversation:102"])
+            expected_ids = sorted([*saved["consumed_feedback_ids"], "conversation:102"])
             assert paused["consumed_feedback_ids"] == (
-                expected if commands.result["outcome"] == "revised" else saved["consumed_feedback_ids"])
+                expected_ids if commands.result["outcome"] == "revised" else saved["consumed_feedback_ids"])
             assert not health.failures and not health.item_failures and not gh.comments
             daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
             assert read(tmp_path) == paused
@@ -507,9 +511,9 @@ def test_selected_job_survives_pause_stop_and_reauthorization(stage_setup, tmp_p
     recovered = read(tmp_path)
     assert fixed(recovered) == fixed(saved) and len(jobs) == 1 and not dispatches(commands)
     assert "agent:revise" in gh.labels  # The newer application belongs to a later round.
-    assert json.loads((directory / "result.json").read_text()) == {"result": commands.result}
+    assert json.loads((directory / "result.json").read_text()) == {"result": expected}
     if control == "pause":
-        assert recovered["delivered"] and recovered["consumed_feedback_ids"] == expected
+        assert recovered["delivered"] and recovered["consumed_feedback_ids"] == expected_ids
         assert len(gh.comments) == 2
         assert gh.comments[-1]["body"].endswith(
             f"<!-- nightshift:revise:{saved['change']}:{saved['round_id']} -->")
@@ -563,7 +567,8 @@ def test_background_reader_retains_snapshot_across_restart(
         assert (payload == saved["feedback"] if args[0] == "revise"
                 else saved["feedback"][0] in payload)
         assert "Edited after dispatch" not in str(payload) and "Later feedback" not in str(payload)
-        specloop_job.finalize(directory, {"result": commands.result})
+        expected = revision_success(args, commands.result)
+        specloop_job.finalize(directory, {"result": expected})
     finally:
         for _, _, fd in jobs:
             os.close(fd)
@@ -580,9 +585,10 @@ def test_background_reader_retains_snapshot_across_restart(
         assert fixed(read(tmp_path)) == fixed(saved)
         assert read(tmp_path)["consumed_feedback_ids"] == consumed
         assert not gh.comments and "agent:revise" in gh.labels
-        assert json.loads((directory / "result.json").read_text()) == {"result": commands.result}
+        assert json.loads((directory / "result.json").read_text()) == {"result": expected}
         module = restart()
     tick(stage_setup, tmp_path, module=module, background=True, launcher=launch)
+    assert read(tmp_path)["result"] == expected
     assert len(jobs) == 1 and not dispatches(commands)
     assert fixed(read(tmp_path)) == fixed(saved)
     assert read(tmp_path)["consumed_feedback_ids"] == sorted([*consumed, "conversation:102"])

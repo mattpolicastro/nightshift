@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from revision_result_fixtures import revision_success
+
 from manifest_fixtures import manifest_text
 
 from nightshift import daemon, queue, specloop_intake, specloop_job
@@ -591,6 +593,9 @@ def delivery_job(background, monkeypatch):
         job.path = daemon.STATE_DIR / directory / "owner__sample" / f"{number}.json"
         receipt = json.loads(job.path.read_text())
         job.directory = job.path.parent / f"{number}.jobs" / receipt["job"]
+        argv = json.loads((job.directory / "request.json").read_text())["args"]
+        job.result = revision_success(argv, result)
+        (root / "cli-result.json").write_text(json.dumps(job.result))
         job.result_path = job.directory / "result.json"
         assert len(children) == 1 and children[0].poll() is None
         assert not job.result_path.exists()

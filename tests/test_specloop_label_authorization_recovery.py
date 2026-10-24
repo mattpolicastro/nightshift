@@ -16,6 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from revision_result_fixtures import revision_success
+
 from nightshift import daemon, queue, specloop_intake
 from nightshift.config import Config
 from test_engine_routing import DraftGh
@@ -895,6 +897,8 @@ def test_revision_recovery_rechecks_membership_and_reuses_same_event(
                     repo, queue.Labels(), tmp_path, runner=lost_delivery,
                     git_runner=commands, specloop_runner=commands,
                 )
+        expected = (revision_success(json.loads((directory / "request.json").read_text())["args"],
+                                     commands.result) if recovery == "job" else commands.result)
         original = json.loads(path.read_text())
         original_labels = gh.labels.copy()
         trusted = False  # Current membership is rechecked even for this same event.
@@ -902,7 +906,7 @@ def test_revision_recovery_rechecks_membership_and_reuses_same_event(
         gh.calls.clear()
         for finished in (False, True) if recovery == "job" else (True,):
             if recovery == "job" and finished:
-                job_module.finalize(directory, {"result": commands.result})
+                job_module.finalize(directory, {"result": expected})
                 locks.close()
             snapshot = files_under(tmp_path)
             for module in (specloop_intake, restarted_intake()):
@@ -943,7 +947,7 @@ def test_revision_recovery_rechecks_membership_and_reuses_same_event(
         result, = revision_poll(repo, tmp_path, github, commands=commands, module=restarted_intake())
         receipt = json.loads(path.read_text())
         assert receipt["event"] == original["event"] and receipt["delivered"]
-        assert result == commands.result
+        assert result == expected
         assert_no_revision_reads(gh)
         assert not any(c[0] == "specloop" for c in commands.calls)
         if stage == "spec-revision":

@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from revision_result_fixtures import revision_success
+
 from nightshift import queue, specloop_intake as intake, specloop_job
 from test_specloop_approval import Commands as AdmissionCommands
 from test_specloop_build_revision import BuildCommands, setup, poll
@@ -337,9 +339,14 @@ def test_undelivered_failure_retries_only_when_feedback_changes(stage_setup, tmp
     elif feedback_change == "id_only":
         gh.feedback[1]["id"] = 104  # Identical text still represents new feedback.
     commands.result = success
-    expected = failure if feedback_change == "unchanged" else success
-    assert poll(stage_setup, tmp_path) == [expected]
+    results = poll(stage_setup, tmp_path)
+    expected = failure if feedback_change == "unchanged" else commands.result
+    assert results == [expected]
     recovered = read(tmp_path)
+    if feedback_change != "unchanged" and isinstance(commands, BuildCommands):
+        argv = next(c for c in reversed(commands.calls) if c[:2] == ["specloop", "revise"])
+        if "--round-id" in argv:
+            assert expected["round_id"] == argv[argv.index("--round-id") + 1] == recovered["round_id"]
     assert recovered["event"] == saved["event"]
     assert recovered["delivered"]
     dispatches = commands.feedback if isinstance(commands, BuildCommands) else commands.proposals
@@ -399,6 +406,7 @@ def test_first_selection_includes_historical_ids_without_commit_read(stage_setup
 @pytest.mark.scenario(
     "specloop-documentation/front-door-guidance/revision-feedback-survives-a-long-round"
 )
+@pytest.mark.scenario("pr-revision/keyed-result-acknowledgement/result-identity-gates-consumption")
 def test_comments_during_revision_feed_the_next_round(stage_setup, tmp_path, monkeypatch, source, same_body):
     repo, gh, commands = stage_setup
     a = {**gh.feedback[1], "submittedAt": gh.feedback[1]["createdAt"]}
@@ -425,7 +433,7 @@ def test_comments_during_revision_feed_the_next_round(stage_setup, tmp_path, mon
         specloop_job.save(path, receipt)
 
     monkeypatch.setattr(specloop_job, "start", start)
-    monkeypatch.setattr(specloop_job, "_collect_locked", lambda *args: commands.result if ready else None)
+    monkeypatch.setattr(specloop_job, "_collect_locked", lambda *args: expected if ready else None)
 
     def tick():
         return intake.revise_pending(repo, queue.Labels(), tmp_path, runner=github,
@@ -446,8 +454,10 @@ def test_comments_during_revision_feed_the_next_round(stage_setup, tmp_path, mon
     a["body"] = "A edited after selection"
     tick()  # A pending job must retain its exact payload, despite live edits.
     assert len(jobs) == 1 and read(tmp_path) == snapshot
+    expected = revision_success(jobs[0], commands.result)
     ready = True
     tick()
+    assert read(tmp_path)["result"] == expected
     assert read(tmp_path)["feedback"] == snapshot["feedback"]
     assert read(tmp_path)["consumed_feedback_ids"] == sorted([*consumed, a_id])
     assert "agent:revise" not in gh.labels
