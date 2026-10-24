@@ -888,6 +888,119 @@ def revise_pending(
                  on_error=on_error, on_pending=on_pending)
 
 
+def _readiness_human_checks(row: dict, body: object, *, git_runner=None) -> list[str]:
+    """Apply the literal checklist/spec line rules, using only committed run-head specs."""
+    unknown = ["human checks: unknown checklist or scenario annotation"]
+    if not isinstance(body, str):
+        return unknown
+    lines = body.splitlines()
+    starts = [i for i, line in enumerate(lines) if line == "## Checks a human must make"]
+    if len(starts) != 1:
+        return unknown
+    start = starts[0] + 1
+    end = next((i for i in range(start, len(lines)) if lines[i].startswith("#")), len(lines))
+    checks = [line for line in lines[start:end] if line.strip()]
+    if not checks or checks == ["(none)"]:
+        return []
+    ids = []
+    for line in checks:
+        if not line.startswith(("- [ ] ", "- [x] ")):
+            return unknown
+        parts = line.split("`")
+        citations = [part for part in parts[1::2] if "/" in part]
+        if (len(parts) % 2 != 1 or any(not part for part in parts[1::2])
+                or len(citations) != 1 or not re.fullmatch(
+                    r"[a-z0-9]+(?:-[a-z0-9]+)*(?:/[a-z0-9]+(?:-[a-z0-9]+)*){2}", citations[0])):
+            return unknown
+        ids.append(citations[0])
+    try:
+        change, head = row["change"], row["head"]
+        if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+            return unknown
+        run = run_state.Run.for_change(change, require_existing=True)
+        if run.state.change != change or run.state.pr != row["pr"]:
+            return unknown
+
+        def git(*args):
+            return (git_runner or run_git)(["git", "--git-dir", str(run.dir / "repo.git"), *args],
+                                          timeout=POLL_COMMAND_TIMEOUT, capture_output=True, text=True, check=True).stdout
+
+        def slug(name):
+            return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+        prefix = f"openspec/changes/{change}/specs/"
+        paths = git("ls-tree", "-r", "--name-only", "-z", head, "--", prefix).split("\0")
+        scenarios: dict[str, list[bool]] = {}
+        for path in paths:
+            relative = path.removeprefix(prefix).split("/")
+            if len(relative) != 2 or relative[1] != "spec.md":
+                continue
+            spec = git("show", f"{head}^{{commit}}:{path}").splitlines()
+            requirement = ""
+            for i, line in enumerate(spec):
+                if line.startswith("### Requirement: "):
+                    requirement = slug(line.removeprefix("### Requirement: "))
+                elif line.startswith("#### Scenario: ") and requirement:
+                    sid = "/".join((slug(relative[0]), requirement, slug(line.removeprefix("#### Scenario: "))))
+                    end = next((j for j in range(i + 1, len(spec)) if spec[j].startswith("#")), len(spec))
+                    scenarios.setdefault(sid, []).append("<!-- nightshift:post-deploy -->" in spec[i + 1:end])
+                elif line.startswith("#"):
+                    requirement = ""
+        return [f"human checks: outstanding or unknown post-deploy annotation for `{sid}`"
+                for sid in dict.fromkeys(ids) if scenarios.get(sid) != [True]]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+        return unknown
+
+
+def _readiness_revision(repo: Repo, labels: queue.Labels, state_dir: Path, number: int,
+                        row: dict, current: set[str]) -> list[str]:
+    """Observe revision state without authorization, collection, migration or delivery."""
+    if labels.revise in current:
+        return [f"revision: pending trigger `{labels.revise}`"]
+    path = state_dir / "revisions" / repo.name.replace("/", "__") / f"{number}.json"
+    try:
+        try:
+            receipt = json.loads(path.read_text())
+        except FileNotFoundError:
+            return []
+        if (not isinstance(receipt, dict) or not isinstance(receipt.get("change"), str)
+                or not _safe_change(receipt["change"])):
+            raise ValueError("invalid receipt identity")
+        if receipt["change"] != row["change"]:
+            return []
+        command = receipt.get("command")
+        if command == "propose":
+            return []
+        # An empty-feedback round dispatches no command or job.
+        if ("command" not in receipt and "job" not in receipt
+                and receipt.get("delivered") is True and receipt.get("result") == {"outcome": "empty"}):
+            return []
+        if command != "revise":
+            raise ValueError("unknown revision command")
+        result = receipt.get("result")
+        if (receipt.get("delivered") is not True or not isinstance(result, dict)
+                or result.get("outcome") not in ("revised", "refused")
+                or "error" in result
+                or "version" in result and (type(result["version"]) is not int or result["version"] != 1)
+                or result.get("outcome") == "revised" and not isinstance(result.get("commit"), str)
+                or result.get("outcome") == "revised" and not result.get("commit")):
+            return ["revision: pending or unknown build-revision result/delivery"]
+        if "job" in receipt:
+            job = receipt["job"]
+            if not isinstance(job, str) or not re.fullmatch(r"[0-9a-f]{32}", job):
+                raise ValueError("invalid attached job")
+            directory = path.parent / f"{number}.jobs" / job
+            if (directory / "stop.json").exists():
+                return ["revision: attached job is stopped or stopping"]
+            collected = json.loads((directory / "collected.json").read_text())
+            if (not isinstance(collected, dict) or not isinstance(collected.get("collected_at"), str)
+                    or not collected["collected_at"]):
+                raise ValueError("uncollected or unknown attached job")
+        return []
+    except (OSError, ValueError, KeyError, TypeError):
+        return ["revision: unknown local build-revision state"]
+
+
 def _readiness_evidence(row: dict, *, git_runner=None) -> list[str]:
     """Read-only local evidence assessment; an empty reason list permits readiness."""
     source = "run identity/state.json"
