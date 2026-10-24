@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from specloop import manifest as manifests
+from specloop import state as run_state, tasks as run_tasks
 
 from . import queue, specloop_client, specloop_job
 from .config import Repo
@@ -885,6 +886,100 @@ def revise_pending(
 
     return _each((item["number"] for item in pending), revise,
                  on_error=on_error, on_pending=on_pending)
+
+
+def _readiness_evidence(row: dict, *, git_runner=None) -> list[str]:
+    """Read-only local evidence assessment; an empty reason list permits readiness."""
+    source = "run identity/state.json"
+    try:
+        change, head, pr = row["change"], row["head"], row["pr"]
+        if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+            raise ValueError("missing or invalid run head")
+        run = run_state.Run.for_change(change, require_existing=True)
+        saved = run.state
+        if not isinstance(pr, str) or not pr or saved.change != change or saved.pr != pr:
+            raise ValueError("saved change/PR does not match status")
+        if (not isinstance(saved.evidenced, list)
+                or any(type(n) is not int or n < 1 for n in saved.evidenced)):
+            raise ValueError("invalid evidenced sections")
+        for field in (saved.section_base, saved.evidence_summary):
+            if not isinstance(field, dict) or any(
+                    not isinstance(k, str) or not isinstance(v, str) for k, v in field.items()):
+                raise ValueError("invalid section_base/evidence_summary")
+        source = "manifest.toml"
+        manifest = manifests.load(run.manifest_path)
+        if manifest.change != change or manifest.branch != f"spec/{change}":
+            raise ValueError("manifest identity does not match status")
+
+        def git(*args):
+            return (git_runner or run_git)(["git", "--git-dir", str(run.dir / "repo.git"), *args],
+                                          timeout=POLL_COMMAND_TIMEOUT, capture_output=True, text=True, check=True).stdout
+
+        source = "committed tasks.md/repo.git"
+        tasks_path = f"openspec/changes/{change}/tasks.md"
+        document = git("show", f"{head}^{{commit}}:{tasks_path}")
+        sections = list(dict.fromkeys(t.section for t in run_tasks.parse(document)))
+        headings = [int(m[1]) for line in document.splitlines() if (m := run_tasks.SECTION.match(line))]
+        if not sections or sections != headings:
+            raise ValueError("missing, empty or duplicate task sections")
+        source = "events.jsonl"
+        latest = {}
+        events = (run.dir / source).read_text()
+        if events and not events.endswith("\n"):
+            raise ValueError("incomplete final event line")
+        for line in events.splitlines():
+            event = json.loads(line)
+            if not isinstance(event, dict) or not isinstance(event.get("event"), str) or not event["event"]:
+                raise ValueError("invalid event record")
+            if event["event"] == "evidence":
+                n = event.get("section")
+                if type(n) is not int or n < 1:
+                    raise ValueError("invalid evidence section")
+                latest[n] = event
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError, subprocess.SubprocessError) as exc:
+        return [f"evidence: check {source} ({type(exc).__name__}: {exc})"]
+
+    reasons = []
+    for index, n in enumerate(sections):
+        prefix = f"evidence section {n}: "
+        event = latest.get(n)
+        if event is None:
+            start = saved.section_base.get(str(n), "")
+            end = saved.section_base.get(str(sections[index + 1]), "") if index + 1 < len(sections) else head
+            try:
+                if not all(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", ref) for ref in (start, end)):
+                    raise ValueError("missing section boundaries")
+                git("merge-base", "--is-ancestor", start, end)
+                git("merge-base", "--is-ancestor", end, head)
+                # Disabling rename detection exposes both sides of cross-boundary renames.
+                paths = set(git("diff", "--no-ext-diff", "--no-renames", "--name-only", "-z", start, end, "--").split("\0")) - {"", tasks_path}
+                if paths and all(p.startswith("tests/") for p in paths):
+                    continue
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
+            reasons.append(prefix + "missing event; no bounded test-only diff proof")
+            continue
+        failed = []
+        if event.get("passed") is not True:
+            failed.append("passed must be true")
+        if event.get("unmeasured", False) is not False:
+            failed.append("unmeasured or invalid measurement flag")
+        score = event.get("score")
+        skip = "mutation: skipped (no mutable lines added under mutation_paths)"
+        if not (isinstance(score, (int, float)) and not isinstance(score, bool) and 0 <= score <= 1):
+            if not ("score" in event and score is None and skip in saved.evidence_summary.get(str(n), "").splitlines()):
+                failed.append("score missing, invalid or unmeasured without no-mutable-lines summary")
+        timeouts = event.get("timeouts")
+        if type(timeouts) is not int or timeouts < 0:
+            failed.append("timeouts missing or invalid")
+        elif timeouts:
+            failed.append(f"{timeouts} timeouts")
+        if event.get("uncovered") != []:
+            failed.append("uncovered scenarios missing, invalid or nonempty")
+        if n not in saved.evidenced:
+            failed.append("saved evidence completion missing")
+        reasons.extend(prefix + reason for reason in failed)
+    return reasons
 
 
 def publish_pending(
