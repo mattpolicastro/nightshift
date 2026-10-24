@@ -104,6 +104,10 @@ Test exits after prepared-journal persistence, after ref advancement before stat
 
 Implementation acceptance is `uv run pytest`, plus the repository's type regression check where applicable. This drafting task only validates artifacts. Operator edits during implementation are limited to specloop passages in `README.md`, `docs/specloop/README.md`, `docs/specloop/command-json.md`, and `KNOWN-LIMITATIONS.md`. Cite issue #7 until an implementation PR exists, retain #9 references, qualify all existing crash-boundary warnings consistently, and preserve unrelated limits. Documentation tests check links, syntax and CLI schema, never mandatory prose phrases.
 
+### Provenance scope
+
+Request, argv and receipt are written only by the daemon, atomically. The harness does not defend against independent edits of those files between dispatch and collection. Provenance agreement is checked only where a decision depends on it: before dispatching a replacement attempt and before replaying a keyed round. Collecting a cached result, and detaching a failed or crashed attempt, work exactly as today with no extra validation on those paths.
+
 ## Risks / Trade-offs
 
 - Journals and historical attempts accumulate with the run. Deleting them or restoring incomplete backups loses the guarantee; automated pruning and recovery from arbitrary corruption are outside scope.

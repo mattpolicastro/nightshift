@@ -24,8 +24,8 @@ A new keyed build-revision attempt SHALL persist its round identity and separate
 - **THEN** malformed, missing or inconsistent declared attempt provenance prevents automatic redispatch, and retry inspection creates no release lock
 
 #### Scenario: Mixed legacy and keyed evidence is refused
-- **WHEN** a saved attempt retains keyed evidence but its request round_id, argv --round-id or receipt key metadata is independently removed or disagrees with the other records
-- **THEN** provenance validation reports an inconsistency without treating the attempt as legacy, dispatching a replacement, consuming feedback or rewriting its evidence
+- **WHEN** a replacement dispatch or a replay decision finds a saved attempt whose request round_id, argv --round-id or receipt key metadata disagree
+- **THEN** that decision reports an inconsistency instead of treating the attempt as legacy, dispatching a replacement or consuming feedback; collecting a cached result or detaching a failed attempt proceeds as today
 - **THEN** a consistently unkeyed historical request and receipt remain supported, including an event-derived round_id and event-named feedback input retained through explicit stopped-job release
 
 #### Scenario: Compaction preserves round identity
