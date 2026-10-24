@@ -143,6 +143,43 @@ def test_test_only_missing_event_has_positive_proof(local_run, case):
         f"evidence section {n}: missing event; no bounded test-only diff proof" for n in blocked]
 
 
+@pytest.mark.scenario("merge-readiness/local-evidence-assessment/test-only-missing-event-has-positive-proof")
+@pytest.mark.parametrize("missing_section", [1, 2])
+def test_test_only_diff_ends_at_next_of_three_sections(local_run, missing_section):
+    env = local_run
+    files = {env.tasks_path: env.document + "\n## 3. Final\n- [x] 3.1 Finish\n"}
+    if missing_section == 1:
+        # Section 2's measured production edit must not leak into section 1's diff.
+        files["source.py"] = "section two\n"
+    third_base = env.commit(files)
+    env.run.state.section_base["3"] = third_base
+    env.run.state.evidenced = [n for n in (1, 2, 3) if n != missing_section]
+    env.run.save()
+    env.commit({"source.py": "section three\n"})
+    env.events.append(dict(env.events[0], section=3))
+    env.events = [event for event in env.events if event["section"] != missing_section]
+    env.write_events()
+
+    # The first and middle sections use their immediate successor's start;
+    # neither a previous section nor the final head bounds their test-only work.
+    assert _readiness_evidence(env.row) == []
+
+
+@pytest.mark.scenario("merge-readiness/local-evidence-assessment/unknown-evidence-blocks")
+def test_missing_saved_state_reports_missing_file(local_run):
+    path = local_run.run.dir / "state.json"
+    path.unlink()
+
+    reasons = _readiness_evidence(local_run.row)
+
+    # Missing persisted state must be diagnosed directly, rather than loading
+    # admission defaults and misleadingly reporting a saved PR identity mismatch.
+    assert len(reasons) == 1
+    assert "check run identity/state.json (FileNotFoundError:" in reasons[0]
+    assert str(path) in reasons[0]
+    assert not path.exists()
+
+
 @pytest.mark.parametrize("field,value", [
     ("score", True), ("score", "0.9"), ("score", -0.1), ("score", 1.1),
     ("score", float("nan")), ("score", float("inf")), ("passed", 1),

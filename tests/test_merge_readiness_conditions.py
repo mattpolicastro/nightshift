@@ -87,6 +87,35 @@ def test_annotation_must_be_committed_at_run_head(local_run):
     assert intake._readiness_human_checks(env.row, HEADING + ITEM, git_runner=timeout)
 
 
+@pytest.mark.scenario("merge-readiness/human-and-revision-conditions/pre-merge-or-unknown-checks-block")
+@pytest.mark.parametrize("ref", ["symbolic", "abbreviated"])
+def test_human_checks_reject_resolvable_non_full_head(local_run, ref):
+    env = local_run
+    env.commit({SPEC_PATH: SPEC + MARKER + "\n"})
+    assert intake._readiness_human_checks(env.row, HEADING + ITEM) == []
+    head = "HEAD" if ref == "symbolic" else env.row["head"][:12]
+    assert env.git("rev-parse", head) == env.row["head"]
+
+    assert intake._readiness_human_checks({**env.row, "head": head}, HEADING + ITEM) == [
+        "human checks: unknown checklist or scenario annotation"]
+
+
+@pytest.mark.scenario("merge-readiness/human-and-revision-conditions/pending-revision-blocks")
+@pytest.mark.parametrize("job", ["a" * 32, "a" * 31, "A" * 32, "g" * 32])
+def test_revision_job_id_validated_even_when_collection_exists(tmp_path, job):
+    path = tmp_path / "revisions/owner__repo/1.json"
+    directory = path.parent / "1.jobs" / job
+    directory.mkdir(parents=True)
+    (directory / "collected.json").write_text(json.dumps({"collected_at": "now"}))
+    path.write_text(json.dumps(dict(change="c", command="revise", delivered=True, job=job,
+                                   result=dict(outcome="revised", commit="a" * 40))))
+
+    reasons = intake._readiness_revision(Repo(name="owner/repo"), queue.Labels(), tmp_path,
+                                         1, {"change": "c"}, set())
+
+    assert reasons == ([] if job == "a" * 32 else ["revision: unknown local build-revision state"])
+
+
 @pytest.mark.parametrize("missing", ["state.json", "repo.git", "spec"])
 def test_missing_local_inputs_block_checks(local_run, missing):
     local_run.commit({SPEC_PATH: SPEC + MARKER})
