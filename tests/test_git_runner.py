@@ -104,8 +104,8 @@ while time.monotonic() < deadline:
         for child in [*children, unrelated]:
             try:
                 os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            except (ProcessLookupError, PermissionError):
+                pass  # macOS reports EPERM for a group that is already gone
             child.kill()
             child.wait(timeout=5)
             for pipe in (child.stdout, child.stderr):
