@@ -160,7 +160,7 @@ def test_spec_revised_from_review_through_daemon(setup, tmp_path, monkeypatch, i
                           "created_at": "2026-10-19T12:00:00Z"})
     monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
     monkeypatch.setattr(daemon, "PAUSE_FILE", tmp_path / "pause")
-    monkeypatch.setattr(specloop_intake.subprocess, "run", commands)
+    monkeypatch.setattr(specloop_intake, "run_git", commands)
     health = daemon.RepoHealth()
     for _ in range(2):
         daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)

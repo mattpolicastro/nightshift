@@ -2,6 +2,8 @@
 
 import fcntl
 import os
+import re
+import shlex
 import socket
 import subprocess
 from contextlib import ExitStack
@@ -224,6 +226,7 @@ def test_stop_operational_failure_is_actionable(local_state, monkeypatch, capsys
     assert "permission denied; stop intent retained; see /job/log" in output.err
 
 
+@pytest.mark.scenario("background-job-control/active-jobs-in-status/status-preserves-compatibility")
 @pytest.mark.parametrize("args, expected, fragment", [
     ([], 0, "status sentinel"), (["status"], 0, "status sentinel"),
     (["pause"], 0, "paused"), (["resume"], 0, "resumed"),
@@ -254,13 +257,164 @@ def test_existing_commands_and_options_remain_compatible(tmp_path, monkeypatch, 
         assert offline
         return {"entries": [], "error": None}
     monkeypatch.setattr(cli.specloop_attention, "snapshot", attention)
-    monkeypatch.setattr(jobs, "list_jobs", forbidden)
+    inventory_reads = []
+    def inventory(root):
+        assert args in ([], ["status"])
+        inventory_reads.append(root)
+        return [], []
+    monkeypatch.setattr(jobs, "list_jobs", inventory)
     monkeypatch.setattr(jobs, "stop_job", forbidden)
+    monkeypatch.setattr(jobs, "release_job", forbidden)
     if args == ["resume"]:
         daemon.PAUSE_FILE.touch()
     assert cli.main(["--config", str(config_path), *args]) == expected
     output = capsys.readouterr()
     assert fragment in output.out + output.err
     assert loaded == (["env"] if args in (["pause"], ["resume"]) else ["env", config_path])
+    assert inventory_reads == ([daemon.STATE_DIR] if args in ([], ["status"]) else [])
+    if args in ([], ["status"]):
+        assert output.out == "status sentinel\n  alerts: NOT CONFIGURED\n" and output.err == ""
     if args in (["pause"], ["resume"]):
         assert daemon.PAUSE_FILE.exists() == (args == ["pause"])
+
+
+@pytest.fixture
+def status_state(local_state, monkeypatch, capsys):
+    cfg = config.Config(repos=[config.Repo("enrolled/repo")])
+    monkeypatch.setattr(config, "load_env_file", lambda: None)
+    monkeypatch.setattr(config, "load", lambda path: cfg)
+    monkeypatch.setattr(cli, "_liveness", lambda cfg: "status sentinel")
+    monkeypatch.setattr(cli.time, "time", lambda: 1000)
+    monkeypatch.setattr(jobs, "stop_job", forbidden)
+    monkeypatch.setattr(jobs, "release_job", forbidden)
+    monkeypatch.setattr(jobs, "collect", forbidden)
+    claim = cli.queue.Claim("enrolled/repo", 42, "worker-branch", "/wt", "bad clock")
+    monkeypatch.setattr(cli.queue, "in_flight", lambda repo: ([claim], []))
+    monkeypatch.setattr(cli.queue, "title_of", lambda *args: "Worker title")
+    monkeypatch.setattr(cli, "_progress_of", lambda *args: "worker progress")
+    monkeypatch.setattr(cli.queue, "contradictions", lambda *args: [])
+    reads, before_network = [], []
+    list_jobs = jobs.list_jobs
+    def inventory(root):
+        reads.append(root)
+        return list_jobs(root)
+    def ready(*args):
+        assert reads == [local_state]
+        before_network.append(capsys.readouterr())
+        return []
+    monkeypatch.setattr(jobs, "list_jobs", inventory)
+    monkeypatch.setattr(cli.queue, "ready", ready)
+    return local_state, before_network
+
+
+@pytest.mark.scenario("background-job-control/active-jobs-in-status/status-preserves-compatibility")
+@pytest.mark.parametrize("args", [[], ["status"]])
+def test_status_empty_inventory_preserves_worker_output(status_state, capsys, args):
+    root, before_network = status_state
+    assert cli.main(args) == 0
+    output = capsys.readouterr()
+    assert before_network[0].out == "status sentinel\n  alerts: NOT CONFIGURED\n"
+    assert before_network[0].err == output.err == ""
+    assert output.out == (
+        "  enrolled/repo: 1 working, 0 ready, 0 blocked\n"
+        "    >> #42 Worker title  (claimed, ? on worker-branch)\n"
+        "       worker progress\n"
+    )
+    assert not root.exists()
+
+
+@pytest.mark.scenario("background-job-control/active-jobs-in-status/active-attempts-are-visible")
+@pytest.mark.scenario("specloop-documentation/active-job-status-guidance/operator-reads-job-status")
+@pytest.mark.parametrize("args", [[], ["status"], *[
+    shlex.split(re.search(r"`nightshift (status)`", (Path(__file__).resolve().parents[1] / path).read_text())[1])
+    for path in ("README.md", "docs/specloop/README.md")
+]])
+def test_status_active_jobs_before_network(status_state, capsys, args):
+    root, before_network = status_state
+    with ExitStack() as locks:
+        for digit, stage, command, state, start, deadline in [
+            ("a", "admissions", "admit", "running", 900, 1200),
+            ("b", "proposals", "propose", "starting", None, None),
+            ("c", "proposals", "propose", "running", 1100, 4700),
+            ("d", "revisions", "revise", "stopping", 0, 1000),
+            ("e", "revisions", "revise", "running", 0, 990),
+        ]:
+            directory = attempt(root, stage, digit=digit, command=[command, "--idea", "SECRET IDEA"])
+            if start is not None:
+                jobs.save(directory / "request.json", {
+                    "stage": stage, "args": [command, "--idea", "SECRET IDEA"],
+                    "started_at": start, "timeout_seconds": deadline - start, "deadline_at": deadline,
+                })
+                jobs.save(directory / "process.json", {
+                    "version": 1, "job_id": directory.name, "pid": 1234, "pgid": 1234,
+                    "start_identity": "identity", "started_at": "2026-10-21T12:00:00Z",
+                })
+            if state == "stopping":
+                jobs.save(directory / "stop.json", {"state": state})
+            fcntl.flock(locks.enter_context((directory / "lock").open()), fcntl.LOCK_EX)
+        for digit, record, value in [("f", "result", {"result": {}}),
+                                     ("0", "result", {"error": "failed"}),
+                                     ("1", "stop", {"state": "stopped"})]:
+            directory = attempt(root, digit=digit)
+            jobs.save(directory / f"{record}.json", value)
+        before = snapshot(root)
+        assert cli.main(args) == 0
+        output = capsys.readouterr()
+        early = before_network[0]
+        rows = [line.strip() for line in early.out.splitlines() if "owner/sample#" in line]
+        assert rows == [
+            f"{'a' * 32}  admissions  owner/sample#7  admit  running  elapsed 100s; 200s remaining",
+            f"{'b' * 32}  proposals  owner/sample#7  propose  starting  elapsed unavailable; deadline unavailable",
+            f"{'c' * 32}  proposals  owner/sample#7  propose  running  elapsed 0s; 3700s remaining",
+            f"{'d' * 32}  revisions  owner/sample#7  revise  stopping  elapsed 1000s; OVERDUE by 0s",
+            f"{'e' * 32}  revisions  owner/sample#7  revise  running  elapsed 1000s; OVERDUE by 10s",
+        ]
+        assert early.err == output.err == ""
+        assert "SECRET IDEA" not in early.out + output.out and "--idea" not in early.out + output.out
+        assert "enrolled/repo: 1 working, 0 ready, 0 blocked" in output.out
+        assert ">> #42 Worker title  (claimed, ? on worker-branch)" in output.out
+        assert "worker progress" in output.out
+        assert cli.main(["jobs"]) == 0
+        history = capsys.readouterr().out
+        for digit, state in [("f", "finished"), ("0", "failed"), ("1", "stopped")]:
+            assert digit * 32 not in early.out + output.out
+            assert f"{digit * 32}  proposals  owner/sample#7  {state}" in history
+        assert snapshot(root) == before
+
+
+@pytest.mark.scenario("background-job-control/active-jobs-in-status/status-tolerates-damaged-inventory")
+@pytest.mark.parametrize("args", [[], ["status"]])
+@pytest.mark.parametrize("damage", ["malformed", "unreadable", "timing"])
+def test_status_damaged_inventory_is_read_only(status_state, monkeypatch, capsys, args, damage):
+    root, before_network = status_state
+    healthy = attempt(root)
+    bad = attempt(root, digit="b")
+    if damage == "malformed":
+        (bad / "request.json").write_text("{broken")
+    elif damage == "timing":
+        jobs.save(bad / "request.json", {"args": ["propose"], "started_at": 100})
+    else:
+        read_text = Path.read_text
+        def read(path, *args, **kwargs):
+            if path == bad / "request.json":
+                raise PermissionError("permission denied reading request.json")
+            return read_text(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "read_text", read)
+    before = snapshot(root)
+    mtimes = {p: p.stat().st_mtime_ns for p in root.rglob("*")}
+    with (healthy / "lock").open() as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        assert cli.main(args) == 0
+        output = capsys.readouterr()
+        early = before_network[0]
+        assert f"{healthy.name}  proposals  owner/sample#7  propose  starting" in early.out
+        assert "elapsed unavailable; deadline unavailable" in early.out
+        assert "unreadable job:" in early.err and str(bad) in early.err
+        assert "request.json" in early.err
+        assert early.out.startswith("status sentinel\n  alerts: NOT CONFIGURED\n")
+        assert "enrolled/repo: 1 working, 0 ready, 0 blocked" in output.out
+        assert "worker progress" in output.out and output.err == ""
+        assert cli.main(["jobs"]) == 1
+        assert "unreadable job:" in capsys.readouterr().err
+    assert snapshot(root) == before
+    assert {p: p.stat().st_mtime_ns for p in root.rglob("*")} == mtimes

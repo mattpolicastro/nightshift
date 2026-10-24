@@ -38,12 +38,31 @@ Fixes land through Nightshift's own front door; these gaps remain unresolved.
   revision commit/result crash boundary and independent admitted builds above
   still apply.
 - **Background jobs:**
-  - No deadline for a hung job. `nightshift jobs` shows the local inventory
-    ([PR #28](https://github.com/mattpolicastro/nightshift/pull/28)), but does
-    not enforce deadlines or automatically retry jobs.
-  - Job directories are never cleaned, and their `request.json` keeps the full
-    idea text.
-  - Daemon git timeouts kill only the direct child, not its process group.
+  - Persisted reporting deadlines are propose 3600 seconds, admit 300 seconds
+    and revise 1800 seconds. A live overdue attempt gets `needs-human` on the
+    next authorized, eligible, unpaused poll; no automatic termination or retry.
+    Restart does not reset timing. Daemon/GitHub outages, removed triggers and
+    authorization holds delay reporting; wall-clock jumps affect observation.
+    `nightshift status` shows active timing/`OVERDUE`; legacy timing is unavailable.
+    Use `nightshift jobs` for history and the recovery instructions above
+    ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+  - Delivered attempts lose logs and safely owned idea payloads; minimal
+    requests redact idea arguments while retaining original mtimes for
+    touchpoint history. Results, control metadata and directories remain.
+    Undelivered and stopped/released evidence, workflow receipts and build
+    feedback remain too: storage still grows and this is not secure erasure
+    ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+    Interrupted cleanup waits for a later eligible, authorized, unpaused visit.
+    After final-trigger removal, closure or authorization denial, residual
+    artifacts can remain indefinitely; a cleanup journal grants no authorization.
+    Do not rearm solely for cleanup, because normal new work may follow.
+  - Daemon intake git has a 30-second command timeout, then SIGKILL to its POSIX
+    process group with at most one further second for reaping/output draining.
+    Descendants that leave the group can escape. Remote acceptance may precede
+    timeout; inspect remote refs before retrying. Existing retry/reconciliation
+    and pause rules remain ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+    Real stalled-origin fetch/push validation remains a pending human check;
+    CI process-group tests cannot establish remote acceptance or live behavior.
 - **Touchpoint history:** the report counts observed local history and can
   undercount when records are missing or overwritten; it cannot reconstruct
   missing actions ([PR #53](https://github.com/mattpolicastro/nightshift/pull/53)).

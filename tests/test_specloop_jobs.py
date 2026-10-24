@@ -88,13 +88,20 @@ print(json.dumps({"version": 1, "outcome": "needs_input", "questions": ["Which?"
 
 
 @pytest.mark.scenario("background-job-control/local-job-inventory/list-jobs-after-daemon-restart")
-def test_restart_inventory_all_stages_history_and_order(tmp_path, monkeypatch, wrappers):
+@pytest.mark.scenario("background-job-control/durable-command-timing/timing-survives-restart")
+@pytest.mark.parametrize("revision_command", ["revise", "propose"])
+def test_restart_inventory_all_stages_history_and_order(tmp_path, monkeypatch, wrappers, revision_command):
     root = tmp_path / "state"
+    now = [1792584000.25]
+    monkeypatch.setattr(jobs.time, "time", lambda: now[0])
+    requests = {}
+    budgets = {"propose": 3600, "admit": 300, "revise": 1800}
     live = []
-    for stage, command in [("revisions", "revise"), ("proposals", "propose"), ("admissions", "admit")]:
+    for stage, command in [("revisions", revision_command), ("proposals", "propose"), ("admissions", "admit")]:
         path = root / stage / "owner__sample" / "10.json"
         receipt = {"head": "unchanged"}
-        args = [command, str(tmp_path / stage)]
+        args = [command, str(tmp_path / stage), "--idea", "complete idea ☃\nsecond line",
+                "--change", "original-change", "--head", "original-head"]
         child = wrappers(path, receipt, args)
         eventually(lambda: (tmp_path / stage).exists())
         directory = path.parent / "10.jobs" / receipt["job"]
@@ -109,9 +116,14 @@ def test_restart_inventory_all_stages_history_and_order(tmp_path, monkeypatch, w
             assert process["start_identity"] == current_identity
         assert process["started_at"]
         assert json.loads(path.read_text()) == receipt == {"head": "unchanged", "job": directory.name}
-        assert json.loads((directory / "request.json").read_text()) == {"args": args}
+        requests[directory] = {
+            "stage": stage, "args": args, "started_at": now[0],
+            "timeout_seconds": budgets[command], "deadline_at": now[0] + budgets[command],
+        }
+        assert json.loads((directory / "request.json").read_text()) == requests[directory]
         assert jobs.collect(path, receipt) is None
         live.append((directory, path, receipt, args, child))
+        now[0] += 17.5
 
     # These attempts have no current receipt pointing to them.
     historical = attempt(root, "proposals", number=10, job_id="0" * 32)
@@ -121,6 +133,7 @@ def test_restart_inventory_all_stages_history_and_order(tmp_path, monkeypatch, w
     other = attempt(root, "proposals", repo="aaa__repo", number=20)
     attempt(root, "worker")  # Outside the three inventory stages.
     jobs._children.clear()
+    before = release_snapshot(root)
 
     with monkeypatch.context() as offline:
         def forbidden(*args, **kwargs):
@@ -129,8 +142,13 @@ def test_restart_inventory_all_stages_history_and_order(tmp_path, monkeypatch, w
         offline.setattr(subprocess, "Popen", forbidden)
         offline.setattr(jobs.specloop_client, "call", forbidden)
         offline.setattr(jobs, "reap", forbidden)
+        offline.setattr(socket.socket, "connect", forbidden)
+        offline.setattr(socket, "create_connection", forbidden)
+        now[0] += 86400  # Restart and later polls cannot renew a deadline.
         rows, errors = jobs.list_jobs(root)
+        now[0] -= 172800  # A backward clock change cannot rewrite it either.
         assert jobs.list_jobs(root) == (rows, errors)
+    assert release_snapshot(root) == before
     assert not errors
     assert [(row.stage, row.repository, row.number, row.id) for row in rows] == sorted(
         (row.stage, row.repository, row.number, row.id) for row in rows)
@@ -144,6 +162,9 @@ def test_restart_inventory_all_stages_history_and_order(tmp_path, monkeypatch, w
         assert row.command == tuple(args) and row.state == "running"
         assert row.pid == row.pgid == child.pid
         assert row.log_path == directory / "log"
+        request = requests[directory]
+        assert (row.started_at, row.timeout_seconds, row.deadline_at) == (
+            request["started_at"], request["timeout_seconds"], request["deadline_at"])
 
     (tmp_path / "release").touch()
     for directory, path, receipt, _, child in live:
@@ -155,6 +176,126 @@ def test_restart_inventory_all_stages_history_and_order(tmp_path, monkeypatch, w
     rows, errors = jobs.list_jobs(root)
     assert not errors
     assert all(row.state == "finished" for row in rows if row.process)
+
+
+@pytest.mark.scenario("background-job-control/durable-command-timing/timing-survives-restart")
+@pytest.mark.parametrize("stage,command,budget", [
+    ("proposals", "propose", 3600), ("admissions", "admit", 300),
+    ("revisions", "propose", 3600), ("revisions", "revise", 1800),
+])
+def test_timing_is_persisted_before_wrapper_launch(tmp_path, monkeypatch, stage, command, budget):
+    path = tmp_path / stage / "owner__sample" / "7.json"
+    receipt = {}
+    args = [command, "manifest.toml", "--idea-file", "input with spaces"]
+    monkeypatch.setattr(jobs, "_children", {})
+    launched = []
+
+    def launcher(argv, **kwargs):
+        directory = Path(argv[-2])
+        assert json.loads(path.read_text()) == receipt == {"job": directory.name}
+        assert json.loads((directory / "request.json").read_text()) == {
+            "stage": stage, "args": args, "started_at": 100.5,
+            "timeout_seconds": budget, "deadline_at": 100.5 + budget,
+        }
+        launched.append(directory)
+        return object()
+
+    jobs.start(path, receipt, args, launcher=launcher, clock=lambda: 100.5)
+    assert len(launched) == 1
+
+
+@pytest.mark.scenario("background-job-control/durable-command-timing/timing-survives-restart")
+@pytest.mark.parametrize("state", ["starting", "running", "finished", "failed", "stopping", "stopped"])
+def test_persisted_timing_preserves_execution_state(tmp_path, monkeypatch, offline_jobs_cli, state):
+    directory = attempt(tmp_path)
+    # Zero is a valid epoch, even when the deadline is long past at read time.
+    jobs.save(directory / "request.json", {
+        "stage": "proposals", "args": ["propose"],
+        "started_at": 0, "timeout_seconds": 3600, "deadline_at": 3600,
+    })
+    if state != "starting":
+        jobs.save(directory / "process.json", identity(directory))
+    if state == "finished":
+        jobs.save(directory / "result.json", {"result": {"outcome": "drafted"}})
+    elif state == "failed":
+        jobs.save(directory / "result.json", {"error": "execution failed"})
+    elif state in ("stopping", "stopped"):
+        jobs.save(directory / "stop.json", {"state": state})
+    with (directory / "lock").open("r") as lock:
+        if state in ("starting", "running", "stopping"):
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        before = release_snapshot(tmp_path)
+        monkeypatch.setattr(jobs.time, "time", offline_jobs_cli)
+        jobs._children.clear()
+        rows, errors = jobs.list_jobs(tmp_path)
+        assert not errors and len(rows) == 1
+        assert rows[0].id == directory.name and rows[0].state == state
+        assert (rows[0].started_at, rows[0].timeout_seconds, rows[0].deadline_at) == (0, 3600, 3600)
+        assert release_snapshot(tmp_path) == before
+
+
+@pytest.mark.scenario("background-job-control/durable-command-timing/legacy-and-malformed-timing")
+@pytest.mark.parametrize("now", [float("nan"), float("inf"), float("-inf"), True])
+def test_invalid_clock_cannot_persist_or_launch_job(tmp_path, monkeypatch, now):
+    monkeypatch.setattr(jobs, "_children", {})
+    path = tmp_path / "proposals" / "owner__sample" / "7.json"
+    receipt = {"head": "original"}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid timing must not launch a wrapper")
+
+    with pytest.raises(ValueError, match="timing"):
+        jobs.start(path, receipt, ["propose"], clock=lambda: now, launcher=forbidden)
+    assert receipt == {"head": "original"}
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.scenario("background-job-control/durable-command-timing/legacy-and-malformed-timing")
+@pytest.mark.parametrize("invalid", [
+    {"started_at": 100},
+    {"started_at": None},
+    {"started_at": 100, "timeout_seconds": 3600},
+    {"started_at": 100, "timeout_seconds": None, "deadline_at": 3700},
+    *({"started_at": 100, "timeout_seconds": 3600, "deadline_at": 3700, key: value}
+      for key in ("started_at", "timeout_seconds", "deadline_at")
+      for value in (float("nan"), float("inf"), float("-inf"), True, False, "100", 10 ** 400)),
+    {"started_at": 100, "timeout_seconds": 0, "deadline_at": 100},
+    {"started_at": 100, "timeout_seconds": -1, "deadline_at": 99},
+    {"started_at": 100, "timeout_seconds": 3600, "deadline_at": 3701},
+    {"stage": "admissions"},
+    {"stage": None},
+])
+def test_legacy_and_malformed_timing(tmp_path, monkeypatch, invalid, offline_jobs_cli):
+    args = ["propose", "--idea", "preserve exact input"]
+    timing = {"started_at": 100, "timeout_seconds": 3600, "deadline_at": 3700}
+    records = [
+        {"args": args},
+        {"stage": "proposals", "args": args, **dict.fromkeys(timing)},
+        {"stage": "proposals", "args": args, **timing},
+        {"stage": "proposals", "args": args, **invalid},
+    ]
+    directories = []
+    for i, request in enumerate(records, 1):
+        directory = attempt(tmp_path, job_id=str(i) * 32)
+        jobs.save(directory / "request.json", {**request, "future": {"version": 2}})
+        jobs.save(directory / "process.json", identity(directory))
+        jobs.save(directory / "result.json", {"result": {"outcome": "drafted"}})
+        directories.append(directory)
+    before = release_snapshot(tmp_path)
+    monkeypatch.setattr(jobs.time, "time", offline_jobs_cli)
+    monkeypatch.setattr(jobs, "reap", offline_jobs_cli)
+    jobs._children.clear()
+    rows, errors = jobs.list_jobs(tmp_path)
+    assert jobs.list_jobs(tmp_path) == (rows, errors)
+    assert release_snapshot(tmp_path) == before
+    assert [row.id for row in rows] == [directory.name for directory in directories]
+    assert [row.state for row in rows] == ["finished", "finished", "finished", "unknown"]
+    assert all(row.command == tuple(args) and row.process == identity(row.directory) for row in rows)
+    assert all((row.started_at, row.timeout_seconds, row.deadline_at) == (None, None, None)
+               for row in (rows[0], rows[1], rows[3]))
+    assert (rows[2].started_at, rows[2].timeout_seconds, rows[2].deadline_at) == (100, 3600, 3700)
+    assert len(errors) == 1
+    assert str(directories[3]) in errors[0] and "request.json" in errors[0]
 
 
 @pytest.mark.scenario("background-job-control/local-job-inventory/list-jobs-after-daemon-restart")

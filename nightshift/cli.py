@@ -8,6 +8,7 @@ import logging
 import os
 import shlex
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -136,6 +137,27 @@ def _jobs(action: str | None, job_id: str | None) -> int:
     return 1 if errors else 0
 
 
+def _active_jobs() -> None:
+    """Render local active attempts without changing job or delivery state."""
+    jobs, errors = specloop_job.list_jobs(daemon.STATE_DIR)
+    now = time.time()
+    for job in jobs:
+        if job.state not in ("starting", "running", "stopping"):
+            continue
+        timing = "elapsed unavailable; deadline unavailable"
+        if job.started_at is not None and job.deadline_at is not None:
+            elapsed = max(0, int(now - job.started_at))
+            deadline = (f"OVERDUE by {int(now - job.deadline_at)}s"
+                        if now >= job.deadline_at
+                        else f"{int(job.deadline_at - now)}s remaining")
+            timing = f"elapsed {elapsed}s; {deadline}"
+        command = job.command[0] if job.command else "unavailable"
+        print(f"  {job.id}  {job.stage}  {job.repository}#{job.number}  "
+              f"{command}  {job.state}  {timing}")
+    for error in errors:
+        print(f"unreadable job: {error}", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nightshift")
     parser.add_argument(
@@ -239,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 scope = f" [{repo.name}]" if repo else ""
                 print(f"  {phase}{scope}: {a.endpoint.name}:{a.model} (off-subscription)")
+        _active_jobs()
         for repo in cfg.repos:
             # Read this BEFORE asking GitHub anything. A claimed issue carries
             # `agent:working`, so `ready` cannot see it and every count below

@@ -14,7 +14,7 @@ import pytest
 
 from manifest_fixtures import manifest_text
 
-from nightshift import daemon, queue, specloop_job
+from nightshift import daemon, queue, specloop_intake, specloop_job
 from nightshift.config import Config, Repo
 from specloop import serve, state
 from specloop.state import Run
@@ -289,14 +289,12 @@ def test_jobs_survive_polls_and_restart_then_deliver_once(background, monkeypatc
               "reasons": ["Contradictory voltage."], "risks": []}
     (root / "cli-result.json").write_text(json.dumps(result))
     gh = DraftGh(("spec:draft",)) if command == "propose" else ApprovalGh()
-    original_run = subprocess.run
 
     def run(args, **kwargs):
-        if args[0] == "git":
-            return subprocess.CompletedProcess(args, 0, HEAD, "")
-        return original_run(args, **kwargs)
+        assert args[0] == "git"
+        return subprocess.CompletedProcess(args, 0, HEAD, "")
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(specloop_intake, "run_git", run)
     cfg, health = Config(repos=[repo]), daemon.RepoHealth()
     poll = partial(daemon.poll_specloop, cfg, health, runner=gh)
     poll()
@@ -357,14 +355,12 @@ def test_cancelled_jobs_remain_pending_after_restart_and_resume(
     if late_result == "error":
         result = {"version": 1, "error": "late CLI failure"}
     (root / "cli-result.json").write_text(json.dumps(result))
-    original_run = subprocess.run
 
     def run(args, **kwargs):
-        if args[0] == "git":
-            return subprocess.CompletedProcess(args, 0, HEAD, "")
-        return original_run(args, **kwargs)
+        assert args[0] == "git"
+        return subprocess.CompletedProcess(args, 0, HEAD, "")
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(specloop_intake, "run_git", run)
     notifications = []
     monkeypatch.setattr(daemon.notify, "send", lambda *args: notifications.append(args))
     cfg, health = Config(repos=[repo]), daemon.RepoHealth()
@@ -488,7 +484,6 @@ def test_pause_immediately_before_launch_stops_new_job(background, monkeypatch, 
     gh = (DraftGh(("spec:draft",)) if command == "propose" else
           ApprovalGh() if command == "admit" else RevisionGh())
     labels = set(gh.labels)
-    original_run = subprocess.run
 
     def trusted_author(*args):
         # Pause after intake reads, so the launch guard itself must stop Popen.
@@ -499,13 +494,12 @@ def test_pause_immediately_before_launch_stops_new_job(background, monkeypatch, 
     monkeypatch.setattr(daemon.specloop_intake, "_issue_author_trusted", trusted_author)
 
     def run(args, **kwargs):
-        if args[0] == "git":
-            if "rev-parse" in args:
-                daemon.PAUSE_FILE.touch()
-            return subprocess.CompletedProcess(args, 0, HEAD, "")
-        return original_run(args, **kwargs)
+        assert args[0] == "git"
+        if "rev-parse" in args:
+            daemon.PAUSE_FILE.touch()
+        return subprocess.CompletedProcess(args, 0, HEAD, "")
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(specloop_intake, "run_git", run)
     health = daemon.RepoHealth()
     daemon.poll_specloop(Config(repos=[repo]), health, runner=gh)
     assert daemon.PAUSE_FILE.exists()
@@ -587,6 +581,7 @@ def delivery_job(background, monkeypatch):
             return original_run(args, **kwargs)
 
         monkeypatch.setattr(subprocess, "run", run)
+        monkeypatch.setattr(specloop_intake, "run_git", run)
         job.runner = github
         job.poll = lambda: daemon.poll_specloop(Config(repos=[repo]), job.health, runner=job.runner)
         job.poll()
@@ -1103,6 +1098,7 @@ sys.exit(int("error" in result))
                   else {"version": 1, "outcome": "wrong"})
     (root / "cli-result.json").write_text(json.dumps(bad_result))
     monkeypatch.setattr(subprocess, "run", pipeline.command)
+    monkeypatch.setattr(specloop_intake, "run_git", pipeline.command)
     notifications = []
     monkeypatch.setattr(daemon.notify, "send", lambda *args: notifications.append(args))
     health = daemon.RepoHealth()

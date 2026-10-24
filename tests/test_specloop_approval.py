@@ -144,7 +144,7 @@ def test_approved_spec_admitted_through_daemon(repo, tmp_path, monkeypatch):
     gh, commands = ApprovalGh(), Commands()
     template = repo.manifest.read_bytes()
     monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
-    monkeypatch.setattr(specloop_intake.subprocess, "run", commands)
+    monkeypatch.setattr(specloop_intake, "run_git", commands)
     health = daemon.RepoHealth()
     for _ in range(2):
         daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
@@ -312,7 +312,7 @@ def test_unavailable_state_never_admits(repo, tmp_path, monkeypatch, failure):
         return gh(args)
 
     monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
-    monkeypatch.setattr(specloop_intake.subprocess, "run", commands)
+    monkeypatch.setattr(specloop_intake, "run_git", commands)
     health = daemon.RepoHealth()
     daemon.poll_specloop(Config(repos=[repo]), health, runner=runner, specloop_runner=commands)
     assert health.failures == {repo.name: 1}

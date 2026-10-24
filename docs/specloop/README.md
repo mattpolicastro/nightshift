@@ -59,9 +59,11 @@ eligible ([issue #5](https://github.com/mattpolicastro/nightshift/issues/5),
 The daemon writes the issue title, body and trusted comments to a durable
 UTF-8 file and passes its absolute path with `--idea-file`; the idea text
 does not go in argv. The file survives delayed background reads, later polls
-and restarts; each round keeps its own input
+and restarts until durable delivery; each round has a distinct input
 ([issue #12](https://github.com/mattpolicastro/nightshift/issues/12),
 [PR #35](https://github.com/mattpolicastro/nightshift/pull/35)).
+Delivered background inputs may then be compacted; undelivered and stopped
+inputs remain unchanged ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
 
 Draft questions or rejection remove both issue intake labels. Answer the
 questions or resolve the rejection on the issue, remove `needs-human`, and
@@ -190,6 +192,29 @@ eligible admitted publication/build revisions and other repositories continue.
 
 ### Pause, stop and the supervisor
 
+`nightshift status` reads local active attempts before repository network calls.
+Rows show full job ID, stage, repository/item, command, execution state, elapsed
+seconds and remaining time or `OVERDUE by Ns`. Starting/legacy jobs without
+timing report unavailable. Finished/failed/stopped history is in `nightshift jobs`.
+These rows are separate from daemon/worker liveness and independent
+`specloop status` run state ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+
+| Command | Budget (seconds) |
+| --- | ---: |
+| `propose` | 3600 |
+| `admit` | 300 |
+| `revise` | 1800 |
+| daemon intake `git` | 30 |
+
+Background reporting deadlines include startup and persist across restart;
+spec re-drafting uses `propose`. On the next authorized, eligible, unpaused
+poll, a live overdue attempt gets a comment and `needs-human`, retaining its
+job identity. There is no automatic termination or retry. Daemon/GitHub outages,
+removed triggers and authorization holds delay reporting; wall-clock changes
+affect elapsed/deadline calculations. Follow stop/inspection/release below for
+hung work. A late completed result can be delivered after resolving the human
+hold under normal eligibility ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+
 `nightshift pause` creates `~/.nightshift/pause`, holding new daemon launches
 and completion delivery, including publication. In-flight drafting, admission
 and revision jobs can finish locally; an already-dispatched external operation
@@ -205,7 +230,30 @@ before sending SIGTERM, then SIGKILL if needed, to that group. It records
 is refused ([issue #8](https://github.com/mattpolicastro/nightshift/issues/8),
 [PR #28](https://github.com/mattpolicastro/nightshift/pull/28)).
 
-Logs, requests, results and receipts remain on disk without automatic cleanup.
+After durable authorized delivery, validated compaction retains a minimal
+request with idea arguments redacted and its original mtime restored, preserving
+touchpoint history and date filtering across receipt replacement
+([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+
+| Delivered attempt artifact | After compaction |
+| --- | --- |
+| `log` | removed |
+| owned `--idea-file` payload | removed |
+| `request.json` | redacted |
+| `result.json` | retained |
+| `process.json` | retained |
+| `collected.json` | retained |
+| `control.lock` | retained |
+| `lock` | retained |
+
+The directory, workflow receipts and build-feedback files remain. Undelivered
+and stopped/released evidence is retained. Minimal records still accumulate;
+missing history stays missing, and retained text means this is not secure erasure.
+Interrupted cleanup waits for a later eligible, authorized, unpaused item visit;
+a journal proves delivery, not current authorization. Final-trigger removal,
+closure or authorization denial can leave residual logs/inputs indefinitely.
+Do not rearm solely for cleanup: normal new work may follow.
+
 Stopped jobs stay held across polling, daemon restart, resume and label
 removal/reapplication. Only explicit release can enable a replacement;
 the stopped result remains ineligible for delivery.
@@ -236,6 +284,18 @@ Admission can finish while paused and commit runnable state. The independent
 withholds delivery. Neither daemon pause nor job stop cancels admitted runs.
 Control the supervisor and active run processes separately; unloading its
 launchd job alone does not prove detached run processes exited.
+
+Daemon intake git runs in a new POSIX session. At its 30-second timeout it
+SIGKILLs the process group, reaps the child and bounds output draining to at most
+one additional second. Descendants that leave the group can escape; a remote
+push may already have succeeded. Timeout remains retryable under existing pause
+and reconciliation rules; inspect remote refs before retrying
+([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+Pending human checks for the implementation PR: stall a real origin on disposable
+macOS, inspect git/transport PIDs, daemon responsiveness and remote refs; exercise
+an overdue job through pause/resume and status/recovery. CI cannot prove these
+live outcomes. Verify issue/PR references and the current issue #17 ledger
+(including #34); retain Matt's single readability pass through the three guides.
 
 ### Touchpoint report
 
