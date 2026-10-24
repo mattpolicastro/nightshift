@@ -22,10 +22,30 @@ class Interrupted(BaseException):
     """Process death must bypass the driver's ordinary infrastructure handler."""
 
 
+class PublicationGh(ApprovalGh):
+    @property
+    def publication_comments(self):
+        return [c for c in self.comments if "<!-- nightshift:publish:" in c["body"]]
+
+    @property
+    def readiness_comments(self):
+        return [c for c in self.comments if "<!-- nightshift:approval:c:merge-readiness -->" in c["body"]]
+
+    def __call__(self, args):
+        if args[:2] == ["pr", "checks"]:
+            self.calls.append(args)
+            assert args == ["pr", "checks", "8", "--repo", "owner/sample", "--json", "name,bucket,state"]
+            return '[{"name":"CI","bucket":"pass","state":"COMPLETED"}]'
+        result = super().__call__(args)
+        if args[:2] == ["pr", "view"]:
+            return json.dumps({**json.loads(result), "body": "## Checks a human must make\n(none)"})
+        return result
+
+
 @pytest.fixture
 def publication(base_env, tmp_path, monkeypatch, capfd):
     env, ctx = base_env, base_env.ctx
-    gh = ApprovalGh()
+    gh = PublicationGh()
     gh.branch, gh.head = "spec/c", ctx.head()
     ctx.run.manifest_path.write_text(f'''
 [run]
@@ -80,6 +100,7 @@ run = ["/usr/bin/true"]
             p.fail_push = False
             raise OSError("injected push transport failure")
         real_push(*args)  # Push to the local bare origin, never a hosted service.
+        gh.head = ctx.head()
         p.pushes.append(ctx.head())
 
     def verify(repo, head, steps, m, out):
@@ -155,8 +176,12 @@ run = ["/usr/bin/true"]
         errors = []
         specloop_intake.publish_pending(repo, queue.Labels(), tmp_path, runner=gh_runner or gh,
                                        specloop_runner=runner, on_error=lambda n, e: errors.append(e))
-        assert not gh.labels
-        assert not any("--add-label" in call for call in gh.calls)
+        assessed = (tmp_path / "merge-readiness/owner__sample/8.json").exists()
+        assert gh.labels == ({"merge:blocked"} if assessed else set())
+        assert [call for call in gh.calls if "--add-label" in call] == (
+            [["pr", "edit", "8", "--repo", repo.name, "--add-label", "merge:blocked"]] if assessed else [])
+        assert len(gh.readiness_comments) == int(assessed)
+        assert gh.comments == gh.publication_comments + gh.readiness_comments
         assert not any("Publication refused" in c["body"] for c in gh.comments)
         return errors
 
@@ -202,14 +227,14 @@ def finish(p, old_receipt):
     assert receipt["checks"] == status["pause"]["detail"]
     assert p.pushes == [merged]
     assert sh(p.env.origin, "git", "rev-parse", "spec/c") == merged
-    assert len(p.gh.comments) == 1
-    body = p.gh.comments[0]["body"]
+    assert len(p.gh.publication_comments) == 1
+    body = p.gh.publication_comments[0]["body"]
     assert all(check in body for check in checks) and "hosted CI" in body
     assert receipt["round_id"] in body and old_receipt["round_id"] not in body
     assert "specloop publish c" not in body and "specloop finish c" in body
     publishes = p.calls.count("publish")
     assert p.poll() == [] and p.calls.count("publish") == publishes
-    assert len(p.gh.comments) == 1
+    assert len(p.gh.publication_comments) == 1
     events = [json.loads(line) for line in (p.ctx.run.dir / "events.jsonl").read_text().splitlines()]
     assert [e["head"] for e in events if e["event"] == "published"] == [merged]
 
@@ -252,7 +277,7 @@ def recover_merged_publication(p, monkeypatch, failure):
     comment_attempts = []
 
     def interrupted_comment(args):
-        if args[:2] == ["pr", "comment"]:
+        if args[:2] == ["pr", "comment"] and "<!-- nightshift:publish:" in args[-1]:
             comment_attempts.append(args)
             if failure == "comment-after":
                 p.gh(args)  # GitHub accepted the comment before the transport failed.
@@ -299,10 +324,11 @@ def recover_merged_publication(p, monkeypatch, failure):
         assert delivered["result"]["pr"] == p.gh.pr_url
         assert p.operations == operations and p.merges == p.verified == p.pushes == [merged]
         assert p.fetches == [20, 300, 20]
-        assert len(p.gh.comments) == 1
+        assert len(p.gh.publication_comments) == 1
+        assert len(p.gh.readiness_comments) == int(_ == 1)
         if accepted:
-            assert p.gh.comments == accepted  # Reconcile the accepted comment's ID and body.
-        body = p.gh.comments[0]["body"]
+            assert p.gh.publication_comments == accepted  # Reconcile the accepted comment's ID and body.
+        body = p.gh.publication_comments[0]["body"]
         assert all(check in body for check in checks)
         assert "hosted CI" in body and p.gh.pr_url in body and merged[:12] in body
         assert f"<!-- nightshift:publish:c:{receipt['round_id']} -->" in body
@@ -313,9 +339,18 @@ def recover_merged_publication(p, monkeypatch, failure):
             assert len(patches) == 1
             assert patches[0][1] == f"repos/owner/sample/issues/comments/{accepted[0]['id']}"
         if _ == 1:
-            assert p.gh.calls[gh_calls:] == []  # A delivered receipt causes no further writes.
-    creates = [call for call in p.gh.calls if call[:2] == ["pr", "comment"]]
+            assert [call[:2] for call in p.gh.calls[gh_calls:]] == [
+                ["pr", "view"], ["pr", "checks"], ["pr", "edit"], ["api", "repos/owner/sample/issues/8/comments"],
+                ["pr", "comment"]]
+    gh_calls = len(p.gh.calls)
+    assert p.poll() == []
+    assert p.gh.calls[gh_calls:] == [["pr", "view", "8", "--repo", "owner/sample", "--json",
+                                    "state,labels,headRefName,headRefOid,isCrossRepository,url,body"]]
+    creates = [call for call in p.gh.calls if call[:2] == ["pr", "comment"]
+               and "<!-- nightshift:publish:" in call[-1]]
     assert len(creates) == 1
+    assert len([call for call in p.gh.calls if call[:2] == ["pr", "comment"]
+                and "<!-- nightshift:approval:c:merge-readiness -->" in call[-1]]) == 1
     events = [json.loads(line) for line in (p.ctx.run.dir / "events.jsonl").read_text().splitlines()]
     assert [event["head"] for event in events if event["event"] == "published"] == [merged]
 
@@ -521,7 +556,7 @@ def test_successive_base_advances_publish_only_latest_verified_receipt(publicati
     assert delivered["result"]["outcome"] == "published"
     assert delivered["head"] == heads[-1]
     assert delivered["result"]["pr"] == delivered["pr"] == p.gh.pr_url
-    body = p.gh.comments[0]["body"]
+    body = p.gh.publication_comments[0]["body"]
     assert heads[-1][:12] in body
     assert all(prior["round_id"] not in body and prior["head"][:12] not in body for prior in stale_receipts)
     events = [json.loads(line) for line in (p.ctx.run.dir / "events.jsonl").read_text().splitlines()]

@@ -888,6 +888,41 @@ def revise_pending(
                  on_error=on_error, on_pending=on_pending)
 
 
+def _reconcile_merge_readiness(repo: Repo, labels: queue.Labels, state_dir: Path,
+                               number: int, row: dict, publication: dict, *, runner=None) -> None:
+    """Poll one PR snapshot; reuse only assessments bound to this publication/head."""
+    gh = runner or queue._gh
+    pr = json.loads(gh([
+        "pr", "view", str(number), "--repo", repo.name, "--json",
+        "state,labels,headRefName,headRefOid,isCrossRepository,url,body",
+    ]))
+    if (pr["state"] != "OPEN" or pr["isCrossRepository"] is not False
+            or pr["headRefName"] != f"spec/{row['change']}" or pr["url"] != row["pr"]):
+        return
+    path = state_dir / "merge-readiness" / repo.name.replace("/", "__") / f"{number}.json"
+    previous = _load_readiness(path)
+    head = pr.get("headRefOid")
+    head = head if isinstance(head, str) and head.strip() else ""
+    identity = dict(change=row["change"], pr=row["pr"], run_head=row["head"], head=head,
+                    publication_round=publication.get("round_id", [row[k] for k in ("change", "head", "pr")]))
+    matching = previous is not None and all(previous.get(k) == v for k, v in identity.items())
+    current = {label["name"] for label in pr["labels"]}
+    consistent = previous is not None and current & {"merge:ready", "merge:blocked"} == {previous["label"]}
+    if matching and consistent and previous is not None and previous["delivered"]:
+        return
+    if ("merge:ready" in current and (head != row["head"]
+            or previous is not None and previous["head"] != head)):
+        # Invalidate even an incomplete old intention before any assessment I/O.
+        gh(["pr", "edit", str(number), "--repo", repo.name, "--remove-label", "merge:ready"])
+        current.remove("merge:ready")
+        pr["labels"] = [label for label in pr["labels"] if label["name"] != "merge:ready"]
+    if matching and consistent and previous is not None and not previous["delivered"]:
+        _deliver_readiness(repo, state_dir, number, row, publication, pr, previous, runner=gh)
+        return
+    assessment = _readiness_assessment(repo, labels, state_dir, number, row, pr, runner=gh)
+    _deliver_readiness(repo, state_dir, number, row, publication, pr, assessment, runner=gh)
+
+
 def _readiness_ci(repo: Repo, number: int, *, runner=None) -> list[str]:
     """Classify one ordinary PR-check snapshot through the string-returning runner."""
     try:
@@ -1255,6 +1290,10 @@ def publish_pending(
                 change, run["head"], run["pr"]):
             receipt = None
         if receipt and receipt.get("delivered"):
+            if (pause["reason"] == "human_checks" and receipt["delivered"] is True
+                    and receipt.get("result", {}).get("outcome") == "published"):
+                _reconcile_merge_readiness(repo, labels, state_dir, int(admission_path.stem),
+                                           run, receipt, runner=gh)
             return None
         if pause["reason"] == "human_checks" and receipt is None:
             return None  # No daemon publication to recover.
