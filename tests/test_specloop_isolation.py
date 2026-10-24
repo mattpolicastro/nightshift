@@ -6,6 +6,7 @@ import subprocess
 import pytest
 
 from manifest_fixtures import manifest_text
+from merge_readiness_fixtures import ReadinessTransport
 
 from nightshift import daemon, queue, specloop_intake
 from nightshift.config import Config, Repo
@@ -22,6 +23,7 @@ class Pipeline:
         self.prs = {}
         self.runs = {}
         self.calls = []
+        self.readiness = ReadinessTransport(self._gh, self.calls)
         self.fail = None
         self.reporting_fails = None
 
@@ -38,6 +40,9 @@ class Pipeline:
         return change
 
     def gh(self, args):
+        return self.readiness(args)
+
+    def _gh(self, args):
         self.calls.append(args)
         if args[0] == "api":
             if args == ["api", f"repos/{self.repo.name}"]:
