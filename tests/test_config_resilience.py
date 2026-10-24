@@ -92,7 +92,7 @@ engine = "specloop"
     for pipeline in pipelines:
         pipeline.issue(7)
         pipeline.approved(8)
-    monkeypatch.setattr(daemon.subprocess, "run", pipelines[0].command)
+    monkeypatch.setattr(intake, "run_git", pipelines[0].command)
     health = daemon.RepoHealth()
     for attempt in range(1, 4):
         poll(pipelines, health)
@@ -181,7 +181,7 @@ def test_repair_clears_hold_and_rearms_notification(enrollment, monkeypatch, cap
     path.write_text("[broken")
     pipeline = Pipeline(Repo("owner/sample", engine="specloop", manifest=path))
     pipeline.issue(7)
-    monkeypatch.setattr(daemon.subprocess, "run", pipeline.command)
+    monkeypatch.setattr(intake, "run_git", pipeline.command)
     health = daemon.RepoHealth()
     for _ in range(3):
         poll([pipeline], health)
@@ -275,7 +275,7 @@ def test_home_resolution_recovery_reaches_cli_template(enrollment, tmp_path, mon
     else:
         gh = RevisionGh()
         commands = RevisionCommands(gh)
-    monkeypatch.setattr(daemon.subprocess, "run", commands)
+    monkeypatch.setattr(intake, "run_git", commands)
     parsed, errors = [], []
     health = daemon.RepoHealth()
 
@@ -363,7 +363,7 @@ def test_template_readiness_preserves_dispatch_identity(enrollment, monkeypatch,
             parsed.append(effective)
         return commands(args, **kwargs)
 
-    monkeypatch.setattr(daemon.subprocess, "run", commands)
+    monkeypatch.setattr(intake, "run_git", commands)
     health = daemon.RepoHealth()
     daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=cli)
     assert not health.failures and len(parsed) == 1
@@ -396,7 +396,7 @@ def test_new_work_waits_without_recording_attempt(enrollment, monkeypatch, stage
                 "result": {"outcome": "refused"}, "delivered": True})
     before = {p: p.read_bytes() for p in daemon.STATE_DIR.rglob("*.json")}
     labels = gh.labels.copy()
-    monkeypatch.setattr(daemon.subprocess, "run", commands)
+    monkeypatch.setattr(intake, "run_git", commands)
     health = daemon.RepoHealth()
     for _ in range(3):
         daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
@@ -552,7 +552,7 @@ def test_finished_jobs_survive_hold(enrollment, monkeypatch, stage, stopped):
         commands.runs = [{"change": CHANGE, "pr": gh.pr_url, "status": "running"}]
     commands.calls.clear()
     gh.calls.clear()
-    monkeypatch.setattr(daemon.subprocess, "run", commands)
+    monkeypatch.setattr(intake, "run_git", commands)
     health = daemon.RepoHealth()
     for _ in range(3):
         daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)

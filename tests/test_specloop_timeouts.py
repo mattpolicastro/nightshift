@@ -17,6 +17,7 @@ from test_specloop_isolation import Pipeline
 
 
 @pytest.mark.scenario("issue-intake/engine-per-repository/worker-repository-unchanged")
+@pytest.mark.scenario("issue-intake/git-process-group-timeout/production-runner-preserves-daemon-progress")
 @pytest.mark.parametrize("operation", ["push", "ls-remote", "fetch", "rev-parse", "publish"])
 def test_origin_timeout_allows_worker_claim_heartbeat_harvest_and_retry(
     tmp_path, monkeypatch, caplog, operation,
@@ -44,23 +45,24 @@ def test_origin_timeout_allows_worker_claim_heartbeat_harvest_and_retry(
     original_labels = list(item["labels"])
     assert 0 < specloop_intake.POLL_COMMAND_TIMEOUT <= 30
     monkeypatch.setattr(specloop_intake, "POLL_COMMAND_TIMEOUT", .05)
-    real_run = subprocess.run
+    real_run, real_git = subprocess.run, specloop_intake.run_git
     stalled = True
     timeouts = []
 
     def command(args, **kwargs):
         if stalled and operation in args:
-            # Exercise subprocess.run's actual timeout, without contacting git
+            # Exercise the production group runner's timeout, without contacting git
             # or GitHub. The finite sleep also bounds a timeout regression.
             start = time.monotonic()
             try:
-                return real_run([sys.executable, "-c", "import time; time.sleep(2)"], **kwargs)
+                run = real_git if args[0] == "git" else real_run
+                return run([sys.executable, "-c", "import time; time.sleep(2)"], **kwargs)
             except subprocess.TimeoutExpired:
                 timeouts.append(time.monotonic() - start)
                 raise
         return pipeline.command(args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", command)
+    monkeypatch.setattr(specloop_intake, "run_git", command)
     poll = daemon.poll_specloop
     health_seen = []
 

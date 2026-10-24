@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import daemon, specloop_job
+from nightshift import daemon, specloop_intake, specloop_job
 from nightshift.config import Config
 from test_engine_routing import DraftGh
 from test_specloop_background import CLI, background, eventually
@@ -38,14 +38,12 @@ idea = Path(args[args.index("--idea-file") + 1]).read_text(encoding="utf-8")
     gh = DraftGh(("spec:draft",))
     gh.comments[0]["body"] = "Original λ\n\n" + "complete thread 🦉\n" * 70_000 + "END"
     expected = "Add a gate\n\nPlease draft it.\n\n" + gh.comments[0]["body"]
-    original_run = subprocess.run
 
     def run(args, **kwargs):
-        if args[0] == "git":
-            return subprocess.CompletedProcess(args, 0, "", "")
-        return original_run(args, **kwargs)
+        assert args[0] == "git"
+        return subprocess.CompletedProcess(args, 0, "", "")
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(specloop_intake, "run_git", run)
     health = daemon.RepoHealth()
     poll = partial(daemon.poll_specloop, Config(repos=[repo]), health, runner=gh)
     poll()

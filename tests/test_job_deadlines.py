@@ -114,7 +114,7 @@ def test_overdue_does_not_starve_other_items(background, monkeypatch):
     root, repo, children = background
     pipeline = Pipeline(repo)
     pipeline.issue(1)
-    monkeypatch.setattr(specloop_intake.subprocess, "run", pipeline.command)
+    monkeypatch.setattr(specloop_intake, "run_git", pipeline.command)
     poll = partial(daemon.poll_specloop, Config(repos=[repo]), daemon.RepoHealth(), runner=pipeline.gh)
     poll()
     request_path, = daemon.STATE_DIR.glob("proposals/*/1.jobs/*/request.json")

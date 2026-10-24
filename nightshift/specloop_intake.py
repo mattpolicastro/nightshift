@@ -9,8 +9,11 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import os
 import re
+import signal
 import subprocess
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -139,9 +142,52 @@ _PENDING = object()
 POLL_COMMAND_TIMEOUT = 30
 
 
-def _bounded_run(args, *, runner=None, **kwargs):
+def run_git(args, *, timeout, capture_output=False, text=False, check=False, **kwargs):
+    """Run daemon git in its own group, including ordinary transport children."""
+    input_data = kwargs.pop("input", None)
+    if input_data is not None:
+        if kwargs.get("stdin") is not None:
+            raise ValueError("stdin and input arguments may not both be used")
+        kwargs["stdin"] = subprocess.PIPE
+    if capture_output:
+        if kwargs.get("stdout") is not None or kwargs.get("stderr") is not None:
+            raise ValueError("stdout and stderr arguments may not be used with capture_output")
+        kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    child = subprocess.Popen(args, start_new_session=True, text=text, **kwargs)
     try:
-        return (runner or subprocess.run)(args, timeout=POLL_COMMAND_TIMEOUT, **kwargs)
+        try:
+            stdout, stderr = child.communicate(input_data, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # The group exited between the timeout and signal.
+            except OSError as exc:
+                raise RuntimeError(f"git timeout: failed to kill process group {child.pid}: {exc}") from exc
+            # Reap independently of pipes held by descendants that escaped the
+            # group. Reaping and draining share one additional second.
+            deadline = time.monotonic() + 1
+            child.wait(timeout=1)
+            try:
+                child.communicate(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+            raise
+        result = subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
+        if check:
+            result.check_returncode()
+        return result
+    finally:
+        for pipe in (child.stdin, child.stdout, child.stderr):
+            if pipe is not None:
+                pipe.close()
+
+
+def _bounded_run(args, *, runner=None, **kwargs):
+    if runner is None:
+        runner = run_git if args[0] == "git" else subprocess.run
+    try:
+        return runner(args, timeout=POLL_COMMAND_TIMEOUT, **kwargs)
     except subprocess.TimeoutExpired as exc:
         # An ambiguous timeout is retryable, not a rejected push. Preserve the
         # receipt and arming labels so the next poll can reconcile remote state.

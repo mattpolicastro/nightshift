@@ -123,10 +123,11 @@ def poll(gh, *, module=specloop_intake, runner=None, numbers=(7,), kind="issue",
 
 def restarted_intake():
     # Load fresh module globals, with no local authorization/comment cache,
-    # while retaining only the fake remote GitHub service across the restart.
+    # while retaining the fake GitHub and git transports across the restart.
     spec = importlib.util.spec_from_file_location("nightshift._restarted_intake", specloop_intake.__file__)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    module.run_git = specloop_intake.run_git
     return module
 
 

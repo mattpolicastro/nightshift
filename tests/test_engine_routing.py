@@ -9,7 +9,7 @@ import pytest
 
 from manifest_fixtures import manifest_text
 
-from nightshift import daemon, queue, specloop_client
+from nightshift import daemon, queue
 from nightshift.config import Config, Repo, load
 from test_queue import FakeGh
 
@@ -205,7 +205,7 @@ def test_specloop_repository_drafts_without_worker_claims(isolated, monkeypatch,
     monkeypatch.setattr(daemon, "endpoints_ready", lambda *a, **k: pytest.fail("worker endpoint probed"))
     monkeypatch.setattr(daemon, "run_claimed", lambda *a, **k: pytest.fail("worker started"))
     monkeypatch.setattr(queue, "_gh", gh)
-    monkeypatch.setattr(specloop_client.subprocess, "run", run)
+    monkeypatch.setattr(daemon.specloop_intake, "run_git", run)
     # Inject completed CLI results for this routing/delivery test; production
     # now starts propose in a separate process (covered by the background tests).
     monkeypatch.setattr(daemon, "poll_specloop", partial(daemon.poll_specloop, specloop_runner=run))
