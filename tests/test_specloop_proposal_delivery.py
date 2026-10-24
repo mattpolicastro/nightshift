@@ -14,8 +14,9 @@ from test_specloop_spec_revision import setup as revision_setup
 
 
 def background_result(path, receipt, result):
-    receipt["job"] = "finished"
+    receipt["job"] = "a" * 32
     directory = path.parent / f"{path.stem}.jobs" / receipt["job"]
+    specloop_job.save(directory / "request.json", {"args": ["propose"]})
     specloop_job.save(directory / "result.json", {"result": result})
     specloop_job.save(path, receipt)
 
@@ -118,7 +119,12 @@ def test_daemon_delivers_a_fallback_ref_proposal(repo, tmp_path, monkeypatch, fa
     commands = Commands(branch=ref, commit=commit)
     path = tmp_path / "proposals/owner__sample/7.json"
     if background:
-        background_result(path, {"change": CHANGE, "idea": "Add a gate"}, commands.result)
+        idea = "Add a gate\n\nPlease draft it.\n\nKeep it small."
+        background_result(path, {
+            "repo": repo.name, "issue": 7, "change": CHANGE, "title": "Add a gate",
+            "idea": idea, "input": idea, "round_id": "b" * 32,
+            "drafting_events": {event["label"]["name"]: event["id"] for event in gh.events},
+        }, commands.result)
 
     def interrupted(args):
         result = gh(args)
