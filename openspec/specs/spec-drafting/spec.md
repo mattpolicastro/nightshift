@@ -45,3 +45,11 @@ A draft SHALL branch from the base as resolved in the source checkout, independe
 - **WHEN** the source checkout has a feature branch checked out, or has no origin
 - **THEN** the draft still starts from the base (upstream if available, otherwise local), not from the checked-out branch
 
+### Requirement: Rich text line rules
+
+The drafter prompt SHALL require that tasks recognizing structure in Markdown, HTML or other rich text specify a deterministic line rule and the safe direction for ambiguity, and SHALL forbid requiring semantic parsing of fences, HTML blocks or indentation.
+
+#### Scenario: Structure is specified by line rules
+- **WHEN** a change needs to recognize a checklist, heading or similar structure in rich text
+- **THEN** its tasks state a line rule and that ambiguous input resolves to the safe outcome, rather than asking for Markdown-aware parsing
+
