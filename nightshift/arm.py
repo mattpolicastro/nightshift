@@ -255,7 +255,10 @@ def front_door_issue(repository: str, change: str) -> int | None:
     """Use the producer's stable change identity, independent of current titles."""
     # mutation-equivalent: rsplit with maxsplit 1 or 2 yields the same final '/' component.
     basename = re.escape(repository.rsplit("/", 1)[-1])
-    match = re.fullmatch(rf"{basename}-issue-([1-9][0-9]*)-[a-z0-9-]{{1,40}}", change)
+    # Since #13 new changes are owner-qualified (`owner__repo-issue-N-...`); older ones are not.
+    owner = re.escape(repository.split("/", 1)[0]) if "/" in repository else None
+    prefix = rf"(?:{owner}__)?" if owner else ""
+    match = re.fullmatch(rf"{prefix}{basename}-issue-([1-9][0-9]*)-[a-z0-9-]{{1,40}}", change)
     return int(match[1]) if match else None
 
 
