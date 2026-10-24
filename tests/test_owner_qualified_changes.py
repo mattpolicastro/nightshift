@@ -89,7 +89,7 @@ def test_unsafe_name_is_repository_health_hold(template, monkeypatch, name):
     pipeline.approved(8)
     # Even a safe existing PR cannot start a new admission while held.
     pipeline.prs[8]["headRefName"] = "spec/safe-recorded-change"
-    monkeypatch.setattr(daemon.subprocess, "run", pipeline.command)
+    monkeypatch.setattr(intake, "run_git", pipeline.command)
     messages = []
     monkeypatch.setattr(daemon.notify, "send", lambda hook, message: messages.append(message))
     health = daemon.RepoHealth()
@@ -131,7 +131,7 @@ def test_malformed_repository_does_not_stop_healthy_repository(template, monkeyp
             name = args[args.index("--repo") + 1]
         return {"sample": malformed, "owner/healthy": healthy}[name].gh(args)
 
-    monkeypatch.setattr(daemon.subprocess, "run", healthy.command)
+    monkeypatch.setattr(intake, "run_git", healthy.command)
     messages = []
     monkeypatch.setattr(daemon.notify, "send", lambda hook, message: messages.append(message))
     health = daemon.RepoHealth()

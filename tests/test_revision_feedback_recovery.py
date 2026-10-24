@@ -111,7 +111,7 @@ def test_legacy_saved_work_finishes_before_exact_snapshot(
             patch.setattr(specloop_job, "_collect_locked", collect_then_pause)
             patch.setattr(daemon, "STATE_DIR", tmp_path)
             patch.setattr(daemon, "PAUSE_FILE", pause)
-            patch.setattr(daemon.subprocess, "run", commands)
+            patch.setattr(intake, "run_git", commands)
             health = daemon.RepoHealth()
             daemon.poll_specloop(Config(repos=[repo]), health, runner=github, specloop_runner=commands)
             assert not health.failures and read(tmp_path)["result"] == commands.result
@@ -476,7 +476,7 @@ def test_selected_job_survives_pause_stop_and_reauthorization(stage_setup, tmp_p
             patch.setattr(specloop_job, "_collect_locked", collect_then_pause)
             patch.setattr(daemon, "STATE_DIR", tmp_path)
             patch.setattr(daemon, "PAUSE_FILE", pause)
-            patch.setattr(daemon.subprocess, "run", commands)
+            patch.setattr(intake, "run_git", commands)
             health = daemon.RepoHealth()
             daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
             paused = read(tmp_path)

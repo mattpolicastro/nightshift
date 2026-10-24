@@ -35,8 +35,13 @@ def _home(call: Call) -> Path:
     home = call.home
     home.mkdir(parents=True, exist_ok=True)
     auth = home / "auth.json"
-    if not call.profile.base_url and not auth.exists():
-        os.symlink(Path.home() / ".codex" / "auth.json", auth)
+    if not call.profile.base_url:
+        # A profile may name its own login (an API key, say); the default is the ChatGPT one.
+        target = Path(call.profile.auth).expanduser() if call.profile.auth else Path.home() / ".codex" / "auth.json"
+        if auth.is_symlink() and Path(os.readlink(auth)) != target:
+            auth.unlink()
+        if not auth.exists() and not auth.is_symlink():
+            os.symlink(target, auth)
     return home
 
 

@@ -193,7 +193,6 @@ def seal(repo: Path, work: Path, base: str, m: Manifest, message: str, secrets: 
 def credential_values(extra_env: dict[str, str] | None = None) -> list[str]:
     """Literal token values a diff must never contain."""
     values = []
-    auth = Path.home() / ".codex" / "auth.json"
 
     def walk(x):
         if isinstance(x, dict):
@@ -202,10 +201,12 @@ def credential_values(extra_env: dict[str, str] | None = None) -> list[str]:
         elif isinstance(x, str) and len(x) >= 24:
             values.append(x)
 
-    try:
-        walk(json.loads(auth.read_text()))
-    except (OSError, ValueError):
-        pass
+    # Every codex login: ~/.codex and any per-profile login such as ~/.codex-api.
+    for auth in sorted(Path.home().glob(".codex*/auth.json")):
+        try:
+            walk(json.loads(auth.read_text()))
+        except (OSError, ValueError):
+            pass
     for k in ("CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "SPECLOOP_SLACK_WEBHOOK"):
         v = (extra_env or {}).get(k) or os.environ.get(k)
         if v and len(v) >= 16:

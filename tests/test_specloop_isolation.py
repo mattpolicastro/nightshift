@@ -144,7 +144,7 @@ def pipelines(tmp_path, monkeypatch):
     def git(args, **kwargs):
         return next(p for p in pipelines if args[2].endswith(p.repo.name.split("/")[-1])).command(args, **kwargs)
 
-    monkeypatch.setattr(daemon.subprocess, "run", git)
+    monkeypatch.setattr(specloop_intake, "run_git", git)
     return pipelines
 
 

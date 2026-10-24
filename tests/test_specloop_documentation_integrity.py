@@ -5,6 +5,7 @@ result remain acceptance checks, not claims a test can make about itself.
 """
 
 import re
+import json
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -12,6 +13,8 @@ from urllib.parse import unquote, urlsplit
 import pytest
 
 from specloop import seal, tasks
+from nightshift import specloop_intake, specloop_job
+from test_specloop_compaction import delivered
 from test_specloop_seal_verify import M, repo  # noqa: F401 -- shared git fixture
 
 
@@ -78,6 +81,7 @@ def test_reference_labels_distinguish_prs_from_issues(path):
             assert label == f"{'PR' if kind == 'pull' else 'issue'} #{number}"
             references.append(target)
     assert references, f"{path} lost its references"
+    assert f"{REPOSITORY}/issues/9" in references
 
 
 @pytest.mark.scenario(
@@ -136,6 +140,7 @@ def test_relative_documentation_links_resolve_including_heading_fragments(path):
         if url.scheme or url.netloc:
             continue
         destination = document.parent / unquote(url.path) if url.path else document
+        assert destination.resolve().is_relative_to(ROOT)
         assert destination.exists(), f"{path}: broken link {target}"
         if url.fragment:
             assert unquote(url.fragment) in heading_ids(destination.read_text()), (
@@ -172,3 +177,47 @@ def test_docs_only_seal_preserves_runtime_and_test_assertions(repo):
     for path, original in protected.items():
         assert seal.git(bare, "show", f"{sealed.sha}:{path}").decode() == original
     assert set(seal.git(bare, "diff", "--name-only", base, sealed.sha).decode().splitlines()) == set(DOCS)
+
+
+def guide_table(schema):
+    blocks = (ROOT / "docs/specloop/README.md").read_text().split("\n\n")
+    table, = [block for block in blocks if block.startswith(schema)]
+    return dict(tuple(cell.strip() for cell in row.strip("|").split("|"))
+                for row in table.splitlines()[2:])
+
+
+@pytest.mark.scenario("specloop-documentation/deadline-guidance/operator-handles-overdue-work")
+@pytest.mark.scenario("specloop-documentation/git-timeout-guidance/operator-understands-timeout-limits")
+def test_documented_command_budgets_match_dispatch(monkeypatch):
+    budgets = guide_table("| Command | Budget (seconds) |")
+    git_budget = int(budgets.pop("daemon intake `git`"))
+    assert {key.strip("`"): int(value) for key, value in budgets.items()} == (
+        specloop_job.COMMAND_TIMEOUT_SECONDS
+    )
+    calls = []
+    monkeypatch.setattr(specloop_intake, "run_git", lambda args, **kw: calls.append((args, kw)))
+    specloop_intake._bounded_run(["git", "fetch"], capture_output=True)
+    assert calls == [(["git", "fetch"], {"timeout": git_budget, "capture_output": True})]
+
+
+@pytest.mark.scenario("specloop-documentation/delivered-retention-guidance/operator-understands-retained-artifacts")
+def test_documented_artifacts_match_compaction(tmp_path):
+    path, receipt, directory, idea = delivered(tmp_path)
+    artifacts = guide_table("| Delivered attempt artifact | After compaction |")
+    targets = {name: idea if name == "owned `--idea-file` payload" else directory / name.strip("`")
+               for name in artifacts}
+    before = {name: (target.read_bytes(), target.stat().st_mtime_ns) for name, target in targets.items()}
+    assert specloop_job.compact_delivered(path, receipt) == []
+    for name, action in artifacts.items():
+        target = targets[name]
+        if action == "removed":
+            assert not target.exists()
+        elif action == "retained":
+            assert (target.read_bytes(), target.stat().st_mtime_ns) == before[name]
+        else:
+            assert action == "redacted" and target.stat().st_mtime_ns == before[name][1]
+            original = json.loads(before[name][0])
+            assert json.loads(target.read_text()) == dict(
+                stage="proposals", args=original["args"][:-2],
+                started_at=None, timeout_seconds=None, deadline_at=None,
+            )
