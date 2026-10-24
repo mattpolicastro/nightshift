@@ -2,11 +2,13 @@
 
 import json
 import subprocess
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
 from manifest_fixtures import manifest_text
+from revision_result_fixtures import revision_success
 
 from nightshift import daemon, queue, specloop_intake, specloop_job
 from nightshift.config import Config, Repo
@@ -18,6 +20,8 @@ class BuildCommands(Commands):
         super().__init__(gh)
         self.runs = [{"change": CHANGE, "pr": gh.pr_url}]
         self.result = {"version": 1, "outcome": "revised", "commit": REVISED}
+        self._success = deepcopy(self.result)
+        self._emitted_success_json = json.dumps(self.result, sort_keys=True)
         self.feedback = []
         self.revise_label = "agent:revise"
 
@@ -29,6 +33,12 @@ class BuildCommands(Commands):
         assert args[5:7] == ["--feedback-format", "json"]
         assert self.revise_label in self.gh.labels
         self.feedback.append(Path(args[4]).read_text())
+        # Rebind only intact successes. Deliberate invalid-result mutations bypass
+        # the builder, and earlier returned payloads retain their original key.
+        if json.dumps(self.result, sort_keys=True) in (
+                json.dumps(self._success, sort_keys=True), self._emitted_success_json):
+            self.result = revision_success(args, self._success)
+            self._emitted_success_json = json.dumps(self.result, sort_keys=True)
         return subprocess.CompletedProcess(args, int(self.result.get("outcome") == "refused"),
                                            json.dumps(self.result), "")
 
@@ -157,19 +167,44 @@ def test_failures_keep_request_armed(setup, tmp_path, failure):
     assert not commands.proposals and gh.head == HEAD
 
 
+@pytest.mark.scenario("pr-revision/keyed-result-acknowledgement/refusal-and-replacement-have-distinct-comments")
 def test_refused_revision_explained_and_retried_after_human(setup, tmp_path):
+    from test_revision_feedback_recovery import restart, tick
+
     _, gh, commands = setup
     commands.result = {"version": 1, "outcome": "refused", "reasons": ["Run is busy."]}
-    poll(setup, tmp_path)
+    gh.fail_comment = True
+    with pytest.raises(RuntimeError, match="response lost"):
+        poll(setup, tmp_path)
+    tick(setup, tmp_path, module=restart())
+    path = tmp_path / "revisions/owner__sample/8.json"
+    refused = json.loads(path.read_text())
+    refusal_comment = deepcopy(gh.comments[0])
     assert gh.labels == {"agent:revise", "needs-human"}
     assert "Run is busy." in gh.comments[0]["body"]
     poll(setup, tmp_path)
     assert len(commands.feedback) == 1
     gh.label_event("needs-human", "unlabeled")
     commands.result = {"version": 1, "outcome": "revised", "commit": REVISED}
+    gh.fail_comment = True
+    with pytest.raises(RuntimeError, match="response lost"):
+        poll(setup, tmp_path)
     poll(setup, tmp_path)
     assert len(commands.feedback) == 2 and not gh.labels
-    assert len(gh.comments) == 1 and REVISED in gh.comments[0]["body"]
+    succeeded = json.loads(path.read_text())
+    assert refused["event"] == succeeded["event"]
+    assert refused["round_id"] != succeeded["round_id"]
+    assert refused["consumed_feedback_ids"] == ["conversation:101", "inline:3"]
+    assert succeeded["consumed_feedback_ids"] == ["conversation:101", "inline:1", "inline:2", "inline:3"]
+    for _ in range(2):
+        tick(setup, tmp_path, module=restart())
+    assert len(commands.feedback) == len(gh.comments) == 2
+    assert gh.comments[0] == refusal_comment and REVISED in gh.comments[1]["body"]
+    assert REVISED not in refusal_comment["body"]
+    for receipt, comment in zip((refused, succeeded), gh.comments):
+        marker = f"<!-- nightshift:revise:{receipt['change']}:{receipt['round_id']} -->"
+        assert comment["body"].endswith(marker)
+        assert sum(marker in entry["body"] for entry in gh.comments) == 1
 
 
 def test_another_pr_cannot_steer_admitted_change(setup, tmp_path):
@@ -198,7 +233,9 @@ def test_background_revision_waits_for_landed_commit(setup, tmp_path, monkeypatc
                                       status_runner=commands, on_pending=pending.append)
     assert len(jobs) == 1 and jobs[0][:2] == ["revise", CHANGE]
     assert pending == [8, 8] and not gh.comments and "agent:revise" in gh.labels
-    monkeypatch.setattr(specloop_job, "_collect_locked", lambda *a: commands.result)
+    expected = revision_success(jobs[0], commands.result)
+    monkeypatch.setattr(specloop_job, "_collect_locked", lambda *a: expected)
     poll(setup, tmp_path)
+    assert json.loads((tmp_path / "revisions/owner__sample/8.json").read_text())["result"] == expected
     assert not commands.feedback and not gh.labels
     assert REVISED in gh.comments[0]["body"]

@@ -9,7 +9,7 @@ inherited child-process output (including Git hooks) go to stderr. Without
 | --- | --- | --- |
 | `propose` | `drafted` (0), `needs_input` (2), `rejected` (1) | `branch`, `commit`, `questions`, `contradictions`, `risks`, `problems` |
 | `admit` | `admitted` (0), `refused` (1) | `head`, `reasons`, `risks` |
-| `revise` | `revised` (0), `refused` (1) | `commit` on success; `reasons` on refusal |
+| `revise` | `revised` (0), `refused` (1) | `commit` on success; keyed success also has `round_id`, `replayed`, `status`, `pause`; `reasons` on refusal |
 | `publish` | `published` (0), `refused` (1) | `pr` on success; `reasons` on refusal |
 
 Publication exceptions (such as a failed or timed-out push) exit 1 with
@@ -117,28 +117,82 @@ results; PR and issue delivery waits until the pause file is removed.
 Runs already admitted continue under the separate specloop supervisor; the
 Nightshift pause file does not stop that supervisor.
 
-Queue a review round for an admitted change with:
+## Keyed build revisions
+
+Queue a review round for an admitted change with an optional run-local key
+([issue #7](https://github.com/mattpolicastro/nightshift/issues/7)):
 
 ```sh
-specloop revise issue-7-y --feedback feedback.md --json
+specloop revise issue-7-y --feedback feedback.md --round-id review:1 --json
 ```
 
+Keep that key and the saved feedback for retries. Keys are 1–128 ASCII
+characters matching `[A-Za-z0-9][A-Za-z0-9._:-]*`; empty keys are invalid.
+Scope is the admitted run and its recorded branch. Matching normalized blocks
+return the original round commit, even when the branch tip is a descendant;
+changed blocks under the same key are refused. Order and duplicates matter.
+Filenames, JSON whitespace and text/JSON encoding do not change identity when
+the parsed nonempty blocks are identical. Different keys can append identical
+feedback intentionally.
+
+Keyed success retains version 1 and adds these fields:
+
+```json
+{
+  "version": 1,
+  "outcome": "revised",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "round_id": "review:1",
+  "replayed": false,
+  "status": "running",
+  "pause": null
+}
+```
+
+`replayed` is boolean: true means recovery/replay of an existing journal,
+including landing its prepared candidate. `commit` always names that round's
+original commit. `status` is `running`, `paused`, `aborted` or `done`;
+`pause` is null or the observed pause object (`reason`, `task`, `detail`,
+`resume_at`). State is observed under the run lock, not promised at delivery
+time. Replay preserves later pause, abort or completion decisions and pending
+pause requests; human output uses “finished” for `done`. Invalid keys, empty
+feedback, conflicting payloads and unverifiable evidence exit 1 with
+`outcome: refused` and `reasons`; Git operational failures remain identifiable
+in those reasons. Busy runs must be retried once their lock is available.
+
 Separate feedback blocks with a line containing only `---`. Each nonempty
-block becomes one unchecked task in a new `## N. Review round K` section.
+block in a new round becomes one unchecked task in `## N. Review round K`.
 The task quotes the entire block as a JSON string, preserving file/line
 references and escaping newlines so embedded checklists remain one task.
 Empty files and files containing only whitespace or separators are refused.
-The harness commits tasks.md to its run branch and leaves the run running
-for `serve` or `specloop run`; it preserves the recorded PR. A run currently
-being driven must be retried once its lock is available.
+For a new round, the harness commits tasks.md to its run branch and leaves
+the run running for `serve` or `specloop run`, preserving the recorded PR.
 
 For comments containing `---` lines, use `--feedback-format json` with a
 feedback file containing a JSON array of strings, one complete comment per
 string. The daemon uses this format for `agent:revise` on admitted PRs,
 preserving each new comment and its file/line reference. It removes the label
-after the revision commit is reported. With no feedback newer than the PR tip,
+after durable success consumes the selected IDs. With no unconsumed feedback,
 it comments that there is nothing to revise and removes the label without
 running a specloop command.
+
+New daemon build snapshots save a UUID key and feedback before dispatch.
+Ordinary crashed attempts detach and report health errors; a later eligible
+attempt uses the same snapshot/key with a new job ID and deadline. Explicit
+`nightshift jobs release <id>` after confirmed stop and inspection instead
+permits selection of current unconsumed feedback with a new key, even under
+the same label event. The historical stopped result stays suppressed and the
+new round can repeat already committed effects. Release launches nothing,
+does not roll back effects and does not stop independent admitted builds; see
+[recovery, timing and cleanup](README.md#pause-stop-and-the-supervisor)
+([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+
+Omitting `--round-id` retains the unkeyed version-1 fields and human success
+wording (`run is running`), with a fresh append on each eligible call. Legacy
+receipts and unkeyed calls have no retrospective deduplication; a commit whose
+result was lost can be duplicated. Keyed recovery is tested with deterministic
+process exits, not physical machine crashes. Retain journals and Git evidence;
+incomplete backups or deletion lose the guarantee. See [remaining limits](../../KNOWN-LIMITATIONS.md#open-gaps).
 
 The original `propose repo.toml change --idea "..."` syntax still defaults to
 `spec/change`. An explicit `--change` takes precedence over the positional

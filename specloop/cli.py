@@ -296,14 +296,23 @@ def revise(args) -> int:
         run = Run.for_change(args.change)
         if not run.manifest_path.exists() or not (run.dir / "state.json").exists():
             raise ValueError(f"no admitted change {args.change}")
-        commit = revision.revise(run, _manifest(run), Path(args.feedback).read_text(),
-                                 feedback_format=args.feedback_format)
+        result = revision.revise_result(run, _manifest(run), Path(args.feedback).read_text(),
+                                        feedback_format=args.feedback_format, round_id=args.round_id)
     except (OSError, ValueError, KeyError, RuntimeError) as e:
         _outcome(args, reasons=[str(e)])
         print(f"revision refused: {e}", file=sys.stderr)
         return 1
-    _outcome(args, outcome="revised", commit=commit)
-    print(f"{args.change}: review tasks committed at {commit[:12]}; run is running")
+    _outcome(args, outcome="revised", commit=result.commit)
+    if result.round_id is None:
+        print(f"{args.change}: review tasks committed at {result.commit[:12]}; run is running")
+    else:
+        _outcome(args, round_id=result.round_id, replayed=result.replayed,
+                 status=result.status, pause=result.pause)
+        action = "replayed" if result.replayed else "committed"
+        status = "finished" if result.status == "done" else result.status
+        detail = f" ({result.pause['reason']})" if result.pause else ""
+        print(f"{args.change}: review round {result.round_id} {action} at {result.commit[:12]}; "
+              f"run is {status}{detail}")
     return 0
 
 
@@ -1033,6 +1042,7 @@ def main(argv=None) -> int:
     rv.add_argument("--feedback", required=True, help="file of feedback blocks separated by a line containing ---")
     rv.add_argument("--feedback-format", choices=("text", "json"), default="text",
                     help="text uses --- separators; json is an array of complete feedback strings")
+    rv.add_argument("--round-id", help="run-local key for replaying the same feedback without appending again")
     rv.add_argument("--json", action="store_true", help="print one version-1 outcome document")
     ac = sub.add_parser("accept")
     ac.add_argument("change")

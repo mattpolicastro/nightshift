@@ -6,6 +6,7 @@ the production entry point, selection, membership and per-item loop.
 
 import importlib.util
 import json
+from uuid import UUID
 import os
 import subprocess
 from contextlib import ExitStack
@@ -15,6 +16,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from revision_result_fixtures import revision_success
 
 from nightshift import daemon, queue, specloop_intake
 from nightshift.config import Config
@@ -765,6 +768,7 @@ def revision_poll(repo, state, gh, *, module=specloop_intake,
 @pytest.mark.scenario(TRUSTED)
 @pytest.mark.scenario("pr-revision/revision-actor-gate/unauthorized-revision-ignored-at-either-stage")
 @pytest.mark.scenario("pr-revision/durable-round-snapshot/new-label-preserves-completed-round")
+@pytest.mark.scenario("pr-revision/stable-build-round-identity/new-event-selects-an-independent-round")
 @pytest.mark.parametrize("stage", ["spec-revision", "build-revision"])
 @pytest.mark.parametrize("configured", [False, True])
 def test_revision_receipt_survives_untrusted_reapplication(repo, tmp_path, stage, configured):
@@ -825,13 +829,20 @@ def test_revision_receipt_survives_untrusted_reapplication(repo, tmp_path, stage
     assert not any(c[0] == "specloop" for c in commands.calls)
     assert gh.comments[0] == rejection and len(gh.comments) == 2
     assert labels.revise in gh.labels
-    assert f"nightshift:revise:{receipt['change']}:{original['round_id']}" in gh.comments[-1]["body"]
+    assert gh.comments[-1]["body"].endswith(
+        f"<!-- nightshift:revise:{receipt['change']}:{original['round_id']} -->")
     assert all((tmp_path / name).read_bytes() == data for name, data in snapshot.items()
                if name != path.relative_to(tmp_path))
     original_comment = deepcopy(gh.comments[-1])
     revision_poll(repo, tmp_path, gh, module=restarted_intake(), commands=commands, labels=labels)
     remaining = json.loads(path.read_text())
-    assert remaining["event"] == authorized_event and remaining["round_id"] == str(authorized_event)
+    assert remaining["event"] == authorized_event
+    if stage == "build-revision":
+        assert remaining["revision_key_version"] == 1
+        key = UUID(remaining["round_id"])
+        assert key.version == 4 and key.hex == remaining["round_id"] != original["round_id"]
+    else:
+        assert remaining["round_id"] == str(authorized_event)
     assert remaining["feedback_ids"] == ["conversation:104"]
     assert remaining["feedback"] == ["**reviewer:**\n\nFeedback for the later request"]
     assert remaining["consumed_feedback_ids"] == ["conversation:101", "conversation:102", "conversation:104"]
@@ -844,7 +855,8 @@ def test_revision_receipt_survives_untrusted_reapplication(repo, tmp_path, stage
     assert (payload == remaining["feedback"] if stage == "build-revision"
             else remaining["feedback"][0] in payload and "Handle empty input" not in payload)
     assert gh.comments[:2] == [rejection, original_comment] and len(gh.comments) == 3
-    assert f"nightshift:revise:{remaining['change']}:{authorized_event}" in gh.comments[-1]["body"]
+    assert gh.comments[-1]["body"].endswith(
+        f"<!-- nightshift:revise:{remaining['change']}:{remaining['round_id']} -->")
     reapply(gh, labels.revise, "maintainer")
     calls = commands.calls.copy()
     assert revision_poll(repo, tmp_path, gh, labels=labels) == [{"outcome": "empty"}]
@@ -895,6 +907,8 @@ def test_revision_recovery_rechecks_membership_and_reuses_same_event(
                     repo, queue.Labels(), tmp_path, runner=lost_delivery,
                     git_runner=commands, specloop_runner=commands,
                 )
+        expected = (revision_success(json.loads((directory / "request.json").read_text())["args"],
+                                     commands.result) if recovery == "job" else commands.result)
         original = json.loads(path.read_text())
         original_labels = gh.labels.copy()
         trusted = False  # Current membership is rechecked even for this same event.
@@ -902,7 +916,7 @@ def test_revision_recovery_rechecks_membership_and_reuses_same_event(
         gh.calls.clear()
         for finished in (False, True) if recovery == "job" else (True,):
             if recovery == "job" and finished:
-                job_module.finalize(directory, {"result": commands.result})
+                job_module.finalize(directory, {"result": expected})
                 locks.close()
             snapshot = files_under(tmp_path)
             for module in (specloop_intake, restarted_intake()):
@@ -943,7 +957,7 @@ def test_revision_recovery_rechecks_membership_and_reuses_same_event(
         result, = revision_poll(repo, tmp_path, github, commands=commands, module=restarted_intake())
         receipt = json.loads(path.read_text())
         assert receipt["event"] == original["event"] and receipt["delivered"]
-        assert result == commands.result
+        assert result == expected
         assert_no_revision_reads(gh)
         assert not any(c[0] == "specloop" for c in commands.calls)
         if stage == "spec-revision":
