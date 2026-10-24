@@ -106,6 +106,25 @@ and without waiting for build publication. Relabeling or restarting does not
 replay them. Empty revision requests are explained and cleared without an
 agent ([PR #61](https://github.com/mattpolicastro/nightshift/pull/61)).
 
+New build snapshots persist a UUID `round_id` with their selected feedback
+before dispatch. Ordinary failed/crashed jobs still detach and report through
+repository health. A later eligible attempt gets a new job ID and deadline,
+retaining the saved key and feedback even if newer comments or labels arrive.
+This recovers the original logical round before selecting another. Same-key
+replay returns its original commit without another task append, including when
+the branch has advanced. Changed parsed feedback under that key is refused.
+Results and completion comments describe the run state observed when the round
+was acknowledged: later paused, aborted or finished state is preserved, and
+the supervisor may have advanced again before delivery
+([issue #7](https://github.com/mattpolicastro/nightshift/issues/7)).
+
+Local callers can opt in with `--round-id`; retain the same key and saved
+feedback on retry. See [key syntax and JSON results](command-json.md#keyed-build-revisions).
+Legacy/unkeyed attempts remain compatible but have no retrospective
+deduplication guarantee. Restart services onto supporting code before relying
+on keyed intake; never retry a rejected `--round-id` by dropping the flag.
+Spec re-drafting remains outside this keyed build-revision contract.
+
 Legacy revision receipts initialize consumed IDs once, after authorization.
 Trusted records created at or before the receipt's saved time are treated as
 consumed, including blank and daemon-prefixed records. This uses comment
@@ -275,9 +294,16 @@ approval-head checks satisfied. Existing PR/admission recovery precedes new
 work; no fresh label event is required. See the
 [release outcomes and recovery instructions](../../README.md#pause-and-job-control)
 for success/no-op (exit 0), refusal (exit 1) and invalid syntax (exit 2).
-There is no automatic retry or rollback of committed effects. A revision that
-commits before saving its result can append a duplicate round on retry; release
-does not fix that [crash boundary](../../KNOWN-LIMITATIONS.md#open-gaps).
+There is no automatic retry of stopped work or rollback of committed effects.
+After release, an eligible build revision selects current unconsumed feedback
+with a new key, even without a new label event. That new round can append tasks
+already committed by the stopped attempt: inspect committed effects before
+release. A resolved refusal also permits a new snapshot and key.
+Legacy/unkeyed revisions can duplicate a commit if its result was lost.
+Keyed retries cover tested process-crash windows, but physical machine-crash
+durability remains unproven. Journals and stopped inputs accumulate; deleting
+evidence or restoring incomplete backups loses the keyed guarantee. See the
+[remaining crash and retention limits](../../KNOWN-LIMITATIONS.md#open-gaps).
 
 Admission can finish while paused and commit runnable state. The independent
 `specloop serve` supervisor can start or continue that build while the daemon
@@ -502,7 +528,7 @@ uv run specloop resume <change> [--note "..."]
 uv run specloop accept <change> [task]
 uv run specloop waive <change> <task> <text>
 uv run specloop publish <change>      # push to the recorded PR, or open a draft PR
-uv run specloop revise <change> --feedback <file>  # queue a review round
+uv run specloop revise <change> --feedback <file> --round-id <key>  # retain key and input on retry
 uv run specloop finish <change>       # archive the change, mark the PR ready
 uv run specloop propose <manifest> <change> --idea "..." [--source doc]   # draft a change
 uv run specloop drill <change>        # seeded defects through the review gate

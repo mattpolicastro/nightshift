@@ -68,7 +68,10 @@ def test_naming_guidance_distinguishes_compatibility_from_migration():
 @pytest.mark.scenario(
     "specloop-documentation/documentation-integrity/references-and-reader-checks-are-reviewable"
 )
-@pytest.mark.parametrize("path", DOCS)
+@pytest.mark.scenario(
+    "specloop-documentation/git-timeout-guidance/operator-understands-timeout-limits"
+)
+@pytest.mark.parametrize("path", (*DOCS, "docs/specloop/command-json.md"))
 def test_reference_labels_distinguish_prs_from_issues(path):
     references = []
     for label, target in LINK.findall((ROOT / path).read_text()):
@@ -82,6 +85,7 @@ def test_reference_labels_distinguish_prs_from_issues(path):
             references.append(target)
     assert references, f"{path} lost its references"
     assert f"{REPOSITORY}/issues/9" in references
+    assert f"{REPOSITORY}/issues/7" in references
 
 
 @pytest.mark.scenario(
@@ -131,7 +135,10 @@ def heading_ids(markdown):
 @pytest.mark.scenario(
     "specloop-documentation/documentation-integrity/scope-and-regression-checks-remain-intact"
 )
-@pytest.mark.parametrize("path", DOCS)
+@pytest.mark.scenario(
+    "specloop-documentation/keyed-revision-recovery-guidance/recovery-limits-remain-reviewable"
+)
+@pytest.mark.parametrize("path", (*DOCS, "docs/specloop/command-json.md"))
 def test_relative_documentation_links_resolve_including_heading_fragments(path):
     document = ROOT / path
     links = 0

@@ -14,11 +14,22 @@ Fixes land through Nightshift's own front door; these gaps remain unresolved.
 
 ## Open gaps
 
-- **Revision crash boundary:** a revise job that crashes after committing but
-  before saving its result can append a duplicate round on retry. Consumed
-  feedback IDs prevent replay after durable success
-  ([PR #61](https://github.com/mattpolicastro/nightshift/pull/61)); they do not
-  make the commit and result persistence atomic.
+- **Revision recovery limits:** keyed build revisions now recover the same
+  logical round across tested process-crash windows, including a commit before
+  wrapper result persistence ([issue #7](https://github.com/mattpolicastro/nightshift/issues/7)).
+  Ordinary crashed attempts detach as before; later eligible attempts retain
+  the saved key and feedback. Replay returns the original commit and observed
+  state, preserving later pauses, aborts and completion; changed payloads under
+  that key are refused. See the [optional `--round-id` contract](docs/specloop/command-json.md#keyed-build-revisions).
+  Legacy/unkeyed revisions still risk duplicate appends between commit and
+  result persistence; old receipts cannot acquire retrospective deduplication.
+  Consumed feedback IDs protect durable successes
+  ([PR #61](https://github.com/mattpolicastro/nightshift/pull/61)).
+  Deterministic process-crash tests do not prove physical machine-crash
+  durability: interruption of a real machine/VM mid-write remains an unperformed
+  human check in the design, alongside live-link and reader review. Missing or
+  inconsistent journal/Git evidence is refused, not reconstructed. Journals
+  accumulate with retained runs; deletion or incomplete backups lose protection.
 - **Pause boundary:** jobs already running can finish while the daemon is
   paused. An admission that completes while paused can still build under the
   independent `specloop serve` supervisor. Jobs have their own sessions, so
@@ -35,8 +46,11 @@ Fixes land through Nightshift's own front door; these gaps remain unresolved.
   evidence and inputs remain on disk. Release launches nothing: a later poll
   uses normal authorization, pause, blockers, health, approval and recovery
   rules. There is no automatic retry or rollback of committed effects; the
-  revision commit/result crash boundary and independent admitted builds above
-  still apply.
+  next eligible build revision selects current unconsumed feedback with a new
+  key, even under the same label event, and can append tasks the stopped attempt
+  already committed. Inspect committed effects before release. The legacy/
+  unkeyed crash risk, unproven keyed machine-crash durability and independent
+  admitted builds above still apply.
 - **Background jobs:**
   - Persisted reporting deadlines are propose 3600 seconds, admit 300 seconds
     and revise 1800 seconds. A live overdue attempt gets `needs-human` on the

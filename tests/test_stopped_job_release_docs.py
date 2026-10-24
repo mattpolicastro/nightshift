@@ -76,6 +76,11 @@ def test_documented_recovery_preserves_evidence_and_links(path, stopped_job, off
     assert daemon.PAUSE_FILE.exists()
     targets = {target for _, target in LINK.findall((ROOT / path).read_text())}
     assert f"{REPOSITORY}/issues/34" in targets
+    assert f"{REPOSITORY}/issues/7" in targets
+    # Recovery references must lead to the executable keyed contract as well
+    # as stop/release; prose and the human crash checklist are reviewed separately.
+    contract, = [target for target in targets if target.endswith("command-json.md#keyed-build-revisions")]
+    assert ((ROOT / path).parent / contract.split("#")[0]).resolve().is_file()
     if path == "KNOWN-LIMITATIONS.md":
         assert f"{REPOSITORY}/issues/17" in targets
         assert "README.md#pause-and-job-control" in targets

@@ -173,6 +173,21 @@ The corresponding label application is removed after success. If no eligible
 unconsumed feedback remains, the daemon explains this and removes the label
 without running an agent ([PR #61](https://github.com/mattpolicastro/nightshift/pull/61)).
 
+New build snapshots also save a UUID `round_id` before dispatch. Ordinary
+failed/crashed attempts detach and report repository health as before; a later
+eligible dispatch uses a new job ID and deadline with the same key and saved
+feedback. A matching retry returns the original round commit, even after the
+branch advances, without appending tasks again. Changed feedback under that
+key is refused. Keyed results and completion comments report state observed
+when acknowledged, preserving later paused, aborted or finished runs; they do
+not promise the supervisor has stayed in that state. For local retries, retain
+the same optional `--round-id` and feedback file; see the
+[keyed CLI contract](docs/specloop/command-json.md#keyed-build-revisions)
+([issue #7](https://github.com/mattpolicastro/nightshift/issues/7)).
+Legacy/unkeyed revisions have no retrospective deduplication guarantee.
+Explicit stopped-job release instead permits selection of a new round after
+inspection, as described in [job recovery](#pause-and-job-control).
+
 Existing revision receipts without consumed IDs are initialized automatically
 after authorization. Trusted IDs created at or before the receipt's saved time
 are treated as consumed, using comment creation times and review submission
@@ -609,8 +624,14 @@ over duplicate work. Resume or relabeling alone never clears a stopped hold.
 
 Release is explicit recovery, not automatic retry or rollback. SIGKILL can
 leave partial artifacts; remote effects and admission may already have
-committed. A revision can commit before saving its result, so a later attempt
-can append a duplicate round. Stopped/released job evidence and inputs have no
+committed. After release, a later eligible build revision selects current
+unconsumed feedback with a new key, even under the same label event. It can
+append tasks already committed by the stopped attempt; inspect those effects
+before releasing. Same-key crash recovery does not apply to this new round.
+Legacy/unkeyed revisions can still duplicate a commit whose result was lost.
+Keyed process-crash recovery is tested; physical machine-crash durability is
+unproven ([issue #7](https://github.com/mattpolicastro/nightshift/issues/7)).
+Stopped/released job evidence, inputs and revision journals have no
 automatic cleanup. See [remaining limits](KNOWN-LIMITATIONS.md#open-gaps) and the
 [manual host checks](docs/validation.md#manual-host-checks) for launchd unload
 and stopping during a push to a disposable remote.
