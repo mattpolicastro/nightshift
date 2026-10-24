@@ -967,7 +967,8 @@ def _reconcile_merge_readiness(repo: Repo, labels: queue.Labels, state_dir: Path
     if matching and consistent and previous is not None and not previous["delivered"]:
         _deliver_readiness(repo, state_dir, number, row, publication, pr, previous, runner=gh)
         return
-    assessment = _readiness_assessment(repo, labels, state_dir, number, row, pr, runner=gh)
+    assessment = _readiness_assessment(repo, labels, state_dir, number, row, pr, runner=gh,
+                                       publication=publication)
     _deliver_readiness(repo, state_dir, number, row, publication, pr, assessment, runner=gh)
 
 
@@ -997,7 +998,8 @@ def _readiness_ci(repo: Repo, number: int, *, runner=None) -> list[str]:
 
 
 def _readiness_assessment(repo: Repo, labels: queue.Labels, state_dir: Path, number: int,
-                          row: dict, pr: dict, *, runner=None, git_runner=None) -> dict:
+                          row: dict, pr: dict, *, runner=None, git_runner=None,
+                          publication: dict | None = None) -> dict:
     """Compose all conditions in stable order without delivering or modifying state."""
     head = pr.get("headRefOid")
     head = head if isinstance(head, str) and head.strip() else ""
@@ -1010,7 +1012,8 @@ def _readiness_assessment(repo: Repo, labels: queue.Labels, state_dir: Path, num
     reasons.extend(_readiness_evidence(row, git_runner=git_runner))
     current = {label["name"] for label in pr["labels"]}
     reasons.extend(_readiness_revision(repo, labels, state_dir, number, row, current))
-    reasons.extend(_readiness_human_checks(row, pr.get("body"), git_runner=git_runner))
+    reasons.extend(_readiness_human_checks(row, pr.get("body"), git_runner=git_runner,
+                                           publication_checks=(publication or {}).get("checks")))
     label = "merge:blocked" if reasons else "merge:ready"
     advisory = (f"Advisory snapshot for {head or '(unknown)'}. Recheck CI and current main when landing; "
                 "this label does not authorize merge.")
@@ -1094,18 +1097,31 @@ def _deliver_readiness(repo: Repo, state_dir: Path, number: int, row: dict,
     _save(path, {**receipt, "delivered": True})
 
 
-def _readiness_human_checks(row: dict, body: object, *, git_runner=None) -> list[str]:
-    """Apply the literal checklist/spec line rules, using only committed run-head specs."""
+PUBLICATION_HEADER = re.compile(r"all tasks landed at [0-9a-f]+; human checks after publishing:")
+
+
+def _readiness_human_checks(row: dict, body: object, *, git_runner=None,
+                            publication_checks: object = None) -> list[str]:
+    """Apply the literal checklist/spec line rules, using only committed run-head specs.
+
+    A PR specloop opened carries the list in its body. A front-door PR's body is the
+    spec PR's; its list is the publication's `checks`, the run's ready_to_publish detail.
+    """
     unknown = ["human checks: unknown checklist or scenario annotation"]
     if not isinstance(body, str):
         return unknown
     lines = body.splitlines()
     starts = [i for i, line in enumerate(lines) if line == "## Checks a human must make"]
-    if len(starts) != 1:
+    if len(starts) == 1:
+        start = starts[0] + 1
+        end = next((i for i in range(start, len(lines)) if lines[i].startswith("#")), len(lines))
+        checks = [line for line in lines[start:end] if line.strip()]
+    elif not starts and isinstance(publication_checks, str):
+        checks = [line for line in publication_checks.splitlines() if line.strip()
+                  and not PUBLICATION_HEADER.fullmatch(line.strip())
+                  and not line.startswith("Next: `specloop publish ")]
+    else:
         return unknown
-    start = starts[0] + 1
-    end = next((i for i in range(start, len(lines)) if lines[i].startswith("#")), len(lines))
-    checks = [line for line in lines[start:end] if line.strip()]
     if not checks or checks == ["(none)"]:
         return []
     ids = []
