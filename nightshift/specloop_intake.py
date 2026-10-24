@@ -939,6 +939,78 @@ def _readiness_assessment(repo: Repo, labels: queue.Labels, state_dir: Path, num
             "body": f"Merge readiness: `{label}`.\n\n{advisory}\n\n{explanation}"}
 
 
+def _load_readiness(path: Path) -> dict | None:
+    """Reject damaged delivery state instead of overwriting its recovery evidence."""
+    if not path.exists():
+        return None
+    receipt = json.loads(path.read_text())
+    _validate_readiness(receipt)
+    return receipt
+
+
+def _validate_readiness(receipt: dict) -> None:
+    if (not isinstance(receipt, dict)
+            or any(not isinstance(receipt.get(key), str) or not receipt[key].strip()
+                   for key in ("change", "pr", "run_head", "body"))
+            or not _safe_change(receipt["change"])
+            or not isinstance(receipt.get("head"), str)
+            or type(receipt.get("delivered")) is not bool
+            or receipt.get("label") not in ("merge:ready", "merge:blocked")
+            or not isinstance(receipt.get("reasons"), list)
+            or any(not isinstance(reason, str) or not reason.strip() for reason in receipt["reasons"])
+            or (receipt["label"] == "merge:blocked") != bool(receipt["reasons"])
+            or (receipt["label"] == "merge:ready" and receipt["head"] != receipt["run_head"])):
+        raise ValueError("invalid merge-readiness receipt")
+    round_id = receipt.get("publication_round")
+    if not (isinstance(round_id, str) and round_id.strip()
+            or round_id == [receipt[key] for key in ("change", "run_head", "pr")]):
+        raise ValueError("invalid merge-readiness publication identity")
+
+
+def _deliver_readiness(repo: Repo, state_dir: Path, number: int, row: dict,
+                       publication: dict, pr: dict, assessment: dict, *, runner=None) -> None:
+    """Deliver against the caller's fresh PR snapshot, never a saved intention alone.
+
+    Eligibility, head-change removal before assessment and polling budgets belong
+    to the caller. This receipt is independent of publication and revision state.
+    """
+    from .daemon import paused
+
+    path = state_dir / "merge-readiness" / repo.name.replace("/", "__") / f"{number}.json"
+    previous = _load_readiness(path) or {}
+    head = pr.get("headRefOid")
+    head = head if isinstance(head, str) and head.strip() else ""
+    if assessment["head"] != head or assessment["run_head"] != row["head"]:
+        raise ValueError("stale merge-readiness assessment; reassess the observed head")
+    identity = [row["change"], row["head"], row["pr"]]
+    if ([publication.get(key) for key in ("change", "head", "pr")] != identity
+            or publication.get("delivered") is not True
+            or publication.get("result", {}).get("outcome") != "published"):
+        raise ValueError("merge-readiness requires a matching delivered publication")
+    chosen = {key: assessment[key] for key in ("head", "run_head", "label", "reasons", "body")}
+    chosen.update(change=row["change"], pr=row["pr"],
+                  publication_round=publication.get("round_id", identity))
+    receipt = {**previous, **chosen, "delivered": False}
+    _validate_readiness(receipt)
+    current = {label["name"] for label in pr["labels"]}
+    selected = receipt["label"]
+    opposite = "merge:blocked" if selected == "merge:ready" else "merge:ready"
+    if (previous.get("delivered") is True and all(previous.get(k) == v for k, v in chosen.items())
+            and selected in current and opposite not in current):
+        return
+    _save(path, receipt)  # Atomic intent precedes every external effect.
+    gh = runner or queue._gh
+    if opposite in current:
+        gh(["pr", "edit", str(number), "--repo", repo.name, "--remove-label", opposite])
+    if selected not in current:
+        gh(["pr", "edit", str(number), "--repo", repo.name, "--add-label", selected])
+    _comment(repo.name, number, row["change"], receipt["body"], runner=gh, action="approval",
+             kind="pr", round_id="merge-readiness")
+    if paused():
+        raise Paused()
+    _save(path, {**receipt, "delivered": True})
+
+
 def _readiness_human_checks(row: dict, body: object, *, git_runner=None) -> list[str]:
     """Apply the literal checklist/spec line rules, using only committed run-head specs."""
     unknown = ["human checks: unknown checklist or scenario annotation"]
