@@ -22,6 +22,7 @@ from test_specloop_approval import ApprovalGh, Commands as AdmissionCommands, CH
 from test_specloop_spec_revision import RevisionGh, Commands as RevisionCommands, REVISED, seed_consumed
 from test_specloop_build_revision import BuildCommands
 from test_specloop_publication import PublishCommands, DETAIL, CHECKS
+from merge_readiness_fixtures import PublicationOnlyGh
 
 
 @pytest.fixture
@@ -467,7 +468,7 @@ def test_unhealthy_repo_still_publishes_admitted_run(enrollment, failure, name):
     elif failure != "unsupported-name":
         path.unlink()
     repo = Repo(name, engine="specloop", manifest=None if failure == "absent" else path)
-    gh, commands = ApprovalGh(labels=()), PublishCommands()
+    gh, commands = PublicationOnlyGh(labels=()), PublishCommands()
     gh.pr_url = f"https://github.com/{name}/pull/8"
     commands.runs = [{"change": CHANGE, "pr": gh.pr_url, "status": "paused", "head": HEAD,
                       "pause": {"reason": "ready_to_publish", "detail": DETAIL}}]

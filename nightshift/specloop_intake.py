@@ -23,6 +23,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from specloop import manifest as manifests
+from specloop import state as run_state, tasks as run_tasks
 
 from . import queue, specloop_client, specloop_job
 from .config import Repo
@@ -935,6 +936,371 @@ def revise_pending(
                  on_error=on_error, on_pending=on_pending)
 
 
+def _reconcile_merge_readiness(repo: Repo, labels: queue.Labels, state_dir: Path,
+                               number: int, row: dict, publication: dict, *, runner=None) -> None:
+    """Poll one PR snapshot; reuse only assessments bound to this publication/head."""
+    gh = runner or queue._gh
+    pr = json.loads(gh([
+        "pr", "view", str(number), "--repo", repo.name, "--json",
+        "state,labels,headRefName,headRefOid,isCrossRepository,url,body",
+    ]))
+    if (pr["state"] != "OPEN" or pr["isCrossRepository"] is not False
+            or pr["headRefName"] != f"spec/{row['change']}" or pr["url"] != row["pr"]):
+        return
+    path = state_dir / "merge-readiness" / repo.name.replace("/", "__") / f"{number}.json"
+    previous = _load_readiness(path)
+    head = pr.get("headRefOid")
+    head = head if isinstance(head, str) and head.strip() else ""
+    identity = dict(change=row["change"], pr=row["pr"], run_head=row["head"], head=head,
+                    publication_round=publication.get("round_id", [row[k] for k in ("change", "head", "pr")]))
+    matching = previous is not None and all(previous.get(k) == v for k, v in identity.items())
+    current = {label["name"] for label in pr["labels"]}
+    consistent = previous is not None and current & {"merge:ready", "merge:blocked"} == {previous["label"]}
+    if matching and consistent and previous is not None and previous["delivered"]:
+        return
+    if ("merge:ready" in current and (head != row["head"]
+            or previous is not None and previous["head"] != head)):
+        # Invalidate even an incomplete old intention before any assessment I/O.
+        gh(["pr", "edit", str(number), "--repo", repo.name, "--remove-label", "merge:ready"])
+        current.remove("merge:ready")
+        pr["labels"] = [label for label in pr["labels"] if label["name"] != "merge:ready"]
+    if matching and consistent and previous is not None and not previous["delivered"]:
+        _deliver_readiness(repo, state_dir, number, row, publication, pr, previous, runner=gh)
+        return
+    assessment = _readiness_assessment(repo, labels, state_dir, number, row, pr, runner=gh)
+    _deliver_readiness(repo, state_dir, number, row, publication, pr, assessment, runner=gh)
+
+
+def _readiness_ci(repo: Repo, number: int, *, runner=None) -> list[str]:
+    """Classify one ordinary PR-check snapshot through the string-returning runner."""
+    try:
+        raw = (runner or queue._gh)([
+            "pr", "checks", str(number), "--repo", repo.name, "--json", "name,bucket,state",
+        ])
+    except Paused:
+        raise
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return ["CI: checks unavailable; green CI could not be established"]
+    try:
+        checks = json.loads(raw)
+    except (ValueError, TypeError):
+        return ["CI: malformed check results"]
+    if not isinstance(checks, list) or any(
+            not isinstance(check, dict) or any(
+                not isinstance(check.get(field), str) or not check[field].strip()
+                for field in ("name", "bucket", "state")) for check in checks):
+        return ["CI: malformed check results"]
+    buckets = {check["bucket"] for check in checks}
+    if "pass" in buckets and buckets <= {"pass", "skipping"}:
+        return []
+    return ["CI: checks are not green; require at least one pass and only pass or skipping buckets"]
+
+
+def _readiness_assessment(repo: Repo, labels: queue.Labels, state_dir: Path, number: int,
+                          row: dict, pr: dict, *, runner=None, git_runner=None) -> dict:
+    """Compose all conditions in stable order without delivering or modifying state."""
+    head = pr.get("headRefOid")
+    head = head if isinstance(head, str) and head.strip() else ""
+    reasons = []
+    if not head:
+        reasons.append("head: PR head is missing or unknown")
+    elif head != row.get("head"):
+        reasons.append(f"head: PR head {head} does not match run head {row.get('head') or '(unknown)'}")
+    reasons.extend(_readiness_ci(repo, number, runner=runner))
+    reasons.extend(_readiness_evidence(row, git_runner=git_runner))
+    current = {label["name"] for label in pr["labels"]}
+    reasons.extend(_readiness_revision(repo, labels, state_dir, number, row, current))
+    reasons.extend(_readiness_human_checks(row, pr.get("body"), git_runner=git_runner))
+    label = "merge:blocked" if reasons else "merge:ready"
+    advisory = (f"Advisory snapshot for {head or '(unknown)'}. Recheck CI and current main when landing; "
+                "this label does not authorize merge.")
+    explanation = ("\n".join(f"- {reason}" for reason in reasons) if reasons else
+                   "PR head matches the run; CI checks are green; section evidence passed with zero "
+                   "timeouts (or an allowed measurement exemption); no build revision is pending; "
+                   "human checks are empty or explicitly post-deploy.")
+    return {"head": head, "run_head": row.get("head"), "label": label, "reasons": reasons,
+            "body": f"Merge readiness: `{label}`.\n\n{advisory}\n\n{explanation}"}
+
+
+def _load_readiness(path: Path) -> dict | None:
+    """Reject damaged delivery state instead of overwriting its recovery evidence."""
+    if not path.exists():
+        return None
+    receipt = json.loads(path.read_text())
+    _validate_readiness(receipt)
+    return receipt
+
+
+def _validate_readiness(receipt: dict) -> None:
+    if (not isinstance(receipt, dict)
+            or any(not isinstance(receipt.get(key), str) or not receipt[key].strip()
+                   for key in ("change", "pr", "run_head", "body"))
+            or not _safe_change(receipt["change"])
+            or not isinstance(receipt.get("head"), str)
+            or type(receipt.get("delivered")) is not bool
+            or receipt.get("label") not in ("merge:ready", "merge:blocked")
+            or not isinstance(receipt.get("reasons"), list)
+            or any(not isinstance(reason, str) or not reason.strip() for reason in receipt["reasons"])
+            or (receipt["label"] == "merge:blocked") != bool(receipt["reasons"])
+            or (receipt["label"] == "merge:ready" and receipt["head"] != receipt["run_head"])):
+        raise ValueError("invalid merge-readiness receipt")
+    round_id = receipt.get("publication_round")
+    if not (isinstance(round_id, str) and round_id.strip()
+            or round_id == [receipt[key] for key in ("change", "run_head", "pr")]):
+        raise ValueError("invalid merge-readiness publication identity")
+
+
+def _deliver_readiness(repo: Repo, state_dir: Path, number: int, row: dict,
+                       publication: dict, pr: dict, assessment: dict, *, runner=None) -> None:
+    """Deliver against the caller's fresh PR snapshot, never a saved intention alone.
+
+    Eligibility, head-change removal before assessment and polling budgets belong
+    to the caller. This receipt is independent of publication and revision state.
+    """
+    from .daemon import paused
+
+    path = state_dir / "merge-readiness" / repo.name.replace("/", "__") / f"{number}.json"
+    previous = _load_readiness(path) or {}
+    head = pr.get("headRefOid")
+    head = head if isinstance(head, str) and head.strip() else ""
+    if assessment["head"] != head or assessment["run_head"] != row["head"]:
+        raise ValueError("stale merge-readiness assessment; reassess the observed head")
+    identity = [row["change"], row["head"], row["pr"]]
+    if ([publication.get(key) for key in ("change", "head", "pr")] != identity
+            or publication.get("delivered") is not True
+            or publication.get("result", {}).get("outcome") != "published"):
+        raise ValueError("merge-readiness requires a matching delivered publication")
+    chosen = {key: assessment[key] for key in ("head", "run_head", "label", "reasons", "body")}
+    chosen.update(change=row["change"], pr=row["pr"],
+                  publication_round=publication.get("round_id", identity))
+    receipt = {**previous, **chosen, "delivered": False}
+    _validate_readiness(receipt)
+    current = {label["name"] for label in pr["labels"]}
+    selected = receipt["label"]
+    opposite = "merge:blocked" if selected == "merge:ready" else "merge:ready"
+    if (previous.get("delivered") is True and all(previous.get(k) == v for k, v in chosen.items())
+            and selected in current and opposite not in current):
+        return
+    _save(path, receipt)  # Atomic intent precedes every external effect.
+    gh = runner or queue._gh
+    if opposite in current:
+        gh(["pr", "edit", str(number), "--repo", repo.name, "--remove-label", opposite])
+    if selected not in current:
+        gh(["pr", "edit", str(number), "--repo", repo.name, "--add-label", selected])
+    _comment(repo.name, number, row["change"], receipt["body"], runner=gh, action="approval",
+             kind="pr", round_id="merge-readiness")
+    if paused():
+        raise Paused()
+    _save(path, {**receipt, "delivered": True})
+
+
+def _readiness_human_checks(row: dict, body: object, *, git_runner=None) -> list[str]:
+    """Apply the literal checklist/spec line rules, using only committed run-head specs."""
+    unknown = ["human checks: unknown checklist or scenario annotation"]
+    if not isinstance(body, str):
+        return unknown
+    lines = body.splitlines()
+    starts = [i for i, line in enumerate(lines) if line == "## Checks a human must make"]
+    if len(starts) != 1:
+        return unknown
+    start = starts[0] + 1
+    end = next((i for i in range(start, len(lines)) if lines[i].startswith("#")), len(lines))
+    checks = [line for line in lines[start:end] if line.strip()]
+    if not checks or checks == ["(none)"]:
+        return []
+    ids = []
+    for line in checks:
+        if not line.startswith(("- [ ] ", "- [x] ")):
+            return unknown
+        parts = line.split("`")
+        citations = [part for part in parts[1::2] if "/" in part]
+        if (len(parts) % 2 != 1 or any(not part for part in parts[1::2])
+                or len(citations) != 1 or not re.fullmatch(
+                    r"[a-z0-9]+(?:-[a-z0-9]+)*(?:/[a-z0-9]+(?:-[a-z0-9]+)*){2}", citations[0])):
+            return unknown
+        ids.append(citations[0])
+    try:
+        change, head = row["change"], row["head"]
+        if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+            return unknown
+        run = run_state.Run.for_change(change, require_existing=True)
+        if run.state.change != change or run.state.pr != row["pr"]:
+            return unknown
+
+        def git(*args):
+            return (git_runner or run_git)(["git", "--git-dir", str(run.dir / "repo.git"), *args],
+                                          timeout=POLL_COMMAND_TIMEOUT, capture_output=True, text=True, check=True).stdout
+
+        def slug(name):
+            return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+        prefix = f"openspec/changes/{change}/specs/"
+        paths = git("ls-tree", "-r", "--name-only", "-z", head, "--", prefix).split("\0")
+        scenarios: dict[str, list[bool]] = {}
+        for path in paths:
+            relative = path.removeprefix(prefix).split("/")
+            if len(relative) != 2 or relative[1] != "spec.md":
+                continue
+            spec = git("show", f"{head}^{{commit}}:{path}").splitlines()
+            requirement = ""
+            for i, line in enumerate(spec):
+                if line.startswith("### Requirement: "):
+                    requirement = slug(line.removeprefix("### Requirement: "))
+                elif line.startswith("#### Scenario: ") and requirement:
+                    sid = "/".join((slug(relative[0]), requirement, slug(line.removeprefix("#### Scenario: "))))
+                    end = next((j for j in range(i + 1, len(spec)) if spec[j].startswith("#")), len(spec))
+                    scenarios.setdefault(sid, []).append("<!-- nightshift:post-deploy -->" in spec[i + 1:end])
+                elif line.startswith("#"):
+                    requirement = ""
+        return [f"human checks: outstanding or unknown post-deploy annotation for `{sid}`"
+                for sid in dict.fromkeys(ids) if scenarios.get(sid) != [True]]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+        return unknown
+
+
+def _readiness_revision(repo: Repo, labels: queue.Labels, state_dir: Path, number: int,
+                        row: dict, current: set[str]) -> list[str]:
+    """Observe revision state without authorization, collection, migration or delivery."""
+    if labels.revise in current:
+        return [f"revision: pending trigger `{labels.revise}`"]
+    path = state_dir / "revisions" / repo.name.replace("/", "__") / f"{number}.json"
+    try:
+        try:
+            receipt = json.loads(path.read_text())
+        except FileNotFoundError:
+            return []
+        if (not isinstance(receipt, dict) or not isinstance(receipt.get("change"), str)
+                or not _safe_change(receipt["change"])):
+            raise ValueError("invalid receipt identity")
+        if receipt["change"] != row["change"]:
+            return []
+        command = receipt.get("command")
+        if command == "propose":
+            return []
+        # An empty-feedback round dispatches no command or job.
+        if ("command" not in receipt and "job" not in receipt
+                and receipt.get("delivered") is True and receipt.get("result") == {"outcome": "empty"}):
+            return []
+        if command != "revise":
+            raise ValueError("unknown revision command")
+        result = receipt.get("result")
+        if (receipt.get("delivered") is not True or not isinstance(result, dict)
+                or result.get("outcome") not in ("revised", "refused")
+                or "error" in result
+                or "version" in result and (type(result["version"]) is not int or result["version"] != 1)
+                or result.get("outcome") == "revised" and not isinstance(result.get("commit"), str)
+                or result.get("outcome") == "revised" and not result.get("commit")):
+            return ["revision: pending or unknown build-revision result/delivery"]
+        if "job" in receipt:
+            job = receipt["job"]
+            if not isinstance(job, str) or not re.fullmatch(r"[0-9a-f]{32}", job):
+                raise ValueError("invalid attached job")
+            directory = path.parent / f"{number}.jobs" / job
+            if (directory / "stop.json").exists():
+                return ["revision: attached job is stopped or stopping"]
+            collected = json.loads((directory / "collected.json").read_text())
+            if (not isinstance(collected, dict) or not isinstance(collected.get("collected_at"), str)
+                    or not collected["collected_at"]):
+                raise ValueError("uncollected or unknown attached job")
+        return []
+    except (OSError, ValueError, KeyError, TypeError):
+        return ["revision: unknown local build-revision state"]
+
+
+def _readiness_evidence(row: dict, *, git_runner=None) -> list[str]:
+    """Read-only local evidence assessment; an empty reason list permits readiness."""
+    source = "run identity/state.json"
+    try:
+        change, head, pr = row["change"], row["head"], row["pr"]
+        if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+            raise ValueError("missing or invalid run head")
+        run = run_state.Run.for_change(change, require_existing=True)
+        saved = run.state
+        if not isinstance(pr, str) or not pr or saved.change != change or saved.pr != pr:
+            raise ValueError("saved change/PR does not match status")
+        if (not isinstance(saved.evidenced, list)
+                or any(type(n) is not int or n < 1 for n in saved.evidenced)):
+            raise ValueError("invalid evidenced sections")
+        for field in (saved.section_base, saved.evidence_summary):
+            if not isinstance(field, dict) or any(
+                    not isinstance(k, str) or not isinstance(v, str) for k, v in field.items()):
+                raise ValueError("invalid section_base/evidence_summary")
+        source = "manifest.toml"
+        manifest = manifests.load(run.manifest_path)
+        if manifest.change != change or manifest.branch != f"spec/{change}":
+            raise ValueError("manifest identity does not match status")
+
+        def git(*args):
+            return (git_runner or run_git)(["git", "--git-dir", str(run.dir / "repo.git"), *args],
+                                          timeout=POLL_COMMAND_TIMEOUT, capture_output=True, text=True, check=True).stdout
+
+        source = "committed tasks.md/repo.git"
+        tasks_path = f"openspec/changes/{change}/tasks.md"
+        document = git("show", f"{head}^{{commit}}:{tasks_path}")
+        sections = list(dict.fromkeys(t.section for t in run_tasks.parse(document)))
+        headings = [int(m[1]) for line in document.splitlines() if (m := run_tasks.SECTION.match(line))]
+        if not sections or sections != headings:
+            raise ValueError("missing, empty or duplicate task sections")
+        source = "events.jsonl"
+        latest = {}
+        events = (run.dir / source).read_text()
+        if events and not events.endswith("\n"):
+            raise ValueError("incomplete final event line")
+        for line in events.splitlines():
+            event = json.loads(line)
+            if not isinstance(event, dict) or not isinstance(event.get("event"), str) or not event["event"]:
+                raise ValueError("invalid event record")
+            if event["event"] == "evidence":
+                n = event.get("section")
+                if type(n) is not int or n < 1:
+                    raise ValueError("invalid evidence section")
+                latest[n] = event
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError, subprocess.SubprocessError) as exc:
+        return [f"evidence: check {source} ({type(exc).__name__}: {exc})"]
+
+    reasons = []
+    for index, n in enumerate(sections):
+        prefix = f"evidence section {n}: "
+        event = latest.get(n)
+        if event is None:
+            start = saved.section_base.get(str(n), "")
+            end = saved.section_base.get(str(sections[index + 1]), "") if index + 1 < len(sections) else head
+            try:
+                if not all(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", ref) for ref in (start, end)):
+                    raise ValueError("missing section boundaries")
+                git("merge-base", "--is-ancestor", start, end)
+                git("merge-base", "--is-ancestor", end, head)
+                # Disabling rename detection exposes both sides of cross-boundary renames.
+                paths = set(git("diff", "--no-ext-diff", "--no-renames", "--name-only", "-z", start, end, "--").split("\0")) - {"", tasks_path}
+                if paths and all(p.startswith("tests/") for p in paths):
+                    continue
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
+            reasons.append(prefix + "missing event; no bounded test-only diff proof")
+            continue
+        failed = []
+        if event.get("passed") is not True:
+            failed.append("passed must be true")
+        if event.get("unmeasured", False) is not False:
+            failed.append("unmeasured or invalid measurement flag")
+        score = event.get("score")
+        skip = "mutation: skipped (no mutable lines added under mutation_paths)"
+        if not (isinstance(score, (int, float)) and not isinstance(score, bool) and 0 <= score <= 1):
+            if not ("score" in event and score is None and skip in saved.evidence_summary.get(str(n), "").splitlines()):
+                failed.append("score missing, invalid or unmeasured without no-mutable-lines summary")
+        timeouts = event.get("timeouts")
+        if type(timeouts) is not int or timeouts < 0:
+            failed.append("timeouts missing or invalid")
+        elif timeouts:
+            failed.append(f"{timeouts} timeouts")
+        if event.get("uncovered") != []:
+            failed.append("uncovered scenarios missing, invalid or nonempty")
+        if n not in saved.evidenced:
+            failed.append("saved evidence completion missing")
+        reasons.extend(prefix + reason for reason in failed)
+    return reasons
+
+
 def publish_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
     on_error=None,
@@ -972,6 +1338,10 @@ def publish_pending(
                 change, run["head"], run["pr"]):
             receipt = None
         if receipt and receipt.get("delivered"):
+            if (pause["reason"] == "human_checks" and receipt["delivered"] is True
+                    and receipt.get("result", {}).get("outcome") == "published"):
+                _reconcile_merge_readiness(repo, labels, state_dir, int(admission_path.stem),
+                                           run, receipt, runner=gh)
             return None
         if pause["reason"] == "human_checks" and receipt is None:
             return None  # No daemon publication to recover.

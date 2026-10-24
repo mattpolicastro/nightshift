@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from manifest_fixtures import manifest_text
+from merge_readiness_fixtures import PublicationOnlyGh
 
 from nightshift import daemon, queue, specloop_intake
 from nightshift.config import Config, Repo
@@ -53,7 +54,7 @@ def setup(tmp_path, monkeypatch):
     manifest = tmp_path / "manifest.toml"
     manifest.write_text(manifest_text(tmp_path / "source"))
     repo = Repo("owner/sample", engine="specloop", manifest=manifest)
-    gh, commands = ApprovalGh(), PublishCommands()
+    gh, commands = PublicationOnlyGh(), PublishCommands()
     # Use actual admission to establish daemon ownership, not hand-written state.
     specloop_intake.admit_pending(repo, queue.Labels(), tmp_path,
                                  runner=gh, specloop_runner=commands, git_runner=commands)
