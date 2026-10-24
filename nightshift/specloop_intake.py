@@ -9,6 +9,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -893,8 +894,17 @@ def revise_pending(
             if result.get("risks"):
                 body += "\n\nFeasibility risks:\n" + "\n".join(f"- {risk}" for risk in result["risks"])
         elif result["outcome"] == "revised":
+            # Saved results also cross this gate after a daemon restart.
+            _validate(result, "revise", receipt)
             _acknowledge_revision_feedback(path, receipt)
             body = f"Queued review tasks for {change} in {result['commit']}; the build has resumed."
+            if "revision_key_version" in receipt and (result["replayed"] or result["status"] != "running"):
+                state = "finished" if result["status"] == "done" else result["status"]
+                if state == "paused":
+                    state += f" ({result['pause']['reason']})"
+                action = "Acknowledged replay of review tasks" if result["replayed"] else "Queued review tasks"
+                body = (f"{action} for {change} in {result['commit']}; "
+                        f"the build was observed {state} when acknowledged.")
         elif result["outcome"] == "empty":
             body = "There is nothing to revise: no unconsumed review feedback is available."
         else:
@@ -1221,6 +1231,37 @@ def _validate(result: dict, command: str, receipt: dict) -> None:
         raise specloop_client.SpecloopError("propose returned no commit on the requested branch")
     if command == "revise" and result["outcome"] == "revised" and not result.get("commit"):
         raise specloop_client.SpecloopError("revise returned no landed commit")
+    if command == "revise" and result["outcome"] == "revised" and "revision_key_version" in receipt:
+        key = receipt.get("round_id")
+        if (type(receipt["revision_key_version"]) is not int or receipt["revision_key_version"] != 1
+                or not isinstance(key, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", key)
+                or result.get("round_id") != key):
+            raise specloop_client.SpecloopError("revise returned a missing or mismatched round identity")
+        if not isinstance(result["commit"], str) or not result["commit"].strip():
+            raise specloop_client.SpecloopError("revise returned no landed commit")
+        if type(result.get("replayed")) is not bool:
+            raise specloop_client.SpecloopError("revise returned an invalid replay flag")
+        if result.get("status") not in ("running", "paused", "aborted", "done"):
+            raise specloop_client.SpecloopError("revise returned an invalid observed status")
+        pause = result.get("pause")
+        if "pause" not in result or pause is None and result["status"] == "paused":
+            raise specloop_client.SpecloopError("revise returned no observed pause")
+        # Abort can retain the preceding pause. Validate its shape without
+        # imposing a new control-state transition or rejecting future fields.
+        if pause is not None:
+            if (not isinstance(pause, dict) or not isinstance(pause.get("reason"), str)
+                    or not pause["reason"].strip()
+                    or any(field in pause and not isinstance(pause[field], str)
+                           for field in ("task", "detail"))
+                    or type(pause.get("resume_at", 0)) not in (int, float)):
+                raise specloop_client.SpecloopError("revise returned an invalid observed pause")
+            try:
+                finite = math.isfinite(pause.get("resume_at", 0))
+            except OverflowError:
+                finite = False
+            if not finite:
+                raise specloop_client.SpecloopError("revise returned an invalid observed pause")
 
 
 def _start(path: Path, receipt: dict, args: list[str], *, runner, launcher,
