@@ -1,0 +1,96 @@
+## Context
+
+`specloop/revise.py:revise` currently parses feedback, locks and reloads the run, creates a harness commit, advances the branch with compare-and-swap, saves running state and appends a `revised` event. The wrapper in `nightshift/specloop_job.py` subsequently saves `result.json`. There is no transaction spanning these operations.
+
+Issue #9 is landed: `start` writes stage/args/start/budget/deadline before launch; `_collect_locked` detaches dead or failed jobs and reports the error; live overdue jobs remain attached; delivered-attempt compaction retains minimal requests. Preserve these policies. In particular, keep issue-intake's Overdue job escalation / Control and completion take precedence unchanged.
+
+`revise_pending` saves selected feedback and a label-event-based `round_id`, but its no-result condition subsequently discards a detached snapshot. Explicit stopped-job release also removes only `job`, and intentionally permits a newly selected snapshot under the same event. Therefore merely passing the existing event ID cannot solve both cases. New build snapshots need a unique identity plus separate attempt provenance. Spec-stage snapshots and legacy marker behavior remain unchanged.
+
+The checkout has no repository `AGENTS.md`; `README.md` points to `CLAUDE.md`, whose protected-test, compatibility and documentation rules apply. Existing requirements in specloop-interface, pr-revision, background-job-control, issue-intake, paused-job-delivery, run-actions, agent-test-rules and specloop-documentation remain in force except for the explicitly supplied deltas.
+
+## Goals / Non-Goals
+
+Guarantee at most one appended review round for the same key and normalized feedback in a retained run, including a retry in another CLI process after branch advancement but before wrapper result persistence. Different keys may legitimately carry identical text. Preserve run-control decisions, feedback consumption, authorization, pause, release, deadline and cleanup boundaries.
+
+No network or host application is needed for automated correctness checks: local Git repositories, isolated run directories, injected GitHub responses and real candidate Python subprocesses suffice. Physical power-loss behavior remains a human check. No retroactive key inference, global retry service, journal garbage collector, or new production executable-selection policy is included.
+
+## Decisions
+
+### 1. Optional key and compatible CLI result
+
+Add `--round-id` in `specloop/cli.py` and keyword `round_id: str | None = None` in `specloop/revise.py`. Accept a nonempty ASCII identifier of at most 128 characters matching `[A-Za-z0-9][A-Za-z0-9._:-]*`; reject an explicitly empty or invalid key. Store records by SHA-256 of the key, never by interpreting it as a path. Key scope is one admitted run and its recorded branch.
+
+Retain `revise(...) -> str` for existing Python callers. A small structured entry point `revise_result(...)` returns commit, key, replay flag, status and pause captured while holding the run lock; the string-returning function delegates to it. The CLI uses the structured entry point. Unkeyed calls retain the existing version-1 success/refusal fields, fresh append behavior, eligibility restrictions and human success text including `run is running`.
+
+Keyed success retains `version: 1`, `outcome: revised` and `commit`, adding `round_id`, boolean `replayed`, `status` and `pause` (the current pause object or null). `commit` always names the original round commit, even when HEAD is a descendant. Status is the observation under the lock, not a promise that a running supervisor cannot subsequently advance. Human keyed output distinguishes append from replay and reports that observed state, mapping `done` to finished language. Invalid keys, empty feedback, key conflicts and unverifiable records are nonzero refusals with reasons; operational Git errors must remain distinguishable from an ancestry conflict in those reasons.
+
+### 2. Durable evidence before branch advancement
+
+Use `specloop/revision_store.py` for a version-1 per-key journal under `<run>/revision-rounds/<sha256(key)>.json`. It is harness storage outside agent-controlled commits and `RunState`, so an older supervisor's `run.save()` cannot discard it. No migration of legacy state is required. Unknown journal fields are tolerated; malformed known fields or unsupported versions fail closed.
+
+Bind the journal to change, branch, key, a digest of canonical JSON of the parsed nonempty feedback blocks, parent SHA, candidate commit SHA, review-round number, task count, and pre-transition evidence. Normalize using the existing text/JSON parsing semantics: JSON blocks preserve their text, text blocks retain today's stripping, order and duplicates matter. Filenames, JSON whitespace and text-vs-JSON encoding do not affect equality when the parsed blocks are identical.
+
+Under `run.lock()`, reload strict existing state and look up the key before applying new-round status restrictions. For a new key, enforce the existing eligibility checks, create the candidate commit and atomically persist a prepared journal before `git update-ref <ref> <commit> <parent>`. Journal writes use unique temporary files, flush/fsync, replace and parent-directory fsync. Failure before journal persistence cannot advance the ref. A crash leaving an unreachable candidate before journal persistence is harmless; it has appended nothing.
+
+Record fingerprints of the saved state bytes and event-log bytes at preparation, including whether each exists. Use them only to recognize an interrupted original transition, not as the source of idempotency. Never clear `pause-requested`. Finish the normal running-state transition and record completion in the journal. Store the immutable original result identity, not a cached status to be imposed on later replay. A keyed `revised` event carries the key; recovery avoids a second complete event for that key. A corrupt or partially written log needed for recovery yields an actionable error rather than guessing or discarding history.
+
+### 3. Recovery and control precedence
+
+Validate journal fields and referenced Git objects before trusting success. Verify that the candidate has the recorded parent and the expected harness-authored task append. A matching commit must be reachable from the current branch for replay. Use a direct bounded `subprocess.run` with `seal.SAFE_FLAGS` and `seal.SAFE_GIT` for `git merge-base --is-ancestor`: exit 0 means reachable, exit 1 means ancestry mismatch, all other exits/timeouts/OS errors mean operational failure. Do not pass this predicate through `seal.git`'s blanket nonzero `RuntimeError`, or interpret operational errors as missing evidence.
+
+| Persisted evidence on retry | Action under the run lock |
+| --- | --- |
+| No journal for the key | Normal eligible append, with prepared journal first. |
+| Prepared journal, branch still at recorded parent | Recheck eligibility and land that exact candidate once with compare-and-swap; do not rebuild another round. |
+| Prepared journal, candidate is on current branch | Complete bookkeeping; return the original commit. Resume only if both state and event evidence still match the saved pre-transition values. Otherwise preserve every current run-state field. |
+| Completed journal, candidate is on current branch | Return the original commit with `replayed: true`; do not save run state or append another revised event. |
+| Same key with different parsed blocks, malformed journal, missing candidate, unrelated head or rewritten ancestry | Refuse without moving refs, creating another round, or replacing the journal. |
+| Git operational failure | Report the operation failure without treating it as permission to append. |
+
+A later paused, aborted or done run can therefore acknowledge an already-landed round without resuming. Replay can work after finish has archived tasks: validate the append at the original commit, not at the current live `tasks.md` path. Prepared recovery may finish its original running-state transition only when no intervening state/event change is visible; uncertain provenance always favors preserving current control state. A present pause request remains present.
+
+Concurrent callers serialize through the existing nonblocking run lock. A loser receives existing Busy behavior and can retry. Neither two same-key calls nor different-key calls may race round numbering or replace each other's journal. Failures around event persistence may leave missing diagnostic events; they must never authorize a duplicate task append. Physical loss of Git or filesystem writes is outside the proven process-crash guarantee.
+
+### 4. Stable snapshots with distinct attempt provenance
+
+In `nightshift/specloop_intake.py`, newly selected build snapshots receive a fresh `uuid.uuid4().hex` as `round_id` and `revision_key_version: 1`, saved together with IDs, blocks, change, event and consumed history before any dispatch. Each invocation still gets a distinct, closed, absolute JSON feedback file containing those same saved blocks; this preserves Immutable build revision input. Dispatch `--round-id <round_id>` on synchronous and background paths.
+
+When replacing a snapshot, explicitly clear the previous snapshot's `round_job` and key-version metadata, then set the new build snapshot's version/key as appropriate; do not carry stale attempt provenance into spec or empty snapshots. Persist `round_job` in the receipt alongside `job` before each keyed background launch. It names the most recent attempt only as provenance, never as the deduplication key or a cancellation hold. New background requests contain exactly six fields: `stage`, `args`, `started_at`, `timeout_seconds`, `deadline_at`, `round_id`; the last is null for unkeyed commands. Validate keyed request/argv/receipt agreement. Existing five-field requests remain valid and unkeyed. The #9 compactor preserves `round_id` when present, all remaining args, timing and original mtime; it does not backfill keys into old requests.
+
+Leave `_collect_locked`'s crash/error detachment and health reporting and `release_job`'s remove-only-job transaction unchanged. On a subsequent eligible visit, keyed undelivered snapshots without results are recovered before the existing no-result/new-event replacement condition:
+
+- Without a prior attempt (`round_job` absent), retry the already saved selection after preparation/launch failure.
+- With a prior attempt, validate its request against round/change/feedback provenance under its control lock and the existing release lock, rereading the receipt. An idle unstopped failed/crashed attempt permits the same snapshot and key on a new job ID with a fresh per-attempt deadline. Do not reset the old attempt's deadline or relaunch it.
+- A confirmed stopped attempt whose `job` was explicitly detached follows existing released-revision selection: select current unconsumed feedback, assign a new round key and input file, and suppress the stopped result forever.
+- A live, still-attached, stopping, inconsistent or unreadable attempt must not authorize replacement. Defer/report through existing paths. A present stopped hold remains held.
+
+Serialize provenance inspection and successor receipt persistence under control-lock then existing release-lock order. Reread before mutation and compare the expected receipt/attempt; a stale poll must defer instead of restoring `job` or replacing another poll's successor. Do not create a release lock merely to retry. Synchronous injected calls have no `round_job` and retain the saved key until a valid result or a genuinely new selection.
+
+Recover the original saved round before considering a newer authorized label event; later edits/comments do not alter its feedback, and old delivery cannot remove the new event. Delivered refusals resolved by a human select a new snapshot and key, even under the same event. Empty requests and spec-stage revisions keep their current selection and marker behavior. Pre-upgrade receipts and requests remain on their legacy unkeyed path; never infer a guarantee from an old event ID or task heading. Reject malformed fields on receipts explicitly declaring the new key version.
+
+### 5. Result validation and per-round delivery
+
+Validate a keyed `revised` result's key, commit, replay boolean, status and pause shape before consuming feedback. Only a durable valid success acknowledges the selected IDs; unsuccessful attempts consume none. Existing durable delivery and marker reconciliation remain in effect. New build markers use the saved UUID; retries within that round reuse it. Replacement snapshots have a different marker, including refusal recovery under an unchanged label event. Legacy receipts retain their markers.
+
+At the existing build-success message in `revise_pending`, use the keyed result's observed state: running may say resumed, paused includes its reason, aborted says aborted, and done says finished. Frame replay state as observed when acknowledged, since delivery can happen later. Legacy/unkeyed result wording stays unchanged. No extra status subprocess or network lookup is needed for messaging.
+
+Explicit protected-test migrations: update both complete-request expectations in `tests/test_specloop_jobs.py` (currently around lines 123 and 196) to all six fields, asserting null keys for their existing unkeyed cases and keeping exact args, original timing and all other checks. Update `test_refused_revision_explained_and_retried_after_human` in `tests/test_specloop_build_revision.py` (currently lines 160–172) to assert two comments with the exact saved refusal/success round markers, one per round, and the successful commit only in the success message; retain its label, reason and dispatch checks and add repeated-poll/delivery-retry deduplication assertions. Also migrate the build branch of `tests/test_specloop_label_authorization_recovery.py:test_revision_receipt_survives_untrusted_reapplication` (currently lines 834 and 847): keep event equality, assert a fresh UUID distinct from the original build round, and bind the exact comment marker to the saved round ID; retain event-derived IDs for its spec branch and every authorization-denial byte snapshot, consumption, dispatch-count and comment-count assertion. Adapt `BuildCommands` in `tests/test_specloop_build_revision.py` and the build-result fixture in `tests/test_specloop_background.py` to echo the dispatched key plus the complete keyed success schema without masking intentionally invalid results. These are contract fixture migrations, not new tests; preserve their unkeyed cases and all pause/control assertions. Put all other new tests in new files. Do not edit `tests/test_specloop_command_json.py`; preserve its unkeyed success assertion containing `running` and avoid #47's concurrent edits.
+
+### 6. Validation and documentation
+
+Use new files `tests/test_revision_store.py`, `tests/test_revise_idempotency.py`, `tests/test_revise_round_cli.py`, `tests/test_revision_job_identity.py`, `tests/test_revision_snapshot_retry.py`, `tests/test_revision_replay_delivery.py`, and `tests/test_revision_crash_subprocess.py` as the relevant tasks land. Keep focused tests beside each implementation task. Include `test_revise_retry_after_commit_does_not_duplicate_round` in the subprocess file.
+
+Subprocess fixtures must execute this candidate's code explicitly: `[sys.executable, '-m', 'specloop.cli', ...]`, with cwd and PYTHONPATH bound to this checkout and a temporary HOME created before importing `specloop.state` in the child. Assert the imported module path and resolved run root. For deterministic fault injection, use a child bootstrap that imports the candidate, wraps a boundary to call `os._exit`, and invokes the actual CLI main; clean retries use the module command. An injected wrapper runner may replace only the executable prefix with the explicit interpreter/module prefix, preserving real argv and JSON decoding. Never depend on the first `specloop` on PATH. Use a hostile PATH sentinel as a negative control. Keep all repositories, run state, wrapper jobs and feedback under the test's temporary root; no credentials, provider or GitHub calls.
+
+Test exits after prepared-journal persistence, after ref advancement before state save, after state/event completion and before wrapper `result.json`. Restart from disk and assert the original commit, exactly one review section and one set of task lines, preserved newer run state, and one per-round delivery comment. Cover a child exiting without a result both before and after its old deadline, explicit release selecting a new key, same-key/different-input refusal, distinct-key/same-input append, independent runs, archive replay, malformed evidence, ancestry exit classifications, lock contention, and failed atomic writes. Completion-event assertions concern intact records, not unsupported arbitrary torn-log repair.
+
+Implementation acceptance is `uv run pytest`, plus the repository's type regression check where applicable. This drafting task only validates artifacts. Operator edits during implementation are limited to specloop passages in `README.md`, `docs/specloop/README.md`, `docs/specloop/command-json.md`, and `KNOWN-LIMITATIONS.md`. Cite issue #7 until an implementation PR exists, retain #9 references, qualify all existing crash-boundary warnings consistently, and preserve unrelated limits. Documentation tests check links, syntax and CLI schema, never mandatory prose phrases.
+
+## Risks / Trade-offs
+
+- Journals and historical attempts accumulate with the run. Deleting them or restoring incomplete backups loses the guarantee; automated pruning and recovery from arbitrary corruption are outside scope.
+- Process-crash recovery spans Git and filesystem writes without claiming a universal disk transaction. Prepared evidence bridges the known windows; missing or inconsistent evidence produces an actionable refusal.
+- Mixed-version processes can ignore added fields. Existing unkeyed attempts stay compatible but unprotected; restart the relevant services onto supporting code before relying on keyed intake. Do not silently drop a rejected `--round-id` and retry unkeyed.
+- Explicit release intentionally permits a new round even if the stopped attempt committed. Inspect committed effects before release; the key does not provide rollback or silently consume a stopped result.
+- Eight tasks keep separate storage, state recovery, CLI, job persistence, intake selection, delivery, subprocess integration and documentation concerns near 300 changed lines each, including tests. Provenance coordination stays with the adjacent job/intake tasks, not a separate protocol task. Reuse existing fixture helpers and parameterize failure matrices rather than duplicating setup; estimates are targets, not permission to omit required cases.
+- Human PR checklist: on disposable storage, interrupt the machine/VM around ref and journal/state writes, restart services and inspect journal, Git history, tasks, run state and delivery. Record filesystem/platform and whether this check was actually performed; CI cannot prove recovery after a real machine crash mid-write. Also review the operator prose and live issue/PR links. These are human checks, not implementation tasks.
