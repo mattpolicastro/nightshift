@@ -310,11 +310,17 @@ look like an absent label or an empty set of comments.
                 # A reopened PR can share the branch with an unpushed replacement.
                 # Only its exact draft commit proves delivery of this attempt.
                 matching = previous.get("headRefOid") == receipt["result"]["commit"]
+            if matching and not _recover_item_cleanup(path):
+                return _PENDING
             _deliver(repo, labels, number, change, None, current, pr=pr, runner=gh)
             if matching:
                 _finish_delivery(path, receipt)
             return receipt
         if receipt:
+            if receipt["result"]["outcome"] == "drafted":
+                _require_manifest(repo, readiness, new_work=False)
+            if not _recover_item_cleanup(path):
+                return _PENDING
             _deliver(repo, labels, number, change, receipt, current, runner=gh,
                      git_runner=git_runner, readiness=readiness)
             _finish_delivery(path, receipt)
@@ -333,6 +339,8 @@ look like an absent label or an empty set of comments.
         # work gets today's qualified name; delivery retries keep the receipt.
         change = _change_name(repo.name, number, raw["title"])
         _require_supported_name(repo, change)
+        if not _recover_item_cleanup(path):
+            return _PENDING
         branch = f"spec/{change}"
         receipt = {"repo": repo.name, "issue": number, "change": change,
                    "title": raw["title"], "idea": idea, "input": issue_input,
@@ -461,6 +469,8 @@ def admit_pending(
                       capture_output=True, text=True, check=False)
             if tip.returncode or tip.stdout.strip() != pr["headRefOid"]:
                 raise RuntimeError(f"{branch} changed during approval; retry on the next poll")
+            if not _recover_item_cleanup(path):
+                return _PENDING
             receipt = {"change": change, "head": pr["headRefOid"],
                        "approval_event": approval_event}
             if not _start(path, receipt, [
@@ -469,6 +479,8 @@ def admit_pending(
             ], runner=specloop_runner, launcher=launcher):
                 return _PENDING
             result = receipt["result"]
+        if not _recover_item_cleanup(path):
+            return _PENDING
         matching = (receipt and (existing is None or committed)
                     and receipt["change"] == change
                     and receipt.get("approval_event") == approval_event
@@ -715,6 +727,8 @@ def revise_pending(
                        "feedback": feedback, "round_id": str(event)}
             if not queue.has_instructions(feedback):
                 receipt["result"] = {"outcome": "empty"}
+                if not _recover_item_cleanup(path):
+                    return _PENDING
                 receipt = _save_revision_snapshot(path, previous, items, **receipt)
             else:
                 # Empty feedback needs no CLI call, including status. Only
@@ -726,6 +740,8 @@ def revise_pending(
                 if admitted is not None:
                     if admitted.get("pr") != pr["url"]:
                         return None  # Never steer another repository's run.
+                    if not _recover_item_cleanup(path):
+                        return _PENDING
                     receipt["command"] = "revise"
                     # The background CLI may outlive this poll or the daemon.
                     # Retain immutable input with every attempt, even after release.
@@ -765,6 +781,8 @@ def revise_pending(
                            capture_output=True, text=True, check=False)
                 if head.returncode or head.stdout.strip() != pr["headRefOid"]:
                     raise RuntimeError(f"{branch} changed during revision; retry on the next poll")
+                if not _recover_item_cleanup(path):
+                    return _PENDING
                 receipt = _save_revision_snapshot(path, previous, items, **receipt)
                 if not _start(path, receipt, [
                     "propose", str(repo.manifest), "--change", change, "--branch", branch,
@@ -778,6 +796,8 @@ def revise_pending(
             source = _require_manifest(repo, readiness, new_work=False).repo
             if pr["headRefOid"] not in (receipt["head"], result["commit"]):
                 raise DeliveryError(f"{branch} moved while its revision was drafted; review the branch before retrying")
+            if not _recover_item_cleanup(path):
+                return _PENDING
             pushed = git([
                 "git", "-C", str(source), "push", "origin", f"{result['commit']}:refs/heads/{branch}",
             ], capture_output=True, text=True, check=False)
@@ -799,6 +819,8 @@ def revise_pending(
                 for field in ("questions", "contradictions", "problems", "risks", "reasons")
                 for item in result.get(field, [])
             )
+        if not _recover_item_cleanup(path):
+            return _PENDING
         _comment(repo.name, number, change, body, runner=gh, action="revise", kind="pr",
                  round_id=receipt.get("round_id"))
         edit = ["pr", "edit", str(number), "--repo", repo.name]
@@ -1161,6 +1183,49 @@ def _job_receipt_lock(path: Path, receipt: dict):
         finally:
             if release is not None:
                 release.close()
+
+
+def _recover_item_cleanup(path: Path) -> bool:
+    """Recover only this eligible, authorized item; defer unsafe replacement."""
+    from .daemon import paused
+
+    def check_pause():
+        if paused():
+            raise Paused()
+
+    try:
+        root = path.with_suffix(".jobs")
+        specloop_job._cleanup_file(path)
+        receipt = specloop_job._read_object(path) if path.exists() else {}
+        job_id = receipt.get("job")
+        candidate = (receipt.get("delivered") and isinstance(job_id, str)
+                     and re.fullmatch(r"[0-9a-f]{32}", job_id))
+        if not root.exists() and not candidate:
+            return True  # No state creation merely to discover cleanup work.
+        if candidate:
+            check_pause()
+            # Validate under coordination before a new round can replace the
+            # sole surviving proof of delivery, even if local selection lost it.
+            diagnostics = specloop_job.compact_delivered(path, receipt, prepare_only=True)
+            for diagnostic in diagnostics:
+                log.warning("%s", diagnostic)
+            if diagnostics:
+                return False
+        specloop_job._cleanup_file(root / "cleanup.json")  # Reject linked roots.
+        if root.is_dir():
+            for directory in root.iterdir():
+                journal = directory / "cleanup.json"
+                if directory.is_dir() and journal.exists():
+                    specloop_job._cleanup_file(journal)
+                    if specloop_job._read_object(journal).get("complete") is True:
+                        continue
+                    check_pause()
+                    for diagnostic in specloop_job.resume_cleanup(path, directory.name):
+                        log.warning("%s", diagnostic)
+    except (OSError, ValueError, TypeError) as exc:
+        log.warning("Cannot recover cleanup at %s: %s", path, exc)
+        return False
+    return True
 
 
 def _finish_delivery(path: Path, receipt: dict) -> None:

@@ -1086,6 +1086,7 @@ def snapshot_local_tree(root):
 def test_cleanup_preserves_touchpoint_history(tmp_path, monkeypatch):
     from nightshift import specloop_job as jobs
     from test_specloop_compaction import delivered
+    from nightshift.specloop_intake import _recover_item_cleanup
 
     state, runs = tmp_path / ".nightshift", tmp_path / ".specloop/runs"
     events = put(runs, "r-issue-8-feature/events.jsonl", {})
@@ -1112,7 +1113,7 @@ def test_cleanup_preserves_touchpoint_history(tmp_path, monkeypatch):
 
     # Replacing current receipts with each later round must retain earlier
     # observations; current results and build events duplicate retained results.
-    for serial, (stage, command, outcome, counter) in enumerate(rounds * 2, 1):
+    for serial, (stage, command, outcome, counter) in enumerate(rounds * 2 + [rounds[0]], 1):
         path, receipt, directory, idea = delivered(state, stage=stage, command=command,
                                                     outcome=outcome, serial=serial)
         request = directory / "request.json"
@@ -1138,7 +1139,13 @@ def test_cleanup_preserves_touchpoint_history(tmp_path, monkeypatch):
             assert json.loads((directory / "cleanup.json").read_text())["complete"] is False
             assert reports() == before
             jobs._children.clear()  # Retry uses only durable state.
-        assert jobs.compact_delivered(path, receipt) == []
+            continue  # The durable journal survives replacement by round nine.
+        receipt_bytes = path.read_bytes()
+        assert _recover_item_cleanup(path)  # Enclosing visit's authority is tested in intake.
+        assert path.read_bytes() == receipt_bytes
+        if serial == 9:
+            older = directory.with_name(f"{5:032x}") / "cleanup.json"
+            assert json.loads(older.read_text())["complete"]
         assert reports() == before
         assert all(p.stat().st_mtime_ns == stamp for p, stamp in mtimes.items())
 

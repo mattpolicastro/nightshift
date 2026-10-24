@@ -338,7 +338,17 @@ def _cleanup_save(path: Path, data: dict, *, timestamps=None) -> None:
         temp.unlink(missing_ok=True)
 
 
-def compact_delivered(path: Path, receipt: dict) -> list[str]:
+def resume_cleanup(path: Path, job_id: str) -> list[str]:
+    """Resume journaled delivery after the caller checks current item authority."""
+    return _compact_delivered(path, {"job": job_id}, resume=True)
+
+
+def compact_delivered(path: Path, receipt: dict, *, prepare_only=False) -> list[str]:
+    """Journal validated delivery; optionally defer artifact changes until resume."""
+    return _compact_delivered(path, receipt, prepare_only=prepare_only)
+
+
+def _compact_delivered(path: Path, receipt: dict, *, resume=False, prepare_only=False) -> list[str]:
     """Compact one durably delivered attempt; return local diagnostics.
 
     The caller must have passed this visit's eligibility, authorization and
@@ -370,7 +380,7 @@ def compact_delivered(path: Path, receipt: dict) -> list[str]:
                 fcntl.flock(lock, fcntl.LOCK_EX | (fcntl.LOCK_NB if record.name == "lock" else 0))
             for record in evidence:
                 _cleanup_file(record)
-            if _read_object(path) != receipt or receipt.get("delivered") is not True:
+            if not resume and (_read_object(path) != receipt or receipt.get("delivered") is not True):
                 raise ValueError("receipt changed or delivery is incomplete")
             context = {"repo": path.parent.name.replace("__", "/", 1),
                        "issue" if stage == "proposals" else "pr": int(path.stem)}
@@ -397,13 +407,14 @@ def compact_delivered(path: Path, receipt: dict) -> list[str]:
             if (set(result) != {"result"} or not isinstance(payload, dict)
                     or type(payload.get("version")) is not int or payload["version"] != 1
                     or "error" in payload or payload.get("outcome") not in outcomes.get(command, ())
-                    or payload != receipt.get("result")
+                    or not resume and payload != receipt.get("result")
                     or command != receipt.get("command", command)
                     or stage == "proposals" and command != "propose"
                     or stage == "admissions" and command != "admit"
                     or stage == "revisions" and command not in ("propose", "revise")
                     or payload.get("outcome") in ("drafted", "revised") and not payload.get("commit")
-                    or payload.get("outcome") == "drafted" and payload.get("branch") != f"spec/{receipt.get('change')}"):
+                    or not resume and payload.get("outcome") == "drafted"
+                    and payload.get("branch") != f"spec/{receipt.get('change')}"):
                 raise ValueError("invalid or conflicting terminal result")
             for flag in ("change", "head", "branch"):
                 values = [a.split("=", 1)[1] for a in args if a.startswith(f"--{flag}=")]
@@ -428,6 +439,8 @@ def compact_delivered(path: Path, receipt: dict) -> list[str]:
                                for key in ("idea_files", "idea_references"))):
                     raise ValueError("invalid cleanup journal identity")
             else:
+                if resume:
+                    raise ValueError("missing cleanup journal")
                 owned = []
                 for value in idea_files:
                     try:
@@ -438,7 +451,7 @@ def compact_delivered(path: Path, receipt: dict) -> list[str]:
                                mtime_ns=original.st_mtime_ns, idea_files=owned, complete=False,
                                idea_references=[os.path.abspath(v) for v in idea_files])
                 _cleanup_save(journal_path, journal)
-            if journal["complete"]:
+            if prepare_only or journal["complete"]:
                 return diagnostics
             _cleanup_save(request_path, minimal, timestamps=(journal["atime_ns"], journal["mtime_ns"]))
             for value in journal["idea_files"]:
