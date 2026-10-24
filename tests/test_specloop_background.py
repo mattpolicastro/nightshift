@@ -689,7 +689,8 @@ def test_released_admission_recovers_committed_run(delivery_job):
     assert not (job.directory / "collected.json").exists()
 
 
-def test_jobs_ignores_drafting_idea_file(delivery_job, capsys):
+@pytest.mark.parametrize("options", [[], ["--all"]])
+def test_jobs_ignores_drafting_idea_file(delivery_job, capsys, options):
     from nightshift import cli
 
     job = delivery_job("draft")
@@ -701,12 +702,12 @@ def test_jobs_ignores_drafting_idea_file(delivery_job, capsys):
     assert idea.match("idea-*.txt") and idea.read_text()
     before = {p: p.read_bytes() for p in daemon.STATE_DIR.rglob("*") if p.is_file()}
 
-    assert cli.main(["jobs"]) == 0
+    assert cli.main(["jobs", *options]) == 0
     output = capsys.readouterr()
     rows = [line for line in output.out.splitlines() if not line.startswith(" ")]
     assert rows == [
         f"{job.directory.name}  proposals  owner/sample#7  finished "
-        "(execution complete; delivery may be pending)"
+        "(delivery pending)"
     ]
     assert output.err == ""
     assert {p: p.read_bytes() for p in daemon.STATE_DIR.rglob("*") if p.is_file()} == before
