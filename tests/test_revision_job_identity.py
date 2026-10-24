@@ -158,8 +158,12 @@ def test_mixed_evidence_never_becomes_legacy(revision, damage, detachment):
     if detachment is None:
         jobs.finalize(directory, {"result": {"version": 1, "outcome": "revised", "commit": "abc"}})
         before = snapshot(path.parent)
-        with pytest.raises((ValueError, OSError)):
-            jobs.collect(path, receipt)
+        # Collection is not a replacement/replay decision; provenance gates
+        # those decisions above, not acceptance of an already cached result.
+        assert jobs.collect(path, receipt) == {"version": 1, "outcome": "revised", "commit": "abc"}
+        after = snapshot(path.parent)
+        assert {p: data for p, data in after.items() if p.name != "collected.json"} == before
+        before = snapshot(path.parent)
     assert snapshot(path.parent) == before and receipt["consumed_feedback_ids"] == []
 
 

@@ -15,7 +15,7 @@ import signal
 import subprocess
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -671,7 +671,8 @@ def _save_revision_snapshot(path: Path, previous: dict | None,
     selected = [item for item in items if item.id not in consumed]
     receipt = dict(previous) if previous is not None else {}
     for field in ("change", "head", "event", "round_id", "command", "job", "result",
-                  "delivered", "feedback", "feedback_ids", "legacy_snapshot"):
+                  "delivered", "feedback", "feedback_ids", "legacy_snapshot",
+                  "revision_key_version", "round_job"):
         receipt.pop(field, None)
     receipt.update(round_fields)
     receipt.update(feedback_state_version=1, consumed_feedback_ids=sorted(consumed),
@@ -694,6 +695,20 @@ def _acknowledge_revision_feedback(path: Path, receipt: dict) -> None:
         set(receipt["consumed_feedback_ids"]) | set(receipt.get("feedback_ids", [])))}
     _save(path, updated)
     receipt.update(updated)
+
+
+def _build_revision_input(path: Path, feedback: list[str]) -> Path:
+    """Finish and close each immutable attempt input before saving or dispatch."""
+    source = (path.with_suffix(".jobs") / f"feedback-{uuid.uuid4().hex}.json").resolve()
+    source.parent.mkdir(parents=True, exist_ok=True)
+    with source.open("x", encoding="utf-8") as stream:
+        stream.write(json.dumps(feedback) + "\n")
+    return source
+
+
+def _build_revision_args(receipt: dict, source: Path) -> list[str]:
+    return ["revise", receipt["change"], "--feedback", str(source),
+            "--feedback-format", "json", "--round-id", receipt["round_id"]]
 
 
 def revise_pending(
@@ -750,92 +765,115 @@ def revise_pending(
         # including human-input outcomes that must retain the original marker.
         awaiting_legacy = (receipt and receipt.get("legacy_snapshot")
                            and not receipt.get("delivered") and "result" in receipt)
-        if receipt and not (awaiting_success or awaiting_legacy) and (
-                receipt["change"] != change or receipt["event"] != event or "result" not in receipt
-                or (receipt.get("delivered")
-                    and receipt["result"]["outcome"] in ("needs_input", "rejected", "refused"))):
-            receipt = None
-        git = partial(_bounded_run, runner=git_runner)
-        if receipt is None or (not awaiting_legacy and receipt["result"]["outcome"] in (
-                "needs_input", "rejected", "refused")):
-            items = queue.pr_feedback_items(repo.name, number, runner=gh)
-            consumed = set(previous["consumed_feedback_ids"]) if previous else set()
-            items = [item for item in items if item.id not in consumed]
-            feedback = [item.block for item in items]
-            # The needs-human write may have landed despite a lost response,
-            # leaving delivered unset. A reviewer answer after clearing the
-            # label must retry drafting rather than replay the old questions.
-            if receipt and (feedback != receipt["feedback"]
-                            or [item.id for item in items] != receipt.get("feedback_ids")):
-                receipt = None
-        if receipt is None:
-            receipt = {"change": change, "head": pr["headRefOid"], "event": event,
-                       "feedback": feedback, "round_id": str(event)}
-            if not queue.has_instructions(feedback):
-                receipt["result"] = {"outcome": "empty"}
-                if not _recover_item_cleanup(path):
-                    return _PENDING
-                receipt = _save_revision_snapshot(path, previous, items, **receipt)
-            else:
-                # Empty feedback needs no CLI call, including status. Only
-                # instructions require choosing between spec and build stages.
-                status = specloop_client.call(["status"], runner=status_runner or specloop_runner)
-                if not isinstance(status.get("runs"), list):
-                    raise specloop_client.SpecloopError("status returned no runs list")
-                admitted = next((run for run in status["runs"] if run["change"] == change), None)
-                if admitted is not None:
-                    if admitted.get("pr") != pr["url"]:
-                        return None  # Never steer another repository's run.
-                    if not _recover_item_cleanup(path):
+        selecting = not receipt or not (awaiting_success or awaiting_legacy) and (
+            receipt["change"] != change or receipt["event"] != event
+            or "result" not in receipt or receipt["result"]["outcome"] in (
+                "needs_input", "rejected", "refused"))
+        # Cleanup takes its own control locks; finish it before coordination.
+        if selecting and not _recover_item_cleanup(path):
+            return _PENDING
+        recovered_attempt = False
+        try:
+            with ExitStack() as coordination:
+                # Inspect only decisions that can replace or replay saved work.
+                # Keep the boundary open through successor snapshot/start writes.
+                if receipt and selecting and ("revision_key_version" in receipt
+                                               or "round_job" in receipt
+                                               or receipt.get("command") == "revise"
+                                               and not receipt.get("legacy_snapshot")):
+                    disposition = coordination.enter_context(
+                        specloop_job.revision_attempt(path, receipt))
+                    if disposition == "pending":
                         return _PENDING
-                    receipt["command"] = "revise"
-                    # The background CLI may outlive this poll or the daemon.
-                    # Retain immutable input with every attempt, even after release.
-                    feedback_path = (path.parent / f"{path.stem}.jobs"
-                                     / f"feedback-{uuid.uuid4().hex}.json").resolve()
-                    feedback_path.parent.mkdir(parents=True, exist_ok=True)
-                    # Review bodies may contain Markdown separators or YAML
-                    # document boundaries. JSON preserves each complete block.
-                    with feedback_path.open("x", encoding="utf-8") as stream:
-                        stream.write(json.dumps(feedback) + "\n")
-                    receipt = _save_revision_snapshot(path, previous, items, **receipt)
-                    if not _start(path, receipt, [
-                        "revise", change, "--feedback", str(feedback_path),
-                        "--feedback-format", "json",
-                    ], runner=specloop_runner, launcher=launcher):
-                        return _PENDING
-            if "result" not in receipt:
-                receipt["command"] = "propose"
-                source = _require_manifest(repo, readiness).repo
-                # Prefer the original idea, including issue comments. A spec
-                # PR created outside intake still has its title/body and the
-                # existing change in the drafting clone as context.
-                idea = f"{pr['title']}\n\n{pr.get('body') or ''}"
-                for proposal in (state_dir / "proposals" / directory).glob("*.json"):
-                    original = json.loads(proposal.read_text())
-                    if original["change"] == change:
-                        idea = original["idea"]
-                        break
-                idea += "\n\n## New PR review feedback\n\n" + "\n\n---\n\n".join(feedback)
-                fetched_ref = f"refs/nightshift/revise/{change}"
-                fetched = git([
-                    "git", "-C", str(source), "fetch", "origin", f"+refs/heads/{branch}:{fetched_ref}",
-                ], capture_output=True, text=True, check=False)
-                if fetched.returncode:
-                    raise RuntimeError(f"could not fetch {branch}: {fetched.stderr.strip()}")
-                head = git(["git", "-C", str(source), "rev-parse", fetched_ref],
-                           capture_output=True, text=True, check=False)
-                if head.returncode or head.stdout.strip() != pr["headRefOid"]:
-                    raise RuntimeError(f"{branch} changed during revision; retry on the next poll")
-                if not _recover_item_cleanup(path):
-                    return _PENDING
-                receipt = _save_revision_snapshot(path, previous, items, **receipt)
-                if not _start(path, receipt, [
-                    "propose", str(repo.manifest), "--change", change, "--branch", branch,
-                    "--from-branch", fetched_ref,
-                ], idea=idea, runner=specloop_runner, launcher=launcher):
-                    return _PENDING
-            _save(path, receipt)
+                    if "result" not in receipt:
+                        if "revision_key_version" in receipt and disposition in ("retry", "unattempted"):
+                            status = specloop_client.call(["status"], runner=status_runner or specloop_runner)
+                            if not isinstance(status.get("runs"), list):
+                                raise specloop_client.SpecloopError("status returned no runs list")
+                            admitted = next((run for run in status["runs"]
+                                             if run["change"] == receipt["change"]), None)
+                            if receipt["change"] != change or admitted is None or admitted.get("pr") != pr["url"]:
+                                return None
+                            source = _build_revision_input(path, receipt["feedback"])
+                            if not _start(path, receipt, _build_revision_args(receipt, source),
+                                          runner=specloop_runner, launcher=launcher):
+                                return _PENDING
+                            _save(path, receipt)
+                            awaiting_success = True  # Deliver this attempt under its saved event.
+                            recovered_attempt = True
+                if receipt and not (awaiting_success or awaiting_legacy) and (
+                        receipt["change"] != change or receipt["event"] != event or "result" not in receipt
+                        or (receipt.get("delivered")
+                            and receipt["result"]["outcome"] in ("needs_input", "rejected", "refused"))):
+                    receipt = None
+                git = partial(_bounded_run, runner=git_runner)
+                if receipt is None or (not (awaiting_legacy or recovered_attempt) and receipt["result"]["outcome"] in (
+                        "needs_input", "rejected", "refused")):
+                    items = queue.pr_feedback_items(repo.name, number, runner=gh)
+                    consumed = set(previous["consumed_feedback_ids"]) if previous else set()
+                    items = [item for item in items if item.id not in consumed]
+                    feedback = [item.block for item in items]
+                    # The needs-human write may have landed despite a lost response,
+                    # leaving delivered unset. A reviewer answer after clearing the
+                    # label must retry drafting rather than replay the old questions.
+                    if receipt and (feedback != receipt["feedback"]
+                                    or [item.id for item in items] != receipt.get("feedback_ids")):
+                        receipt = None
+                if receipt is None:
+                    receipt = {"change": change, "head": pr["headRefOid"], "event": event,
+                               "feedback": feedback, "round_id": str(event)}
+                    if not queue.has_instructions(feedback):
+                        receipt["result"] = {"outcome": "empty"}
+                        receipt = _save_revision_snapshot(path, previous, items, **receipt)
+                    else:
+                        # Empty feedback needs no CLI call, including status. Only
+                        # instructions require choosing between spec and build stages.
+                        status = specloop_client.call(["status"], runner=status_runner or specloop_runner)
+                        if not isinstance(status.get("runs"), list):
+                            raise specloop_client.SpecloopError("status returned no runs list")
+                        admitted = next((run for run in status["runs"] if run["change"] == change), None)
+                        if admitted is not None:
+                            if admitted.get("pr") != pr["url"]:
+                                return None  # Never steer another repository's run.
+                            receipt["command"] = "revise"
+                            receipt.update(round_id=uuid.uuid4().hex, revision_key_version=1)
+                            feedback_path = _build_revision_input(path, feedback)
+                            receipt = _save_revision_snapshot(path, previous, items, **receipt)
+                            if not _start(path, receipt, _build_revision_args(receipt, feedback_path),
+                                          runner=specloop_runner, launcher=launcher):
+                                return _PENDING
+                    if "result" not in receipt:
+                        receipt["command"] = "propose"
+                        source = _require_manifest(repo, readiness).repo
+                        # Prefer the original idea, including issue comments. A spec
+                        # PR created outside intake still has its title/body and the
+                        # existing change in the drafting clone as context.
+                        idea = f"{pr['title']}\n\n{pr.get('body') or ''}"
+                        for proposal in (state_dir / "proposals" / directory).glob("*.json"):
+                            original = json.loads(proposal.read_text())
+                            if original["change"] == change:
+                                idea = original["idea"]
+                                break
+                        idea += "\n\n## New PR review feedback\n\n" + "\n\n---\n\n".join(feedback)
+                        fetched_ref = f"refs/nightshift/revise/{change}"
+                        fetched = git([
+                            "git", "-C", str(source), "fetch", "origin", f"+refs/heads/{branch}:{fetched_ref}",
+                        ], capture_output=True, text=True, check=False)
+                        if fetched.returncode:
+                            raise RuntimeError(f"could not fetch {branch}: {fetched.stderr.strip()}")
+                        head = git(["git", "-C", str(source), "rev-parse", fetched_ref],
+                                   capture_output=True, text=True, check=False)
+                        if head.returncode or head.stdout.strip() != pr["headRefOid"]:
+                            raise RuntimeError(f"{branch} changed during revision; retry on the next poll")
+                        receipt = _save_revision_snapshot(path, previous, items, **receipt)
+                        if not _start(path, receipt, [
+                            "propose", str(repo.manifest), "--change", change, "--branch", branch,
+                            "--from-branch", fetched_ref,
+                        ], idea=idea, runner=specloop_runner, launcher=launcher):
+                            return _PENDING
+                    _save(path, receipt)
+        except specloop_job.ReceiptChanged:
+            return _PENDING
 
         result = receipt["result"]
         if result["outcome"] == "drafted":

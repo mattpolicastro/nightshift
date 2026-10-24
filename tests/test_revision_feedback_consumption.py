@@ -3,6 +3,7 @@
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -417,6 +418,8 @@ def test_comments_during_revision_feed_the_next_round(stage_setup, tmp_path, mon
     consumed = read(tmp_path)["consumed_feedback_ids"]
     jobs = []
     ready = False
+    start_job = specloop_job.start
+    monkeypatch.setattr(specloop_job, "_children", {})
 
     def start(path, receipt, args, **kwargs):
         saved = read(tmp_path)
@@ -428,12 +431,17 @@ def test_comments_during_revision_feed_the_next_round(stage_setup, tmp_path, mon
         assert (saved["feedback"] == payload if args[0] == "revise"
                 else saved["feedback"][0] in payload)
         jobs.append(args)
-        receipt["job"] = "pending"
-        (path.parent / f"{path.stem}.jobs" / receipt["job"]).mkdir(parents=True, exist_ok=True)
-        specloop_job.save(path, receipt)
+        start_job(path, receipt, args, launcher=lambda *a, **k: SimpleNamespace(poll=lambda: None))
+
+    def collect(path, receipt):
+        if ready:
+            directory = path.with_suffix(".jobs") / receipt["job"]
+            specloop_job.save(directory / "result.json", {"result": expected})
+            return expected
+        return None
 
     monkeypatch.setattr(specloop_job, "start", start)
-    monkeypatch.setattr(specloop_job, "_collect_locked", lambda *args: expected if ready else None)
+    monkeypatch.setattr(specloop_job, "_collect_locked", collect)
 
     def tick():
         return intake.revise_pending(repo, queue.Labels(), tmp_path, runner=github,

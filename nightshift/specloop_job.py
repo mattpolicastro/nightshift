@@ -269,7 +269,8 @@ def _check_unattempted(path: Path, receipt: dict) -> None:
     if not root.exists():
         return
     for directory in root.iterdir():
-        if not directory.is_dir():
+        # Only UUID directories can contain attempts dispatched by this writer.
+        if not directory.is_dir() or not re.fullmatch(r"[0-9a-f]{32}", directory.name):
             continue
         request = _read_object(directory / "request.json")
         key = _request_round_id(request)
@@ -285,7 +286,7 @@ def revision_attempt(path: Path, receipt: dict):
     Callers retain their eligibility/authorization/pause gates. Keep this
     context open through snapshot saving and start(), so release, collection
     and other retry polls cannot replace the evidence between read and write.
-    Only retry/unattempted permit reusing a key; released permits new selection.
+    Only retry/unattempted permit reusing a key; released/completed permit selection.
     This read never creates lock files or repairs evidence. ReceiptChanged defers
     stale writers; invalid or missing provenance raises instead of redispatching.
     """
@@ -336,7 +337,9 @@ def revision_attempt(path: Path, receipt: dict):
         # _job_state takes the lifetime lock itself; drop our probe first.
         fcntl.flock(lifetime, fcntl.LOCK_UN)
         state = _job_state(directory, process)
-        if "job" in receipt or "result" in receipt or receipt.get("delivered"):
+        if "result" in receipt and stop is None and state in ("finished", "failed"):
+            yield "completed"
+        elif "job" in receipt or "result" in receipt or receipt.get("delivered"):
             yield "pending"
         elif state == "stopped":
             if (process is None or process["start_identity"] is None or stop is None
@@ -1083,9 +1086,6 @@ def _collect_locked(path: Path, receipt: dict) -> dict | None:
         receipt.pop("job")
         save(path, receipt)
         raise specloop_client.SpecloopError(outcome["error"])
-    request_path = directory / "request.json"
-    if request_path.exists() or "revision_key_version" in receipt or "round_job" in receipt:
-        validate_revision_request(_read_object(request_path), receipt, job_id=directory.name)
     result = outcome["result"]
     # Persist acceptance before returning to intake, whose cached result
     # bypasses collect on delivery retries. Stop must respect that interval.

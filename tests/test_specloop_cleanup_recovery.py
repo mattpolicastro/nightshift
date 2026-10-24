@@ -67,7 +67,10 @@ def test_cleanup_waits_for_current_authority(delivery_job, monkeypatch, caplog, 
         new_request = read(newer / "request.json")
         new_request["args"] = jobs._redact_idea(new_request["args"])[0] + ["--idea-file", str(new_input)]
         jobs.save(newer / "request.json", new_request)
-        jobs.save(job.path, {**saved, "job": newer.name, "delivered": False})
+        successor = {**saved, "job": newer.name, "delivered": False}
+        if "revision_key_version" in saved:
+            successor["round_job"] = newer.name
+        jobs.save(job.path, successor)
     trigger = {"draft": "spec:draft", "admit": "spec:approved"}.get(stage, "agent:revise")
     runner = job.runner
     for gate in ("unarmed", "held", "closed", "denied", "lookup", "paused"):
