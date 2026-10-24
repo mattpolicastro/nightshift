@@ -30,6 +30,7 @@ All three scoped operator documents SHALL distinguish delivered-attempt compacti
 - **WHEN** the root README, KNOWN-LIMITATIONS.md and docs/specloop/README.md describe job storage
 - **THEN** they explain removal of delivered logs and owned idea payloads, redacted minimal requests, retained results/control metadata and restored request mtimes for touchpoint history
 - **THEN** the guide's drafting-input paragraph qualifies retention by delivery, and its job-control paragraph no longer claims all artifacts remain without automatic cleanup
+- **THEN** all three documents explain that interrupted cleanup waits for a later eligible authorized visit, so unarmed, closed or denied items can retain residual artifacts indefinitely; they do not recommend rearming solely for cleanup because normal new work may follow
 - **THEN** they preserve stopped/released and undelivered evidence retention, workflow-receipt and build-feedback retention, remaining storage growth and missing-history limitations without promising secure erasure
 
 ### Requirement: Git timeout guidance
