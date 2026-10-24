@@ -57,6 +57,9 @@ idea = Path(args[args.index("--idea-file") + 1]).read_text(encoding="utf-8")
     assert receipt["idea"] == expected
     directory = path.parent / "7.jobs"
     args = json.loads((directory / receipt["job"] / "request.json").read_text())["args"]
+    request_path = directory / receipt["job"] / "request.json"
+    request = json.loads(request_path.read_text())
+    request_mtime = request_path.stat().st_mtime_ns
     payload = idea_file(args)
     assert payload.parent == directory.resolve()
     assert "relative state with spaces" in str(payload)
@@ -82,6 +85,10 @@ idea = Path(args[args.index("--idea-file") + 1]).read_text(encoding="utf-8")
     poll()
     poll()
     assert json.loads(path.read_text())["delivered"] is True
+    assert json.loads(request_path.read_text()) == {**request, "args": args[:-2]}
+    assert request_path.stat().st_mtime_ns == request_mtime
+    assert (request_path.parent / "result.json").is_file()
+    assert not payload.exists()
     assert not health.failures
     assert len((root / "started").read_text().splitlines()) == 1
     assert gh.labels == set() and len(gh.prs) == 1

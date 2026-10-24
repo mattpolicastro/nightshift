@@ -304,13 +304,20 @@ look like an absent label or an empty set of comments.
         if (pr is not None or receipt) and not authorize():
             return None
         if pr is not None:
+            matching = receipt and "job" in receipt and receipt["result"]["outcome"] == "drafted"
+            if matching:
+                _validate(receipt["result"], "propose", receipt)
+                # A reopened PR can share the branch with an unpushed replacement.
+                # Only its exact draft commit proves delivery of this attempt.
+                matching = previous.get("headRefOid") == receipt["result"]["commit"]
             _deliver(repo, labels, number, change, None, current, pr=pr, runner=gh)
+            if matching:
+                _finish_delivery(path, receipt)
             return receipt
         if receipt:
             _deliver(repo, labels, number, change, receipt, current, runner=gh,
                      git_runner=git_runner, readiness=readiness)
-            receipt["delivered"] = True
-            _save(path, receipt)
+            _finish_delivery(path, receipt)
             return receipt
         blocked = queue.open_blockers(repo.name, queue.blockers(raw["body"]), runner=gh)
         if blocked:
@@ -342,8 +349,7 @@ look like an absent label or an empty set of comments.
             _save(path, receipt)
             _deliver(repo, labels, number, change, receipt, current, runner=gh,
                      git_runner=git_runner, readiness=readiness)
-            receipt["delivered"] = True
-            _save(path, receipt)
+            _finish_delivery(path, receipt)
             return receipt
         if not _start(path, receipt, [
             "propose", str(repo.manifest), "--change", change,
@@ -353,8 +359,7 @@ look like an absent label or an empty set of comments.
         _save(path, receipt)
         _deliver(repo, labels, number, change, receipt, current, runner=gh,
                  git_runner=git_runner, readiness=readiness)
-        receipt["delivered"] = True
-        _save(path, receipt)
+        _finish_delivery(path, receipt)
         return receipt
 
     return _each(sorted(pending), propose, on_error=on_error, on_pending=on_pending)
@@ -464,15 +469,19 @@ def admit_pending(
             ], runner=specloop_runner, launcher=launcher):
                 return _PENDING
             result = receipt["result"]
-        head = pr["headRefOid"]
-        if (committed and receipt
-                and receipt["change"] == change and receipt["result"]["outcome"] == "admitted"
-                and receipt.get("approval_event") == approval_event):
-            # A build can advance the PR before a lost notification is retried.
-            # Keep its original delivery marker so recovery updates that comment.
-            head = receipt["head"]
-        receipt = {"change": change, "head": head,
-                   "approval_event": approval_event, "result": result}
+        matching = (receipt and (existing is None or committed)
+                    and receipt["change"] == change
+                    and receipt.get("approval_event") == approval_event
+                    and receipt["result"]["outcome"] == result["outcome"]
+                    and (receipt["head"] == pr["headRefOid"] or committed))
+        if matching:
+            # Committed builds can advance the PR. Retain the original marker,
+            # exact result and job only for this approval's matching attempt.
+            result = receipt["result"]
+            receipt = {**receipt, "result": result}
+        else:
+            receipt = {"change": change, "head": pr["headRefOid"],
+                       "approval_event": approval_event, "result": result}
         _save(path, receipt)
         if result["outcome"] == "admitted":
             body = f"The build has started for {change}."
@@ -493,8 +502,7 @@ def admit_pending(
         for label in remove:
             edit += ["--remove-label", label]
         gh(edit)
-        receipt["delivered"] = True
-        _save(path, receipt)
+        _finish_delivery(path, receipt)
         return result
 
     return _each((item["number"] for item in pending), admit,
@@ -804,8 +812,7 @@ def revise_pending(
         # mutation-equivalent: edit has 5 arguments or 7 after a flag/value pair, so > 5 and > 6 agree.
         if len(edit) > 5:
             gh(edit)
-        receipt["delivered"] = True
-        _save(path, receipt)
+        _finish_delivery(path, receipt)
         return result
 
     return _each((item["number"] for item in pending), revise,
@@ -1154,6 +1161,33 @@ def _job_receipt_lock(path: Path, receipt: dict):
         finally:
             if release is not None:
                 release.close()
+
+
+def _finish_delivery(path: Path, receipt: dict) -> None:
+    """Persist completed notification before compacting its matching attempt."""
+    from .daemon import paused
+
+    if paused():
+        raise Paused()
+    if "job" not in receipt:
+        _save(path, {**receipt, "delivered": True})
+        receipt["delivered"] = True
+        return
+    try:
+        with _job_receipt_lock(path, receipt) as current:
+            if current != receipt:
+                raise _ReceiptChanged
+            _save(path, {**current, "delivered": True})
+            receipt["delivered"] = True
+    except _ReceiptChanged:
+        return  # A release or replacement cannot inherit this delivery.
+    if not re.fullmatch(r"[0-9a-f]{32}", receipt["job"]):
+        log.debug("No durable attempt identity to compact at %s", path)
+        return
+    if paused():
+        raise Paused()
+    for diagnostic in specloop_job.compact_delivered(path, receipt):
+        log.warning("%s", diagnostic)
 
 
 def _collect(path: Path, receipt: dict, command: str) -> bool:

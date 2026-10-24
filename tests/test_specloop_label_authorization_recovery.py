@@ -479,6 +479,7 @@ def test_proposal_recovery_requires_current_actor_and_preserves_completed_work(
 @pytest.mark.scenario(REPEATED)
 @pytest.mark.scenario(TRUSTED)
 @pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+@pytest.mark.scenario("issue-intake/delivery-identity-for-cleanup/denied-or-incomplete-delivery-retains-artifacts")
 def test_untrusted_reapplication_holds_running_and_finished_job_and_its_payload(
     repo, tmp_path, monkeypatch, armed,
 ):
@@ -503,6 +504,7 @@ def test_untrusted_reapplication_holds_running_and_finished_job_and_its_payload(
         directory = Path(launches[0][-2])
         assert directory.name == saved["job"]
         request = json.loads((directory / "request.json").read_text())
+        request_mtime = (directory / "request.json").stat().st_mtime_ns
         payload = idea_file(request["args"])
         assert payload.read_text() == saved["idea"]
         reapply(gh, armed, "outsider")
@@ -530,8 +532,13 @@ def test_untrusted_reapplication_holds_running_and_finished_job_and_its_payload(
         assert receipt == {**saved, "result": commands.result, "delivered": True}
         assert json.loads(path.read_text()) == receipt
         assert (directory / "collected.json").is_file()
-        assert json.loads((directory / "request.json").read_text()) == request
-        assert payload.read_text() == saved["idea"]
+        assert json.loads((directory / "request.json").read_text()) == {
+            **request, "args": request["args"][:-2],
+        }
+        assert (directory / "request.json").stat().st_mtime_ns == request_mtime
+        assert json.loads((directory / "result.json").read_text()) == {"result": commands.result}
+        assert all((directory / name).is_file() for name in ("lock", "control.lock"))
+        assert not payload.exists()
         assert len(launches) == 1 and [c[0] for c in commands.calls] == ["git"]
         assert gh.blocker_reads == [] and gh.labels == set()
         assert gh.comments[-2] == rejection and len(gh.prs) == 1
