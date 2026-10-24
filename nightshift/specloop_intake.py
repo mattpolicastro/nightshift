@@ -1104,7 +1104,8 @@ def _validate(result: dict, command: str, receipt: dict) -> None:
     if result.get("outcome") not in outcomes:
         raise specloop_client.SpecloopError(f"{command} returned no recognized outcome")
     if command == "propose" and result["outcome"] == "drafted" and (
-            not result.get("commit") or result.get("branch") != f"spec/{receipt['change']}"):
+            not result.get("commit") or result.get("branch") not in (
+                f"spec/{receipt['change']}", f"refs/specloop/proposals/{receipt['change']}")):
         raise specloop_client.SpecloopError("propose returned no commit on the requested branch")
     if command == "revise" and result["outcome"] == "revised" and not result.get("commit"):
         raise specloop_client.SpecloopError("revise returned no landed commit")
