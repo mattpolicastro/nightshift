@@ -766,7 +766,12 @@ arbiter keep their existing behavior
 
 **Providers are pluggable.** Two adapters: `codex` (`codex exec`) and `claude`
 (`claude -p`). Each can use its CLI's subscription login or a local
-`base_url`.
+`base_url`. A codex profile can also name its own login with `auth`, for
+example `auth = "~/.codex-api/auth.json"` for API credits created with
+`CODEX_HOME=~/.codex-api codex login --with-api-key`. List it after the
+subscription profile in a role's chain, and the role moves to it when the
+subscription is usage-limited or unavailable. The seal refuses diffs that
+contain any `~/.codex*/auth.json` value.
 
 Spike S1 probed, from the harness itself, that each session can write only its
 workspace and has no network. The claude adapter with `qwen3-coder-next` on the
