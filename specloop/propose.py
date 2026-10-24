@@ -70,6 +70,11 @@ MODIFIED or REMOVED delta.
 - `tasks.md` with `## N. Title` sections and `- [ ] N.M ...` tasks.
   - Each task is a single session's work: about 300 changed lines at most, one
     concern.
+  - When a task must recognize structure in Markdown, HTML or other rich text (a
+    checklist, a heading, a fenced example), specify a deterministic line rule and
+    which way ambiguity resolves, choosing the safe direction (refuse or block).
+    Never require semantic parsing of fences, HTML blocks or indentation: reviewers
+    find a new edge case every round and the task never converges.
   - Combine work touching the same file for one concern into one task within
     that ceiling. Split when distinct concerns, dependencies or the ceiling
     require it, not by document heading.
