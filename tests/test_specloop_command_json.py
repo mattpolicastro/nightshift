@@ -300,8 +300,9 @@ def test_admit_unavailable_head_refused(template, capfd, head):
 
 
 @pytest.mark.scenario("specloop-interface/command-json/questions-as-json")
+@pytest.mark.scenario("specloop-interface/proposal-source-ref-json/unsuccessful-proposal-retains-its-outcome")
 def test_questions_as_json(template, monkeypatch, capfd):
-    path, _ = template
+    path, repo = template
     questions = ['Should "empty" mean zero?\nOr an error?']
 
     def agent(call):
@@ -318,8 +319,10 @@ def test_questions_as_json(template, monkeypatch, capfd):
         "version": 1, "outcome": "needs_input", "branch": "draft/new-change", "commit": "",
         "questions": questions, "contradictions": [], "risks": [], "problems": [],
     }
+    assert not git(repo, "for-each-ref", "refs/specloop/proposals/", "refs/heads/draft/new-change")
 
 
+@pytest.mark.scenario("specloop-interface/proposal-source-ref-json/ordinary-branch-retains-its-spelling")
 @pytest.mark.parametrize("arguments,change,branch,json_mode", [
     ([], "x", "spec/x", True),
     (["--change", "new-change"], "new-change", "spec/x", True),
@@ -357,6 +360,79 @@ def test_propose_drafts_to_effective_branch(template, monkeypatch, capfd, argume
         assert f"risk: {RISK}" in output
 
 
+@pytest.mark.parametrize("checkout_kind,branch", [
+    pytest.param("main", BRANCH, marks=pytest.mark.scenario(
+        "specloop-interface/proposal-source-ref-json/checked-out-branch-reports-private-ref")),
+    pytest.param("linked", BRANCH, marks=pytest.mark.scenario(
+        "specloop-interface/proposal-source-ref-json/checked-out-branch-reports-private-ref")),
+    pytest.param("ordinary", BRANCH, marks=pytest.mark.scenario(
+        "specloop-interface/proposal-source-ref-json/ordinary-branch-retains-its-spelling")),
+    pytest.param("ordinary", "draft/custom", marks=pytest.mark.scenario(
+        "specloop-interface/proposal-source-ref-json/ordinary-branch-retains-its-spelling")),
+])
+def test_propose_json_reports_real_ref(template, tmp_path, monkeypatch, capfd, checkout_kind, branch):
+    path, repo = template
+    old = git(repo, "rev-parse", "HEAD")
+    checkout = repo
+    fallback = checkout_kind != "ordinary"
+    if checkout_kind == "linked":
+        checkout = tmp_path / "review"
+        git(repo, "worktree", "add", str(checkout), branch)
+    elif checkout_kind == "main":
+        git(repo, "checkout", branch)
+
+    task_file = f"openspec/changes/{CHANGE}/tasks.md"
+    (checkout / task_file).write_text(TASKS + "\nStaged notes\n")
+    git(checkout, "add", task_file)
+    (checkout / task_file).write_text(TASKS + "\nUnstaged notes\n")
+    (checkout / "notes.txt").write_text("Untracked review notes\n")
+
+    def snapshot(work):
+        index = Path(git(work, "rev-parse", "--path-format=absolute", "--git-path", "index"))
+        return (
+            git(work, "symbolic-ref", "HEAD"), git(work, "rev-parse", "HEAD"),
+            git(work, "diff"), git(work, "diff", "--cached"), index.read_bytes(),
+            (work / task_file).read_bytes(),
+            {name: (work / name).read_bytes() for name in
+             git(work, "ls-files", "--others", "--exclude-standard").splitlines()},
+        )
+
+    worktrees = [repo, checkout] if checkout != repo else [repo]
+    before = [snapshot(work) for work in worktrees]
+
+    def agent(call):
+        print("proposal progress")
+        if call.access == "read":
+            return agents.Result("ok", {"contradictions": [], "risks": []})
+        assert (call.cwd / task_file).read_text() == TASKS
+        (call.cwd / task_file).write_text(TASKS + "\nHandle empty input.\n")
+        return agents.Result("ok", {"status": "drafted", "summary": "New spec", "questions": []})
+
+    monkeypatch.setattr(agents, "run", agent)
+    assert cli.main(["propose", str(path), "--change", CHANGE, "--branch", branch,
+                     "--from-branch", "main", "--idea", "Handle empty input", "--json"]) == 0
+    output = capfd.readouterr()
+    result = json.loads(output.out)  # Reject extra stdout documents or progress.
+    ref = f"refs/specloop/proposals/{CHANGE}" if fallback else branch
+    commit = git(repo, "rev-parse", ref)
+    assert result == {
+        "version": 1, "outcome": "drafted", "branch": ref, "commit": commit,
+        "questions": [], "contradictions": [], "risks": [], "problems": [],
+    }
+    assert commit != old
+    assert "proposal progress" in output.err
+    assert [snapshot(work) for work in worktrees] == before
+    if fallback:
+        assert git(repo, "rev-parse", branch) == old
+
+    # A consumer must be able to fetch the reported source ref verbatim.
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    git(consumer, "init", "-q")
+    git(consumer, "fetch", str(repo), result["branch"])
+    assert git(consumer, "rev-parse", "FETCH_HEAD") == result["commit"]
+
+
 @pytest.mark.scenario("pr-revision/spec-stage-revision/spec-revised-from-review")
 @pytest.mark.parametrize("private_ref", [False, True])
 def test_propose_from_branch_continues_existing_spec(template, monkeypatch, capfd, private_ref):
@@ -390,6 +466,7 @@ def test_propose_from_branch_continues_existing_spec(template, monkeypatch, capf
 
 
 @pytest.mark.scenario("pr-revision/spec-stage-revision/spec-revised-from-review")
+@pytest.mark.scenario("specloop-interface/proposal-source-ref-json/checked-out-branch-reports-private-ref")
 @pytest.mark.parametrize("linked", [False, True])
 def test_propose_from_checked_out_spec_preserves_review_checkout(template, tmp_path, monkeypatch, capfd, linked):
     path, repo = template
@@ -426,7 +503,7 @@ def test_propose_from_checked_out_spec_preserves_review_checkout(template, tmp_p
     assert cli.main(["propose", str(path), "--change", CHANGE, "--branch", BRANCH,
                      "--from-branch", start, "--idea", "Handle empty input", "--json"]) == 0
     result = json.loads(capfd.readouterr().out)
-    assert result["outcome"] == "drafted" and result["branch"] == BRANCH
+    assert result["outcome"] == "drafted" and result["branch"] == f"refs/specloop/proposals/{CHANGE}"
     commit = result["commit"]
     assert git(repo, "rev-parse", f"{commit}^") == old
     assert git(repo, "rev-parse", f"refs/specloop/proposals/{CHANGE}") == commit
@@ -440,6 +517,7 @@ def test_propose_from_checked_out_spec_preserves_review_checkout(template, tmp_p
     assert git(remote, "rev-parse", BRANCH) == commit
 
 
+@pytest.mark.scenario("specloop-interface/proposal-source-ref-json/unsuccessful-proposal-retains-its-outcome")
 @pytest.mark.parametrize("contradictions,problems", [([CONTRADICTION], []), ([], ["invalid scenario"])])
 def test_rejected_draft_reports_details(template, monkeypatch, capfd, contradictions, problems):
     from specloop import propose
@@ -450,11 +528,36 @@ def test_rejected_draft_reports_details(template, monkeypatch, capfd, contradict
     assert cli.main(["propose", str(path), "--idea", "feature", "--json"]) == 1
     document = json.loads(capfd.readouterr().out)
     assert document["outcome"] == "rejected"
+    assert document["version"] == 1 and document["branch"] == "spec/x"
     assert document["contradictions"] == contradictions
     assert document["problems"] == problems
     assert document["risks"] == [RISK]
     assert document["commit"] == "candidate"
     assert "spec/x" not in git(repo, "branch", "--list")
+    assert not git(repo, "for-each-ref", "refs/specloop/proposals/")
+
+
+@pytest.mark.scenario("specloop-interface/proposal-source-ref-json/unsuccessful-proposal-retains-its-outcome")
+def test_propose_publication_failure_retains_rejected_outcome(template, tmp_path, monkeypatch, capfd):
+    from specloop import propose
+
+    path, repo = template
+    git(repo, "checkout", BRANCH)
+    old = git(repo, "rev-parse", "HEAD")
+    missing = tmp_path / "missing-draft"
+    monkeypatch.setattr(propose, "draft", lambda *a, **kw: propose.Draft(
+        CHANGE, missing, branch=BRANCH, risks=[RISK], commit="candidate"))
+    # Real publication selects the private ref, then fails to fetch the draft.
+    assert cli.main(["propose", str(path), "--change", CHANGE, "--branch", BRANCH,
+                     "--idea", "feature", "--json"]) == 1
+    result = json.loads(capfd.readouterr().out)
+    assert result == {
+        "version": 1, "outcome": "rejected", "branch": BRANCH, "commit": "candidate",
+        "questions": [], "contradictions": [], "risks": [RISK], "problems": result["problems"],
+    }
+    assert len(result["problems"]) == 1 and str(missing) in result["problems"][0]
+    assert not git(repo, "for-each-ref", "refs/specloop/proposals/")
+    assert git(repo, "rev-parse", "HEAD") == git(repo, "rev-parse", BRANCH) == old
 
 
 @pytest.mark.parametrize("json_mode", [True, False])

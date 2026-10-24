@@ -682,7 +682,7 @@ def propose(args) -> int:
                             f"draft ready on {published_ref} in {m.repo} ({d.commit[:12]}); "
                             f"review openspec/changes/{m.change}/ there",
                             f"specloop admit --head {d.commit}"))
-    _outcome(args, outcome="drafted")
+    _outcome(args, outcome="drafted", branch=published_ref)
     return 0
 
 
