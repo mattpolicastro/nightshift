@@ -23,6 +23,11 @@ class Interrupted(BaseException):
 
 
 class PublicationGh(ApprovalGh):
+    def __init__(self):
+        super().__init__()
+        self.body = "## Checks a human must make\n(none)"
+        self.checks = [{"name": "CI", "bucket": "pass", "state": "COMPLETED"}]
+
     @property
     def publication_comments(self):
         return [c for c in self.comments if "<!-- nightshift:publish:" in c["body"]]
@@ -35,10 +40,10 @@ class PublicationGh(ApprovalGh):
         if args[:2] == ["pr", "checks"]:
             self.calls.append(args)
             assert args == ["pr", "checks", "8", "--repo", "owner/sample", "--json", "name,bucket,state"]
-            return '[{"name":"CI","bucket":"pass","state":"COMPLETED"}]'
+            return json.dumps(self.checks)
         result = super().__call__(args)
         if args[:2] == ["pr", "view"]:
-            return json.dumps({**json.loads(result), "body": "## Checks a human must make\n(none)"})
+            return json.dumps({**json.loads(result), "body": self.body})
         return result
 
 
@@ -172,10 +177,14 @@ run = ["/usr/bin/true"]
     receipt_path = tmp_path / "publications/owner__sample/8.json"
     p.receipt = lambda: json.loads(receipt_path.read_text())
 
-    def poll(gh_runner=None):
+    def poll_once(gh_runner=None):
         errors = []
         specloop_intake.publish_pending(repo, queue.Labels(), tmp_path, runner=gh_runner or gh,
                                        specloop_runner=runner, on_error=lambda n, e: errors.append(e))
+        return errors
+
+    def poll(gh_runner=None):
+        errors = poll_once(gh_runner)
         assessed = (tmp_path / "merge-readiness/owner__sample/8.json").exists()
         assert gh.labels == ({"merge:blocked"} if assessed else set())
         assert [call for call in gh.calls if "--add-label" in call] == (
@@ -186,6 +195,9 @@ run = ["/usr/bin/true"]
         return errors
 
     p.poll = poll
+    # New integration cases assert their own exact readiness effects; legacy
+    # publication cases retain every assertion in the wrapper above.
+    p.poll_once = poll_once
     p.status = lambda: json.loads(runner(["specloop", "status", "--json"]).stdout)["runs"][0]
     p.publish = lambda: runner(["specloop", "publish", "c", "--json"], timeout=30)
     assert cli.main(["run", "c"]) == 0
