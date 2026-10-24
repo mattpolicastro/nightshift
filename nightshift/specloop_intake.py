@@ -1180,6 +1180,8 @@ def _collect(path: Path, receipt: dict, command: str) -> bool:
             return True
     except _ReceiptChanged:
         return False
+    except specloop_job.JobOverdue as exc:
+        raise DeliveryError(str(exc)) from exc
 
 
 def _comment(repo: str, number: int, change: str, body: str, *, runner,

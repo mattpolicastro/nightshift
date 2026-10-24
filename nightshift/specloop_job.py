@@ -611,6 +611,23 @@ def start(path: Path, receipt: dict, args: list[str], *, launcher=None, clock=No
         _children[str(directory)] = child
 
 
+class JobOverdue(RuntimeError):
+    """A live attempt crossed its reporting deadline; execution stays attached."""
+
+    def __init__(self, directory: Path, command: str, elapsed: float, budget: float):
+        self.job_id, self.command = directory.name, command
+        self.elapsed, self.budget = elapsed, budget
+        self.log_path = directory / "log"
+        super().__init__(
+            f"Specloop job {self.job_id} ({command}) is overdue: elapsed {elapsed:g}s, "
+            f"deadline budget {budget:g}s. Log: {self.log_path}. "
+            f"Inspect with `nightshift jobs` and read the log; "
+            f"stop with `nightshift jobs stop {self.job_id}`, then inspect retained evidence "
+            f"before `nightshift jobs release {self.job_id}`. "
+            "The job has not been terminated or replaced."
+        )
+
+
 def collect(path: Path, receipt: dict) -> dict | None:
     """Return a completed result, or None while the job is live or cancelled.
 
@@ -633,6 +650,14 @@ def _collect_locked(path: Path, receipt: dict) -> dict | None:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            try:
+                request = _read_object(directory / "request.json")
+            except FileNotFoundError:
+                return None  # Older retained work may lack a request and deadline.
+            started, budget, deadline = _read_timing(request, path.parent.parent.name)
+            now = time.time()
+            if started is not None and budget is not None and deadline is not None and now >= deadline:
+                raise JobOverdue(directory, request["args"][0], max(0, now - started), budget)
             return None
         result_path = directory / "result.json"
         outcome = (json.loads(result_path.read_text()) if result_path.exists()

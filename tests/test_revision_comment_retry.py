@@ -14,6 +14,8 @@ REPO = "owner/sample"
 COMMENTS = f"repos/{REPO}/issues/8/comments"
 LOST = "pr-revision/revision-comment-retry-reconciliation/lost-revision-comment-response-reconciled"
 READ_FAILS = "pr-revision/revision-comment-retry-reconciliation/revision-reconciliation-read-fails"
+ERROR_RETRY = "issue-intake/failure-marker-reconciliation/error-comment-retry-does-not-duplicate"
+ERROR_READ = "issue-intake/failure-marker-reconciliation/reconciliation-failure-prevents-blind-retry"
 
 
 class Remote:
@@ -85,9 +87,13 @@ def deliver(*, action="revise", kind="pr", round_id=None):
 
 
 @pytest.mark.scenario(LOST)
+@pytest.mark.scenario(ERROR_RETRY)
 @pytest.mark.parametrize("round_id", [None, "42"])
 @pytest.mark.parametrize("action,kind", [("revise", "pr"), ("draft", "issue"),
-                                         ("admit", "pr"), ("publish", "pr")])
+                                         ("admit", "pr"), ("publish", "pr"),
+                                         ("draft-error", "issue"), ("admit-error", "pr"),
+                                         ("revise-error", "pr"), ("publish-error", "pr"),
+                                         ("approval", "pr")])
 def test_lost_response_reconciles_later_page(remote, action, kind, round_id):
     deliver(action=action, kind=kind, round_id=round_id)
     assert len(remote.creates) == len(remote.comments) == len(remote.patches) == 1
@@ -101,16 +107,19 @@ def test_lost_response_reconciles_later_page(remote, action, kind, round_id):
 
 
 @pytest.mark.scenario(LOST)
+@pytest.mark.scenario(ERROR_RETRY)
+@pytest.mark.parametrize("action", ["draft", "admit", "publish", "revise", "draft-error",
+                                   "admit-error", "publish-error", "revise-error", "approval"])
 @pytest.mark.parametrize("previous_round", [None, "4"])
-def test_distinct_round_is_created_then_reconciled(remote, previous_round):
+def test_distinct_round_is_created_then_reconciled(remote, previous_round, action):
     remote.lose_response = False
-    deliver(round_id=previous_round)
+    deliver(action=action, round_id=previous_round)
     original = remote.comments[0].copy()
     remote.lose_response = True
-    deliver(round_id="42")
+    deliver(action=action, round_id="42")
     assert len(remote.creates) == len(remote.comments) == 2
     assert remote.comments[0] == original
-    assert remote.comments[1]["body"].endswith("<!-- nightshift:revise:gate:42 -->")
+    assert remote.comments[1]["body"].endswith(f"<!-- nightshift:{action}:gate:42 -->")
     assert len(remote.patches) == 1
     assert remote.patches[0][1] == f"repos/{REPO}/issues/comments/502"
 
@@ -150,3 +159,82 @@ def test_read_failure_preserves_saved_revision_for_recovery(remote, tmp_path, ro
     assert len(remote.creates) == len(remote.comments) == len(remote.patches) == 1
     assert remote.patches[0][1] == f"repos/{REPO}/issues/comments/501"
     assert remote.patches[0][-1] == f"body={remote.creates[0][-1]}"
+
+
+@pytest.mark.scenario(ERROR_RETRY)
+@pytest.mark.scenario(ERROR_READ)
+@pytest.mark.parametrize("stage", ["draft", "admit", "revise", "publish"])
+@pytest.mark.parametrize("interruption", [None, "HTTP 403", "HTTP 503", "pause", "label"])
+def test_error_comment_retry_does_not_duplicate(remote, monkeypatch, stage, interruption):
+    kind = "issue" if stage == "draft" else "pr"
+    labels, waits = [], []
+    paused = False
+    label_error = interruption == "label"
+
+    def transport(args, **kwargs):
+        if args[1:3] == [kind, "edit"]:
+            remote.calls.append(args[1:])
+            assert remote.comments and remote.patches  # Comment delivery precedes labeling.
+            if label_error:
+                return subprocess.CompletedProcess(args, 1, "", "HTTP 403: label forbidden")
+            labels.append(args[-1])
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return remote.run(args, **kwargs)
+
+    def sleep(seconds):
+        nonlocal paused
+        waits.append(seconds)
+        paused = interruption == "pause"
+
+    def guard():
+        if paused:
+            raise specloop_intake.Paused()
+
+    monkeypatch.setattr(queue.subprocess, "run", transport)
+    remote.read_error = interruption if interruption in ("HTTP 403", "HTTP 503") else None
+    report = partial(specloop_intake.report_failure, Repo(REPO), queue.Labels(), 8,
+                     stage, kind, RuntimeError("overdue attempt"), runner=partial(queue._gh, sleep=sleep))
+    with queue.gh_guard(guard):
+        if interruption == "pause":
+            with pytest.raises(specloop_intake.Paused):
+                report()
+            assert remote.calls[-1] == remote.creates[0]
+        else:
+            errors = report()
+            assert bool(errors) == bool(interruption)
+    assert len(remote.creates) == len(remote.comments) == 1
+    assert labels == ([] if interruption else ["needs-human"])
+    assert waits == ([2, 2, 8] if interruption == "HTTP 503" else [2])
+    if interruption:
+        if interruption != "label":
+            assert not remote.patches and not any(c[1] == "edit" for c in remote.calls)
+        remote.read_error, paused, label_error = None, False, False
+        with queue.gh_guard(guard):
+            assert report() == []
+        assert labels == ["needs-human"]
+    assert len(remote.creates) == len(remote.comments) == 1
+    assert remote.patches[-1][1] == f"repos/{REPO}/issues/comments/501"
+    assert remote.comments[0]["body"].endswith(f"<!-- nightshift:{stage}-error:8 -->")
+
+
+@pytest.mark.scenario(ERROR_READ)
+@pytest.mark.parametrize("body", ["worker comment", "<!-- nightshift:unknown:gate -->",
+                                "<!-- nightshift:draft:gate --> trailing text"])
+def test_unmarked_retry_policy_unchanged(remote, body):
+    waits = []
+    queue._gh(["issue", "comment", "8", "--repo", REPO, "--body", body], sleep=waits.append)
+    assert len(remote.creates) == 2 and not remote.patches
+    assert remote.calls == remote.creates and waits == [2]
+
+
+@pytest.mark.scenario(ERROR_RETRY)
+@pytest.mark.parametrize("action", ["draft-error", "admit-error", "revise-error", "publish-error", "approval"])
+def test_different_actions_keep_distinct_comments(remote, action):
+    remote.lose_response = False
+    deliver(action=action.removesuffix("-error") if action != "approval" else "admit")
+    original = remote.comments[0].copy()
+    remote.lose_response = True
+    deliver(action=action)
+    assert len(remote.creates) == len(remote.comments) == 2
+    assert remote.comments[0] == original
+    assert remote.patches[0][1] == f"repos/{REPO}/issues/comments/502"
