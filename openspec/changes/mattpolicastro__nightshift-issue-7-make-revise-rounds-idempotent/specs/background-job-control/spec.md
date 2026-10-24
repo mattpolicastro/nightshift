@@ -23,6 +23,11 @@ A new keyed build-revision attempt SHALL persist its round identity and separate
 - **THEN** coordinated rereading prevents restoration of a detached job or overwrite of a newer snapshot or successor job
 - **THEN** malformed, missing or inconsistent declared attempt provenance prevents automatic redispatch, and retry inspection creates no release lock
 
+#### Scenario: Mixed legacy and keyed evidence is refused
+- **WHEN** a saved attempt retains keyed evidence but its request round_id, argv --round-id or receipt key metadata is independently removed or disagrees with the other records
+- **THEN** provenance validation reports an inconsistency without treating the attempt as legacy, dispatching a replacement, consuming feedback or rewriting its evidence
+- **THEN** a consistently unkeyed historical request and receipt remain supported, including an event-derived round_id and event-named feedback input retained through explicit stopped-job release
+
 #### Scenario: Compaction preserves round identity
 - **WHEN** a keyed delivered attempt is compacted or its interrupted compaction resumes
 - **THEN** its minimal request retains the same round_id, remaining exact args, original timing and mtime, and unchanged result/control evidence and feedback input

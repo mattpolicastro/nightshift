@@ -17,11 +17,19 @@ Each newly selected build snapshot SHALL save a fresh UUID round_id and revision
 - **WHEN** input preparation, a synchronous injected command or background launch fails after saving a keyed snapshot but before a valid result is saved
 - **THEN** the next eligible retry keeps that snapshot and key without consuming feedback or inventing another logical round
 - **THEN** no invocation is dispatched before its full input file is written and closed
+- **WHEN** preparing the first input for a new selection fails before its snapshot is saved
+- **THEN** no command is dispatched and the prior receipt and historical inputs remain byte-for-byte unchanged
 
 #### Scenario: Replacement selection creates a new identity
 - **WHEN** a delivered refusal is resolved or a confirmed stopped attempt is explicitly released, even under an unchanged trigger event
 - **THEN** normal unconsumed-feedback selection creates a fresh build-round key and input file while preserving consumed IDs and unknown fields
 - **THEN** the stopped attempt stays cancelled, its result is never acknowledged, and an unreleased stop remains held
+
+#### Scenario: New event selects an independent round
+- **WHEN** a newer authorized revision event remains after the original round completes and unconsumed feedback is selected for a build revision
+- **THEN** the new snapshot keeps the newer event ID separately from its fresh UUID round_id, which differs from the completed round's ID, and its completion comment uses exactly that saved round marker
+- **THEN** the original snapshot and comment stay unchanged, only newly selected IDs are consumed, and further retries add no dispatch or comment for the completed round
+- **THEN** spec-stage snapshots continue to use their event-derived round IDs and markers
 
 #### Scenario: Legacy rounds keep existing semantics
 - **WHEN** a pre-upgrade receipt or request lacks keyed-round metadata, or an empty or spec-stage revision is processed
