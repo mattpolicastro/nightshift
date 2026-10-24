@@ -219,20 +219,44 @@ def _changed(work: Path) -> list[str]:
     return [line[3:].strip() for line in out.splitlines() if line.strip()]
 
 
+
+def start_commit(source: Path, base: str, from_branch: str | None = None) -> str:
+    """The commit a draft branches from, resolved in the source checkout.
+
+    A clone names its default branch after the source's current branch and
+    renames the rest to origin/*, so `base` is resolved here, never in the
+    clone. A base just merged upstream may not be in the source checkout yet,
+    so the source's origin is fetched first (best effort) and its copy of the
+    base wins when present. A reviewed `from_branch` tip is used as given.
+    """
+    if from_branch:
+        return git(source, "rev-parse", "--verify", f"{from_branch}^{{commit}}").decode().strip()
+    candidates = [base]
+    try:
+        fetched = subprocess.run(
+            ["git", "-C", str(source), "fetch", "-q", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}"],
+            capture_output=True, timeout=60)
+        if fetched.returncode == 0:
+            candidates.insert(0, f"refs/remotes/origin/{base}")
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    for ref in candidates:
+        try:
+            return git(source, "rev-parse", "--verify", f"{ref}^{{commit}}").decode().strip()
+        except RuntimeError:
+            continue
+    raise RuntimeError(f"base {base!r} is not a commit in {source}")
+
 def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m: Manifest, out: Path,
           rounds: int = 4, agent=None, *, branch: str | None = None,
           from_branch: str | None = None) -> Draft:
     agent = agent or agents.run
-    # Resolve in the source: a clone renames local branches to origin/* and
-    # does not copy private refs used by a front end to fetch a reviewed tip.
-    start = (git(source, "rev-parse", "--verify", f"{from_branch}^{{commit}}").decode().strip()
-             if from_branch else base)
+    start = start_commit(source, base, from_branch)
     shutil.rmtree(out, ignore_errors=True)
     work = out / "work"
     subprocess.run(["git", "clone", "-q", str(source), str(work)], check=True)
     branch = branch if branch is not None else f"spec/{change}"
-    if from_branch:
-        git(work, "fetch", "-q", str(source), start)
+    git(work, "fetch", "-q", str(source), start)
     git(work, "checkout", "-q", "-B" if from_branch else "-b", branch, start)
     d = Draft(change, work, branch=branch)
     profile = (m.chains.get("implement") or (m.roles["implement"],))[0]
