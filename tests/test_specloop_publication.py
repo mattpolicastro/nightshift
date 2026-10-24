@@ -435,6 +435,7 @@ def test_paused_daemon_does_nothing(setup, monkeypatch, entry):
 
     monkeypatch.setattr(queue, "_gh", github)
     monkeypatch.setattr(daemon.subprocess, "run", commands)
+    monkeypatch.setattr(specloop_intake, "run_git", commands)
     if entry == "loop":
         daemon.loop(Config(repos=[repo]), {}, once=True)
     else:
@@ -477,6 +478,7 @@ def test_pause_created_during_poll_stops_further_actions(setup, stage):
 
 
 @pytest.mark.scenario("issue-intake/kill-switch/paused-daemon-does-nothing")
+@pytest.mark.scenario("issue-intake/git-process-group-timeout/production-runner-preserves-daemon-progress")
 def test_pause_during_propose_stops_push_and_delivery(setup, monkeypatch):
     repo, _, _ = setup
     gh = DraftGh(("spec:draft",))
@@ -490,7 +492,7 @@ def test_pause_during_propose_stops_push_and_delivery(setup, monkeypatch):
             "version": 1, "outcome": "drafted", "branch": f"spec/{CHANGE}", "commit": HEAD,
         }), "")
 
-    monkeypatch.setattr(daemon.subprocess, "run", lambda *a, **k: pytest.fail("pushed while paused"))
+    monkeypatch.setattr(specloop_intake, "run_git", lambda *a, **k: pytest.fail("pushed while paused"))
     health = daemon.RepoHealth()
     daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=cli)
     assert not health.failures

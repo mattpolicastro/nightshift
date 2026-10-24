@@ -155,6 +155,7 @@ def test_idea_file_preparation_failure(repo, tmp_path, monkeypatch, operation, b
     assert not gh.prs and len(gh.comments) == 1
     assert not calls(gh, "issue", "edit")
     assert not (tmp_path / "proposals/owner__sample/7.json").exists()
+    assert not list(tmp_path.rglob("cleanup.json"))
 
 
 class BlockedDraftGh(DraftGh):
@@ -1035,6 +1036,7 @@ def test_answered_escalation_can_be_rearmed(repo, tmp_path):
     assert later.read_bytes() == expected.encode("utf-8")
     assert earlier.read_bytes() == original
     assert original == b"Add a gate\n\nPlease draft it.\n\nKeep it small."
+    assert not list(earlier.parent.rglob("cleanup.json"))
     assert len(gh.comments) == 4
     assert "Which voltage?" in gh.comments[1]["body"]
     assert gh.pr_url in gh.comments[-1]["body"]

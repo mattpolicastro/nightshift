@@ -490,6 +490,22 @@ actual Paseo host validation remain pending as described in the platform limits.
 
 ### Pause and job control
 
+`nightshift status` shows local active background jobs before repository network
+queries: full job ID, stage, repository/item, command, execution state, elapsed
+seconds and time remaining or `OVERDUE by Ns`. Starting/legacy attempts without
+timing say unavailable. These rows are separate from daemon/worker liveness and
+independent `specloop status` run state; `nightshift jobs` includes history.
+
+Reporting deadlines are **propose 3600 seconds, admit 300 seconds, revise 1800
+seconds**, including startup; spec re-drafting uses propose's budget. Persisted
+deadlines survive restart. On the next authorized, eligible, unpaused poll, a
+live overdue attempt gets a comment and `needs-human`, retaining its job ID.
+This neither terminates nor retries it automatically. Daemon/GitHub outages,
+removed triggers and authorization holds delay reporting; wall-clock changes
+affect timing. Use the stop, inspection and release procedure below. If the
+job finishes late, resolving `needs-human` under normal eligibility allows
+delivery of that result ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+
 `nightshift pause` creates `~/.nightshift/pause`; `nightshift resume` removes
 it. Pause prevents new daemon launches and completion-delivery operations,
 including pushes, PR creation, comments, label changes and publication.
@@ -508,6 +524,24 @@ completed; delivery may still be pending. States also include `starting`,
 `running`, `failed`, `stopping`, `stopped` and `unknown`. Unreadable entries
 produce diagnostics and exit 1 while valid rows remain visible; an empty
 inventory prints `No background jobs.` and exits 0.
+
+After durable authorized delivery, compaction removes the log and safely owned
+idea payload, redacts idea arguments from a minimal `request.json`, and keeps
+results, control metadata and the directory. Original request mtimes preserve
+touchpoint dates and history across receipt replacement. Undelivered and
+stopped/released evidence, workflow receipts and build-feedback files remain;
+minimal records still grow, and missing history cannot be reconstructed. This
+is not secure erasure ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+Interrupted cleanup waits for a later eligible, authorized, unpaused item visit;
+its journal proves delivery, not current authorization. Removal of the final
+trigger, closure or authorization denial can leave residual artifacts indefinitely.
+Do not rearm solely for cleanup: normal new work may follow.
+
+Daemon intake git times out after 30 seconds and SIGKILLs its POSIX process
+group, with at most one further second for reaping/output draining. Escaped
+descendants and already-accepted remote effects remain possible; see the
+[timeout limits and pending human checks](docs/specloop/README.md#pause-stop-and-the-supervisor)
+([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
 
 To stop one job, copy its exact full ID (32 hexadecimal characters as printed;
 no prefixes or paths). Stop verifies the wrapper's process-start identity,
@@ -576,8 +610,8 @@ over duplicate work. Resume or relabeling alone never clears a stopped hold.
 Release is explicit recovery, not automatic retry or rollback. SIGKILL can
 leave partial artifacts; remote effects and admission may already have
 committed. A revision can commit before saving its result, so a later attempt
-can append a duplicate round. Job evidence and inputs have no automatic
-cleanup. See [remaining limits](KNOWN-LIMITATIONS.md#open-gaps) and the
+can append a duplicate round. Stopped/released job evidence and inputs have no
+automatic cleanup. See [remaining limits](KNOWN-LIMITATIONS.md#open-gaps) and the
 [manual host checks](docs/validation.md#manual-host-checks) for launchd unload
 and stopping during a push to a disposable remote.
 

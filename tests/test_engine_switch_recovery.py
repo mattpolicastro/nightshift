@@ -18,7 +18,7 @@ def switched(tmp_path, monkeypatch):
     manifest.write_text(manifest_text(tmp_path / "source"))
     pipeline = Pipeline(Repo("owner/switched", engine="specloop", manifest=manifest))
     monkeypatch.setattr(queue, "_gh", pipeline.gh)
-    monkeypatch.setattr(daemon.subprocess, "run", pipeline.command)
+    monkeypatch.setattr(daemon.specloop_intake, "run_git", pipeline.command)
     return pipeline
 
 

@@ -673,7 +673,7 @@ def poll_specloop(cfg: Config, health: RepoHealth, *, runner=None, specloop_runn
     cli = guarded(specloop_runner or subprocess.run)
     intake_cli = guarded(specloop_runner) if specloop_runner is not None else None
     launcher = guarded(subprocess.Popen)
-    git = guarded(subprocess.run)
+    git = guarded(specloop_intake.run_git)
     for repo in cfg.repos:
         if paused():
             return

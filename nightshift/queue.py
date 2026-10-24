@@ -279,7 +279,7 @@ def _reconcile_intake_comment(args: list[str], *, sleep) -> str | None:
             or "--body" not in args or "--repo" not in args):
         return None
     body = args[args.index("--body") + 1]
-    marker = re.search(r"<!-- nightshift:(?:draft|admit|publish|revise):[^\s<>]+ -->$", body)
+    marker = re.search(r"<!-- nightshift:(?:(?:draft|admit|publish|revise)(?:-error)?|approval):[^\s<>]+ -->$", body)
     if marker is None:
         return None
     repo = args[args.index("--repo") + 1]
