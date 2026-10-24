@@ -9,8 +9,11 @@ from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
+from uuid import UUID
 
 import pytest
+
+from revision_result_fixtures import revision_success
 
 from nightshift import queue, specloop_intake as intake, specloop_job
 from test_revision_feedback_consumption import read, receipt_path, stage_setup
@@ -298,6 +301,8 @@ def feedback_streams(monkeypatch):
 
 
 @pytest.mark.scenario("pr-revision/immutable-build-revision-input/replacement-preserves-stopped-input")
+@pytest.mark.scenario("pr-revision/stable-build-round-identity/replacement-selection-creates-a-new-identity")
+@pytest.mark.scenario("pr-revision/stable-build-round-identity/legacy-rounds-keep-existing-semantics")
 @pytest.mark.scenario("pr-revision/immutable-build-revision-input/delayed-reader-retains-complete-blocks")
 @pytest.mark.scenario("pr-revision/durable-round-snapshot/pause-and-stop-preserve-snapshots")
 @pytest.mark.parametrize("legacy", [False, True])
@@ -334,14 +339,21 @@ def test_released_revision_keeps_stopped_attempt_input(
             old = receipt_path(state).with_suffix(f".{saved['event']}.feedback.json").resolve()
             source.rename(old)
             args[args.index("--feedback") + 1] = str(old)
+            key_index = args.index("--round-id")
+            del args[key_index:key_index + 2]
             specloop_job.save(original / "request.json", {"args": args})
+            saved.pop("revision_key_version")
+            saved.pop("round_job")
+            saved["round_id"] = str(saved["event"])
+            specloop_job.save(receipt_path(state), saved)
             source = old
         before = source.read_bytes()  # First read happens after the launching poll returns.
         assert json.loads(before.decode("utf-8")) == saved["feedback"]
         assert gh.inline[0]["body"] in saved["feedback"][0]
         specloop_job.save(original / "process.json", identity(original))
         specloop_job.request_stop(original, verify_identity=lambda: identity(original))
-        specloop_job.finalize(original, {"result": {**commands.result, "commit": "e" * 40}})
+        stopped_result = revision_success(args, {**commands.result, "commit": "e" * 40})
+        specloop_job.finalize(original, {"result": stopped_result})
         os.close(locks.pop())
         specloop_job.finish_stop(original)
         gh.inline[0]["body"] = "Edited λ feedback\n\n---\n\nKeep this block whole"
@@ -354,6 +366,9 @@ def test_released_revision_keeps_stopped_attempt_input(
         replacement = read(state)
         assert len(jobs) == 2 and replacement["job"] != saved["job"]
         assert replacement["event"] == saved["event"]
+        assert replacement["revision_key_version"] == 1
+        assert replacement["round_id"] != saved["round_id"]
+        assert UUID(replacement["round_id"]).version == 4
         assert replacement["consumed_feedback_ids"] == saved["consumed_feedback_ids"]
         assert replacement["feedback_ids"] == ["inline:1", "inline:2", "inline:4"]
         assert gh.inline[0]["body"] in replacement["feedback"][0]
@@ -400,6 +415,7 @@ def test_synchronous_revision_invocations_keep_distinct_inputs(build_setup, tmp_
 
 
 @pytest.mark.scenario("pr-revision/immutable-build-revision-input/feedback-file-preparation-fails")
+@pytest.mark.scenario("pr-revision/stable-build-round-identity/prepared-snapshot-survives-launch-failure")
 @pytest.mark.parametrize("failure", ["collision", "write"])
 def test_feedback_file_failure_prevents_dispatch(build_setup, tmp_path, monkeypatch, failure):
     path = receipt_path(tmp_path)
@@ -462,7 +478,9 @@ def test_selected_job_survives_pause_stop_and_reauthorization(stage_setup, tmp_p
     later_feedback(gh)
     if control != "pause":
         specloop_job.save(directory / "stop.json", {"state": control})
-    specloop_job.finalize(directory, {"result": commands.result})
+    expected = revision_success(json.loads((directory / "request.json").read_text())["args"],
+                                commands.result)
+    specloop_job.finalize(directory, {"result": expected})
     if control == "pause":
         collect = specloop_job._collect_locked
         pause = tmp_path / "pause"
@@ -480,12 +498,12 @@ def test_selected_job_survives_pause_stop_and_reauthorization(stage_setup, tmp_p
             health = daemon.RepoHealth()
             daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
             paused = read(tmp_path)
-            assert paused["result"] == commands.result and not paused.get("delivered")
+            assert paused["result"] == expected and not paused.get("delivered")
             assert fixed(paused) == fixed(saved)
             # Build success is acknowledged before notification; specs wait for push.
-            expected = sorted([*saved["consumed_feedback_ids"], "conversation:102"])
+            expected_ids = sorted([*saved["consumed_feedback_ids"], "conversation:102"])
             assert paused["consumed_feedback_ids"] == (
-                expected if commands.result["outcome"] == "revised" else saved["consumed_feedback_ids"])
+                expected_ids if commands.result["outcome"] == "revised" else saved["consumed_feedback_ids"])
             assert not health.failures and not health.item_failures and not gh.comments
             daemon.poll_specloop(Config(repos=[repo]), health, runner=gh, specloop_runner=commands)
             assert read(tmp_path) == paused
@@ -507,9 +525,9 @@ def test_selected_job_survives_pause_stop_and_reauthorization(stage_setup, tmp_p
     recovered = read(tmp_path)
     assert fixed(recovered) == fixed(saved) and len(jobs) == 1 and not dispatches(commands)
     assert "agent:revise" in gh.labels  # The newer application belongs to a later round.
-    assert json.loads((directory / "result.json").read_text()) == {"result": commands.result}
+    assert json.loads((directory / "result.json").read_text()) == {"result": expected}
     if control == "pause":
-        assert recovered["delivered"] and recovered["consumed_feedback_ids"] == expected
+        assert recovered["delivered"] and recovered["consumed_feedback_ids"] == expected_ids
         assert len(gh.comments) == 2
         assert gh.comments[-1]["body"].endswith(
             f"<!-- nightshift:revise:{saved['change']}:{saved['round_id']} -->")
@@ -563,7 +581,8 @@ def test_background_reader_retains_snapshot_across_restart(
         assert (payload == saved["feedback"] if args[0] == "revise"
                 else saved["feedback"][0] in payload)
         assert "Edited after dispatch" not in str(payload) and "Later feedback" not in str(payload)
-        specloop_job.finalize(directory, {"result": commands.result})
+        expected = revision_success(args, commands.result)
+        specloop_job.finalize(directory, {"result": expected})
     finally:
         for _, _, fd in jobs:
             os.close(fd)
@@ -580,9 +599,10 @@ def test_background_reader_retains_snapshot_across_restart(
         assert fixed(read(tmp_path)) == fixed(saved)
         assert read(tmp_path)["consumed_feedback_ids"] == consumed
         assert not gh.comments and "agent:revise" in gh.labels
-        assert json.loads((directory / "result.json").read_text()) == {"result": commands.result}
+        assert json.loads((directory / "result.json").read_text()) == {"result": expected}
         module = restart()
     tick(stage_setup, tmp_path, module=module, background=True, launcher=launch)
+    assert read(tmp_path)["result"] == expected
     assert len(jobs) == 1 and not dispatches(commands)
     assert fixed(read(tmp_path)) == fixed(saved)
     assert read(tmp_path)["consumed_feedback_ids"] == sorted([*consumed, "conversation:102"])
@@ -601,6 +621,7 @@ def test_background_reader_retains_snapshot_across_restart(
 
 @pytest.mark.scenario("pr-revision/durable-round-snapshot/new-label-preserves-completed-round")
 @pytest.mark.scenario("pr-revision/consumption-based-eligibility/relabel-does-not-requeue-consumed-feedback")
+@pytest.mark.scenario("pr-revision/stable-build-round-identity/new-event-selects-an-independent-round")
 @pytest.mark.parametrize("replacement", ["execution", "notification", "recovery"])
 def test_new_application_finishes_original_round_before_remaining_ids(stage_setup, tmp_path, replacement):
     _, gh, commands = stage_setup
@@ -653,7 +674,13 @@ def test_new_application_finishes_original_round_before_remaining_ids(stage_setu
     commands.fetch_head = gh.head
     tick(stage_setup, tmp_path, module=restart())  # Use the retained application.
     remaining = read(tmp_path)
-    assert remaining["event"] == newer_event and remaining["round_id"] == str(newer_event)
+    assert remaining["event"] == newer_event
+    if commands.result["outcome"] == "revised":
+        assert remaining["revision_key_version"] == 1
+        key = UUID(remaining["round_id"])
+        assert key.version == 4 and key.hex == remaining["round_id"] != completed["round_id"]
+    else:
+        assert remaining["round_id"] == str(newer_event)
     assert remaining["feedback_ids"] == ["conversation:104"]
     assert remaining["feedback"] == ["**reviewer:**\n\nLater feedback"]
     assert remaining["consumed_feedback_ids"] == sorted(
@@ -661,6 +688,8 @@ def test_new_application_finishes_original_round_before_remaining_ids(stage_setu
     assert remaining["delivered"] and "agent:revise" not in gh.labels
     assert len(dispatches(commands)) == len(gh.comments) == 2
     assert gh.comments[0] == original_comment
+    assert gh.comments[1]["body"].endswith(
+        f"<!-- nightshift:revise:{remaining['change']}:{remaining['round_id']} -->")
     for _ in range(2):
         gh.label_event("agent:revise", "labeled")
         assert tick(stage_setup, tmp_path, module=restart()) == [{"outcome": "empty"}]

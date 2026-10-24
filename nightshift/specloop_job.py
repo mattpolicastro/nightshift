@@ -18,6 +18,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from contextlib import ExitStack, contextmanager
@@ -176,6 +177,184 @@ def _job_state(directory: Path, process: dict | None) -> str:
         raise ValueError(f"{directory / 'result.json'}: invalid result record")
 
 
+def _argument(args: list[str], flag: str) -> str | None:
+    values = []
+    for index, arg in enumerate(args):
+        if arg == flag:
+            if index + 1 == len(args):
+                raise ValueError(f"request.json: missing {flag} value")
+            values.append(args[index + 1])
+        elif arg.startswith(flag + "="):
+            values.append(arg.split("=", 1)[1])
+    if len(values) > 1:
+        raise ValueError(f"request.json: repeated {flag}")
+    return values[0] if values else None
+
+
+def _request_round_id(request: dict) -> str | None:
+    args = request.get("args")
+    if not isinstance(args, list) or not args or not all(isinstance(a, str) for a in args):
+        raise ValueError("request.json: invalid argument list")
+    key = request.get("round_id")
+    if key is not None and (not isinstance(key, str)
+                           or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", key)):
+        raise ValueError("request.json: invalid round identity")
+    if _argument(args, "--round-id") != key or key is not None and args[0] != "revise":
+        raise ValueError("request.json: inconsistent round identity and argv")
+    return key
+
+
+def validate_revision_request(request: dict, receipt: dict, *, job_id: str | None = None) -> None:
+    """Never infer keyed provenance from a historical event-derived round_id."""
+    key = _request_round_id(request)
+    declared = "revision_key_version" in receipt or "round_job" in receipt
+    if key is None and not declared:
+        return
+    if (key is None or type(receipt.get("revision_key_version")) is not int
+            or receipt["revision_key_version"] != 1 or receipt.get("round_id") != key
+            or receipt.get("command") != "revise"
+            or job_id is not None and (receipt.get("round_job") != job_id
+                                      or receipt.get("job", job_id) != job_id)):
+        raise ValueError("inconsistent revision attempt provenance")
+    args = request["args"]
+    feedback = receipt.get("feedback")
+    source = _argument(args, "--feedback")
+    if (len(args) < 2 or args[1] != receipt.get("change")
+            or _argument(args, "--feedback-format") != "json"
+            or not isinstance(feedback, list) or not feedback
+            or not all(isinstance(block, str) for block in feedback)
+            or source is None or not Path(source).is_absolute()
+            or json.loads(Path(source).read_text()) != feedback):
+        raise ValueError("inconsistent revision change or feedback provenance")
+
+
+class ReceiptChanged(RuntimeError):
+    """A stale poll must defer to the current receipt writer."""
+
+
+_revision_writers = threading.local()
+
+
+@contextmanager
+def _revision_writer(path: Path):
+    """Cover snapshots with no attempt lock yet, without creating lock files.
+
+    The existing repository directory is stable across atomic receipt saves.
+    Reentrant in this thread so start can also protect standalone dispatch;
+    competing polls defer. Attempt control then release locks still follow.
+    """
+    parent = path.parent.resolve()
+    held = getattr(_revision_writers, "held", ())
+    if parent in held:
+        yield
+        return
+    descriptor = os.open(parent, os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ReceiptChanged("revision writer active; retry on a later poll") from exc
+        _revision_writers.held = (*held, parent)
+        try:
+            yield
+        finally:
+            _revision_writers.held = held
+    finally:
+        os.close(descriptor)
+
+
+def _check_unattempted(path: Path, receipt: dict) -> None:
+    """Missing receipt pointers cannot erase retained keyed attempt evidence."""
+    root = path.with_suffix(".jobs")
+    if not root.exists():
+        return
+    for directory in root.iterdir():
+        # Only UUID directories can contain attempts dispatched by this writer.
+        if not directory.is_dir() or not re.fullmatch(r"[0-9a-f]{32}", directory.name):
+            continue
+        request = _read_object(directory / "request.json")
+        key = _request_round_id(request)
+        if key is not None and (key == receipt.get("round_id")
+                                or "revision_key_version" not in receipt):
+            raise ValueError("inconsistent revision attempt provenance: missing round_job")
+
+
+@contextmanager
+def revision_attempt(path: Path, receipt: dict):
+    """Inspect provenance and persist a successor within the same context.
+
+    Callers retain their eligibility/authorization/pause gates. Keep this
+    context open through snapshot saving and start(), so release, collection
+    and other retry polls cannot replace the evidence between read and write.
+    Only retry/unattempted permit reusing a key; released/completed permit selection.
+    This read never creates lock files or repairs evidence. ReceiptChanged defers
+    stale writers; invalid or missing provenance raises instead of redispatching.
+    """
+    job_id = receipt.get("round_job", receipt.get("job"))
+    with _revision_writer(path), ExitStack() as locks:
+        directory = None
+        if job_id is not None:
+            if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+                raise ValueError("invalid revision attempt reference")
+            directory = path.with_suffix(".jobs") / job_id
+            control = locks.enter_context((directory / "control.lock").open("r"))
+            fcntl.flock(control, fcntl.LOCK_EX)
+        elif "round_job" in receipt or "job" in receipt:
+            raise ValueError("invalid revision attempt reference")
+        try:
+            release = path.with_suffix(".release.lock").open("r")
+        except FileNotFoundError:
+            pass
+        else:
+            locks.enter_context(release)
+            fcntl.flock(release, fcntl.LOCK_EX)
+        if _read_object(path) != receipt:
+            raise ReceiptChanged("revision receipt changed; retry on a later poll")
+        if directory is None:
+            _check_unattempted(path, receipt)
+            if "revision_key_version" in receipt:
+                key = receipt.get("round_id")
+                if (type(receipt["revision_key_version"]) is not int
+                        or receipt["revision_key_version"] != 1
+                        or not isinstance(key, str)
+                        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", key)
+                        or receipt.get("command") != "revise"):
+                    raise ValueError("invalid revision snapshot provenance")
+                yield "unattempted"
+            else:
+                yield "legacy"
+            return
+        request = _read_object(directory / "request.json")
+        validate_revision_request(request, receipt, job_id=job_id)
+        _read_timing(request, path.parent.parent.name)
+        lifetime = locks.enter_context((directory / "lock").open("r"))
+        try:
+            fcntl.flock(lifetime, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield "pending"
+            return
+        process, stop = _read_process(directory), _read_stop(directory)
+        # _job_state takes the lifetime lock itself; drop our probe first.
+        fcntl.flock(lifetime, fcntl.LOCK_UN)
+        state = _job_state(directory, process)
+        if "result" in receipt and stop is None and state in ("finished", "failed"):
+            yield "completed"
+        elif "job" in receipt or "result" in receipt or receipt.get("delivered"):
+            yield "pending"
+        elif state == "stopped":
+            if (process is None or process["start_identity"] is None or stop is None
+                    or stop.get("process") != process
+                    or any(not isinstance(stop.get(key), str)
+                           or datetime.fromisoformat(stop[key]).tzinfo is None
+                           for key in ("requested_at", "stopped_at"))):
+                raise ValueError("confirmed stop with matching process identity required")
+            yield "released"
+        elif state == "failed":
+            yield "retry"
+        else:
+            yield "pending"
+
+
 def list_jobs(state_dir: Path) -> tuple[list[Job], list[str]]:
     """Return local attempts and diagnostics, independent of receipts/handles."""
 
@@ -221,6 +400,7 @@ def list_jobs(state_dir: Path) -> tuple[list[Job], list[str]]:
                         if not isinstance(args, list) or not args or not all(isinstance(a, str) for a in args):
                             raise ValueError("request.json: expected a nonempty string argument list")
                         command = tuple(args)
+                        _request_round_id(request)
                         started_at, timeout_seconds, deadline_at = _read_timing(request, stage)
                     except (OSError, ValueError) as exc:
                         record_errors.append(str(exc))
@@ -397,6 +577,9 @@ def _compact_delivered(path: Path, receipt: dict, *, resume=False, prepare_only=
             request_path = directory / "request.json"
             original = request_path.stat()  # Capture before the first request read.
             request = _read_object(request_path)
+            _request_round_id(request)
+            if not resume:
+                validate_revision_request(request, receipt, job_id=job_id)
             timing = _read_timing(request, stage)
             args, idea_files = _redact_idea(request.get("args"))
             outcomes = {"propose": ("drafted", "needs_input", "rejected"),
@@ -425,6 +608,8 @@ def _compact_delivered(path: Path, receipt: dict, *, resume=False, prepare_only=
                     raise ValueError(f"conflicting request {flag}")
             minimal = dict(stage=stage, args=args, **dict(zip(
                 ("started_at", "timeout_seconds", "deadline_at"), timing)))
+            if "round_id" in request:
+                minimal["round_id"] = request["round_id"]
             identity = dict(version=1, job_id=job_id, stage=stage,
                             repository=path.parent.name, number=int(path.stem), request=minimal,
                             result_sha256=hashlib.sha256((directory / "result.json").read_bytes()).hexdigest())
@@ -791,6 +976,17 @@ def reap() -> None:
 
 
 def start(path: Path, receipt: dict, args: list[str], *, launcher=None, clock=None) -> None:
+    coordinated = path.parent.resolve() in getattr(_revision_writers, "held", ())
+    if _argument(args, "--round-id") is not None and not coordinated:
+        with revision_attempt(path, receipt) as disposition:
+            if disposition not in ("unattempted", "retry"):
+                raise ValueError("revision attempt does not permit dispatch")
+            _start(path, receipt, args, launcher=launcher, clock=clock)
+    else:
+        _start(path, receipt, args, launcher=launcher, clock=clock)
+
+
+def _start(path: Path, receipt: dict, args: list[str], *, launcher=None, clock=None) -> None:
     reap()
     started_at = (clock or time.time)()
     timeout_seconds = COMMAND_TIMEOUT_SECONDS[args[0]]
@@ -798,15 +994,25 @@ def start(path: Path, receipt: dict, args: list[str], *, launcher=None, clock=No
         "stage": path.parent.parent.name, "args": args,
         "started_at": started_at, "timeout_seconds": timeout_seconds,
         "deadline_at": started_at + timeout_seconds,
+        "round_id": _argument(args, "--round-id"),
     }
     _read_timing(request, path.parent.parent.name)
+    validate_revision_request(request, receipt)
+    if request["round_id"] is not None:
+        if _read_object(path) != receipt:
+            raise ReceiptChanged("revision snapshot changed before launch")
+        if "job" in receipt:
+            raise ValueError("revision attempt is still attached")
     job = uuid.uuid4().hex
     directory = path.parent / f"{path.stem}.jobs" / job
     directory.mkdir(parents=True)
+    (directory / "control.lock").touch()
     save(directory / "request.json", request)
     with (directory / "lock").open("w") as lock, (directory / "log").open("w") as log:
         fcntl.flock(lock, fcntl.LOCK_EX)
         receipt["job"] = job
+        if request["round_id"] is not None:
+            receipt["round_job"] = job
         # Persist the identity before launch. The inherited lock covers the
         # gap between Popen and the child starting, including daemon restarts.
         save(path, receipt)

@@ -119,6 +119,7 @@ def test_restart_inventory_all_stages_history_and_order(tmp_path, monkeypatch, w
         requests[directory] = {
             "stage": stage, "args": args, "started_at": now[0],
             "timeout_seconds": budgets[command], "deadline_at": now[0] + budgets[command],
+            "round_id": None,
         }
         assert json.loads((directory / "request.json").read_text()) == requests[directory]
         assert jobs.collect(path, receipt) is None
@@ -196,6 +197,7 @@ def test_timing_is_persisted_before_wrapper_launch(tmp_path, monkeypatch, stage,
         assert json.loads((directory / "request.json").read_text()) == {
             "stage": stage, "args": args, "started_at": 100.5,
             "timeout_seconds": budget, "deadline_at": 100.5 + budget,
+            "round_id": None,
         }
         launched.append(directory)
         return object()
