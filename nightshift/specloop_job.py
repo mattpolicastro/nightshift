@@ -9,16 +9,18 @@ write their own atomic result files. Logs use files so a verbose CLI cannot fill
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import math
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
@@ -247,6 +249,205 @@ def save(path: Path, data: dict) -> None:
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(data) + "\n")
     temp.replace(path)
+
+
+def _cleanup_file(path: Path) -> None:
+    """Reject links before opening evidence or an exact deletion target."""
+    if any(p.is_symlink() for p in (path, *path.parents)):
+        raise ValueError(f"symlinked cleanup evidence: {path}")
+    if path.exists() and not stat.S_ISREG(path.stat().st_mode):
+        raise ValueError(f"not a regular cleanup file: {path}")
+
+
+def _redact_idea(args: object) -> tuple[list[str], list[str]]:
+    if not isinstance(args, list) or not args or not all(isinstance(a, str) for a in args):
+        raise ValueError("invalid request arguments")
+    retained, files = [], []
+    arguments = iter(args)
+    for arg in arguments:
+        flag, equals, value = arg.partition("=")
+        if flag not in ("--idea", "--idea-file"):
+            retained.append(arg)
+            continue
+        if not equals:
+            try:
+                value = next(arguments)
+            except StopIteration:
+                raise ValueError("missing idea argument") from None
+        if flag == "--idea-file":
+            files.append(value)
+    return retained, files
+
+
+def _owned_idea(directory: Path, value: str) -> Path:
+    _cleanup_file(Path(value).absolute())  # Check links before normalizing '..'.
+    target = Path(os.path.abspath(value))
+    root = directory.parent
+    _cleanup_file(target)
+    if (not target.is_relative_to(root)
+            or target.name in {"request.json", "result.json", "process.json", "stop.json",
+                               "collected.json", "cleanup.json", "lock", "control.lock", "log"}
+            or any(p != directory and p.is_dir() and target.is_relative_to(p)
+                   for p in root.iterdir())):
+        raise ValueError("idea file is outside this attempt's ownership")
+    # A malformed sibling cannot prove exclusive ownership. Compacted siblings
+    # retain their deletion references in the journal after argv is redacted.
+    for other in root.iterdir():
+        if not other.is_dir():
+            continue
+        _cleanup_file(other / "request.json")
+        args = _read_object(other / "request.json").get("args")
+        retained, references = _redact_idea(args)
+        if other != directory:
+            journal = other / "cleanup.json"
+            _cleanup_file(journal)
+            if journal.exists():
+                references += _read_object(journal)["idea_references"]
+        else:
+            references = []
+        # Preserve feedback (and any other file argument), even if also named
+        # as an idea input. Never infer ownership merely from a file extension.
+        # Only option tokens use equals syntax; standalone paths may contain '='.
+        references += [arg.split("=", 1)[-1] if arg.startswith("--") else arg
+                       for arg in retained]
+        for ref in references:
+            candidate = Path(ref).absolute()
+            if any(p.is_symlink() for p in (candidate, *candidate.parents)):
+                raise ValueError("cannot prove ownership through a symlinked reference")
+            if Path(os.path.abspath(ref)) == target:
+                raise ValueError("idea file is shared by another argument or attempt")
+    return target
+
+
+def _cleanup_save(path: Path, data: dict, *, timestamps=None) -> None:
+    temp = path.with_name(f".{path.name}-{uuid.uuid4().hex}.tmp")
+    try:
+        with temp.open("x") as stream:
+            stream.write(json.dumps(data) + "\n")
+            stream.flush()
+            if timestamps is not None:
+                os.utime(temp, ns=timestamps)  # Before publication, even on interruption.
+            os.fsync(stream.fileno())
+        temp.replace(path)
+        descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def compact_delivered(path: Path, receipt: dict) -> list[str]:
+    """Compact one durably delivered attempt; return local diagnostics.
+
+    The caller must have passed this visit's eligibility, authorization and
+    pause gates. Neither a delivered receipt nor a journal grants that authority.
+    No receipt, result, control record or directory is removed or rewritten.
+    """
+    diagnostics: list[str] = []
+    try:
+        job_id = receipt.get("job")
+        if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+            raise ValueError("missing exact job identity")
+        path = path.absolute()
+        stage = path.parent.parent.name
+        if (stage not in ("proposals", "admissions", "revisions") or path.suffix != ".json"
+                or not path.stem.isdecimal() or int(path.stem) <= 0):
+            raise ValueError("invalid attempt context")
+        directory = path.parent / f"{path.stem}.jobs" / job_id
+        release = path.with_suffix(".release.lock")
+        evidence = [path, release, *(directory / name for name in (
+            "request.json", "result.json", "process.json", "stop.json", "collected.json",
+            "cleanup.json", "lock", "control.lock", "log"))]
+        for record in evidence:
+            _cleanup_file(record)
+        with ExitStack() as locks:
+            for record in (directory / "control.lock", release, directory / "lock"):
+                if record == release and not record.exists():
+                    continue  # Never manufacture a release lock for cleanup.
+                lock = locks.enter_context(record.open("r"))
+                fcntl.flock(lock, fcntl.LOCK_EX | (fcntl.LOCK_NB if record.name == "lock" else 0))
+            for record in evidence:
+                _cleanup_file(record)
+            if _read_object(path) != receipt or receipt.get("delivered") is not True:
+                raise ValueError("receipt changed or delivery is incomplete")
+            context = {"repo": path.parent.name.replace("__", "/", 1),
+                       "issue" if stage == "proposals" else "pr": int(path.stem)}
+            if any(key in receipt and (type(receipt[key]) is not type(value) or receipt[key] != value)
+                   for key, value in context.items()):
+                raise ValueError("conflicting receipt item context")
+            if _read_stop(directory) is not None:
+                raise ValueError("stopped attempts retain their evidence")
+            _read_process(directory)
+            if (directory / "collected.json").exists():
+                collected = _read_object(directory / "collected.json")
+                if not isinstance(collected.get("collected_at"), str) or not collected["collected_at"]:
+                    raise ValueError("invalid collection record")
+            request_path = directory / "request.json"
+            original = request_path.stat()  # Capture before the first request read.
+            request = _read_object(request_path)
+            timing = _read_timing(request, stage)
+            args, idea_files = _redact_idea(request.get("args"))
+            outcomes = {"propose": ("drafted", "needs_input", "rejected"),
+                        "admit": ("admitted", "refused"), "revise": ("revised", "refused")}
+            command = args[0]
+            result = _read_object(directory / "result.json")
+            payload = result.get("result")
+            if (set(result) != {"result"} or not isinstance(payload, dict)
+                    or type(payload.get("version")) is not int or payload["version"] != 1
+                    or "error" in payload or payload.get("outcome") not in outcomes.get(command, ())
+                    or payload != receipt.get("result")
+                    or command != receipt.get("command", command)
+                    or stage == "proposals" and command != "propose"
+                    or stage == "admissions" and command != "admit"
+                    or stage == "revisions" and command not in ("propose", "revise")
+                    or payload.get("outcome") in ("drafted", "revised") and not payload.get("commit")
+                    or payload.get("outcome") == "drafted" and payload.get("branch") != f"spec/{receipt.get('change')}"):
+                raise ValueError("invalid or conflicting terminal result")
+            for flag in ("change", "head", "branch"):
+                values = [a.split("=", 1)[1] for a in args if a.startswith(f"--{flag}=")]
+                values += [args[i + 1] for i, a in enumerate(args[:-1]) if a == f"--{flag}"]
+                if flag == "change" and command == "revise":
+                    values.append(args[1])
+                if flag in receipt and any(v != receipt[flag] for v in values):
+                    raise ValueError(f"conflicting request {flag}")
+            minimal = dict(stage=stage, args=args, **dict(zip(
+                ("started_at", "timeout_seconds", "deadline_at"), timing)))
+            identity = dict(version=1, job_id=job_id, stage=stage,
+                            repository=path.parent.name, number=int(path.stem), request=minimal,
+                            result_sha256=hashlib.sha256((directory / "result.json").read_bytes()).hexdigest())
+            journal_path = directory / "cleanup.json"
+            if journal_path.exists():
+                journal = _read_object(journal_path)
+                if (any(type(journal.get(k)) is not type(v) or journal[k] != v for k, v in identity.items())
+                        or any(type(journal.get(k)) is not int for k in ("atime_ns", "mtime_ns"))
+                        or type(journal.get("complete")) is not bool
+                        or any(not isinstance(journal.get(key), list)
+                               or not all(isinstance(v, str) for v in journal[key])
+                               for key in ("idea_files", "idea_references"))):
+                    raise ValueError("invalid cleanup journal identity")
+            else:
+                owned = []
+                for value in idea_files:
+                    try:
+                        owned.append(str(_owned_idea(directory, value)))
+                    except (OSError, ValueError, KeyError) as exc:
+                        diagnostics.append(f"retained idea input: {exc}")
+                journal = dict(**identity, atime_ns=original.st_atime_ns,
+                               mtime_ns=original.st_mtime_ns, idea_files=owned, complete=False,
+                               idea_references=[os.path.abspath(v) for v in idea_files])
+                _cleanup_save(journal_path, journal)
+            if journal["complete"]:
+                return diagnostics
+            _cleanup_save(request_path, minimal, timestamps=(journal["atime_ns"], journal["mtime_ns"]))
+            for value in journal["idea_files"]:
+                _owned_idea(directory, value).unlink(missing_ok=True)
+            (directory / "log").unlink(missing_ok=True)
+            _cleanup_save(journal_path, {**journal, "complete": True})
+    except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+        diagnostics.append(f"cannot compact {path}: {exc}")
+    return diagnostics
 
 
 @contextmanager

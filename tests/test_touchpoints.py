@@ -1082,6 +1082,67 @@ def snapshot_local_tree(root):
     }
 
 
+@pytest.mark.scenario("touchpoint-report/compaction-preserves-history/cleanup-preserves-touchpoint-history")
+def test_cleanup_preserves_touchpoint_history(tmp_path, monkeypatch):
+    from nightshift import specloop_job as jobs
+    from test_specloop_compaction import delivered
+
+    state, runs = tmp_path / ".nightshift", tmp_path / ".specloop/runs"
+    events = put(runs, "r-issue-8-feature/events.jsonl", {})
+    events.write_text("")
+    mtimes, expected = {}, dict(drafter_questions=0, spec_revisions=0,
+                               build_revisions=0, admission_refusals=0)
+    rounds = [("proposals", "propose", "needs_input", "drafter_questions"),
+              ("revisions", "propose", "drafted", "spec_revisions"),
+              ("revisions", "revise", "revised", "build_revisions"),
+              ("admissions", "admit", "refused", "admission_refusals")]
+
+    def reports():
+        before = snapshot_local_tree(tmp_path)
+        outputs = []
+        for since in (None, "2026-10-20", "2026-10-21", "2026-10-22"):
+            result = offline_module_cli(tmp_path, "--json", *(["--since", since] if since else []))
+            assert result.returncode == 0 and result.stderr == ""
+            report = json.loads(result.stdout)
+            assert not report["errors"]
+            assert report["totals"]["changes"] == (0 if since == "2026-10-22" else 1)
+            outputs.append(report)
+        assert snapshot_local_tree(tmp_path) == before
+        return outputs
+
+    # Replacing current receipts with each later round must retain earlier
+    # observations; current results and build events duplicate retained results.
+    for serial, (stage, command, outcome, counter) in enumerate(rounds * 2, 1):
+        path, receipt, directory, idea = delivered(state, stage=stage, command=command,
+                                                    outcome=outcome, serial=serial)
+        request = directory / "request.json"
+        mtimes[request] = request.stat().st_mtime_ns
+        if command == "revise":
+            with events.open("a") as stream:
+                stream.write(json.dumps(dict(event="revised", at=serial, commit=f"commit-{serial}")) + "\n")
+        expected[counter] += 1
+        before = reports()
+        counts = before[0]["changes"][0]["counts"]
+        assert {key: counts[key] for key in expected} == expected
+        assert counts["total"] == sum(expected.values())
+        if serial == 5:
+            unlink = Path.unlink
+            def interrupted(target, *args, **kwargs):
+                if target == directory / "log":
+                    raise OSError("interrupted after request replacement and input deletion")
+                return unlink(target, *args, **kwargs)
+            with monkeypatch.context() as fault:
+                fault.setattr(Path, "unlink", interrupted)
+                assert jobs.compact_delivered(path, receipt)
+            assert not idea.exists()
+            assert json.loads((directory / "cleanup.json").read_text())["complete"] is False
+            assert reports() == before
+            jobs._children.clear()  # Retry uses only durable state.
+        assert jobs.compact_delivered(path, receipt) == []
+        assert reports() == before
+        assert all(p.stat().st_mtime_ns == stamp for p, stamp in mtimes.items())
+
+
 def offline_module_cli(home, *args, denied=()):
     # Install the guard before importing the report, in its own interpreter.
     # Audit hooks also catch calls through aliases and low-level socket APIs.
