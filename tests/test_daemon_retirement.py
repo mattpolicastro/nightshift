@@ -122,7 +122,6 @@ def test_startup_failure_remains_visible_but_sigterm_is_orderly(lifecycle, monke
 
 @pytest.mark.scenario("worker-retirement/sole-execution-engine/worker-execution-is-absent")
 def test_daemon_has_no_worker_executor_or_dispatch_entry_points():
-    # worker.py remains until preflight and mirror migrate in the next task.
     retired = """Claimed Tally _WindowStart _FALLBACK_WINDOW_SECONDS
         endpoints_ready claim_next run_claimed _run_claimed _recover _merge
         _running _harvest _wrap_up _record_quota _branch_to_delete _escalation_text
@@ -137,20 +136,43 @@ def test_retired_modules_are_absent_and_surviving_imports_load():
     result = subprocess.run(
         [sys.executable, "-c", """
 import importlib
+import importlib.abc
 import importlib.util
+import sys
 from pathlib import Path
 import nightshift
 
 package = Path(nightshift.__file__).parent
-for name in ("task", "prompts", "recovery"):
+retired = ("task", "worker", "prompts", "recovery")
+for name in retired:
     assert not (package / f"{name}.py").exists(), name
     assert importlib.util.find_spec(f"nightshift.{name}") is None, name
 
+class RejectRetired(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        assert fullname not in {f"nightshift.{name}" for name in retired}, fullname
+
+# Even a swallowed optional import of the retired engine is a regression.
+sys.meta_path.insert(0, RejectRetired())
 for name in ("nightshift.cli", "specloop.cli"):
     assert callable(importlib.import_module(name).main), name
 for name in ("nightshift.preflight", "nightshift.trace", "nightshift.mirror",
              "nightshift.queue", "nightshift.vcs", "specloop.prompts"):
     importlib.import_module(name)
+
+# Import every application module, including provider adapters, in a fresh process.
+import pkgutil
+import specloop
+for package in (nightshift, specloop):
+    for module in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
+        importlib.import_module(module.name)
+assert not {f"nightshift.{name}" for name in retired} & sys.modules.keys()
+for module, names in {
+    "nightshift.cli": ("_elapsed", "_progress_of"),
+    "nightshift.preflight": ("_endpoint_checks", "_one_endpoint", "_default_prober",
+                            "_LIST_TIMEOUT_S", "_BANNED_VARS", "worker"),
+}.items():
+    assert not set(names) & vars(importlib.import_module(module)).keys(), module
 """],
         cwd=Path(daemon.__file__).resolve().parents[1],
         capture_output=True,

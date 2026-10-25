@@ -36,10 +36,9 @@ import logging
 import subprocess
 from pathlib import Path
 
-from . import worker
-
 log = logging.getLogger("nightshift")
 
+DEFAULT_CONFIG_ROOT = Path.home() / ".config" / "nightshift" / "claude"
 DEFAULT_PROJECTS = Path.home() / ".claude" / "projects"
 
 
@@ -110,7 +109,7 @@ def mirror(
     session_id, cwd = _session_of(transcript)
     if not session_id:
         return "no session id in the transcript"
-    if not _link(session_id, config_root or worker.CONFIG_DIR):
+    if not _link(session_id, config_root or DEFAULT_CONFIG_ROOT):
         return f"session {session_id[:8]} not on disk"
     if not Path(cwd).exists():
         # Import requires it, and the daemon removes worktrees on teardown —

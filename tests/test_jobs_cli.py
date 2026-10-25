@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from nightshift import cli, config, daemon, specloop_job as jobs
+from nightshift.config import load as load_config
 from test_specloop_compaction import delivered, historical, snapshot as evidence_snapshot
 
 
@@ -727,7 +728,19 @@ def test_existing_commands_and_options_remain_compatible(tmp_path, monkeypatch, 
 
 @pytest.fixture
 def status_state(local_state, monkeypatch, capsys):
-    cfg = config.Config(repos=[config.Repo("enrolled/repo")])
+    path = local_state.parent / "legacy.toml"
+    path.write_text('''[models]
+implement = "retired:unused"
+[[endpoints]]
+name = "retired"
+base_url = "http://unused.invalid"
+[[repos]]
+name = "enrolled/repo"
+[repos.models]
+review = "retired:unused"
+''')
+    monkeypatch.delenv("NIGHTSHIFT_SLACK_WEBHOOK", raising=False)
+    cfg = load_config(path)
     monkeypatch.setattr(config, "load_env_file", lambda: None)
     monkeypatch.setattr(config, "load", lambda path: cfg)
     monkeypatch.setattr(cli, "_liveness", lambda cfg: "status sentinel")
@@ -735,10 +748,12 @@ def status_state(local_state, monkeypatch, capsys):
     monkeypatch.setattr(jobs, "stop_job", forbidden)
     monkeypatch.setattr(jobs, "release_job", forbidden)
     monkeypatch.setattr(jobs, "collect", forbidden)
+    monkeypatch.setattr(cli.queue, "CLAIM_DIR", local_state.parent / "claims")
     claim = cli.queue.Claim("enrolled/repo", 42, "worker-branch", "/wt", "bad clock")
-    monkeypatch.setattr(cli.queue, "in_flight", lambda repo: ([claim], []))
-    monkeypatch.setattr(cli.queue, "title_of", lambda *args: "Worker title")
-    monkeypatch.setattr(cli, "_progress_of", lambda *args: "worker progress")
+    claim.write()
+    (cli.queue.CLAIM_DIR / "enrolled__repo#43.json").write_text("{broken")
+    monkeypatch.setattr(cli.queue, "in_flight", forbidden)
+    monkeypatch.setattr(cli.queue, "title_of", forbidden)
     monkeypatch.setattr(cli.queue, "contradictions", lambda *args: [])
     reads, before_network = [], []
     list_jobs = jobs.list_jobs
@@ -756,17 +771,43 @@ def status_state(local_state, monkeypatch, capsys):
 
 @pytest.mark.scenario("background-job-control/active-jobs-in-status/status-preserves-compatibility")
 @pytest.mark.parametrize("args", [[], ["status"]])
-def test_status_empty_inventory_preserves_worker_output(status_state, capsys, args):
+def test_status_empty_inventory_omits_retired_worker_output(status_state, capsys, args):
     root, before_network = status_state
+    claims = snapshot(cli.queue.CLAIM_DIR)
     assert cli.main(args) == 0
     output = capsys.readouterr()
     assert before_network[0].out == "status sentinel\n  alerts: NOT CONFIGURED\n"
     assert before_network[0].err == output.err == ""
+    assert output.out == "  enrolled/repo: 0 ready, 0 blocked\n"
+    assert snapshot(cli.queue.CLAIM_DIR) == claims
+    assert not root.exists()
+
+
+@pytest.mark.scenario("background-job-control/active-jobs-in-status/status-preserves-compatibility")
+@pytest.mark.parametrize("args", [[], ["status"]])
+def test_status_retains_queue_and_contradiction_diagnostics(status_state, monkeypatch, capsys, args):
+    root, before_network = status_state
+    ready = cli.queue.ready
+
+    def pending(repo, labels):
+        ready(repo, labels)  # Retain the fixture's inventory-before-network assertion.
+        return [cli.queue.Issue(repo, 7, "Ready title", ""),
+                cli.queue.Issue(repo, 8, "Blocked title", "blocked-by: #9")]
+
+    monkeypatch.setattr(cli.queue, "ready", pending)
+    monkeypatch.setattr(cli.queue, "open_blockers", lambda repo, numbers: numbers)
+    monkeypatch.setattr(cli.queue, "contradictions", lambda *args: [(10, {"agent:working", "agent:blocked"})])
+    claims = snapshot(cli.queue.CLAIM_DIR)
+    assert cli.main(args) == 0
+    output = capsys.readouterr()
+    assert before_network[0].out == "status sentinel\n  alerts: NOT CONFIGURED\n"
     assert output.out == (
-        "  enrolled/repo: 1 working, 0 ready, 0 blocked\n"
-        "    >> #42 Worker title  (claimed, ? on worker-branch)\n"
-        "       worker progress\n"
+        "  enrolled/repo: 1 ready, 1 blocked\n"
+        "    #7 Ready title\n"
+        "    -- #8 Blocked title  (waiting on #9)\n"
+        "    !! #10 is also labelled agent:blocked, agent:working — it will not be claimed\n"
     )
+    assert output.err == "" and snapshot(cli.queue.CLAIM_DIR) == claims
     assert not root.exists()
 
 
@@ -822,9 +863,8 @@ def test_status_active_jobs_before_network(status_state, capsys, args, history_a
         ]
         assert early.err == output.err == ""
         assert "SECRET IDEA" not in early.out + output.out and "--idea" not in early.out + output.out
-        assert "enrolled/repo: 1 working, 0 ready, 0 blocked" in output.out
-        assert ">> #42 Worker title  (claimed, ? on worker-branch)" in output.out
-        assert "worker progress" in output.out
+        assert early.out.startswith("status sentinel\n  alerts: NOT CONFIGURED\n")
+        assert output.out == "  enrolled/repo: 0 ready, 0 blocked\n"
         assert cli.main(history_args) == 0
         history = capsys.readouterr().out
         for digit, state in [("f", "finished"), ("0", "failed"), ("1", "stopped")]:
@@ -869,8 +909,8 @@ def test_status_damaged_inventory_is_read_only(status_state, monkeypatch, capsys
         assert "unreadable job:" in early.err and str(bad) in early.err
         assert "request.json" in early.err
         assert early.out.startswith("status sentinel\n  alerts: NOT CONFIGURED\n")
-        assert "enrolled/repo: 1 working, 0 ready, 0 blocked" in output.out
-        assert "worker progress" in output.out and output.err == ""
+        assert output.out == "  enrolled/repo: 0 ready, 0 blocked\n"
+        assert output.err == ""
         assert cli.main(["jobs"]) == 1
         assert "unreadable job:" in capsys.readouterr().err
     assert snapshot(root) == before

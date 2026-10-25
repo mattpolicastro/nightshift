@@ -9,36 +9,14 @@ import os
 import shlex
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
-from . import outcomes, config, daemon, preflight, queue, specloop_attention, specloop_job, trace
+from . import outcomes, config, daemon, preflight, queue, specloop_attention, specloop_job
 
 
 def _repo_dirs(cfg: config.Config) -> dict[str, Path]:
     """The clone each repo's worktrees are cut from. See `Repo.clone_dir`."""
     return {r.name: r.clone_dir() for r in cfg.repos}
-
-
-def _elapsed(started_at: str, now: datetime | None = None) -> str:
-    """How long the running task has been running, for `status`.
-
-    Elapsed rather than a wall-clock start time: the question is "is this still
-    moving or did something wedge", and a timestamp makes you do the
-    subtraction yourself. A claim written by an older version — or by hand —
-    may not parse, and an unreadable clock must not cost you the line telling
-    you WHICH issue is running.
-    """
-    try:
-        began = datetime.fromisoformat(started_at)
-    except (ValueError, TypeError):
-        return "?"
-    if began.tzinfo is None:
-        began = began.replace(tzinfo=timezone.utc)
-    mins = int(((now or datetime.now(timezone.utc)) - began).total_seconds() // 60)
-    if mins < 0:
-        return "?"
-    return f"{mins}m" if mins < 60 else f"{mins // 60}h {mins % 60:02d}m"
 
 
 def _liveness(cfg: config.Config) -> str:
@@ -72,33 +50,6 @@ def _liveness(cfg: config.Config) -> str:
             f"(expected every {cfg.poll_seconds}s){paused}"
         )
     return f"running{paused} — pid {beat.pid}, up {up}, last poll {age} ago"
-
-
-def _progress_of(repo: str, number: int) -> str:
-    """The newest in-flight transcript for an issue, summarised.
-
-    Newest by mtime because a task on its second attempt has several, and the
-    one being written is the one worth reading. Both naming schemes are
-    matched: transcripts written before 2026-09-05 carry no repo, and issue
-    numbers collide across repos, so an old file may belong to either.
-    """
-    if not daemon.TRANSCRIPT_DIR.exists():
-        return ""
-    slug = repo.replace("/", "__")
-    candidates = sorted(
-        [
-            *daemon.TRANSCRIPT_DIR.rglob(f"{slug}#{number}-*.jsonl"),
-            *daemon.TRANSCRIPT_DIR.rglob(f"{number}-*.jsonl"),
-        ],
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if not candidates:
-        return ""
-    try:
-        return trace.progress(candidates[0].read_text()).line
-    except OSError:
-        return ""
 
 
 def _jobs(action: str | None, job_id: str | None, *, show_all: bool = False) -> int:
@@ -198,8 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--deep",
         action="store_true",
-        help="preflight: also run a tool-loop probe on each endpoint's models "
-             "(slow — a cold model load is minutes, not seconds)",
+        help="preflight: accepted for compatibility; worker probes are retired",
     )
     parser.add_argument("--config", type=Path, default=None)
     args = parser.parse_intermixed_args(argv)
@@ -277,27 +227,8 @@ def main(argv: list[str] | None = None) -> int:
         # Unconfigured alerting is a silent no-op by design, which makes it
         # invisible exactly when it matters — before an unattended night.
         print(f"  alerts: {'slack' if cfg.slack_webhook else 'NOT CONFIGURED'}")
-        # Only when something is NOT on the subscription endpoint. Silence
-        # means the default, which is what an unconfigured install is; a phase
-        # routed elsewhere is a decision worth seeing every time you look.
-        for repo in [None, *cfg.repos]:
-            for phase in ("implement", "review", "chores"):
-                if not cfg.model_spec(phase, repo):
-                    continue
-                a = cfg.assign(phase, repo)
-                if a.endpoint.is_default:
-                    continue
-                if repo is not None and cfg.assign(phase).endpoint.name == a.endpoint.name:
-                    continue
-                scope = f" [{repo.name}]" if repo else ""
-                print(f"  {phase}{scope}: {a.endpoint.name}:{a.model} (off-subscription)")
         _active_jobs()
         for repo in cfg.repos:
-            # Read this BEFORE asking GitHub anything. A claimed issue carries
-            # `agent:working`, so `ready` cannot see it and every count below
-            # is blind to the task actually consuming the machine — which for
-            # a serial daemon is the first thing you want to know.
-            running, unreadable = queue.in_flight(repo.name)
             pending = queue.ready(repo.name, cfg.labels)
             # Split them: a queue full of blocked issues looks identical to an
             # idle daemon otherwise, and the difference is the whole question
@@ -311,28 +242,7 @@ def main(argv: list[str] | None = None) -> int:
                 (blocked.append((issue.number, issue.title, unmet))
                  if unmet else claimable.append(issue))
 
-            print(
-                f"  {repo.name}: {len(running)} working, "
-                f"{len(claimable)} ready, {len(blocked)} blocked"
-            )
-            for c in running:
-                title = queue.title_of(repo.name, c.number)
-                kind = "revising" if c.revise else c.phase
-                print(
-                    f"    >> #{c.number} {title}".rstrip()
-                    + f"  ({kind}, {_elapsed(c.started_at)} on {c.branch})"
-                )
-                # What it is doing RIGHT NOW, read from the transcript the
-                # worker is streaming. Before this, a forty minute implement
-                # pass reported its phase and elapsed time and nothing else.
-                moving = _progress_of(repo.name, c.number)
-                if moving:
-                    print(f"       {moving}")
-            for name in unreadable:
-                print(
-                    f"    !! unreadable claim file {name}"
-                    f" — `nightshift reconcile` will clear it"
-                )
+            print(f"  {repo.name}: {len(claimable)} ready, {len(blocked)} blocked")
             for issue in claimable:
                 print(f"    #{issue.number} {issue.title}")
             for number, title, unmet in blocked:

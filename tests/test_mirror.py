@@ -13,6 +13,7 @@ phase that is visible, so nothing in this path may affect a task's outcome.
 from __future__ import annotations
 
 import json
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,36 @@ def session_file(root: Path, worktree: Path, session=SESSION) -> Path:
     f = d / f"{session}.jsonl"
     f.write_text("{}\n")
     return f
+
+
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/historical-mirroring-remains-usable")
+@pytest.mark.parametrize("explicit", [False, True])
+def test_historical_roots_without_worker(tmp_path, projects, worktree, monkeypatch, explicit):
+    assert importlib.util.find_spec("nightshift.worker") is None
+    assert mirror_mod.DEFAULT_CONFIG_ROOT == Path.home() / ".config" / "nightshift" / "claude"
+    # Import afresh with an isolated home, without changing the shared module.
+    spec = importlib.util.spec_from_file_location("historical_mirror", mirror_mod.__file__)
+    historical = importlib.util.module_from_spec(spec)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        spec.loader.exec_module(historical)
+    default = tmp_path / "home" / ".config" / "nightshift" / "claude"
+    assert historical.DEFAULT_CONFIG_ROOT == default
+    historical.DEFAULT_PROJECTS = projects
+    root = tmp_path / "override" if explicit else default
+    source = session_file(root, worktree)
+    if explicit:
+        session_file(default, worktree)  # Same session in both roots: override wins.
+    transcript = transcript_at(tmp_path / "historical.jsonl", worktree)
+    calls = []
+    note = historical.mirror(
+        transcript, repo="matt/sandbox", issue=40, phase="review",
+        **({"config_root": root} if explicit else {}),
+        runner=lambda args: calls.append(args) or '{"agentId":"historical"}',
+    )
+    assert (projects / source.parent.name / source.name).resolve() == source.resolve()
+    assert len(calls) == 1 and calls[0][:3] == ["paseo", "import", SESSION]
+    assert note == "mirrored review to paseo agent historic"
 
 
 def test_a_finished_phase_is_linked_and_imported(tmp_path, projects, worktree):
