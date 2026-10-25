@@ -45,6 +45,11 @@ Retirement SHALL preserve historical state, outcomes, transcripts, branches and 
 - **THEN** historical entries, refresh and stale behavior remain available with the same JSON schema and resolution rules
 - **THEN** reading history does not start a worker, move state or delete work
 
+#### Scenario: Historical mirroring remains usable
+- **WHEN** the retained mirror utility is imported and used for a historical transcript after worker.py is removed, with an omitted or explicit config_root
+- **THEN** omission still searches `~/.config/nightshift/claude` through a mirror-owned default, and an explicit root still overrides it without importing the worker engine
+- **THEN** symlink placement, Paseo import argv/labels/cwd, transcript parsing and best-effort missing-session/worktree/tool behavior remain unchanged, and no worker execution or credential initialization occurs
+
 #### Scenario: Recovery preserves interrupted work
 - **WHEN** retirement encounters surviving, missing or unreadable worker claim evidence
 - **THEN** existing durable recovery rules preserve surviving work for human inspection, release known missing work and retain uncertain evidence without restarting the worker
