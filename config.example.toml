@@ -1,11 +1,13 @@
 # Copy to config.toml (gitignored) and edit.
-# Engine enrollment is a human edit. The worker engine remains the default
-# until a later change retires it after a real issue completes the specloop path.
+# Engine enrollment is a human edit. Specloop is the only engine and the default
+# when engine is omitted. Explicit engine = "worker" is rejected at config load.
+# Supply a trusted manifest for each repository; no worker settings are converted.
 # ~/.nightshift/pause blocks specloop intake, approval, revision and publication;
 # already-admitted runs continue under the separate specloop supervisor.
 
 [daemon]
-# Worker worktree placement, not specloop run state. Omission uses this default:
+# Inert worktree_root compatibility: no new work is placed here, and specloop
+# run state is separate. Omission retains the historical default:
 # worktree_root = "~/Projects/nightshift-wt"
 # Leading ~/ expands; spaces stay literal. Relative values now resolve beside
 # the selected config file, not the daemon cwd. To keep an old relative location,
@@ -22,98 +24,57 @@
 # See README.md#host-path-setup and KNOWN-LIMITATIONS.md#platform-assumptions
 # for service environments, deferred wrapper portability and pending host checks.
 poll_seconds = 120
-max_tasks_per_night = 8
-# `claude -p --max-turns` for each phase. Hardcoded 100/60 until 2026-08-08,
-# when three sample runs died at exactly 101 turns in one day — #65, #67 and
-# #106 — each spending its full budget and producing NO branch. A truncation is
-# the worst outcome this daemon can produce: nothing to merge, nothing to read,
-# full cost. The marginal turns are cheap against that, so the implement default
-# moved to 140.
-#
-# Raising it further is not the fix and should not be the reflex. All three of
-# those issues were oversized (#106 was already a split of #67), and the cost is
-# ORIENTATION rather than the change itself — sample-midi's MatrixView.tsx is 1,469
-# lines, so an issue that says "wire a nav deck" spends its budget finding
-# things. Smaller issues with file:line anchors are the fix; this only stops a
-# nearly-finished task from dying on the last turn.
-#
-# Do not read the turn counts in merged PR bodies (104, 114, 147, 227) as proof
-# the cap is slack: those are implement + review summed across attempts, not one
-# phase.
-implement_max_turns = 140
-# The reviewer reads a finished diff and writes a verdict. A separate knob so
-# raising the implementer never widens what already works.
-#
-# It truncated for the first time on 2026-08-15, and the cause is worth
-# recording because it is a coupling that is easy to miss: `implement` had been
-# switched to a stronger model, which produced larger diffs, which made the
-# review longer — 155 turns with no VERDICT rendered. The two phases are not
-# independent, and the fix was to put `implement` back rather than to raise
-# this to chase it. Absence of a FAIL is not a PASS (see task.after_review), so
-# a truncated review escalates rather than shipping.
-review_max_turns = 60
-# How many tasks run at once. Start at 1 and raise it only once you know what
-# your verify command costs: concurrent worktrees on one machine contend for
-# CPU, and a repo with timing-sensitive tests will notice.
-#
-# This is the MACHINE ceiling. How those slots are shared out is the per-repo
-# `concurrency` on each `[[repos]]` block (default 1 — one worker per project),
-# and whichever binds first wins.
-#
-# Claiming stays serial however high this goes — only execution is parallel, so
-# `queue.claim` never races itself. Config order decides who takes the first
-# free slot; per-repo caps stop one repo taking them all.
-#
-# `max_tasks_per_night` counts in-flight work, so N slots cannot overshoot it.
-concurrency = 1
 # A repo the GH_TOKEN must NOT be able to read. `nightshift preflight` uses it
 # as a negative control: a token that reaches the sandbox proves nothing about
 # what else it reaches, and a credential check without a thing that must FAIL
 # is not a check. Point it at something real and off-limits.
 forbidden_probe = "example-owner/dotfiles"
-# Legacy mirror_to_paseo is currently inactive. Use `nightshift attention`
-# for task outcomes.
+# Legacy keys are accepted by presence, ignored and reported by key name only:
+# top-level models/endpoints; repos.models/verify/concurrency; and daemon
+# max_tasks_per_night/concurrency/review_attempts/implement_max_turns/
+# review_max_turns/mirror_to_paseo. Even a zero task cap cannot stop builds.
+# No endpoint is contacted, credential forwarded or manifest generated from them.
+# Repo.verify/concurrency and Config.mirror_to_paseo remain inert compatibility
+# fields; worktree_root retains its path validation and defaults above.
 
 [[repos]]
 name = "example-owner/sample-sandbox"
-# Not the real sample. Enroll one sandbox first, then one low-stakes real repo.
-# engine = "worker"  # default when omitted; existing worker behavior unchanged
-verify = "pnpm -r typecheck && pnpm -r test && pnpm -r build && pnpm format:check"
+# Enroll one sandbox first, then one low-stakes real repo. Edit this path to an
+# operator-controlled manifest outside the repository being built.
+manifest = "~/.config/specloop/manifests/sample-sandbox.toml"
+# engine = "specloop"  # optional: omission selects the same engine
 base = "main"
-# How many of THIS repo's tasks run at once. Defaults to 1 — one worker per
-# project — so a repo with a deep queue cannot hold every slot and starve the
-# repos below it. Raise it only for a repo you want to prioritise, and remember
-# the [daemon] ceiling still binds.
-# concurrency = 1
-# The clone worktrees are cut from. Omit for `~/Projects/<repo-name>`, which is
-# fine for a repo nobody sits in. Set it for a repo you work in daily: the
-# daemon runs `fetch --prune`, `worktree add`/`remove`, and `branch -D` in this
-# directory, and a branch held by a worker's worktree cannot be checked out
-# anywhere else — including by you, to read that worker's PR.
+# Historical clone-path compatibility; the manifest's run.repo selects the
+# specloop checkout. Omitted dir retains ~/Projects/<repo-name> for utilities.
 # dir = "~/Projects/nightshift-clones/sample"
 
-# --- specloop enrollment (optional, separate human edit) ----------------------
-# Add a block like this, or update the repository's existing block:
-# [[repos]]
-# name = "owner/sample"
-# engine = "specloop"
-# manifest = "/absolute/path/to/sample.toml"
-# base = "main"
-#
-# The manifest must exist; relative paths resolve beside config.toml, and ~
-# expands. Use one trusted manifest per repository: [run] repo is its local
-# checkout, github is owner/repo, and pr_base matches base. The daemon overrides
-# the template's change and branch per issue and admission stores that copy.
-# Profiles/roles, allowed/frozen paths and verify commands live in the manifest;
-# the worker's verify setting above is not required for engine = "specloop".
+# Relative manifest paths resolve beside config.toml; ~ expands. Loading does
+# not require the file to exist. Missing or unusable manifests hold only that
+# repository's new work; repair at the same path is retried on a later poll.
+# Supplied empty/wrong-type paths and malformed config TOML remain load errors.
+# Use one trusted manifest per repository: [run] repo is its local checkout,
+# github is owner/repo, and pr_base matches base. The daemon overrides change
+# and branch per issue, and admission stores that copy.
+# Profiles/roles, quotas, allowed/frozen paths and verification belong in the
+# manifest. See examples/specloop/self-hosting.toml for a separate provider example;
+# adapt it for your repository. Provider credentials/tools remain provider-owned.
+# Direct Python front-door commands need no worker verify string, endpoint models
+# or worker OAuth. The frozen bin/nightshift-daemon wrapper still requires its
+# env file, worker OAuth, GH_TOKEN and gh/claude/pnpm/node/git/swift before Python
+# starts; service rollout needs separate host checks (see docs/specloop/README.md).
 # Make specloop available on the daemon's PATH and run its separate supervisor
-# (specloop serve). Worker model/endpoint settings and quota caps do not pace it.
+# (specloop serve). Pausing or stopping the daemon does not stop admitted builds.
+# nightshift status omits worker sessions, working counts and the off-subscription
+# model report; all other status output remains unchanged. Historical outcomes
+# remain available through nightshift attention.
 #
 # Label flow: spec:draft (or agent:ready) on an issue -> draft PR with spec:review
 # -> human adds spec:approved on the PR -> admitted build -> publish to SAME PR
 # -> human checks and merges. The PR links the issue with Closes #N.
 # agent:revise goes on the PR: before admission it re-drafts the spec; after
-# admission it adds review tasks. Only feedback newer than the branch tip counts.
+# admission it adds review tasks. Feedback uses per-repository/PR, source-qualified
+# consumed IDs: comments arriving during a round remain eligible; edits to consumed
+# comments need a new comment ID. See docs/specloop/README.md for revision details.
 # needs-human carries questions/refusals. Draft questions or rejection remove
 # both intake labels: answer or resolve them on the issue, remove needs-human,
 # and reapply spec:draft or agent:ready. Removing needs-human alone does not
@@ -122,11 +83,12 @@ base = "main"
 # nightshift attention lists human pauses; unreadable status retains STALE data.
 #
 # Optional [[prepare]] belongs in the MANIFEST, not this daemon config:
-#   [[prepare]]
-#   id = "dependencies"
 #   [vars]
 #   node_bin = "~/n/bin"
-#
+#   [sandbox]
+#   prepare_read = ["~/n"]
+#   [[prepare]]
+#   id = "dependencies"
 #   run = ["/bin/sh", "-c", "export PATH=\"{node_bin}:$PATH\" && cp -R \"{src}/.\" \"{build}/project\" && chmod -R u+w \"{build}/project\" && cd \"{build}/project\" && pnpm install --frozen-lockfile"]
 #   expect = 0
 #   timeout = 600
@@ -140,98 +102,6 @@ base = "main"
 # an unexpected exit or timeout fails verification before later steps run.
 # Commands are trusted; freeze the lockfile when the dependency contract needs it.
 # See README.md and docs/specloop/prepare.md for enrollment and prepare details.
-
-# --- endpoints ---------------------------------------------------------------
-#
-# WHERE an invocation is sent. Omit this section entirely to get today's
-# behaviour: one implicit endpoint named `anthropic`, on the subscription OAuth
-# token from ~/.config/nightshift/env. Everything below is additive.
-#
-# An endpoint is a wire protocol, a base URL, a credential and a billing kind,
-# declared together. They travel as one unit deliberately: the mistake this
-# feature invites is a subscription credential pointed at a third-party host,
-# and `worker._env` can only prevent that if it knows which token belongs to
-# which URL.
-#
-# [[endpoints]]
-# name = "local"
-# # The WIRE FORMAT, not the vendor. `claude -p` speaks Anthropic and nothing
-# # else; Ollama happens to serve /v1/messages, which is why it is driven
-# # directly with no proxy. A genuinely OpenAI-only endpoint needs
-# # `protocol = "openai"` AND a `proxy_url` — see the second block below.
-# protocol = "anthropic"
-# # subscription | metered | none. Advisory: what actually decides whether a
-# # run spent quota is the run's own telemetry, not this field.
-# billing = "none"
-# base_url = "http://local-host:11434"
-# # The NAME of the env var holding this endpoint's token, never the token.
-# # Put the value in ~/.config/nightshift/env with the other credentials.
-# # Ollama ignores what it is, but the CLI requires one to be set.
-# auth_env = "NIGHTSHIFT_LOCAL_TOKEN"
-# # Advisory, and checked by preflight rather than trusted: a model absent from
-# # the endpoint fails before a task is claimed, not one wasted run later.
-# models = ["glm-4.7-flash", "qwen3-coder-next"]
-# # REQUIRED per model, and not cosmetic. Claude Code has no catalog entry for
-# # these, so it assumes a 200k window and auto-compacts to it — which wastes a
-# # 203k/262k model and would silently overrun a smaller one. Sets
-# # CLAUDE_CODE_MAX_CONTEXT_TOKENS for the run.
-# context_tokens = { "glm-4.7-flash" = 203000, "qwen3-coder-next" = 262000 }
-# # Local models are slower per turn. Without this a local implement pass
-# # inherits a budget tuned for sonnet and truncates, which is the worst
-# # outcome available: full cost, nothing to merge, nothing even to read.
-# max_turns_multiplier = 1.5
-# # Cold-load tolerance for the `--deep` tool-loop probe. A 17GB model takes
-# # MINUTES to load and answers in under a second warm, so a short timeout
-# # reports a healthy endpoint as down. That false negative has happened.
-# warmup_timeout_s = 180
-#
-# [[endpoints]]
-# name = "some-oai-host"
-# protocol = "openai"
-# billing = "metered"
-# base_url = "https://api.example.com/v1"
-# auth_env = "NIGHTSHIFT_OAI_TOKEN"
-# # MANDATORY for protocol = "openai": `claude -p` cannot speak OpenAI, so the
-# # worker talks Anthropic to a translating proxy (LiteLLM or similar) and the
-# # proxy talks onward. nightshift neither runs nor supervises it, and refuses
-# # to claim work for an openai endpoint without one rather than failing at
-# # invocation time. The proxy sits between a worker and its credential, so
-# # choose it with the same scrutiny as the rest of this file.
-# proxy_url = "http://127.0.0.1:4000"
-
-[models]
-# `implement` was raised to opus on 2026-08-09 and put back on 2026-08-15,
-# measured rather than argued: ~2h-2h30 per task against sonnet's ~40-50m on a
-# machine sampled at 70%+ idle, output of comparable quality, and it pushed the
-# reviewer past its own budget (see review_max_turns above). Strictly more
-# expensive, ~3x slower, no better. What actually fixed the truncations it was
-# meant to address is smaller issues with file:line anchors.
-implement = "sonnet"
-review = "opus"          # ~1/3 the cost of an implement run; do not skip
-# `endpoint:model` routes a phase to a declared endpoint; a bare name means
-# the default one, so every pre-endpoints config keeps its meaning. The prefix
-# is read as an endpoint only if one is DECLARED under that name — Ollama tags
-# carry colons of their own (`qwen3.8:27b`), and a blind split would misread
-# them. A prefix matching nothing is a preflight FAILURE, not a fallback:
-# falling back silently converts free work into billed work and hides that the
-# local tier is down.
-#
-# `review` off the default endpoint is an explicit opt-in and preflight says so
-# out loud every time. Branch-only autonomy is safe BECAUSE a separate
-# skeptical reviewer sees the diff — it has caught a CI-green diff whose only
-# tell was a `toBe`→`toEqual` edit, which is the class of defect CI runs rather
-# than catches. A reviewer that passes everything is worse than none.
-# Commented out because the endpoints above are: an `endpoint:model` naming an
-# endpoint nobody declared fails preflight, which is the point of it.
-# chores = "local:glm-4.7-flash"  # read by nobody yet — there is no chores phase
-
-# A per-repo override, on any [[repos]] block above:
-#
-#   [repos.models]
-#   implement = "local:glm-4.7-flash"
-#
-# This is the setting that makes endpoints worth having: a low-stakes repo can
-# run local while anything that matters stays on the subscription.
 
 [notify]
 # Slack incoming webhook. LEAVE THIS EMPTY and put the URL in
@@ -247,7 +117,8 @@ review = "opus"          # ~1/3 the cost of an implement run; do not skip
 slack_webhook = ""
 
 [labels]
-# Worker issue admission; also a spec:draft alias for specloop repositories.
+# agent:ready is an issue-intake alias for spec:draft; working/done are retained
+# for historical state and safe leftover-claim recovery.
 ready = "agent:ready"
 working = "agent:working"
 done = "agent:done"
