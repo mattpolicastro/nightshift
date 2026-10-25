@@ -245,7 +245,10 @@ def test_only_managed_eligible_runs_are_published(setup, tmp_path, condition):
     elif condition == "running":
         commands.runs[0]["status"] = "running"
     elif condition == "worker":
-        repo = replace(repo, engine="worker")
+        with pytest.raises(ValueError, match="owner/sample: worker engine is retired"):
+            replace(repo, engine="worker")
+        assert not commands.publications and not comments(gh)
+        return
     poll((repo, gh, commands))
     assert not commands.publications and not comments(gh)
 

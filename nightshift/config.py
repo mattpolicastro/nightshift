@@ -172,12 +172,11 @@ class Repo:
     # low-stakes repo can run local while anything that matters stays on the
     # subscription.
     models: dict[str, str] = field(default_factory=dict)
-    engine: str = "worker"
+    engine: str = "specloop"
     manifest: Path | None = None
 
     def __post_init__(self) -> None:
-        if self.engine not in ("worker", "specloop"):
-            raise ValueError(f"{self.name}: engine must be 'worker' or 'specloop'")
+        _validate_engine(self.name, self.engine)
         if self.manifest is not None:
             if not isinstance(self.manifest, (str, Path)) or not str(self.manifest).strip():
                 raise ValueError(f"{self.name}: manifest must be a non-empty path")
@@ -387,9 +386,24 @@ class Config:
         ]
 
 
+def _validate_engine(name: str, engine: str) -> None:
+    if engine == "worker":
+        raise ValueError(
+            f'{name}: worker engine is retired; use engine = "specloop" '
+            '(or omit engine) and configure a trusted manifest'
+        )
+    if engine != "specloop":
+        raise ValueError(f"{name}: unknown engine {engine!r}; engine must be 'specloop'")
+
+
 def load(path: Path | None = None) -> Config:
     path = path or DEFAULT_PATH
     raw = tomllib.loads(path.read_text())
+
+    # Reject retired/unknown engines before interpreting any legacy settings
+    # or manifest paths, even when the invalid enrollment appears last.
+    for repo in raw.get("repos", []):
+        _validate_engine(repo["name"], repo.get("engine", "specloop"))
 
     daemon = raw.get("daemon", {})
     endpoints = [_endpoint(e) for e in raw.get("endpoints", [])]
@@ -400,12 +414,12 @@ def load(path: Path | None = None) -> Config:
         repos=[
             Repo(
                 name=r["name"],
-                verify=r["verify"] if r.get("engine", "worker") == "worker" else r.get("verify", ""),
+                verify=r.get("verify", ""),
                 base=r.get("base", "main"),
                 dir=r.get("dir", ""),
                 concurrency=r.get("concurrency", 1),
                 models=dict(r.get("models", {})),
-                engine=r.get("engine", "worker"),
+                engine=r.get("engine", "specloop"),
                 manifest=_manifest_path(r, path.parent),
             )
             for r in raw.get("repos", [])

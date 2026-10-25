@@ -247,6 +247,9 @@ def main(argv: list[str] | None = None) -> int:
     except FileNotFoundError:
         print("no config.toml — copy config.example.toml and edit it", file=sys.stderr)
         return 2
+    except ValueError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
 
     if args.command == "attention":
         items = outcomes.tasks() if args.offline else outcomes.refresh(cfg.labels)

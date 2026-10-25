@@ -33,7 +33,7 @@ def test_engine_and_manifest_config(tmp_path, manifest):
     config = tmp_path / "config.toml"
     config.write_text('''
 [[repos]]
-name = "owner/worker"
+name = "owner/default"
 verify = "pytest"
 [[repos]]
 name = "owner/spec"
@@ -45,7 +45,7 @@ spec_review = "review-me"
 spec_approved = "approved"
 ''')
     cfg = load(config)
-    assert cfg.repos[0].engine == "worker"
+    assert cfg.repos[0].engine == "specloop"
     assert cfg.repos[0].manifest is None
     assert cfg.repos[0].verify == "pytest"
     assert cfg.repos[1].engine == "specloop"
@@ -62,6 +62,8 @@ spec_approved = "approved"
 
 @pytest.mark.parametrize("settings,reason", [
     ('engine = "typo"', "engine"),
+    ('manifest = ""', "non-empty path"),
+    ('manifest = 42', "non-empty path"),
     ('engine = "specloop"\nmanifest = ""', "non-empty path"),
     ('engine = "specloop"\nmanifest = 42', "non-empty path"),
 ])
@@ -72,11 +74,120 @@ def test_invalid_engine_configuration_rejected(tmp_path, settings, reason):
         load(config)
 
 
-def test_unknown_engine_without_worker_settings_is_rejected(tmp_path):
+@pytest.mark.parametrize("engine", [None, "specloop"])
+def test_direct_repo_defaults_to_specloop(manifest, engine):
+    kwargs = {} if engine is None else {"engine": engine}
+    repo = Repo("owner/sample", manifest=manifest, **kwargs)
+    assert repo.engine == "specloop"
+    assert repo.verify == ""
+    assert repo.manifest == manifest.resolve()
+    assert Repo("owner/sample", **kwargs).manifest is None
+
+
+@pytest.mark.parametrize("manifest", ["", "   ", 42, False])
+def test_default_repo_still_rejects_invalid_manifest_paths(manifest):
+    with pytest.raises(ValueError, match="owner/sample: manifest must be a non-empty path"):
+        Repo("owner/sample", manifest=manifest)
+
+
+RETIRED = ('owner/sample: worker engine is retired; use engine = "specloop" '
+           '(or omit engine) and configure a trusted manifest')
+
+
+@pytest.mark.scenario("issue-intake/specloop-repository-engine/explicit-worker-fails-clearly")
+@pytest.mark.scenario("worker-retirement/retired-configuration-is-inert/worker-rejection-takes-precedence")
+@pytest.mark.parametrize("engine,reason", [
+    ("worker", RETIRED),
+    ("typo", "owner/sample: unknown engine 'typo'; engine must be 'specloop'"),
+])
+@pytest.mark.parametrize("verify", [None, "pytest"])
+@pytest.mark.parametrize("manifest", [None, "", 42])
+def test_direct_repo_rejects_engine_before_manifest(engine, reason, verify, manifest):
+    kwargs = {} if verify is None else {"verify": verify}
+    with pytest.raises(ValueError) as error:
+        Repo("owner/sample", engine=engine, manifest=manifest, **kwargs)
+    assert str(error.value) == reason
+
+
+@pytest.mark.scenario("issue-intake/specloop-repository-engine/explicit-worker-fails-clearly")
+@pytest.mark.scenario("worker-retirement/retired-configuration-is-inert/worker-rejection-takes-precedence")
+@pytest.mark.parametrize("engine,reason", [
+    ("worker", RETIRED),
+    ("typo", "owner/sample: unknown engine 'typo'; engine must be 'specloop'"),
+])
+@pytest.mark.parametrize("verify", ["", 'verify = "pytest"\n'])
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("command", [["run", "--once"], ["status"], ["preflight"]])
+def test_invalid_engine_rejected_before_dispatch(
+    tmp_path, monkeypatch, capsys, engine, reason, verify, legacy, command,
+):
     config = tmp_path / "config.toml"
-    config.write_text('[[repos]]\nname = "o/r"\nengine = "typo"')
-    with pytest.raises(ValueError, match="engine"):
+    # Invalid legacy settings and an earlier bad manifest must never mask the
+    # engine diagnostic. Neither missing verify nor a missing manifest does so.
+    prefix = '''endpoints = [{context_tokens = {unused = "not-an-integer"}}]
+models = false
+[daemon]
+concurrency = "obsolete"
+[[repos]]
+name = "owner/earlier"
+manifest = 42
+''' if legacy else ""
+    config.write_text(prefix + f'[[repos]]\nname = "owner/sample"\nengine = "{engine}"\n'
+                      + verify + ('models = false\nmanifest = ""\n' if legacy else ""))
+    with pytest.raises(ValueError) as error:
         load(config)
+    assert str(error.value) == reason
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("configuration failure must precede endpoint parsing and dispatch")
+
+    monkeypatch.setattr(cli.config, "_endpoint", forbidden)
+    monkeypatch.setattr(cli.config, "ENV_FILE", tmp_path / "absent-env")
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(daemon, "loop", forbidden)
+    assert cli.main([*command, "--config", str(config)]) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == f"configuration error: {reason}\n"
+    assert "Traceback" not in output.err
+
+
+@pytest.mark.parametrize("settings", ['manifest = ""', 'manifest = 42', 'engine = ['])
+def test_cli_reports_other_config_value_errors(isolated, monkeypatch, capsys, settings):
+    config = isolated / "config.toml"
+    config.write_text('[[repos]]\nname = "owner/sample"\n' + settings)
+    with pytest.raises(ValueError) as error:
+        load(config)
+    monkeypatch.setattr(cli.config, "ENV_FILE", isolated / "absent-env")
+    monkeypatch.setattr(daemon, "loop", lambda *a, **kw: pytest.fail("dispatched invalid config"))
+    assert cli.main(["run", "--once", "--config", str(config)]) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == f"configuration error: {error.value}\n"
+
+
+@pytest.mark.parametrize("command", ["pause", "resume", "jobs"])
+def test_config_rejection_does_not_block_local_controls(isolated, monkeypatch, capsys, command):
+    config = isolated / "config.toml"
+    config.write_text('[[repos]]\nname = "owner/sample"\nengine = "worker"\n')
+    monkeypatch.setattr(cli.config, "ENV_FILE", isolated / "absent-env")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("local controls must not load enrollment or dispatch external commands")
+
+    monkeypatch.setattr(cli.config, "load", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    jobs = []
+    monkeypatch.setattr(cli, "_jobs", lambda *a, **kw: jobs.append((a, kw)) or 0)
+    if command == "resume":
+        daemon.PAUSE_FILE.touch()
+    if command == "jobs":
+        monkeypatch.setattr(cli.config, "load_env_file", forbidden)
+    assert cli.main([command, "--config", str(config)]) == 0
+    assert daemon.PAUSE_FILE.exists() == (command == "pause")
+    assert jobs == ([((None, None), {"show_all": False})] if command == "jobs" else [])
+    assert capsys.readouterr().err == ""
 
 
 class DraftGh:
@@ -158,19 +269,24 @@ class DraftGh:
 
 
 @pytest.mark.scenario("issue-intake/engine-per-repository/specloop-repository-skips-worker-claims")
+@pytest.mark.scenario("issue-intake/specloop-repository-engine/omitted-engine-uses-specloop")
+@pytest.mark.scenario("issue-intake/specloop-repository-engine/specloop-repository-skips-worker-claims")
+@pytest.mark.scenario("issue-intake/specloop-repository-engine/omitted-manifest-holds-only-its-repository")
 @pytest.mark.scenario("worker-retirement/sole-execution-engine/worker-execution-is-absent")
 @pytest.mark.scenario("worker-retirement/retired-configuration-is-inert/old-knobs-cannot-control-builds")
 @pytest.mark.scenario("worker-retirement/service-prerequisites-match-the-surviving-engine/codex-enrollment-needs-no-worker-login")
 @pytest.mark.real_trust
-@pytest.mark.parametrize("entry", ["daemon", "cli", "legacy-config"])
+@pytest.mark.parametrize("entry", ["daemon", "cli", "legacy-config", "missing-manifest"])
+@pytest.mark.parametrize("engine", [None, "specloop"])
 @pytest.mark.parametrize("labels", [("agent:ready",), ("spec:draft",), ("agent:ready", "spec:draft")])
-def test_specloop_repository_drafts_without_worker_claims(isolated, monkeypatch, manifest, labels, entry):
+def test_specloop_repository_drafts_without_worker_claims(
+    isolated, monkeypatch, manifest, labels, entry, engine,
+):
     config = isolated / "config.toml"
     config.write_text('''[[repos]]
 name = "owner/sample"
-engine = "specloop"
 manifest = "repository.toml"
-''' + ('''verify = "worker-only-verify"
+''' + (f'engine = "{engine}"\n' if engine else "") + ('''verify = "worker-only-verify"
 [repos.models]
 implement = "retired:unused"
 review = "retired:unused"
@@ -182,8 +298,15 @@ base_url = "http://unused.invalid"
 auth_env = "RETIRED_ENDPOINT_TOKEN"
 [models]
 implement = "retired:unused"
-''' if entry == "legacy-config" else ""))
+''' if entry == "legacy-config" else "") + ('''
+[[repos]]
+name = "owner/held"
+''' if entry == "missing-manifest" else ""))
     cfg = load(config)
+    assert all(repo.engine == "specloop" for repo in cfg.repos)
+    if entry == "missing-manifest":
+        # Hold the first repository and still deliver the healthy one's draft.
+        cfg.repos.reverse()
     original_manifest = manifest.read_bytes()
     # Exercise Python's env-file loading with only front-door credentials.
     env_file = isolated / "env"
@@ -191,7 +314,16 @@ implement = "retired:unused"
     monkeypatch.setattr(cli.config, "ENV_FILE", env_file)
     monkeypatch.setattr(os, "environ", {"PATH": "", "HOME": str(isolated)})
     gh = DraftGh(labels)
+    held = DraftGh(labels)
     commands = []
+    health = daemon.RepoHealth()
+
+    def github(args):
+        if any("owner/held" in arg for arg in args):
+            # Reuse the same API fixture with independent labels/events for
+            # the held repository, including its production trust lookups.
+            return held([arg.replace("owner/held", "owner/sample") for arg in args])
+        return gh(args)
 
     def run(args, **kwargs):
         commands.append(args)
@@ -206,7 +338,7 @@ implement = "retired:unused"
             "commit": "abc123", "questions": [], "contradictions": [], "risks": [], "problems": [],
         }), "")
 
-    monkeypatch.setattr(queue, "_gh", gh)
+    monkeypatch.setattr(queue, "_gh", github)
     monkeypatch.setattr(daemon.specloop_intake, "run_git", run)
     # Inject completed CLI results for this routing/delivery test; production
     # now starts propose in a separate process (covered by the background tests).
@@ -214,7 +346,11 @@ implement = "retired:unused"
 
     # No worker checkout is required. A second poll does not duplicate delivery.
     for _ in range(2):
-        if entry == "daemon":
+        if entry == "missing-manifest":
+            daemon.poll_specloop(cfg, health)
+            assert health.failures == {"owner/held": _ + 1}
+            assert not health.item_failures
+        elif entry == "daemon":
             daemon.loop(cfg, {}, once=True)
         else:
             assert cli.main(["run", "--once", "--config", str(config)]) == 0
@@ -242,6 +378,14 @@ implement = "retired:unused"
     assert len([call for call in gh.calls if call[:2] == ["pr", "create"]]) == 1
     assert gh.labels == set()
     assert gh.pr_url in gh.comments[-1]["body"]
+    if entry == "missing-manifest":
+        assert cfg.repos[0].manifest is None
+        assert held.labels == set(labels)
+        assert held.prs == []
+        assert len(held.comments) == 1
+        assert not any(call[:2] in (["issue", "edit"], ["issue", "comment"],
+                                   ["pr", "create"], ["pr", "edit"]) for call in held.calls)
+        assert not (daemon.STATE_DIR / "proposals/owner__held").exists()
 
 
 def test_pause_prevents_specloop_commands(isolated, monkeypatch, manifest):
@@ -249,6 +393,43 @@ def test_pause_prevents_specloop_commands(isolated, monkeypatch, manifest):
     monkeypatch.setattr(daemon.specloop_intake, "propose_pending",
                         lambda *a, **k: pytest.fail("drafted while paused"))
     daemon.loop(Config(repos=[Repo("o/r", engine="specloop", manifest=manifest)]), {}, once=True)
+
+
+@pytest.mark.scenario("issue-intake/specloop-repository-engine/omitted-engine-uses-specloop")
+@pytest.mark.scenario("issue-intake/latest-label-actor-authorization/untrusted-actor-ignored")
+@pytest.mark.real_trust
+@pytest.mark.parametrize("engine", [None, "specloop"])
+def test_default_engine_preserves_latest_label_actor_gate(isolated, monkeypatch, manifest, engine):
+    config = isolated / "config.toml"
+    config.write_text('[[repos]]\nname = "owner/sample"\nmanifest = "repository.toml"\n'
+                      + (f'engine = "{engine}"\n' if engine else ""))
+    cfg = load(config)
+    gh = DraftGh()
+    gh.label_event("agent:ready", "unlabeled")
+    gh.label_event("agent:ready", "labeled", actor="outsider")
+    original_manifest = manifest.read_bytes()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("untrusted trigger must not launch specloop or git")
+
+    monkeypatch.setattr(daemon.specloop_intake, "run_git", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    health = daemon.RepoHealth()
+    for _ in range(2):
+        daemon.poll_specloop(cfg, health, runner=gh, specloop_runner=forbidden)
+    assert cfg.repos[0].engine == "specloop"
+    assert not health.failures and not health.item_failures
+    assert gh.labels == {"agent:ready"}
+    assert not gh.prs and len(gh.comments) == 2
+    assert "<!-- nightshift:draft:label-authorization-7:3 -->" in gh.comments[-1]["body"]
+    assert len([call for call in gh.calls if call[:2] == ["issue", "comment"]]) == 1
+    assert not queue.CLAIM_DIR.exists()
+    assert not (daemon.STATE_DIR / "proposals/owner__sample").exists()
+    assert manifest.read_bytes() == original_manifest
+    assert any(call[:2] == ["api", "repos/owner/sample/collaborators/outsider"]
+               for call in gh.calls)
+    assert not any(call[:2] in (["issue", "edit"],
+                               ["pr", "create"], ["pr", "edit"]) for call in gh.calls)
 
 
 def test_unavailable_specloop_repo_does_not_stop_other_repos(isolated, monkeypatch, manifest):

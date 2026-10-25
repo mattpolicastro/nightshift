@@ -508,7 +508,9 @@ def test_comment_create_response_loss_reconciles_inside_gh(repo, tmp_path, monke
 
 def test_pause_and_worker_routing_prevent_admission(repo, tmp_path, monkeypatch):
     gh, commands = ApprovalGh(), Commands()
-    assert poll(Repo("owner/worker"), tmp_path, gh, commands) == []
+    with pytest.raises(ValueError, match="owner/worker: worker engine is retired"):
+        Repo("owner/worker", engine="worker")
+    assert not commands.admissions
     assert not gh.calls
     pause = tmp_path / "pause"
     pause.touch()

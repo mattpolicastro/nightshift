@@ -21,11 +21,14 @@ Use a working Nightshift checkout with `uv` and `gh` available on PATH. The
 interpreter running `nightshift.land` must be able to import `specloop.cli`;
 the `specloop` console script need not be on PATH, and virtual-environment
 activation is not required. The selected configuration must contain exactly one
-case-insensitive enrollment for the repository. Authenticate `gh` as the operator
+case-insensitive enrollment for the repository. Omit `engine` or set
+`engine = "specloop"`, and configure a trusted manifest. Explicit
+`engine = "worker"` fails configuration loading because the worker engine is
+retired; migrate to specloop with a trusted manifest before landing.
+Authenticate `gh` as the operator
 with permission to read and edit the PR and issue comments, update the branch,
 and merge under the repository's protection rules. Run in the environment where
-that interpreter's `-m specloop.cli status --json` can read the applicable runs,
-including for worker repositories.
+that interpreter's `-m specloop.cli status --json` can read the applicable runs.
 Only open PRs targeting an existing `main` are eligible.
 
 | Argument | Meaning |
@@ -46,8 +49,9 @@ checks or grant review approval.
 ## Check sources and attestation
 
 The PR body is always checked. A front-door PR is identified by a matching
-canonical PR URL in version-1 `specloop status --json`, regardless of repository
-engine, labels, or branch name. For that PR, `land` also reads every issue-comment
+canonical PR URL in version-1 `python -m specloop.cli status --json`, for omitted
+or explicit specloop enrollment, independently of labels or branch names.
+For that PR, `land` also reads every issue-comment
 page and selects the newest trusted publication for the matching change, ordered
 by creation time and then numeric comment ID. Trusted authors have OWNER,
 MEMBER, or COLLABORATOR association. Publications start with `**nightshift** —`
