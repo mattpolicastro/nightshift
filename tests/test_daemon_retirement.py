@@ -1,9 +1,11 @@
 """The front door owns polling and liveness, never an execution pool."""
 
+import json
 import os
 import plistlib
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 from functools import partial
@@ -12,9 +14,11 @@ from pathlib import Path
 import pytest
 
 from manifest_fixtures import manifest_text
-from nightshift import cli, config, daemon, queue, specloop_job
+from nightshift import cli, config, daemon, outcomes, queue, specloop_job, vcs
 from nightshift.config import Config
 from test_engine_routing import DraftGh
+from test_engine_switch_recovery import RecoveryPipeline, labels, working
+from test_specloop_attention import run_record, status_result
 from test_specloop_intake import Commands
 
 
@@ -138,6 +142,7 @@ def test_daemon_has_no_worker_executor_or_dispatch_entry_points():
 
 
 @pytest.mark.scenario("worker-retirement/sole-execution-engine/worker-execution-is-absent")
+@pytest.mark.scenario("worker-retirement/client-command-boundaries-remain-stable/existing-clients-use-surviving-commands")
 def test_retired_modules_are_absent_and_surviving_imports_load():
     # A fresh interpreter catches dependencies hidden by pytest's import cache.
     result = subprocess.run(
@@ -146,6 +151,8 @@ import importlib
 import importlib.abc
 import importlib.util
 import sys
+import ast
+import tomllib
 from pathlib import Path
 import nightshift
 
@@ -173,7 +180,31 @@ import specloop
 for package in (nightshift, specloop):
     for module in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
         importlib.import_module(module.name)
+    # Include imports behind unexecuted branches, including relative imports.
+    for path in Path(package.__file__).parent.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                base = node.module or ""
+                if node.level:
+                    parent = package.__name__ + "." + ".".join(
+                        path.parent.relative_to(Path(package.__file__).parent).parts)
+                    base = importlib.util.resolve_name("." * node.level + base, parent.rstrip("."))
+                names = [base, *(base + "." + alias.name for alias in node.names)]
+            assert not any(name == "nightshift." + old or name.startswith("nightshift." + old + ".")
+                           for name in names for old in retired), (path, names)
 assert not {f"nightshift.{name}" for name in retired} & sys.modules.keys()
+project = tomllib.loads(Path("pyproject.toml").read_text())
+assert project["project"]["scripts"] == {"nightshift": "nightshift.cli:main", "specloop": "specloop.cli:main"}
+assert project["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"] == ["nightshift", "specloop"]
+from nightshift import daemon, outcomes, queue
+from specloop import state
+assert daemon.STATE_DIR == Path.home() / ".nightshift"
+assert outcomes.DB_PATH == daemon.STATE_DIR / "outcomes.sqlite3"
+assert queue.CLAIM_DIR == daemon.STATE_DIR / "claims"
+assert state.ROOT == Path.home() / ".specloop"
 for module, names in {
     "nightshift.cli": ("_elapsed", "_progress_of"),
     "nightshift.preflight": ("_endpoint_checks", "_one_endpoint", "_default_prober",
@@ -190,8 +221,11 @@ for module, names in {
 
 
 @pytest.mark.scenario("worker-retirement/service-prerequisites-match-the-surviving-engine/codex-enrollment-needs-no-worker-login")
+@pytest.mark.scenario("worker-retirement/retired-configuration-is-inert/old-knobs-cannot-control-builds")
+@pytest.mark.scenario("worker-retirement/sole-execution-engine/pause-and-one-shot-retain-control-boundaries")
 @pytest.mark.real_trust
-def test_python_preflight_then_one_shot_dispatch(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_python_preflight_then_one_shot_dispatch(tmp_path, monkeypatch, capsys, caplog, legacy):
     # Failure permutations live in test_preflight (task 1.8); here a successful
     # preflight is followed by real CLI/daemon dispatch using the same enrollment.
     manifest = tmp_path / "repository.toml"
@@ -204,6 +238,10 @@ forbidden_probe = "owner/private"
 name = "owner/sample"
 manifest = "repository.toml"
 ''')
+    if legacy:
+        selected.write_text('endpoints = {url = "https://worker.invalid/secret"}\nmodels = "secret-model"\n'
+                            + selected.read_text().replace('[daemon]', '[daemon]\nmax_tasks_per_night = 0')
+                            + 'verify = "secret-command"\nconcurrency = 0\n')
     env_file = tmp_path / "env"
     env_file.write_text("export GH_TOKEN='github_pat_test'\n"
                         "export NIGHTSHIFT_SLACK_WEBHOOK='https://hooks.invalid/test'\n")
@@ -230,6 +268,7 @@ manifest = "repository.toml"
 
     monkeypatch.setattr(subprocess, "run", external)
     monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
     monkeypatch.setattr(queue, "claim", forbidden)
     monkeypatch.setattr(queue, "_gh", gh)
     monkeypatch.setattr(daemon.notify, "send", forbidden)
@@ -245,6 +284,122 @@ manifest = "repository.toml"
     assert gh.labels == set() and len(gh.prs) == 1
     assert not queue.CLAIM_DIR.exists() and not daemon.HEARTBEAT_FILE.exists()
     assert manifest.read_bytes() == before
+    assert sorted(tmp_path.glob("*.toml")) == sorted([selected, manifest])
+    assert str(manifest) in commands.calls[0]
+    assert "secret" not in caplog.text + repr(commands.calls)
+    if legacy:
+        assert {message.split(" is ignored;")[0] for message in caplog.messages if " is ignored;" in message} == {
+            "endpoints", "models", "daemon.max_tasks_per_night", "repos.verify", "repos.concurrency",
+        }
+
+
+@pytest.mark.scenario("worker-retirement/retired-configuration-is-inert/worker-rejection-takes-precedence")
+@pytest.mark.parametrize("command", [["run", "--once"], ["preflight", "--deep"], ["attention", "--json"]])
+@pytest.mark.parametrize("manifest", ["", 'manifest = 42\n'])
+def test_worker_cli_refuses_before_any_child(tmp_path, monkeypatch, capsys, caplog, command, manifest):
+    selected = tmp_path / "config.toml"
+    selected.write_text('endpoints = false\nmodels = "private-model"\n[daemon]\nmax_tasks_per_night = 0\n'
+                        '[[repos]]\nname = "owner/retired"\nengine = "worker"\n' + manifest)
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / "absent-env")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("retired enrollment reached a child or dispatch")
+
+    for target, name in ((subprocess, "run"), (subprocess, "Popen"), (daemon, "loop"),
+                         (queue, "claim"), (socket, "create_connection")):
+        monkeypatch.setattr(target, name, forbidden)
+    assert cli.main([*command, "--config", str(selected)]) == 2
+    output = capsys.readouterr()
+    assert output.out == "" and not caplog.messages
+    assert output.err == ('configuration error: owner/retired: worker engine is retired; '
+                          'use engine = "specloop" (or omit engine) and configure a trusted manifest\n')
+    assert not daemon.HEARTBEAT_FILE.exists()
+
+
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/recovery-preserves-interrupted-work")
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/historical-attention-remains-readable")
+@pytest.mark.parametrize("evidence", ["surviving", "missing", "unreadable"])
+def test_one_shot_recovery_then_public_attention(tmp_path, monkeypatch, capsys, evidence):
+    selected = tmp_path / "config.toml"
+    selected.write_text('[[repos]]\nname = "owner/switched"\n')  # Recovery needs no manifest.
+    monkeypatch.setattr(os, "environ", {"HOME": str(tmp_path), "PATH": ""})
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / "absent-env")
+    monkeypatch.setattr(daemon, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(queue, "CLAIM_DIR", tmp_path / "claims")
+    monkeypatch.setattr(specloop_job, "_children", {})
+    monkeypatch.setattr(daemon.signal, "signal", lambda *a: None)
+    pipeline = RecoveryPipeline(config.load(selected).repos[0])
+    claim = working(pipeline, 1, tmp_path, survives=evidence == "surviving")
+    if evidence == "unreadable":
+        claim.path.write_text("{broken historical evidence")
+    original = claim.path.read_bytes()
+    monkeypatch.setattr(queue, "_gh", pipeline.gh)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("historical recovery/read attempted execution or destructive cleanup")
+
+    for target, name in ((subprocess, "run"), (subprocess, "Popen"), (queue, "claim"),
+                         (queue, "reconcile"), (vcs, "remove_worktree")):
+        monkeypatch.setattr(target, name, forbidden)
+    assert cli.main(["run", "--once", "--config", str(selected)]) == 0
+    assert capsys.readouterr().out == "poll complete\n"
+    assert labels(pipeline, 1) == {"keep-me", {
+        "surviving": "needs-human", "missing": "agent:ready", "unreadable": "agent:working",
+    }[evidence]}
+    assert len(outcomes.tasks()) == int(evidence != "unreadable")
+    if evidence == "unreadable":
+        assert claim.path.read_bytes() == original
+    else:
+        assert not claim.path.exists()
+        journal = daemon.STATE_DIR / "engine-switch/owner__switched/1.json"
+        assert json.loads(journal.read_text())["done"]
+    if evidence == "surviving":
+        assert (Path(claim.worktree) / "diff.txt").read_text() == "unfinished work"
+    outcomes.record("owner/switched", 9, state="needs_decision", reason="Historical review")
+    pipeline.issue(9)
+    preserved = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    monkeypatch.setattr(outcomes, "_read_github", lambda args, deadline: pipeline.gh(args))
+
+    def status(args, **kwargs):
+        assert args == ["specloop", "status", "--json"]
+        assert kwargs["timeout"] == outcomes.REQUEST_SECONDS
+        return status_result([run_record()])
+
+    monkeypatch.setattr(subprocess, "run", status)
+    for offline in (False, True):
+        if offline:
+            monkeypatch.setattr(subprocess, "run", forbidden)
+            monkeypatch.setattr(outcomes, "_read_github", forbidden)
+        assert cli.main(["attention", "--json", "--config", str(selected)] + (["--offline"] if offline else [])) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert set(payload) == {"version", "offline", "tasks", "specloop", "specloop_error", "stale"}
+        assert payload["version"] == 1 and payload["offline"] is offline
+        assert {item["issue"] for item in payload["tasks"]} == ({9} if evidence == "unreadable" else {1, 9})
+        assert any(item["issue"] == 9 and item["reason"] == "Historical review" for item in payload["tasks"])
+        assert payload["specloop"][0]["change"] == "add-gate"
+        assert payload["specloop"][0]["stale"] is False and payload["stale"] == []
+
+    def unavailable(*args, **kwargs):
+        raise OSError("transport unavailable")
+
+    monkeypatch.setattr(subprocess, "run", unavailable)
+    monkeypatch.setattr(outcomes, "_read_github", unavailable)
+    for offline in (False, True):
+        if offline:
+            monkeypatch.setattr(subprocess, "run", forbidden)
+            monkeypatch.setattr(outcomes, "_read_github", forbidden)
+        assert cli.main(["attention", "--json", "--config", str(selected)] + (["--offline"] if offline else [])) == 1
+        stale = json.loads(capsys.readouterr().out)
+        assert stale["specloop_error"] and stale["specloop"][0]["stale"] is True
+        assert stale["specloop"][0]["checked_at"] == payload["specloop"][0]["checked_at"]
+        assert any(item["issue"] == 9 and item["error"] for item in stale["stale"])
+        assert any(item["issue"] == 9 for item in stale["tasks"])
+    monkeypatch.setattr(subprocess, "run", status)
+    monkeypatch.setattr(outcomes, "_read_github", lambda *a: '{"state":"CLOSED","labels":[]}')
+    assert cli.main(["attention", "--json", "--config", str(selected)]) == 0
+    assert json.loads(capsys.readouterr().out)["tasks"] == []
+    assert all(item["state"] == "resolved" for item in outcomes.tasks())
+    assert {p: p.read_bytes() for p in preserved} == preserved
 
 
 @pytest.mark.scenario("worker-retirement/service-prerequisites-match-the-surviving-engine/services-retain-independent-roles")
