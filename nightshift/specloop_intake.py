@@ -957,7 +957,10 @@ def _reconcile_merge_readiness(repo: Repo, labels: queue.Labels, state_dir: Path
     current = {label["name"] for label in pr["labels"]}
     consistent = previous is not None and current & {"merge:ready", "merge:blocked"} == {previous["label"]}
     if matching and consistent and previous is not None and previous["delivered"]:
-        return
+        # A CI blocker is a snapshot taken while checks run (always, right after publication);
+        # reassess it each poll until CI no longer blocks, or the label would never clear.
+        if not any(reason.startswith("CI:") for reason in previous.get("reasons", [])):
+            return
     if ("merge:ready" in current and (head != row["head"]
             or previous is not None and previous["head"] != head)):
         # Invalidate even an incomplete old intention before any assessment I/O.

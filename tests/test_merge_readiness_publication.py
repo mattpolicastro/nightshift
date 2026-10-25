@@ -89,7 +89,8 @@ def merged_publication(publication, tmp_path):
 @pytest.mark.parametrize("blocked", [False, True])
 def test_recovered_publication_has_independent_cached_assessment(merged_publication, monkeypatch, blocked):
     p = merged_publication
-    p.gh.checks = [] if blocked else p.gh.checks
+    if blocked:  # A non-CI blocker: CI blockers are reassessed each poll.
+        p.gh.body = "## Checks a human must make\n- [ ] no citation here"
     label = "merge:blocked" if blocked else "merge:ready"
     assert p.assess() == []
     assert [operation(a) for a in p.assessment_calls] == [

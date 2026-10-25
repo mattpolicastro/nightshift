@@ -83,12 +83,12 @@ Readiness SHALL query `gh pr checks <pr> --json name,bucket,state` with an expli
 
 ### Requirement: Head bound polling
 
-Readiness SHALL require PR head equality with the run head, read the PR once per eligible poll, and query checks only when unlabelled or the stored assessment no longer matches the observed head or publication identity. A complete matching assessment with consistent labels SHALL be cached for both outcomes. Label removal SHALL permit explicit reassessment.
+Readiness SHALL require PR head equality with the run head, read the PR once per eligible poll, and query checks only when unlabelled or the stored assessment no longer matches the observed head or publication identity. A complete matching assessment with consistent labels SHALL be cached for both outcomes, except that an assessment blocked on CI SHALL be reassessed each poll until CI no longer blocks. Label removal SHALL permit explicit reassessment.
 
 #### Scenario: Matching assessment is cached
 - **WHEN** a ready or blocked assessment is delivered and repeated eligible polls, including after restart, observe the same head, identity, and labels
 - **THEN** each poll performs one PR read and no checks query, evidence read, comment lookup, or readiness mutation
-- **THEN** same-head CI or checklist changes alone do not refresh the cached assessment
+- **THEN** same-head CI or checklist changes alone do not refresh a cached assessment that CI does not block
 
 #### Scenario: New head removes ready
 - **WHEN** the next eligible poll observes a different head from a previously ready assessment
@@ -131,3 +131,8 @@ The human-check section SHALL be the PR body's `## Checks a human must make` sec
 #### Scenario: Front door publication supplies the checklist
 - **WHEN** a front-door PR's body has no human-check section and its publication's recorded checks contain only the ready-to-publish header
 - **THEN** the human-check condition passes; unexpected lines in those checks block as unknown
+
+#### Scenario: CI blocked assessment is reassessed until green
+- **WHEN** the delivered assessment for the current head is blocked on CI and a later poll finds CI green with no other blocker
+- **THEN** the PR moves to `merge:ready` with its one readiness comment updated, and later polls are cached
+
