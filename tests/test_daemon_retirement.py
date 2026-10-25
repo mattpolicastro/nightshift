@@ -1,6 +1,9 @@
 """The front door owns polling and liveness, never an execution pool."""
 
 import signal
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -119,10 +122,39 @@ def test_startup_failure_remains_visible_but_sigterm_is_orderly(lifecycle, monke
 
 @pytest.mark.scenario("worker-retirement/sole-execution-engine/worker-execution-is-absent")
 def test_daemon_has_no_worker_executor_or_dispatch_entry_points():
-    # Worker modules themselves are removed by the following caller-first tasks.
+    # worker.py remains until preflight and mirror migrate in the next task.
     retired = """Claimed Tally _WindowStart _FALLBACK_WINDOW_SECONDS
         endpoints_ready claim_next run_claimed _run_claimed _recover _merge
         _running _harvest _wrap_up _record_quota _branch_to_delete _escalation_text
         task worker recovery trace vcs preflight ThreadPoolExecutor Future
         futures_wait FIRST_COMPLETED""".split()
     assert not (set(retired) & vars(daemon).keys())
+
+
+@pytest.mark.scenario("worker-retirement/sole-execution-engine/worker-execution-is-absent")
+def test_retired_modules_are_absent_and_surviving_imports_load():
+    # A fresh interpreter catches dependencies hidden by pytest's import cache.
+    result = subprocess.run(
+        [sys.executable, "-c", """
+import importlib
+import importlib.util
+from pathlib import Path
+import nightshift
+
+package = Path(nightshift.__file__).parent
+for name in ("task", "prompts", "recovery"):
+    assert not (package / f"{name}.py").exists(), name
+    assert importlib.util.find_spec(f"nightshift.{name}") is None, name
+
+for name in ("nightshift.cli", "specloop.cli"):
+    assert callable(importlib.import_module(name).main), name
+for name in ("nightshift.preflight", "nightshift.trace", "nightshift.mirror",
+             "nightshift.queue", "nightshift.vcs", "specloop.prompts"):
+    importlib.import_module(name)
+"""],
+        cwd=Path(daemon.__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

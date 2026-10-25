@@ -1,5 +1,6 @@
 """Worker retirement uses durable evidence even with unhealthy enrollment."""
 
+import importlib.util
 import json
 from pathlib import Path
 
@@ -26,6 +27,9 @@ class RecoveryPipeline(Pipeline):
 
 @pytest.fixture
 def switched(tmp_path, monkeypatch):
+    # Durable recovery must work after the executable decision tree is deleted.
+    assert importlib.util.find_spec("nightshift.recovery") is None
+
     def forbidden(*args, **kwargs):
         pytest.fail("safe recovery must not claim work or destroy its worktree/branch")
 
