@@ -13,8 +13,9 @@ from urllib.parse import unquote, urlsplit
 import pytest
 
 from specloop import seal, tasks
-from nightshift import specloop_intake, specloop_job
-from test_specloop_compaction import delivered
+from nightshift import cli, daemon, specloop_intake, specloop_job
+from test_specloop_compaction import delivered, snapshot
+from test_specloop_jobs import offline_jobs_cli  # noqa: F401
 from test_specloop_seal_verify import M, repo  # noqa: F401 -- shared git fixture
 
 
@@ -208,13 +209,31 @@ def test_documented_command_budgets_match_dispatch(monkeypatch):
 
 
 @pytest.mark.scenario("specloop-documentation/delivered-retention-guidance/operator-understands-retained-artifacts")
-def test_documented_artifacts_match_compaction(tmp_path):
+@pytest.mark.parametrize("cleanup", [None, *DOCS])
+def test_documented_artifacts_match_compaction(tmp_path, monkeypatch, offline_jobs_cli, capsys, cleanup):
     path, receipt, directory, idea = delivered(tmp_path)
     artifacts = guide_table("| Delivered attempt artifact | After compaction |")
     targets = {name: idea if name == "owned `--idea-file` payload" else directory / name.strip("`")
                for name in artifacts}
     before = {name: (target.read_bytes(), target.stat().st_mtime_ns) for name, target in targets.items()}
-    assert specloop_job.compact_delivered(path, receipt) == []
+    if cleanup is None:
+        assert specloop_job.compact_delivered(path, receipt) == []
+    else:
+        from test_stopped_job_release_docs import commands
+
+        command, = [command for command in commands(cleanup) if command[1:2] == ("compact",)]
+        pause = tmp_path / "pause"
+        monkeypatch.setattr(daemon, "PAUSE_FILE", pause)
+        pause.touch()
+        assert cli.main(command) == 0
+        output = capsys.readouterr()
+        assert output.err == "" and output.out.endswith("Compacted: 1; skipped: 0.\n")
+        assert json.loads(path.read_text()) == receipt and pause.exists()
+        compacted = snapshot(tmp_path)
+        assert cli.main(command) == 0
+        output = capsys.readouterr()
+        assert output.err == "" and output.out.endswith("Compacted: 0; skipped: 1.\n")
+        assert snapshot(tmp_path) == compacted
     for name, action in artifacts.items():
         target = targets[name]
         if action == "removed":

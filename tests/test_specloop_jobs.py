@@ -1,5 +1,6 @@
 """Offline inventory and additive wrapper metadata, including old attempts."""
 
+import errno
 import fcntl
 import json
 import os
@@ -327,7 +328,175 @@ def test_empty_inventory_does_not_create_state(tmp_path, existing):
         (root / "config.toml").write_text("deliberately invalid configuration")
     before = sorted(tmp_path.rglob("*"))
     assert jobs.list_jobs(root) == ([], [])
+    assert jobs.list_jobs(root, include_delivery=True) == ([], [])
     assert sorted(tmp_path.rglob("*")) == before
+
+
+@pytest.mark.scenario("background-job-control/receipt-aware-delivery-display/finished-undelivered-job-reads-pending")
+@pytest.mark.parametrize("receipt", [None, {}, {"delivered": False}])
+@pytest.mark.parametrize("paused", [False, True])
+def test_inventory_pending_delivery(tmp_path, offline_jobs_cli, receipt, paused):
+    directory = attempt(tmp_path)
+    jobs.save(directory / "result.json", {"result": {"outcome": "drafted"}})
+    jobs.save(directory / "collected.json", {"collected_at": "2026-10-21T00:00:00Z"})
+    jobs.save(directory / "cleanup.json", {"complete": True})
+    os.utime(directory / "request.json", ns=(1, 1))
+    if receipt is not None:
+        jobs.save(directory.parent.with_suffix(".json"), receipt)
+    if paused:
+        (tmp_path / "paused").touch()
+    before = release_snapshot(tmp_path)
+    rows, errors = jobs.list_jobs(tmp_path, include_delivery=True)
+    assert not errors and len(rows) == 1
+    assert rows[0].state == "finished" and rows[0].delivered is False
+    assert rows[0].diagnostics == ()
+    assert release_snapshot(tmp_path) == before
+
+
+@pytest.mark.scenario("background-job-control/receipt-aware-delivery-display/delivered-item-history-reads-delivered")
+@pytest.mark.parametrize("stage", ["proposals", "admissions", "revisions"])
+@pytest.mark.parametrize("successor", [False, True])
+def test_inventory_delivered_history_is_not_cleanup_authority(tmp_path, offline_jobs_cli, stage, successor):
+    older = attempt(tmp_path, stage, job_id="1" * 32)
+    newer = attempt(tmp_path, stage, job_id="2" * 32)
+    for directory in (older, newer):
+        jobs.save(directory / "result.json", {"result": {"outcome": "needs_input"}})
+        (directory / "control.lock").touch()
+        (directory / "log").write_text("retained history")
+    path = older.parent.with_suffix(".json")
+    receipt = {"delivered": True, **({"job": newer.name} if successor else {})}
+    jobs.save(path, receipt)
+    before = release_snapshot(tmp_path)
+    rows, errors = jobs.list_jobs(tmp_path, include_delivery=True)
+    assert not errors and [row.id for row in rows] == [older.name, newer.name]
+    assert all(row.state == "finished" and row.delivered is True and not row.diagnostics for row in rows)
+    # Neither missing identity nor an older attempt's stale receipt authorizes
+    # deleting that older attempt, despite its delivered display metadata.
+    stale = {**receipt, "job": older.name} if successor else receipt
+    diagnostics = jobs.compact_delivered(path, stale)
+    assert diagnostics and ("receipt changed" if successor else "missing exact job identity") in diagnostics[0]
+    assert release_snapshot(tmp_path) == before
+    jobs.save(path, {"delivered": False})
+    assert all(not row.delivered for row in jobs.list_jobs(tmp_path, include_delivery=True)[0])
+
+
+@pytest.mark.scenario("background-job-control/receipt-aware-delivery-display/delivered-item-history-reads-delivered")
+@pytest.mark.parametrize("state", ["starting", "running", "failed", "stopping", "stopped"])
+def test_delivery_metadata_preserves_execution_state(tmp_path, offline_jobs_cli, state):
+    directory = attempt(tmp_path)
+    jobs.save(directory.parent.with_suffix(".json"), {"delivered": True})
+    if state != "starting":
+        jobs.save(directory / "process.json", identity(directory))
+    if state in ("stopping", "stopped"):
+        jobs.save(directory / "stop.json", {"state": state})
+    with (directory / "lock").open("r") as lock:
+        if state in ("starting", "running", "stopping"):
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        before = release_snapshot(tmp_path)
+        rows, errors = jobs.list_jobs(tmp_path, include_delivery=True)
+        assert not errors and len(rows) == 1
+        assert rows[0].state == state and rows[0].delivered is True
+        assert release_snapshot(tmp_path) == before
+
+
+@pytest.mark.scenario("background-job-control/receipt-aware-delivery-display/damaged-receipt-stays-visible")
+@pytest.mark.parametrize("damage", [
+    "{", "[]", "null", '{"delivered": null}', '{"delivered": 0}', '{"delivered": 1}',
+    '{"delivered": "true"}', '{"delivered": []}', '{"delivered": {}}',
+    "unreadable", "symlink", "dangling-symlink", "directory", "fifo", "invalid-encoding",
+])
+def test_damaged_receipts_keep_rows_and_cache_diagnostics(tmp_path, monkeypatch, offline_jobs_cli, damage):
+    bad = [attempt(tmp_path, job_id=f"{i:032x}") for i in (1, 2)]
+    healthy = attempt(tmp_path, number=8, job_id="3" * 32)
+    for directory in [*bad, healthy]:
+        jobs.save(directory / "result.json", {"result": {"outcome": "drafted"}})
+    path = bad[0].parent.with_suffix(".json")
+    jobs.save(healthy.parent.with_suffix(".json"), {"delivered": True})
+    if damage in ("symlink", "dangling-symlink"):
+        target = tmp_path / "target.json"
+        if damage == "symlink":
+            jobs.save(target, {"delivered": True})
+        path.symlink_to(target)
+    elif damage == "directory":
+        path.mkdir()
+    elif damage == "fifo":
+        os.mkfifo(path)
+    else:
+        path.write_bytes(b"\xff" if damage == "invalid-encoding" else damage.encode())
+    before, tree = release_snapshot(tmp_path), sorted(tmp_path.rglob("*"))
+    opened, descriptors, real_open = [], [], os.open
+
+    def checked_open(p, flags, *args, **kwargs):
+        if p == path:
+            opened.append(p)
+            if damage == "unreadable":
+                raise PermissionError("injected receipt read denial")
+            if damage in ("symlink", "dangling-symlink"):
+                assert flags & os.O_NOFOLLOW
+        descriptor = real_open(p, flags, *args, **kwargs)
+        if p == path:
+            descriptors.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(os, "open", checked_open)
+    ordinary, errors = jobs.list_jobs(tmp_path)
+    assert not errors and not opened
+    assert all(row.state == "finished" and not row.delivered and not row.diagnostics for row in ordinary)
+    rows, errors = jobs.list_jobs(tmp_path, include_delivery=True)
+    assert [row.id for row in rows] == [row.id for row in ordinary]
+    assert len(errors) == 1 and str(path) in errors[0]
+    assert opened == [path]  # One read even when multiple attempts share damage.
+    assert all(row.state == "finished" and row.delivered is False
+               and row.diagnostics == tuple(errors) for row in rows[:2])
+    assert rows[2].state == "finished" and rows[2].delivered is True and not rows[2].diagnostics
+    for descriptor in descriptors:
+        with pytest.raises(OSError) as closed:
+            os.fstat(descriptor)
+        assert closed.value.errno == errno.EBADF
+    assert release_snapshot(tmp_path) == before and sorted(tmp_path.rglob("*")) == tree
+
+
+@pytest.mark.parametrize("receipt", [None, {}, {"delivered": True}])
+def test_delivery_cache_and_record_diagnostics(tmp_path, monkeypatch, offline_jobs_cli, receipt):
+    good = attempt(tmp_path, job_id="1" * 32)
+    bad = attempt(tmp_path, job_id="2" * 32)
+    (bad / "request.json").write_text("{")
+    path = good.parent.with_suffix(".json")
+    if receipt is not None:
+        jobs.save(path, receipt)
+    reads, real_open = [], os.open
+
+    def counted_open(p, *args, **kwargs):
+        if p == path:
+            reads.append(p)
+        return real_open(p, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", counted_open)
+    rows, errors = jobs.list_jobs(tmp_path, include_delivery=True)
+    assert reads == [path] and len(errors) == 1
+    assert rows[0].state == "failed" and not rows[0].diagnostics
+    assert rows[1].state == "unknown" and rows[1].diagnostics == tuple(errors)
+    assert all(row.delivered is bool(receipt) for row in rows)
+
+
+def test_status_stop_release_keep_receipt_independent_inventory(stopped_job, monkeypatch, offline_jobs_cli, capsys):
+    root, directory, path = stopped_job
+    live = attempt(root, number=8, job_id="b" * 32)
+    live.parent.with_suffix(".json").write_text("{")
+    finished = attempt(root, number=9, job_id="c" * 32)
+    jobs.save(finished / "result.json", {"result": {"outcome": "drafted"}})
+    jobs.save(finished.parent.with_suffix(".json"), {"delivered": True})
+    monkeypatch.setattr(jobs, "_read_delivery", offline_jobs_cli)
+    with (live / "lock").open("r") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        rows, errors = jobs.list_jobs(root)
+        assert not errors and len(rows) == 3
+        cli._active_jobs()
+        output = capsys.readouterr()
+        assert live.name in output.out and "starting" in output.out and not output.err
+    assert jobs.stop_job(root, finished.name) == "finished"
+    assert jobs.release_job(root, directory.name) == "released"
+    assert next(row for row in jobs.list_jobs(root)[0] if row.id == directory.name).state == "stopped"
 
 
 @pytest.fixture(params=[("proposals", "propose"), ("admissions", "admit"),
