@@ -97,13 +97,21 @@ def test_alternate_layout_examples_resolve_without_launching_services(tmp_path, 
     monkeypatch.chdir(elsewhere)
     assert config.load(selected).worktree_root == selected.parent / "worker trees"
     assert not (selected.parent / "worker trees").exists()
+    assert config.load(selected).mirror_to_paseo is False
+    assert config.Repo("owner/repo").engine == "specloop"
 
 
 @pytest.mark.scenario(
     "specloop-documentation/host-portability-guidance/operator-configures-an-alternate-layout"
 )
+@pytest.mark.scenario(
+    "specloop-documentation/host-portability-guidance/platform-claims-retain-their-evidence-limits"
+)
 @pytest.mark.parametrize("path", DOCS)
 def test_portability_documentation_links_resolve(path):
+    references = {target for _, target in LINK.findall(read("KNOWN-LIMITATIONS.md"))}
+    assert "https://github.com/mattpolicastro/nightshift/issues/15" in references
+    assert "https://github.com/mattpolicastro/nightshift/pull/15" not in references
     document = ROOT / path
     for _, target in LINK.findall(document.read_text()):
         url = urlsplit(target)
@@ -120,6 +128,13 @@ def test_portability_documentation_links_resolve(path):
 )
 def test_fixed_bootstrap_commands_and_guarded_rollout_are_explicit():
     limits = read("KNOWN-LIMITATIONS.md")
+    wrapper = read("bin/nightshift-daemon")
+    literals = set(re.findall(r"`([^`\n]+)`", read("README.md")))
+    tools, = re.findall(r"^for bin in (.+); do$", wrapper, re.M)
+    assert set(shlex.split(tools)) <= literals
+    guards = re.findall(r'if \[ -z "\$\{(\w+):-\}" \]; then', wrapper)
+    assert set(guards) == {"CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN"} <= literals
+    assert "~/.config/nightshift/env" in literals
     # The documented commands must agree with the unchanged, frozen wrappers.
     for name, command, path in (
         ("nightshift-daemon", "/opt/homebrew/bin/uv run nightshift run",
