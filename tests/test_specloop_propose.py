@@ -9,6 +9,68 @@ def sh(cwd, *args):
     return subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
+def draft_evidence_snapshot(root):
+    """Include directory membership/mtimes and link identity without following links."""
+    found = {}
+    def visit(path):
+        if not path.exists() and not path.is_symlink():
+            return
+        metadata = path.lstat()
+        data = path.readlink() if path.is_symlink() else path.read_bytes() if path.is_file() else None
+        found[path.relative_to(root)] = (data, metadata.st_mode, metadata.st_mtime_ns, metadata.st_ino)
+        if path.is_dir() and not path.is_symlink():
+            for child in path.iterdir():
+                visit(child)
+    visit(root)
+    return found
+
+
+@pytest.mark.scenario("state-migration/separate-draft-namespace/unsafe-draft-replacement-refuses")
+@pytest.mark.parametrize("unsafe", ["parent-link", "parent-file", "destination-link", "destination-file",
+                                  "parent-dangling", "destination-dangling", "legacy-directory",
+                                  "legacy-file", "legacy-wrong-link", "legacy-dangling-link"])
+def test_unsafe_draft_output_refuses_before_git(tmp_path, monkeypatch, unsafe):
+    monkeypatch.setattr(state, "ROOT", tmp_path / "canonical")
+    monkeypatch.setenv("NIGHTSHIFT_LEGACY_STATE_ROOT", str(tmp_path / "legacy"))
+    out = state.proposals_dir() / "owner__repo"
+    evidence = state.state_root() / "proposals" / out.name
+    evidence.mkdir(parents=True)
+    (evidence / "7.json").write_text('"daemon receipt"')
+    target = out.parent if unsafe.startswith("parent-") else out
+    if unsafe.startswith("legacy-"):
+        target = state.legacy_root() / "proposals" / out.name
+        out.mkdir(parents=True)
+        (out / "retained").write_text("canonical draft")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if "link" in unsafe or "dangling" in unsafe:
+        target.symlink_to(tmp_path / "absent" if "dangling" in unsafe else evidence)
+    elif unsafe.endswith("file"):
+        target.write_text("retain me")
+    else:
+        target.mkdir()
+        (target / "work").mkdir()
+        (target / "work" / "retained").write_text("legacy draft")
+    before = draft_evidence_snapshot(tmp_path)
+    monkeypatch.setattr(propose, "start_commit", lambda *a: pytest.fail("Git ran before refusal"))
+    diagnostic = "nightshift migrate" if unsafe.startswith("legacy-") else "unsafe draft path"
+    with pytest.raises(ValueError, match=diagnostic):
+        propose.draft(tmp_path / "unused", "main", out.name, "idea", [], M, out)
+    assert draft_evidence_snapshot(tmp_path) == before
+
+
+@pytest.mark.scenario("state-migration/separate-draft-namespace/unsafe-draft-replacement-refuses")
+@pytest.mark.parametrize("change", ["", ".", "..", "../escape", "/absolute", "a/b", "a\\b", "a b"])
+def test_invalid_draft_component_refuses_before_replacement(tmp_path, monkeypatch, change):
+    out = tmp_path / "explicit"
+    out.mkdir()
+    (out / "keep").write_text("existing workspace")
+    before = draft_evidence_snapshot(tmp_path)
+    monkeypatch.setattr(propose, "start_commit", lambda *a: pytest.fail("Git ran before refusal"))
+    with pytest.raises(ValueError, match="unsafe change name"):
+        propose.draft(tmp_path, "main", change, "idea", [], M, out)
+    assert draft_evidence_snapshot(tmp_path) == before
+
+
 @pytest.fixture
 def source(tmp_path, monkeypatch):
     monkeypatch.setattr(openspec, "validate", lambda repo, change: [])
@@ -64,6 +126,18 @@ def test_a_rejected_draft_is_fed_back_then_committed(source, tmp_path):
     assert not d.problems and d.commit
     propose.publish_branch(d, source)
     assert "Add sign covering" in sh(source, "git", "show", "spec/sign-helpers:openspec/changes/sign-helpers/tasks.md")
+
+
+def test_explicit_output_helper_is_independent_of_managed_legacy_workspace(source, tmp_path):
+    legacy = state.legacy_root() / "proposals" / "sign-helpers"
+    legacy.mkdir(parents=True)
+    (legacy / "retained").write_text("unmigrated workspace")
+    before = draft_evidence_snapshot(legacy)
+    out = tmp_path / "explicit"
+    for _ in range(2):
+        d = propose.draft(source, "main", "sign-helpers", "add sign", [], M, out, agent=drafter(GOOD))
+        assert d.commit and not d.problems and d.work == out / "work"
+        assert draft_evidence_snapshot(legacy) == before
 
 
 def test_edits_outside_the_change_are_refused(source, tmp_path):

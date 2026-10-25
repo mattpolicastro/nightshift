@@ -82,6 +82,126 @@ def review(monkeypatch, contradictions=()):
     monkeypatch.setattr(agents, "run", agent)
 
 
+def daemon_draft_evidence(change):
+    from nightshift import specloop_job as jobs
+
+    directory = state.state_root() / "proposals" / change / "7.jobs" / ("a" * 32)
+    directory.mkdir(parents=True)
+    idea = directory / "idea.txt"
+    idea.write_text("Retained daemon idea\n")
+    for name in ("lock", "control.lock", "log"):
+        (directory / name).write_text(f"retained {name}\n")
+    jobs.save(directory / "request.json", {
+        "stage": "proposals", "args": ["propose", "template.toml", change, "--idea-file", str(idea)],
+        "started_at": 100, "timeout_seconds": 3600, "deadline_at": 3700,
+    })
+    process = {
+        "version": 1, "job_id": directory.name, "pid": 1234, "pgid": 1234,
+        "start_identity": "retained-identity", "started_at": "2026-10-21T12:00:00Z",
+    }
+    jobs.save(directory / "process.json", process)
+    jobs.save(directory / "stop.json", {
+        "state": "stopped", "process": process,
+        "requested_at": "2026-10-21T12:01:00Z", "stopped_at": "2026-10-21T12:01:01Z",
+    })
+    jobs.save(directory / "result.json", {"error": "stopped by operator"})
+    jobs.save(directory.parent.with_suffix(".json"), {
+        "job": directory.name, "repo": change.replace("__", "/", 1), "number": 7, "delivered": False,
+    })
+    return directory
+
+
+@pytest.mark.parametrize("generated", [
+    pytest.param(False, marks=pytest.mark.scenario(
+        "state-migration/separate-draft-namespace/draft-replacement-preserves-daemon-evidence")),
+    pytest.param(True, marks=pytest.mark.scenario(
+        "state-migration/separate-draft-namespace/generated-names-cannot-collide-with-another-repository")),
+])
+@pytest.mark.scenario("state-migration/separate-draft-namespace/unsafe-draft-replacement-refuses")
+def test_cli_draft_replacement_preserves_daemon_evidence(template, monkeypatch, capfd, generated):
+    from nightshift import specloop_intake, specloop_job as jobs
+    from test_specloop_propose import draft_evidence_snapshot
+
+    path, repo = template
+    change = specloop_intake._change_name("owner/repo", 7, "Add a gate") if generated else "owner__repo"
+    assert change == ("owner__repo-issue-7-add-a-gate" if generated else "owner__repo")
+    directory = daemon_draft_evidence(change)
+    evidence = state.state_root() / "proposals"
+    before = draft_evidence_snapshot(evidence)
+    inventory = jobs.list_jobs(state.state_root(), include_delivery=True)
+    rows, errors = inventory
+    assert not errors and len(rows) == 1
+    assert (rows[0].id, rows[0].repository, rows[0].number, rows[0].directory, rows[0].state) == (
+        "a" * 32, "owner/repo-issue-7-add-a-gate" if generated else "owner/repo", 7, directory, "stopped")
+    assert rows[0].identity_available and rows[0].process["start_identity"] == "retained-identity"
+    out = state.proposals_dir() / change
+    legacy = state.legacy_root() / "proposals" / change
+    legacy_link = None
+
+    def agent(call):
+        if call.access == "read":
+            return agents.Result("ok", {"contradictions": [], "risks": []})
+        assert call.cwd == out / "work"
+        task = call.cwd / "openspec" / "changes" / change / "tasks.md"
+        task.parent.mkdir(parents=True)
+        task.write_text(TASKS)
+        return agents.Result("ok", {"status": "drafted", "summary": "", "questions": []})
+
+    monkeypatch.setattr(agents, "run", agent)
+    monkeypatch.setattr(cli, "notifier", lambda secrets: lambda message: None)
+    for iteration, entry in enumerate((main, cli.main, main, cli.main)):
+        # Exercise both names before and with an already completed legacy link.
+        # Real migration and its marker are covered by tasks 2.6/2.10.
+        if iteration == 2:
+            legacy.parent.mkdir(parents=True)
+            legacy.symlink_to(out, target_is_directory=True)
+            legacy_link = draft_evidence_snapshot(legacy)
+        assert entry(["propose", str(path), change, "--idea", "Add a gate", "--json"]) == 0
+        output = capfd.readouterr()
+        document = json.loads(output.out)
+        assert document == {"version": 1, "outcome": "drafted", "branch": f"spec/{change}",
+                            "commit": git(out / "work", "rev-parse", "HEAD"), "questions": [],
+                            "contradictions": [], "risks": [], "problems": []}
+        assert ("specloop has been renamed to nightshift" in output.err) == (entry is cli.main)
+        assert git(repo, "rev-parse", f"spec/{change}") == document["commit"]
+        assert not (out / "obsolete").exists()
+        (out / "obsolete").write_text("must be removed by the next draft")
+        assert draft_evidence_snapshot(evidence) == before
+        assert jobs.list_jobs(state.state_root(), include_delivery=True) == inventory
+        if legacy_link is not None:
+            assert draft_evidence_snapshot(legacy) == legacy_link
+
+
+@pytest.mark.scenario("state-migration/separate-draft-namespace/unsafe-draft-replacement-refuses")
+@pytest.mark.parametrize("entry", [main, cli.main], ids=["nightshift", "specloop"])
+@pytest.mark.parametrize("unsafe", ["legacy", "daemon-link"])
+def test_cli_unsafe_draft_refuses_without_touching_evidence(template, monkeypatch, capfd, entry, unsafe):
+    from specloop import propose
+    from test_specloop_propose import draft_evidence_snapshot
+
+    path, _ = template
+    change = "owner__repo"
+    directory = daemon_draft_evidence(change)
+    out = state.proposals_dir() / change
+    out.parent.mkdir(parents=True)
+    legacy = state.legacy_root() / "proposals" / change
+    if unsafe == "legacy":
+        legacy.mkdir(parents=True)
+        (legacy / "retained").write_text("legacy workspace")
+        out.mkdir()
+        (out / "retained").write_text("canonical workspace")
+    else:
+        out.symlink_to(directory.parent.parent)
+    roots = (state.state_root(), state.legacy_root())
+    before = [draft_evidence_snapshot(root) for root in roots]
+    monkeypatch.setattr(propose, "start_commit", lambda *a: pytest.fail("Git ran before refusal"))
+    assert entry(["propose", str(path), change, "--idea", "Add a gate", "--json"]) == 1
+    document = json.loads(capfd.readouterr().out)
+    assert document["outcome"] == "rejected" and document["commit"] == ""
+    assert ("nightshift migrate" if unsafe == "legacy" else "unsafe draft path") in document["problems"][0]
+    assert [draft_evidence_snapshot(root) for root in roots] == before
+
+
 @pytest.mark.scenario("specloop-interface/command-json/refused-admission-as-json")
 def test_refused_admission_as_json(template, monkeypatch, capfd):
     path, repo = template
