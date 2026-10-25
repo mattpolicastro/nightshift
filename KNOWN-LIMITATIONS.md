@@ -58,18 +58,43 @@ Fixes land through Nightshift's own front door; these gaps remain unresolved.
     Restart does not reset timing. Daemon/GitHub outages, removed triggers and
     authorization holds delay reporting; wall-clock jumps affect observation.
     `nightshift status` shows active timing/`OVERDUE`; legacy timing is unavailable.
-    Use `nightshift jobs` for history and the recovery instructions above
+    Use `nightshift jobs --all` for history and the recovery instructions above
     ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+  - Default `nightshift jobs` shows active (including starting/overdue),
+    stopping, stopped, finished-undelivered and diagnostic rows. Ordinary failed
+    and finished-delivered history is hidden with a count; `nightshift jobs --all`
+    shows it all. Finished rows say `delivered` only for an item receipt with
+    JSON `delivered: true`, otherwise `finished (delivery pending)`. This item-level
+    label can reflect a successor receipt; it does not establish deletion identity
+    ([issue #103](https://github.com/mattpolicastro/nightshift/issues/103)).
   - Delivered attempts lose logs and safely owned idea payloads; minimal
     requests redact idea arguments while retaining original mtimes for
     touchpoint history. Results, control metadata and directories remain.
     Undelivered and stopped/released evidence, workflow receipts and build
     feedback remain too: storage still grows and this is not secure erasure
     ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
-    Interrupted cleanup waits for a later eligible, authorized, unpaused visit.
+    Automatic interrupted cleanup waits for a later eligible, authorized,
+    unpaused visit.
     After final-trigger removal, closure or authorization denial, residual
     artifacts can remain indefinitely; a cleanup journal grants no authorization.
     Do not rearm solely for cleanup, because normal new work may follow.
+    Explicit offline `nightshift jobs compact` makes one pass, even while paused,
+    without current GitHub labels. It requires a current matching delivered
+    receipt and the existing identity, idle-lock and ownership checks. Missing
+    identity or a replacement receipt prevents cleanup even with an old journal
+    or a `delivered` display. Repeats skip completed cleanup; interruptions resume
+    only while the current receipt still matches. It launches/delivers nothing
+    and leaves receipts and pause unchanged. Per-attempt outcomes end with
+    `Compacted: N; skipped: M.`; retained-target warnings can accompany compaction.
+    Expected ineligibility skips successfully; damaged evidence/filesystem errors
+    exit 1 while healthy attempts continue. Substantial older history may remain
+    ([issue #103](https://github.com/mattpolicastro/nightshift/issues/103)).
+    The design's real-tree check remains pending: pause, capture full inventory
+    and receipts/artifacts, compact once, then compare full inventory, counts,
+    mtimes and retained evidence before resuming. Inspect warnings and identity
+    skips, accounting separately for detached jobs finishing during pause; see
+    the [comparison checklist](README.md#pause-and-job-control). CI covers
+    synthetic trees, not this host's history; live references/prose await review.
   - Daemon intake git has a 30-second command timeout, then SIGKILL to its POSIX
     process group with at most one further second for reaping/output draining.
     Descendants that leave the group can escape. Remote acceptance may precede

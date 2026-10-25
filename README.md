@@ -437,7 +437,9 @@ uv run nightshift preflight   # is it safe to leave alone tonight?
 uv run nightshift reconcile   # repair crash state
 uv run nightshift run --once  # claim and run one task
 uv run nightshift pause       # hold new work and completion delivery
-uv run nightshift jobs        # list local background attempts, including history
+uv run nightshift jobs        # active, stopped, pending and diagnostic rows
+uv run nightshift jobs --all  # full history, including delivered and failed jobs
+uv run nightshift jobs compact  # explicit local cleanup of matching delivered history
 uv run nightshift jobs stop <id>  # replace <id> with the full ID from jobs
 uv run nightshift jobs release <id>  # after confirmed stop and inspection
 uv run nightshift resume      # resume eligible delivery; stopped jobs stay held
@@ -509,7 +511,7 @@ actual Paseo host validation remain pending as described in the platform limits.
 queries: full job ID, stage, repository/item, command, execution state, elapsed
 seconds and time remaining or `OVERDUE by Ns`. Starting/legacy attempts without
 timing say unavailable. These rows are separate from daemon/worker liveness and
-independent `specloop status` run state; `nightshift jobs` includes history.
+independent `specloop status` run state; `nightshift jobs --all` includes history.
 
 Reporting deadlines are **propose 3600 seconds, admit 300 seconds, revise 1800
 seconds**, including startup; spec re-drafting uses propose's budget. Persisted
@@ -530,15 +532,29 @@ without rerunning the job, including after a daemon restart. An external
 operation already dispatched when pause appears may finish. Pause does not
 roll back git or GitHub effects, or terminate current worker-engine tasks.
 
-`nightshift jobs`, `nightshift jobs stop <id>` and `nightshift jobs release <id>`
-work offline without a running daemon, valid repository configuration or
-credentials. Inventory includes proposal, admission and revision attempts,
-with full ID, repository/item, command,
-execution state, available PID/PGID and log path. `finished` means execution
-completed; delivery may still be pending. States also include `starting`,
-`running`, `failed`, `stopping`, `stopped` and `unknown`. Unreadable entries
-produce diagnostics and exit 1 while valid rows remain visible; an empty
-inventory prints `No background jobs.` and exits 0.
+`nightshift jobs`, `nightshift jobs --all`, `nightshift jobs compact`,
+`nightshift jobs stop <id>` and `nightshift jobs release <id>` work offline
+without a running daemon, valid repository configuration or credentials.
+Inventory includes proposal, admission and revision attempts, with full ID,
+stage, repository/item, command, execution state, available PID/PGID and log path.
+The default shows `starting`, `running` (including overdue), `stopping`,
+`stopped` and finished-undelivered work, plus rows with record/receipt diagnostics.
+Ordinary `failed` and finished-delivered attempts are hidden; `--all` shows
+every attempt. Hidden rows are counted in
+`Hidden historical jobs: N (use --all to show).` With only hidden history,
+the default first prints `No active background jobs.` An empty inventory still
+prints `No background jobs.` and exits 0. States also include `unknown`.
+Unreadable entries produce diagnostics and exit 1 while valid rows remain
+visible; diagnostic-only inventory is not called empty.
+
+Finished rows mean execution completed. They read `delivered` only when the
+item's current receipt has JSON `delivered: true`; otherwise they read
+`finished (delivery pending)`.
+This is an item-level label, even if the receipt names a successor or lacks a
+job ID, not proof that each historical attempt delivered independently.
+Receipt replacement can change older rows' labels. Listing is read-only;
+`--all` is only for listing, and `compact` takes no ID
+([issue #103](https://github.com/mattpolicastro/nightshift/issues/103)).
 
 After durable authorized delivery, compaction removes the log and safely owned
 idea payload, redacts idea arguments from a minimal `request.json`, and keeps
@@ -547,10 +563,35 @@ touchpoint dates and history across receipt replacement. Undelivered and
 stopped/released evidence, workflow receipts and build-feedback files remain;
 minimal records still grow, and missing history cannot be reconstructed. This
 is not secure erasure ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
-Interrupted cleanup waits for a later eligible, authorized, unpaused item visit;
-its journal proves delivery, not current authorization. Removal of the final
+Automatic interrupted cleanup waits for a later eligible, authorized,
+unpaused item visit; its journal proves delivery, not current authorization. Removal of the final
 trigger, closure or authorization denial can leave residual artifacts indefinitely.
 Do not rearm solely for cleanup: normal new work may follow.
+
+For an explicit one-pass cleanup, run `nightshift jobs compact`, including
+while paused and without current GitHub labels. Only already-delivered history
+with a current receipt naming that exact attempt can be compacted. Missing or
+replaced identity prevents deletion even when inventory says `delivered` or an
+old cleanup journal exists. Identity, idle-lock and ownership checks still apply;
+unsafe idea targets are retained with warnings. Each attempt reports `compacted`
+or `skipped` with context and a reason, followed by `Compacted: N; skipped: M.`
+Warnings can accompany a compacted attempt: inspect which targets were retained.
+Expected ineligibility is a successful skip; damaged evidence or filesystem
+errors exit 1 while independent healthy attempts continue. Repetition safely
+skips completed cleanup and resumes interruptions only with a still-matching
+current receipt. It does not launch, deliver, change receipts or clear pause
+([issue #103](https://github.com/mattpolicastro/nightshift/issues/103)).
+
+The design's real-tree human check remains pending: pause the daemon, capture
+`nightshift jobs --all` and relevant receipts/artifacts on `~/.nightshift`, run
+`nightshift jobs compact` once, then capture full inventory again. Compare IDs,
+execution/delivery labels, counts, request mtimes, results, control records and
+skipped artifacts; verify only reported eligible logs/owned inputs and idea
+arguments changed. Inspect retained-target warnings and identity skips, confirm
+the default view exposes pending/stopped/active work, and record commands,
+outcomes and unexplained differences before resuming. Detached jobs may finish
+while paused; account for that separately. CI tests synthetic trees, not this
+host's historical tree. Live reference and operator-prose review remain pending.
 
 Daemon intake git times out after 30 seconds and SIGKILLs its POSIX process
 group, with at most one further second for reaping/output draining. Escaped

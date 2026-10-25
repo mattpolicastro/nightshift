@@ -101,7 +101,18 @@ def _progress_of(repo: str, number: int) -> str:
         return ""
 
 
-def _jobs(action: str | None, job_id: str | None) -> int:
+def _jobs(action: str | None, job_id: str | None, *, show_all: bool = False) -> int:
+    if action == "compact":
+        report = specloop_job.compact_history(daemon.STATE_DIR)
+        for outcome in report.outcomes:
+            job = outcome.job
+            print(f"{job.id}  {job.stage}  {job.repository}#{job.number}  "
+                  f"{outcome.status}: {outcome.reason}")
+        for diagnostic in report.diagnostics:
+            print(diagnostic, file=sys.stderr)
+        print(f"Compacted: {report.compacted}; skipped: {report.skipped}.")
+        return 1 if report.error else 0
+
     if action == "release":
         assert job_id is not None  # Required by argument validation.
         try:
@@ -121,17 +132,29 @@ def _jobs(action: str | None, job_id: str | None) -> int:
         print(f"{job_id}: {'already finished' if state == 'finished' else state}")
         return 0
 
-    jobs, errors = specloop_job.list_jobs(daemon.STATE_DIR)
+    jobs, errors = specloop_job.list_jobs(daemon.STATE_DIR, include_delivery=True)
+    visible = jobs if show_all else [
+        job for job in jobs
+        if job.diagnostics or job.state in ("starting", "running", "stopping", "stopped")
+        or job.state == "finished" and not job.delivered
+    ]
+    hidden = len(jobs) - len(visible)
     if not jobs and not errors:
         print("No background jobs.")
-    for job in jobs:
+    elif not visible and hidden and not errors:
+        print("No active background jobs.")
+    for job in visible:
         identity = "" if job.identity_available else " (process identity unavailable)"
-        state = "finished (execution complete; delivery may be pending)" if job.state == "finished" else job.state
+        state = job.state
+        if state == "finished":
+            state = "delivered" if job.delivered else "finished (delivery pending)"
         print(f"{job.id}  {job.stage}  {job.repository}#{job.number}  {state}")
         print(f"  command: {shlex.join(job.command) if job.command else 'unavailable'}")
         print(f"  PID={job.pid if job.pid is not None else '?'} "
               f"PGID={job.pgid if job.pgid is not None else '?'}{identity}")
         print(f"  log: {job.log_path}")
+    if hidden:
+        print(f"Hidden historical jobs: {hidden} (use --all to show).")
     for error in errors:
         print(f"unreadable job: {error}", file=sys.stderr)
     return 1 if errors else 0
@@ -166,8 +189,9 @@ def main(argv: list[str] | None = None) -> int:
         default="status",
         choices=["status", "pause", "resume", "jobs", "run", "reconcile", "preflight", "digest", "attention"],
     )
-    parser.add_argument("action", nargs="?", help="jobs: stop or release")
+    parser.add_argument("action", nargs="?", help="jobs: compact, stop or release")
     parser.add_argument("job_id", nargs="?", help="jobs stop/release: exact full job ID")
+    parser.add_argument("--all", action="store_true", help="jobs: include historical attempts")
     parser.add_argument("--json", action="store_true", help="attention: machine-readable tasks and specloop pauses")
     parser.add_argument("--offline", action="store_true", help="attention: use cached records without GitHub or specloop")
     parser.add_argument("--once", action="store_true", help="one task, then exit")
@@ -179,10 +203,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--config", type=Path, default=None)
     args = parser.parse_intermixed_args(argv)
+    if args.all and (args.command != "jobs" or args.action is not None or args.job_id is not None):
+        parser.error("--all is only valid for jobs listing")
     if args.command == "jobs":
         if not (args.action is None and args.job_id is None
+                or args.action == "compact" and args.job_id is None
                 or args.action in ("stop", "release") and args.job_id is not None):
-            parser.error("expected 'jobs', 'jobs stop <id>' or 'jobs release <id>'")
+            parser.error("expected 'jobs [--all]', 'jobs compact', 'jobs stop <id>' or 'jobs release <id>'")
     elif args.action is not None or args.job_id is not None:
         parser.error(f"{args.command} does not accept positional arguments")
 
@@ -192,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Local job control must also work offline, without configuration or credentials.
     if args.command == "jobs":
-        return _jobs(args.action, args.job_id)
+        return _jobs(args.action, args.job_id, show_all=args.all)
 
     # The daemon gets its credentials from the launchd wrapper, which sources
     # the env file. A human at a terminal has not, so without this every

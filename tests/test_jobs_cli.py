@@ -1,6 +1,7 @@
 """Operator-facing job commands use local durable state, even without config."""
 
 import fcntl
+import json
 import os
 import re
 import shlex
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from nightshift import cli, config, daemon, specloop_job as jobs
+from test_specloop_compaction import delivered, historical, snapshot as evidence_snapshot
 
 
 def forbidden(*args, **kwargs):
@@ -47,9 +49,427 @@ def snapshot(root):
             for p in root.rglob("*")}
 
 
+def inventory_rows(output):
+    return [line for line in output.splitlines() if re.match(r"[0-9a-f]{32}  ", line)]
+
+
+@pytest.fixture
+def compact_offline(local_state, monkeypatch):
+    for name in ("start", "collect", "resume_cleanup", "process_start_identity"):
+        monkeypatch.setattr(jobs, name, forbidden)
+    monkeypatch.setattr(os, "kill", forbidden)
+    monkeypatch.setattr(daemon, "loop", forbidden)
+    monkeypatch.setattr(cli.queue, "ready", forbidden)
+    return local_state
+
+
+@pytest.mark.scenario("background-job-control/historical-compaction-pass/compact-delivered-historical-attempts-only")
+@pytest.mark.scenario("background-job-control/historical-compaction-pass/explicit-cleanup-works-while-paused")
+@pytest.mark.parametrize("broken_config", [False, True])
+def test_jobs_compact_applies_to_delivered_history_only(
+    compact_offline, historical, tmp_path, monkeypatch, capsys, broken_config,
+):
+    # Reuse the service's four-stage fixture, including keyed build revisions.
+    monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
+    path, _, directory, idea = historical
+    config_path = tmp_path / "config.toml"
+    if broken_config:
+        config_path.write_text("[broken TOML")
+    daemon.PAUSE_FILE.touch()
+    pause = evidence_snapshot(daemon.PAUSE_FILE.parent)[daemon.PAUSE_FILE]
+    with ExitStack() as locks:
+        for number, state in enumerate(("live", "pending", "stopped", "released", "failed"), 1):
+            other = attempt(tmp_path, number=number, digit=str(number + 1))
+            other_receipt = {"job": other.name, "delivered": state != "pending"}
+            if state == "live":
+                fcntl.flock(locks.enter_context((other / "lock").open()), fcntl.LOCK_EX)
+            elif state in ("stopped", "released"):
+                jobs.save(other / "stop.json", {"state": "stopped"})
+                if state == "released":
+                    other_receipt.pop("job")
+            else:
+                jobs.save(other / "result.json", {"error": "failed"} if state == "failed" else {"result": {}})
+            jobs.save(other.parent.with_suffix(".json"), other_receipt)
+        rows, errors = jobs.list_jobs(tmp_path)
+        assert not errors
+        before = evidence_snapshot(tmp_path)
+        assert cli.main(["--config", str(config_path), "jobs", "compact"]) == 0
+        output = capsys.readouterr()
+        lines = inventory_rows(output.out)
+        assert len(lines) == len(rows) == 6
+        for row, line in zip(rows, lines):
+            assert line.startswith(f"{row.id}  {row.stage}  {row.repository}#{row.number}  ")
+            assert ("compacted: " if row.directory == directory else "skipped: ") in line
+            assert line.rsplit(": ", 1)[1]
+        assert output.out.endswith("Compacted: 1; skipped: 5.\n") and output.err == ""
+        assert not idea.exists() and not (directory / "log").exists()
+        after = evidence_snapshot(tmp_path)
+        for retained in before.keys() - {idea, directory / "log", directory / "request.json"}:
+            assert after[retained] == before[retained]
+        original = json.loads(before[directory / "request.json"][0])
+        minimal = json.loads((directory / "request.json").read_text())
+        assert minimal["args"] == [arg for arg in original["args"] if arg not in ("--idea-file", str(idea))]
+        assert minimal.get("round_id") == original.get("round_id")
+        assert after[directory / "request.json"][1] == before[directory / "request.json"][1]
+        after_rows, errors = jobs.list_jobs(tmp_path)
+        assert not errors
+        assert [(row.id, row.state) for row in after_rows] == [(row.id, row.state) for row in rows]
+        assert next(row.command for row in after_rows if row.directory == directory) == tuple(minimal["args"])
+        assert not path.with_suffix(".release.lock").exists()
+    assert evidence_snapshot(daemon.PAUSE_FILE.parent)[daemon.PAUSE_FILE] == pause
+
+
+@pytest.mark.scenario("background-job-control/historical-compaction-pass/unmatched-historical-identity-is-skipped")
+@pytest.mark.parametrize("identity", ["absent", "missing", "round-only", "replaced", "context", "busy"])
+def test_jobs_compact_skips_unmatched_identity(compact_offline, monkeypatch, capsys, identity):
+    path, receipt, directory, _ = delivered(compact_offline)
+    assert jobs.compact_delivered(path, receipt, prepare_only=True) == []
+    if identity == "absent":
+        path.unlink()
+    else:
+        if identity in ("missing", "round-only"):
+            receipt.pop("job")
+            if identity == "round-only":
+                receipt["round_job"] = directory.name
+        elif identity == "replaced":
+            receipt["job"] = "f" * 32
+        elif identity == "context":
+            receipt["repo"] = "another/repository"
+        jobs.save(path, receipt)
+    # Acquire the lifetime lock after inventory to exercise the under-lock refusal.
+    inventory = jobs.list_jobs
+    with (directory / "lock").open() as lock:
+        def scan(root):
+            result = inventory(root)
+            if identity == "busy":
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            return result
+        monkeypatch.setattr(jobs, "list_jobs", scan)
+        before = evidence_snapshot(compact_offline)
+        assert cli.main(["jobs", "compact"]) == 0
+        output = capsys.readouterr()
+        reason = {"absent": "missing current receipt", "context": "conflicting receipt item context",
+                  "busy": "lifetime lock is busy"}.get(identity, "receipt lacks matching exact job identity")
+        assert output.out == f"{directory.name}  proposals  o/r#8  skipped: {reason}\nCompacted: 0; skipped: 1.\n"
+        assert evidence_snapshot(compact_offline) == before
+
+
+@pytest.mark.scenario("background-job-control/historical-compaction-pass/receipt-replacement-during-cleanup-is-refused")
+@pytest.mark.parametrize("release_exists", [False, True])
+def test_jobs_compact_refuses_receipt_replacement(compact_offline, monkeypatch, capsys, release_exists):
+    path, receipt, directory, _ = delivered(compact_offline)
+    release = path.with_suffix(".release.lock")
+    if release_exists:
+        release.touch()
+    flock, order = fcntl.flock, []
+    def racing(lock, flags):
+        result = flock(lock, flags)
+        if Path(lock.name) == directory / "control.lock" or order:
+            order.append(Path(lock.name))
+        if Path(lock.name) == directory / "control.lock":
+            jobs.save(path, {**receipt, "job": "f" * 32})
+        return result
+    monkeypatch.setattr(fcntl, "flock", racing)
+    before = evidence_snapshot(directory)
+    assert cli.main(["jobs", "compact"]) == 0
+    output = capsys.readouterr()
+    assert f"{directory.name}  proposals  o/r#8  skipped: receipt changed" in output.out
+    assert output.out.endswith("Compacted: 0; skipped: 1.\n")
+    assert "receipt changed" in output.err
+    assert order == [directory / "control.lock", *([release] if release_exists else []), directory / "lock"]
+    assert evidence_snapshot(directory) == before
+    assert json.loads(path.read_text()) == {**receipt, "job": "f" * 32}
+    assert release.exists() == release_exists
+
+
+@pytest.mark.scenario("background-job-control/historical-compaction-pass/interrupted-and-repeated-passes-are-safe")
+@pytest.mark.parametrize("point", ["journal", "request", "unlink", "completion"])
+@pytest.mark.parametrize("replaced", [False, True])
+def test_jobs_compact_retry_and_repeat(compact_offline, monkeypatch, capsys, point, replaced):
+    from test_specloop_cleanup_recovery import interrupt
+    path, receipt, directory, idea = delivered(compact_offline)
+    before = evidence_snapshot(compact_offline)
+    with monkeypatch.context() as fault:
+        interrupt(fault, directory, point)
+        assert cli.main(["jobs", "compact"]) == 1
+    output = capsys.readouterr()
+    assert "skipped:" in output.out and output.out.endswith("Compacted: 0; skipped: 1.\n")
+    assert "cleanup interrupted" in output.err
+    if replaced:
+        jobs.save(path, {**receipt, "job": "f" * 32})
+    interrupted = evidence_snapshot(compact_offline)
+    assert cli.main(["jobs", "compact"]) == 0
+    output = capsys.readouterr()
+    assert output.out.endswith(f"Compacted: {int(not replaced)}; skipped: {int(replaced)}.\n")
+    assert output.err == ""
+    if replaced:
+        assert evidence_snapshot(compact_offline) == interrupted
+    else:
+        assert not idea.exists() and not (directory / "log").exists()
+        after = evidence_snapshot(compact_offline)
+        assert after[path] == before[path]
+        assert after[directory / "result.json"] == before[directory / "result.json"]
+        assert after[directory / "request.json"][1] == before[directory / "request.json"][1]
+    after = evidence_snapshot(compact_offline)
+    assert cli.main(["jobs", "compact"]) == 0
+    output = capsys.readouterr()
+    assert output.out.endswith("Compacted: 0; skipped: 1.\n") and output.err == ""
+    assert ("receipt lacks matching exact job identity" if replaced else "already compacted") in output.out
+    assert evidence_snapshot(compact_offline) == after
+
+
+@pytest.mark.scenario("background-job-control/historical-compaction-pass/report-partial-progress-and-safe-skips")
+@pytest.mark.parametrize("damage", ["warning", "malformed", "unreadable", "symlink", "filesystem"])
+def test_jobs_compact_reports_partial_progress(compact_offline, monkeypatch, capsys, damage):
+    from test_specloop_cleanup_recovery import interrupt
+    path, _, directory, idea = delivered(compact_offline)
+    healthy = delivered(compact_offline, stage="revisions", serial=2)[2]
+    if damage == "warning":
+        idea.unlink()
+        idea = directory / "idea-directory"
+        idea.mkdir()
+        (idea / "nested").write_text("retain without recursive deletion")
+        request = json.loads((directory / "request.json").read_text())
+        request["args"][-1] = str(idea)
+        jobs.save(directory / "request.json", request)
+    elif damage == "malformed":
+        path.write_text("{")
+    elif damage == "symlink":
+        original = path.with_suffix(".original")
+        path.rename(original)
+        path.symlink_to(original)
+    before = evidence_snapshot(compact_offline)
+    with monkeypatch.context() as fault:
+        if damage == "filesystem":
+            interrupt(fault, directory, "unlink")
+        if damage in ("unreadable", "symlink"):
+            opening = os.open
+            def guarded(p, *args, **kwargs):
+                if p == path:
+                    if damage == "symlink":
+                        assert args[0] & os.O_NOFOLLOW, "must not follow receipt symlinks"
+                    else:
+                        raise PermissionError("unreadable receipt")
+                return opening(p, *args, **kwargs)
+            fault.setattr(os, "open", guarded)
+        assert cli.main(["jobs", "compact"]) == int(damage != "warning")
+    output = capsys.readouterr()
+    lines = inventory_rows(output.out)
+    assert len(lines) == 2
+    assert lines[0].startswith(f"{directory.name}  proposals  o/r#8  ")
+    assert lines[1] == f"{healthy.name}  revisions  o/r#28  compacted: delivered artifacts compacted"
+    assert output.out.endswith(f"Compacted: {2 if damage == 'warning' else 1}; skipped: {0 if damage == 'warning' else 1}.\n")
+    assert not (healthy / "log").exists() and output.err
+    if damage == "warning":
+        assert "retained idea input" in output.err and str(idea) in output.err
+        assert evidence_snapshot(compact_offline)[idea / "nested"] == before[idea / "nested"]
+    else:
+        assert "skipped:" in lines[0]
+        assert str(path) in output.err
+        if damage != "filesystem":
+            assert evidence_snapshot(directory) == {p: data for p, data in before.items() if p.is_relative_to(directory)}
+    if damage == "symlink":
+        assert path.is_symlink() and evidence_snapshot(compact_offline)[original] == before[original]
+
+
+@pytest.mark.scenario("background-job-control/historical-compaction-pass/empty-compaction-is-a-no-op")
+def test_jobs_compact_empty_is_noop(compact_offline, capsys):
+    for _ in range(2):
+        assert cli.main(["jobs", "compact"]) == 0
+        output = capsys.readouterr()
+        assert output.out == "Compacted: 0; skipped: 0.\n" and output.err == ""
+        assert not compact_offline.exists()
+
+
+@pytest.fixture
+def mixed_inventory(local_state, monkeypatch):
+    monkeypatch.setattr(jobs.time, "time", lambda: 1000)
+    monkeypatch.setattr(jobs, "collect", forbidden)
+    monkeypatch.setattr(jobs, "compact_delivered", forbidden)
+    monkeypatch.setattr(os, "kill", forbidden)
+    states = ["starting", "running", "overdue", "stopping", "stopped",
+              "finished", "delivered", "failed"]
+    with ExitStack() as locks:
+        for number, state in reversed(list(enumerate(states, 1))):
+            directory = attempt(local_state, number=number, digit=str(number))
+            if state in ("running", "overdue", "stopping"):
+                jobs.save(directory / "process.json", {
+                    "version": 1, "job_id": directory.name, "pid": 1234, "pgid": 1234,
+                    "start_identity": "persisted identity", "started_at": "2026-10-21T12:00:00Z",
+                })
+                jobs.save(directory / "request.json", {
+                    "args": ["propose", "--issue", str(number)], "stage": "proposals",
+                    "started_at": 0, "timeout_seconds": 900 if state == "overdue" else 1200,
+                    "deadline_at": 900 if state == "overdue" else 1200,
+                })
+            if state in ("starting", "running", "overdue", "stopping"):
+                fcntl.flock(locks.enter_context((directory / "lock").open()), fcntl.LOCK_EX)
+            if state in ("stopping", "stopped"):
+                jobs.save(directory / "stop.json", {"state": state})
+            if state in ("finished", "delivered", "failed"):
+                jobs.save(directory / "result.json", {"error": "wrapper failed"} if state == "failed"
+                          else {"result": {"outcome": "drafted"}})
+            # Item delivery must not relabel any non-finished execution state.
+            jobs.save(directory.parent.with_suffix(".json"), {"delivered": state != "finished"})
+        before = snapshot(local_state)
+        mtimes = {p: p.stat().st_mtime_ns for p in local_state.rglob("*")}
+        yield local_state
+        assert snapshot(local_state) == before
+        assert {p: p.stat().st_mtime_ns for p in local_state.rglob("*")} == mtimes
+
+
+@pytest.mark.scenario("background-job-control/local-job-inventory/default-hides-delivered-history")
+def test_jobs_default_hides_delivered_history(mixed_inventory, capsys):
+    inventory, errors = jobs.list_jobs(mixed_inventory)
+    assert errors == [] and len(inventory) == 8
+    assert inventory[2].state == "running" and inventory[2].deadline_at < jobs.time.time()
+    assert cli.main(["jobs"]) == 0
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert inventory_rows(output.out) == [
+        f"{str(number) * 32}  proposals  owner/sample#{number}  {state}"
+        for number, state in enumerate([
+            "starting", "running", "running", "stopping", "stopped", "finished (delivery pending)"
+        ], 1)
+    ]
+    assert "7" * 32 not in output.out and "8" * 32 not in output.out
+    assert output.out.count("Hidden historical jobs: 2 (use --all to show).\n") == 1
+    assert output.out.endswith("Hidden historical jobs: 2 (use --all to show).\n")
+    assert jobs.list_jobs(mixed_inventory) == (inventory, errors)
+
+
+@pytest.mark.scenario("background-job-control/local-job-inventory/all-lists-history")
+def test_jobs_all_lists_history(mixed_inventory, capsys):
+    assert cli.main(["jobs", "--all"]) == 0
+    output = capsys.readouterr()
+    assert output.err == "" and "Hidden historical jobs:" not in output.out
+    assert inventory_rows(output.out) == [
+        f"{str(number) * 32}  proposals  owner/sample#{number}  {state}"
+        for number, state in enumerate([
+            "starting", "running", "running", "stopping", "stopped",
+            "finished (delivery pending)", "delivered", "failed"
+        ], 1)
+    ]
+    for job in jobs.list_jobs(mixed_inventory)[0]:
+        assert f"  command: propose --issue {job.number}\n" in output.out
+        assert f"  log: {job.log_path}\n" in output.out
+    assert output.out.count("PID=1234 PGID=1234\n") == 3
+    assert output.out.count("PID=? PGID=? (process identity unavailable)\n") == 5
+
+
+@pytest.mark.scenario("background-job-control/receipt-aware-delivery-display/finished-undelivered-job-reads-pending")
+@pytest.mark.parametrize("receipt", [None, {}, {"delivered": False}])
+@pytest.mark.parametrize("paused", [False, True])
+def test_finished_undelivered_job_reads_pending(local_state, capsys, receipt, paused):
+    directory = attempt(local_state)
+    jobs.save(directory / "result.json", {"result": {"outcome": "drafted"}})
+    jobs.save(directory / "collected.json", {"at": "long ago"})
+    jobs.save(directory / "cleanup.json", {"complete": True})
+    os.utime(directory / "request.json", (1, 1))
+    if receipt is not None:
+        jobs.save(directory.parent.with_suffix(".json"), receipt)
+    if paused:
+        daemon.PAUSE_FILE.touch()
+    before = snapshot(local_state)
+    for options in ([], ["--all"]):
+        assert cli.main(["jobs", *options]) == 0
+        output = capsys.readouterr()
+        assert inventory_rows(output.out) == [
+            f"{directory.name}  proposals  owner/sample#7  finished (delivery pending)"]
+        assert "Hidden historical jobs:" not in output.out and output.err == ""
+    assert daemon.PAUSE_FILE.exists() == paused
+    assert snapshot(local_state) == before
+
+
+@pytest.mark.scenario("background-job-control/receipt-aware-delivery-display/delivered-item-history-reads-delivered")
+@pytest.mark.scenario("background-job-control/local-job-inventory/only-history-remains")
+@pytest.mark.parametrize("identity", [{}, {"job": "b" * 32}])
+def test_delivered_item_history_reads_delivered(local_state, capsys, identity):
+    for digit in ("a", "b", "c"):
+        directory = attempt(local_state, digit=digit)
+        jobs.save(directory / "result.json", {"error": "failed"} if digit == "c" else {"result": {}})
+    jobs.save(directory.parent.with_suffix(".json"), {"delivered": True, **identity})
+    before = snapshot(local_state)
+    assert cli.main(["jobs"]) == 0
+    output = capsys.readouterr()
+    assert output.out == "No active background jobs.\nHidden historical jobs: 3 (use --all to show).\n"
+    assert output.err == ""
+    assert cli.main(["jobs", "--all"]) == 0
+    output = capsys.readouterr()
+    assert inventory_rows(output.out) == [
+        f"{digit * 32}  proposals  owner/sample#7  {state}"
+        for digit, state in [("a", "delivered"), ("b", "delivered"), ("c", "failed")]]
+    assert output.err == "" and "Hidden historical jobs:" not in output.out
+    # Display delivery cannot compact even the matching attempt's evidence.
+    assert snapshot(local_state) == before
+
+
+@pytest.mark.scenario("background-job-control/receipt-aware-delivery-display/damaged-receipt-stays-visible")
+@pytest.mark.parametrize("damage", ["malformed", "unreadable", "symlink", "array", "null", "number", "string"])
+def test_damaged_receipt_stays_visible(local_state, monkeypatch, capsys, damage):
+    directory = attempt(local_state)
+    jobs.save(directory / "result.json", {"result": {}})
+    failed = attempt(local_state, digit="b")
+    jobs.save(failed / "result.json", {"error": "wrapper failed"})
+    healthy = attempt(local_state, number=8, digit="c")
+    jobs.save(healthy / "stop.json", {"state": "stopped"})
+    receipt = directory.parent.with_suffix(".json")
+    receipt.write_text({
+        "malformed": "{", "array": "[]", "null": '{"delivered": null}',
+        "number": '{"delivered": 1}', "string": '{"delivered": "true"}',
+        "unreadable": '{"delivered": true}', "symlink": '{"delivered": true}',
+    }[damage])
+    if damage == "symlink":
+        target = local_state / "receipt-target.json"
+        receipt.rename(target)
+        receipt.symlink_to(target)
+    open_file = os.open
+    def guarded_open(path, flags, *args, **kwargs):
+        if path == receipt:
+            assert flags & os.O_NOFOLLOW
+            if damage == "unreadable":
+                raise PermissionError("receipt access denied")
+        return open_file(path, flags, *args, **kwargs)
+    monkeypatch.setattr(os, "open", guarded_open)
+    before = snapshot(local_state)
+    mtimes = {p: p.lstat().st_mtime_ns for p in local_state.rglob("*")}
+    for options in ([], ["--all"]):
+        assert cli.main(["jobs", *options]) == 1
+        output = capsys.readouterr()
+        assert inventory_rows(output.out) == [
+            f"{directory.name}  proposals  owner/sample#7  finished (delivery pending)",
+            f"{failed.name}  proposals  owner/sample#7  failed",
+            f"{healthy.name}  proposals  owner/sample#8  stopped",
+        ]
+        assert "Hidden historical jobs:" not in output.out
+        assert str(receipt) in output.err
+        assert output.err.count("unreadable job:") == 1
+    assert snapshot(local_state) == before
+    assert {p: p.lstat().st_mtime_ns for p in local_state.rglob("*")} == mtimes
+    if damage == "symlink":
+        assert receipt.is_symlink() and receipt.resolve() == target
+
+
+@pytest.mark.scenario("background-job-control/receipt-aware-delivery-display/delivered-item-history-reads-delivered")
+def test_delivered_record_with_diagnostics_stays_visible(local_state, capsys):
+    directory = attempt(local_state)
+    jobs.save(directory / "result.json", {"result": {}})
+    jobs.save(directory.parent.with_suffix(".json"), {"delivered": True})
+    (directory / "request.json").write_text("{")
+    before = snapshot(local_state)
+    for options in ([], ["--all"]):
+        assert cli.main(["jobs", *options]) == 1
+        output = capsys.readouterr()
+        assert inventory_rows(output.out) == [f"{directory.name}  proposals  owner/sample#7  unknown"]
+        assert "No active background jobs." not in output.out and "Hidden historical jobs:" not in output.out
+        assert str(directory) in output.err and "request.json" in output.err
+    assert snapshot(local_state) == before
+
+
 @pytest.mark.scenario("background-job-control/local-job-inventory/list-jobs-after-daemon-restart")
 @pytest.mark.scenario("specloop-documentation/current-limitations/fixed-limitations-leave-the-open-list")
-def test_jobs_lists_persisted_fields_history_and_numeric_order(local_state, capsys):
+@pytest.mark.parametrize("options", [[], ["--all"]])
+def test_jobs_lists_persisted_fields_history_and_numeric_order(local_state, capsys, options):
     directories = []
     with ExitStack() as locks:
         for stage, command, digit, number in [
@@ -70,7 +490,7 @@ def test_jobs_lists_persisted_fields_history_and_numeric_order(local_state, caps
         jobs.save(historical.parent.parent / "10.json", {"job": "b" * 32})
         before = snapshot(local_state)
         assert not jobs._children
-        assert cli.main(["jobs"]) == 0
+        assert cli.main(["jobs", *options]) == 0
         output = capsys.readouterr()
         assert output.err == ""
         for directory, stage, command, number in directories:
@@ -79,7 +499,7 @@ def test_jobs_lists_persisted_fields_history_and_numeric_order(local_state, caps
             assert f"PID={1234 + number} PGID={1234 + number}" in output.out
             assert f"log: {directory / 'log'}" in output.out
         assert f"{historical.name}  proposals  owner/sample#10  finished" in output.out
-        assert "execution complete; delivery may be pending" in output.out
+        assert "finished (delivery pending)" in output.out
         rows = [line.split()[0] for line in output.out.splitlines() if not line.startswith(" ")]
         assert rows == [digit * 32 for digit in ("a", "d", "0", "b", "c")]
         assert snapshot(local_state) == before
@@ -87,10 +507,11 @@ def test_jobs_lists_persisted_fields_history_and_numeric_order(local_state, caps
 
 @pytest.mark.scenario("background-job-control/local-job-inventory/empty-inventory")
 @pytest.mark.parametrize("exists", [False, True])
-def test_jobs_empty_does_not_create_state(local_state, capsys, exists):
+@pytest.mark.parametrize("options", [[], ["--all"]])
+def test_jobs_empty_does_not_create_state(local_state, capsys, exists, options):
     if exists:
         local_state.mkdir()
-    assert cli.main(["jobs"]) == 0
+    assert cli.main(["jobs", *options]) == 0
     output = capsys.readouterr()
     assert output.out == "No background jobs.\n" and output.err == ""
     assert local_state.exists() == exists
@@ -99,7 +520,8 @@ def test_jobs_empty_does_not_create_state(local_state, capsys, exists):
 
 @pytest.mark.scenario("background-job-control/local-job-inventory/legacy-and-unreadable-records")
 @pytest.mark.parametrize("broken", ["malformed", "unreadable"])
-def test_jobs_partial_inventory_reports_errors_and_keeps_legacy(local_state, monkeypatch, capsys, broken):
+@pytest.mark.parametrize("options", [[], ["--all"]])
+def test_jobs_partial_inventory_reports_errors_and_keeps_legacy(local_state, monkeypatch, capsys, broken, options):
     legacy = attempt(local_state)
     jobs.save(legacy / "result.json", {"result": {"outcome": "drafted"}})
     valid = attempt(local_state, digit="b")
@@ -116,7 +538,7 @@ def test_jobs_partial_inventory_reports_errors_and_keeps_legacy(local_state, mon
                     raise PermissionError("permission denied reading request.json")
                 return read_text(path, *args, **kwargs)
             patch.setattr(Path, "read_text", read)
-        assert cli.main(["jobs"]) == 1
+        assert cli.main(["jobs", *options]) == 1
     output = capsys.readouterr()
     assert f"{legacy.name}  proposals  owner/sample#7  finished" in output.out
     assert "PID=? PGID=? (process identity unavailable)" in output.out
@@ -128,25 +550,29 @@ def test_jobs_partial_inventory_reports_errors_and_keeps_legacy(local_state, mon
     assert snapshot(local_state) == before
 
 
-def test_inventory_errors_without_rows_are_not_reported_as_empty(local_state, capsys):
+@pytest.mark.scenario("background-job-control/local-job-inventory/only-history-remains")
+@pytest.mark.parametrize("options", [[], ["--all"]])
+def test_inventory_errors_without_rows_are_not_reported_as_empty(local_state, capsys, options):
     attempt(local_state, digit="z")
-    assert cli.main(["jobs"]) == 1
+    assert cli.main(["jobs", *options]) == 1
     output = capsys.readouterr()
     assert output.out == ""
     assert "unreadable job:" in output.err
 
 
 @pytest.mark.parametrize("broken_config", [False, True])
-@pytest.mark.parametrize("stop", [False, True])
-def test_jobs_work_with_missing_or_broken_config_offline(local_state, tmp_path, capsys, broken_config, stop):
+@pytest.mark.parametrize("action", ["list", "all", "stop"])
+def test_jobs_work_with_missing_or_broken_config_offline(local_state, tmp_path, capsys, broken_config, action):
     path = tmp_path / "config.toml"
     if broken_config:
         path.write_text("[broken TOML")
     directory = attempt(local_state)
     jobs.save(directory / "result.json", {"result": {}})
     args = ["--config", str(path), "jobs"]
-    if stop:
+    if action == "stop":
         args += ["stop", directory.name]
+    elif action == "all":
+        args += ["--all"]
     assert cli.main(args) == 0
     output = capsys.readouterr()
     assert directory.name in output.out and output.err == ""
@@ -158,6 +584,14 @@ def test_jobs_work_with_missing_or_broken_config_offline(local_state, tmp_path, 
     ["jobs", "unknown"], ["jobs", "stop"], ["jobs", "list"],
     ["jobs", "stop", "a" * 32, "extra"], ["jobs", "unknown", "a" * 32],
     ["jobs", "--unknown"], ["status", "stop", "a" * 32], ["pause", "extra"],
+    ["jobs", "release"], ["jobs", "release", "a" * 32, "extra"],
+    ["jobs", "compact", "a" * 32], ["jobs", "compact", "--all"],
+    ["jobs", "compact", "../outside"], ["jobs", "compact", "a" * 32, "extra"],
+    ["--all", "jobs", "compact"], ["jobs", "--all", "stop"],
+    ["jobs", "stop", "a" * 32, "--all"], ["jobs", "--all", "release", "a" * 32],
+    *[[command, "--all"] for command in (
+        "status", "pause", "resume", "run", "reconcile", "preflight", "digest", "attention")],
+    ["--all"],
     pytest.param(["jobs", "retry", "a" * 32], marks=pytest.mark.scenario(
         "specloop-documentation/current-limitations/remaining-ledger-gaps-are-explicit")),
 ])
@@ -166,7 +600,13 @@ def test_malformed_jobs_syntax_has_no_side_effects(local_state, monkeypatch, cap
     before = snapshot(local_state)
     monkeypatch.setattr(jobs, "list_jobs", forbidden)
     monkeypatch.setattr(jobs, "stop_job", forbidden)
-    with pytest.raises(SystemExit) as exc:
+    monkeypatch.setattr(jobs, "release_job", forbidden)
+    monkeypatch.setattr(jobs, "compact_history", forbidden)
+    with monkeypatch.context() as patch, pytest.raises(SystemExit) as exc:
+        patch.setattr(Path, "read_text", forbidden)
+        patch.setattr(Path, "open", forbidden)
+        patch.setattr(os, "open", forbidden)
+        patch.setattr(jobs, "save", forbidden)
         cli.main(args)
     assert exc.value.code == 2
     output = capsys.readouterr()
@@ -176,15 +616,19 @@ def test_malformed_jobs_syntax_has_no_side_effects(local_state, monkeypatch, cap
 
 
 @pytest.mark.scenario("background-job-control/job-command-syntax/reject-path-identifier")
+@pytest.mark.parametrize("action", ["stop", "release"])
 @pytest.mark.parametrize("identifier", ["../outside", "/tmp/outside", "./" + "a" * 32,
-                                         "a/../" + "a" * 32, "..", "a" * 8])
-def test_path_ids_are_rejected_before_reading_state(local_state, monkeypatch, capsys, identifier):
+                                         "a/../" + "a" * 32, "..", "a" * 8, "../" + "a" * 32])
+def test_path_ids_are_rejected_before_reading_state(local_state, monkeypatch, capsys, identifier, action):
     attempt(local_state)
     before = snapshot(local_state)
     with monkeypatch.context() as patch:
         patch.setattr(jobs, "list_jobs", forbidden)
         patch.setattr(Path, "read_text", forbidden)
-        assert cli.main(["jobs", "stop", identifier]) == 1
+        patch.setattr(Path, "open", forbidden)
+        patch.setattr(os, "open", forbidden)
+        patch.setattr(os, "kill", forbidden)
+        assert cli.main(["jobs", action, identifier]) == 1
     output = capsys.readouterr()
     assert "exact full job ID" in output.err and output.out == ""
     assert snapshot(local_state) == before
@@ -295,9 +739,9 @@ def status_state(local_state, monkeypatch, capsys):
     monkeypatch.setattr(cli.queue, "contradictions", lambda *args: [])
     reads, before_network = [], []
     list_jobs = jobs.list_jobs
-    def inventory(root):
+    def inventory(root, *, include_delivery=False):
         reads.append(root)
-        return list_jobs(root)
+        return list_jobs(root, include_delivery=include_delivery)
     def ready(*args):
         assert reads == [local_state]
         before_network.append(capsys.readouterr())
@@ -325,11 +769,15 @@ def test_status_empty_inventory_preserves_worker_output(status_state, capsys, ar
 
 @pytest.mark.scenario("background-job-control/active-jobs-in-status/active-attempts-are-visible")
 @pytest.mark.scenario("specloop-documentation/active-job-status-guidance/operator-reads-job-status")
+@pytest.mark.parametrize("history_args", [
+    shlex.split(re.search(r"`nightshift (jobs --all)`", (Path(__file__).resolve().parents[1] / path).read_text())[1])
+    for path in ("README.md", "docs/specloop/README.md")
+])
 @pytest.mark.parametrize("args", [[], ["status"], *[
     shlex.split(re.search(r"`nightshift (status)`", (Path(__file__).resolve().parents[1] / path).read_text())[1])
     for path in ("README.md", "docs/specloop/README.md")
 ]])
-def test_status_active_jobs_before_network(status_state, capsys, args):
+def test_status_active_jobs_before_network(status_state, capsys, args, history_args):
     root, before_network = status_state
     with ExitStack() as locks:
         for digit, stage, command, state, start, deadline in [
@@ -374,11 +822,17 @@ def test_status_active_jobs_before_network(status_state, capsys, args):
         assert "enrolled/repo: 1 working, 0 ready, 0 blocked" in output.out
         assert ">> #42 Worker title  (claimed, ? on worker-branch)" in output.out
         assert "worker progress" in output.out
-        assert cli.main(["jobs"]) == 0
+        assert cli.main(history_args) == 0
         history = capsys.readouterr().out
         for digit, state in [("f", "finished"), ("0", "failed"), ("1", "stopped")]:
             assert digit * 32 not in early.out + output.out
             assert f"{digit * 32}  proposals  owner/sample#7  {state}" in history
+        assert cli.main(["jobs"]) == 0
+        default = capsys.readouterr().out
+        assert "0" * 32 not in default
+        for digit, state in [("f", "finished (delivery pending)"), ("1", "stopped")]:
+            assert f"{digit * 32}  proposals  owner/sample#7  {state}" in default
+        assert default.endswith("Hidden historical jobs: 1 (use --all to show).\n")
         assert snapshot(root) == before
 
 
