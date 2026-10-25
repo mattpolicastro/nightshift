@@ -6,7 +6,7 @@ Unify build and daemon commands while preserving automation and frozen service c
 
 ### Requirement: Canonical build commands
 
-The nightshift CLI SHALL expose every existing build command with its arguments, outcomes and JSON contract, making build status the default command.
+The nightshift CLI SHALL expose every existing build command with its arguments, outcomes and JSON contract, making build status the default command. The unchanged `specloop-interface` JSON contracts SHALL apply to both `specloop … --json` and `nightshift … --json`.
 
 #### Scenario: Build commands retain their contract
 - **WHEN** canonical admit, propose, revise, act, status, publish or other build commands are parsed and dispatched
@@ -20,6 +20,10 @@ The nightshift CLI SHALL expose every existing build command with its arguments,
 - **WHEN** existing status and argparse tests invoke nightshift.cli.main with explicit or process argv after the alias is installed
 - **THEN** canonical status retains exact JSON and empty stderr, help uses the nightshift program name with empty stderr, and errors retain exit codes, JSON-token/terminator rules, side-effect guards and propagated handler exceptions
 - **THEN** empty human argv selects build status, while lone --json and unsupported global --json syntax still fail before dispatch; alias notices are asserted separately without relaxing canonical checks
+
+#### Scenario: Both names honor machine contracts
+- **WHEN** existing specloop-interface JSON contract fixtures exercise equivalent canonical and alias commands against isolated state
+- **THEN** both satisfy the existing contracts with equivalent stdout documents and exit codes; the alias notice appears only on stderr
 
 ### Requirement: Explicit daemon controls
 
@@ -52,8 +56,17 @@ The installed specloop script and specloop.cli module SHALL forward to the canon
 
 ### Requirement: Canonical internal callers
 
-Python subprocess callers SHALL use canonical nightshift commands while preserving interpreter provenance, argument boundaries, injectable runners and existing request schemas.
+Only the status/finish subprocess calls in nightshift/land.py and driver child argv in specloop/serve.py SHALL migrate to canonical nightshift commands in this change, preserving interpreter provenance, argument boundaries, injectable runners and request schemas.
 
 #### Scenario: Calls retain request identity
-- **WHEN** daemon client, background revise and supervisor driver calls are constructed
-- **THEN** only executable/module spelling changes; command arguments, round IDs, feedback-file boundaries, timeouts and result validation remain unchanged
+- **WHEN** landing status/finish calls and supervisor run CHANGE children are constructed
+- **THEN** they use the current interpreter with -m nightshift.cli, changing only module spelling while retaining arguments, timeouts, result validation and landing gates
+
+### Requirement: Alias routed daemon callers
+
+Daemon-side callers whose existing requirements prescribe specloop invocations without a delta in this change SHALL retain those invocations through the one-release alias, preserving stdout JSON and exit handling.
+
+#### Scenario: Daemon calls parse JSON despite notice
+- **WHEN** intake, background revision, attention and deploy status paths receive alias output with one stdout JSON document and a stderr rename notice
+- **THEN** their existing specloop argv remain unchanged and their parsers accept that one document under the existing success, structured-refusal and error contracts without treating the notice as JSON or a failure
+- **THEN** existing request identity, feedback-file and round-ID boundaries, timeouts, stale handling and deploy safeguards remain unchanged
