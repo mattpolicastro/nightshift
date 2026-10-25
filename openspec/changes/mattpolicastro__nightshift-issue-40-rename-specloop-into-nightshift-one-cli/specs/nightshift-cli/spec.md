@@ -16,6 +16,11 @@ The nightshift CLI SHALL expose every existing build command with its arguments,
 - **WHEN** invalid canonical arguments include an exact --json token before a standalone --
 - **THEN** one version-1 error document is printed to stdout with exit 2 before any handler runs; non-JSON errors and help retain their existing behavior
 
+#### Scenario: Canonical tests retain output contracts
+- **WHEN** existing status and argparse tests invoke nightshift.cli.main with explicit or process argv after the alias is installed
+- **THEN** canonical status retains exact JSON and empty stderr, help uses the nightshift program name with empty stderr, and errors retain exit codes, JSON-token/terminator rules, side-effect guards and propagated handler exceptions
+- **THEN** empty human argv selects build status, while lone --json and unsupported global --json syntax still fail before dispatch; alias notices are asserted separately without relaxing canonical checks
+
 ### Requirement: Explicit daemon controls
 
 The CLI SHALL expose daemon run/status/pause/resume under the daemon group, preserve noncolliding front-door commands, and accept bare nightshift run as the sole implicit daemon compatibility form.
@@ -38,7 +43,8 @@ The installed specloop script and specloop.cli module SHALL forward to the canon
 
 #### Scenario: Specloop alias forwards
 - **WHEN** specloop or python -m specloop.cli receives existing valid command arguments including a quoted note and --json
-- **THEN** test_specloop_alias_forwards verifies the canonical handler receives the same argv, the rename notice appears only on stderr, stdout is unchanged JSON and the canonical exit code is returned
+- **THEN** test_specloop_alias_forwards verifies the canonical handler receives the same argv, exactly one rename notice appears only on stderr, stdout is unchanged JSON and the canonical exit code is returned
+- **THEN** separate help and argument-error cases retain canonical stdout and exit behavior with one additional stderr notice each
 
 #### Scenario: Packaging retains frozen callers
 - **WHEN** project script declarations and wheel contents are inspected and alias serve is parsed
@@ -51,4 +57,3 @@ Python subprocess callers SHALL use canonical nightshift commands while preservi
 #### Scenario: Calls retain request identity
 - **WHEN** daemon client, background revise and supervisor driver calls are constructed
 - **THEN** only executable/module spelling changes; command arguments, round IDs, feedback-file boundaries, timeouts and result validation remain unchanged
-

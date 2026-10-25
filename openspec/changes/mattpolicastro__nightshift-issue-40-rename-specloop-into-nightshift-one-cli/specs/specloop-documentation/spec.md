@@ -12,6 +12,16 @@ Active operator documentation SHALL use canonical command forms, explain the ali
 - **WHEN** README, the build guide and command-JSON guide describe status, run and pause/resume
 - **THEN** examples distinguish daemon controls from build controls and retain schemas, operational boundaries, issue citations and valid links
 
+#### Scenario: Executable examples retain regression coverage
+- **WHEN** the keyed revision guide and direct supervisor README example switch to canonical commands
+- **THEN** existing documentation tests select and execute the canonical revision example, preserving schema/table agreement, keyed replay and later-state snapshots, and changed-feedback refusal
+- **THEN** direct supervisor assertions expect nightshift serve with unchanged configured executable/cwd/environment and shell-syntax coverage, while frozen-wrapper argv, bootstrap and credential assertions stay intact
+
+#### Scenario: Example config points to daemon status
+- **WHEN** config.example.toml explains daemon output and how to check alerting
+- **THEN** both examples use nightshift daemon status and structural checks confirm daemon-status handler selection, while the complete TOML remains valid with unchanged settings, defaults and enrollment semantics
+- **THEN** direct supervisor guidance uses nightshift serve and the comment examples follow the same deterministic command checks as the guides
+
 ### Requirement: Safe migration guidance
 
 Setup and deployment guidance SHALL prescribe stopped-supervisor migration and inspection before restart/resume, preserve frozen-wrapper prerequisites, and identify live checks as human checks.
@@ -46,7 +56,7 @@ Current guidance in allowed documentation SHALL explain sole-engine enrollment a
 #### Scenario: New enrollment follows one engine
 - **WHEN** an operator follows README, config.example.toml and the specloop guide
 - **THEN** the runnable example enrolls a specloop repository with a trusted manifest and explains omission defaults, explicit worker rejection and inert obsolete settings
-- **THEN** it explains repository-local holds for missing or unusable manifests and removal of worker status output, including the off-subscription model report, while all other status output remains unchanged
+- **THEN** it explains repository-local holds for missing or unusable manifests and removal of worker status output, including the off-subscription model report, while all other daemon status output remains unchanged under nightshift daemon status
 - **THEN** direct Python front-door instructions do not require worker verification strings, endpoint models or OAuth; manifest providers retain their own requirements
 - **THEN** bundled service instructions explicitly retain the frozen daemon wrapper's env-file, worker OAuth, GH_TOKEN and gh/claude/pnpm/node/git/swift checks, distinguishing direct invocation from service startup without claiming Python changes bypass shell checks
 
@@ -57,4 +67,3 @@ Current guidance in allowed documentation SHALL explain sole-engine enrollment a
 - **THEN** live config, plist and external-caller inspection remains a pre-merge human checklist, never a claimed CI result
 - **THEN** it describes guarded migration without claiming host checks performed, safety on the live machine, rollback of remote effects or automatic restart of interrupted worker work
 - **THEN** it identifies obsolete worker instructions/metadata in frozen CLAUDE.md and pyproject.toml, historical worker documents and their removed-source references, and resolved type-baseline entries as deferred cleanup outside the implementation allowance
-
