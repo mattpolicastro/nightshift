@@ -123,3 +123,11 @@ Readiness SHALL reconcile mutually exclusive `merge:ready` and `merge:blocked` l
 - **WHEN** pause interrupts readiness operations or a label/comment write fails
 - **THEN** no later external operation begins while paused and readiness remains incomplete until eligible recovery
 - **THEN** publication stays delivered, run and revision state remain unchanged, and no label is created automatically
+
+### Requirement: Human check source
+
+The human-check section SHALL be the PR body's `## Checks a human must make` section when present. Otherwise, for a front-door PR whose body is the spec PR's, it SHALL be the publication's recorded `checks`, ignoring the ready-to-publish header line and the `Next:` line.
+
+#### Scenario: Front door publication supplies the checklist
+- **WHEN** a front-door PR's body has no human-check section and its publication's recorded checks contain only the ready-to-publish header
+- **THEN** the human-check condition passes; unexpected lines in those checks block as unknown
