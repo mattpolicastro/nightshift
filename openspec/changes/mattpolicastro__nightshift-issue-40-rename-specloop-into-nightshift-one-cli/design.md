@@ -1,0 +1,112 @@
+## Context
+
+The checkout includes #16's worker retirement. `nightshift/cli.py` implements front-door commands; `specloop/cli.py` implements build commands. Their run/status/pause/resume verbs collide. The frozen wrappers execute `/opt/homebrew/bin/uv run nightshift run` and `/opt/homebrew/bin/uv run --no-sync specloop serve`. All `bin/**` and `launchd/**` files remain unchanged.
+
+Build paths currently come from import-time `specloop.state.ROOT`, independent `agents.homes_dir()`, literal report defaults and `nightshift.deploy.Context.supervisor_state`. The daemon already owns `~/.nightshift`, including repository-keyed proposal receipts. Migration must merge disjoint immediate children without overwriting this evidence. Run locks use flock on a run-local inode; supervisor liveness currently uses heartbeat/PID checks without a serve lock.
+
+`verify.profile()` currently adds built-in credential denials only during preparation. Real-path sandbox matching means directory denials miss external auth symlink targets. `Manifest` currently drops profiles unused by roles. Revision crash fixtures pin legacy paths in every child and must be migrated along with startup activation.
+
+## Goals / Non-Goals
+
+Provide one canonical CLI, safe resumable relocation, read-only fallback, and manifest-independent credential protection. Preserve state/event bytes, Git evidence, identities, control state, JSON schemas and unaffected assertions.
+
+Do not edit wrappers/plists, trusted manifests, CI configuration, lockfiles or live state. Do not bulk-rename internal modules, configuration directories, refs or enrollment values. Keep docs paths such as `docs/specloop/` stable. This does not guarantee protection from detached old writers, whole-migration atomicity, automatic rollback or power-loss durability.
+
+## Decisions
+
+### Routing and compatibility
+
+Expose a side-effect-free parser construction seam in `nightshift/cli.py`; reuse build parser/handlers in `specloop/cli.py` without recursive forwarding. Keep internal modules and the existing pyproject script targets/package list.
+
+| Invocation | Dispatch |
+| --- | --- |
+| `nightshift run CHANGE` | Build driver |
+| Bare `nightshift run`, including daemon --once/--config | Daemon run; sole implicit daemon compatibility exception |
+| `nightshift daemon run` | Same daemon function as bare run |
+| `nightshift status [CHANGE]`, or no arguments | Build status |
+| `nightshift pause CHANGE`, `resume CHANGE` | Build controls; missing CHANGE is an argument error |
+| `nightshift daemon status`, `pause`, `resume` | Existing daemon controls; daemon alone defaults to daemon status |
+| admit/propose/revise/act/accept/waive/abort/publish/finish/drill/serve | Existing build syntax at top level |
+| jobs/attention/preflight/reconcile/digest | Existing noncolliding front-door commands |
+| `nightshift migrate` | Migration only; exits without scheduler work |
+
+Daemon-only options on `run CHANGE` fail parsing. No other missing build operand dispatches to the daemon. Preserve daemon env-file loading, config-independent daemon pause/resume, offline jobs, help and exit codes. Keep the exact `--json` token before standalone `--` argument-error contract and one stdout JSON document. Read-only commands/help do not migrate or create state.
+
+For one release `specloop` and `python -m specloop.cli` print the rename notice only to stderr and forward argv to the canonical dispatcher. Existing valid build invocations preserve results and status; no shell or extra process is needed for forwarding. Internal imports remain valid. Canonical Python callers use nightshift; landing and supervisor children use `[sys.executable, "-m", "nightshift.cli", ...]` to preserve interpreter provenance. Alias removal and wrapper modernization are follow-ups.
+
+### Lazy state interfaces and isolation
+
+Add `state_root()`, `legacy_root()`, `runs_dir()`, `run_dir(change)`, `iter_run_dirs()`, `proposals_dir()`, `homes_dir()` and heartbeat lookup in `specloop/state.py`. Defaults are host home plus .nightshift/.specloop. `ROOT = None` delegates lazily; explicitly patched state.ROOT remains a test override. Trusted absolute `NIGHTSHIFT_STATE_ROOT` and `NIGHTSHIFT_LEGACY_STATE_ROOT` propagate roots to subprocesses; reject blank/relative overrides. These settings never come from RPC or candidate inputs. `agents.homes_dir()` delegates to the resolver.
+
+Named reads prefer existing canonical state, then legacy state, then the canonical path for a new run. Discovery yields a name-sorted union once per change, deduplicates migration links and retains per-run errors. Distinct unjournaled duplicates block writes/migration and produce read diagnostics rather than hiding evidence. Journal identity resolves the rename/link interruption gap without repairing it during reads. Explicit report roots retain single-root behavior. Reads never create directories, repair journals or load credentials. Existing legacy writes use their resolved directory/lock; new entries use canonical paths.
+
+Add an autouse temporary HOME and both root overrides in `tests/conftest.py`, coordinated with existing daemon/outcome/heartbeat/pause fixtures and local state.ROOT patches. Patch relevant import-time daemon constants to this temporary tree. Children explicitly inherit or replace these temporary settings. A guard intercepts filesystem operations against the actual home's lexical/canonical state paths and fails before access; child probes verify inherited isolation. Capturing forbidden path names must not read their directories. No test reads or copies live state.
+
+Migrate `tests/test_daemon_retirement.py:207,411–412` onto lazy resolver/temporary-home assertions. Preserve the exact wrapper argv/bootstrap/credential assertions at :416/:429 and `tests/test_host_portability_docs.py:140–146`.
+
+### Exclusion
+
+Add `specloop/state_locks.py`. Keep a stable coordination lock at `<legacy_root>/.migration.lock`: upgraded writers acquire shared ownership before resolving paths and retain it throughout the operation, including proposal and agent-home users. Migration acquires exclusive ownership nonblocking. Pending incomplete journals block ordinary writers with the recovery command; only migration recovers them. Reads remain read-only.
+
+Serve holds `<legacy_root>/serve.lock` exclusively for its entire lifetime, including --once. Migration obtains serve lock, then coordination lock, then all legacy and journaled destination run locks sorted by change; retain them through relocation. Never rename/unlink the global lock files. A second supervisor/migrate refuses clearly instead of waiting indefinitely. Check both root heartbeats for old supervisors lacking the new lock: a live PID, permission-denied probe or malformed/uncertain heartbeat blocks migration conservatively. Known-dead heartbeat evidence is retained until normal startup replaces its heartbeat.
+
+Before any entry moves, acquire every existing real legacy run's lock inode nonblocking. A held lock refuses the entire migration with the change name and pause/stop/retry guidance; no runs/proposals/homes entry changes and no completion marker appears. Creating stable coordination lock files is permitted during refusal; entry journal intent is written only after preflight succeeds. New supervisor heartbeat is canonical serve.json, separate from daemon heartbeat.json; readers/deploy use canonical-first legacy fallback. Global lock order, including serve startup's reuse of its owned serve lock, must avoid self-deadlock.
+
+### Relocation and process recovery
+
+Add `specloop/migrate.py`. Migration returns 0 for complete/no-op and 1 for refusal/incomplete recovery; errors identify affected paths without credential contents. There is no force flag, network use, configuration requirement or scheduler call.
+
+Use `<canonical_root>/.specloop-migration-v1.json` as an atomic journal and `<legacy_root>/.migrated-to-nightshift-v1.json` as completion marker. Journal version, root identities, relative entry paths, device/inode identities, original symlink destinations and phases. Write the completion marker only after every entry and compatibility link completes. A valid marker makes later calls no-ops without rescanning/moving late legacy artifacts. Malformed/mismatched markers refuse. Empty legacy state completes once; interrupted attempts resume the existing journal.
+
+Preflight every immediate child of runs/, proposals/ and homes/. Never replace these parent directories or overwrite existing canonical daemon receipts, outcomes, claims, jobs, admissions, revisions or pause. Accept existing destinations only when journal identity proves the same moved entry or a completed legacy link points there. Otherwise refuse without content-based guessing. Refuse unsupported top-level symlinks, traversal, overlapping roots, unreadable evidence and cross-device relocation before moving anything. No copy/delete fallback.
+
+For each entry: persist intent and symlink plan, rewrite relative symlinks whose targets escape that entry to absolute original destinations, atomically rename on the same filesystem, then create an absolute compatibility symlink at the old path. Internal relative links remain relative. Determine external destinations from original parents, including dangling targets; never copy credential bytes. Compatibility links preserve immutable manifest/receipt/log paths and worktree metadata; do not recursively rewrite historical text. Renaming run directories preserves lock inodes. Keep legacy parents and per-entry links for the fallback release.
+
+Each rewrite, rename, link and marker step has an idempotent phase/identity check. Fresh-process recovery recognizes source-only, moved-but-unlinked and linked-but-unmarked states. Refuse both-missing, conflicting or corrupt evidence without deleting either side. A partly rewritten source stays readable; writers wait for recovery. Test process exits around each transition, without claiming power-loss durability.
+
+### Activation and crash fixtures
+
+Land resolver, exclusion, relocation and recovery before activation. Automatic migration runs only at serve startup, before polling/spawning, reusing the held serve lock. Other commands use resolver fallback without implicitly migrating. Startup migration is a fallback, not the rollout procedure.
+
+`nightshift migrate` refuses while a live supervisor holds the serve lock, including alias-launched serve. Runs paused for infra or usage_limit with due deadlines stay byte-for-byte paused; migration appends no auto-resume event and spawns no driver. Never prescribe serve --once for migration.
+
+First migrate basic root assertions and isolated child overrides alongside the resolver in task 2.1, so no intermediate task breaks the suite. Task 2.7 then migrates `tests/test_revision_crash_subprocess.py:36–37,83–97,104–108` for relocation before activation in 2.8: derive run paths in each child through the resolver instead of fixed ROOT/RUN_DIR literals, and refresh parent Run/repo handles after relocation. Preserve prepared/ref/completed crash exits, candidate source/interpreter/PATH-sentinel assertions, keyed replay, one-round/one-event checks and later paused/aborted/done state. Fixtures generate sanitized real-shaped state in temporary directories: multiple repositories (including Phreak/Compact Mixer identities), Git objects/refs, manifest copies, attempt evidence, proposal receipts, revision journals/history, credential sentinel links and a subprocess-held lock. They never read live ~/.specloop.
+
+### Unconditional credential denials
+
+In verify.py, apply every CREDENTIAL_DIRS entry in both ordinary verification and preparation. Include both homes paths and resolved homes_dir(), with lexical and real-path denials. Glob all home-level .codex* directories on each profile build and deny their lexical/real paths. Retain every manifest profile's auth target, including unused profiles and fallback chains, in a Manifest field; deny expanded and resolved paths. Also deny resolved default .codex/auth.json and external auth.json link targets in agent/Codex homes. Use metadata/readlink without reading credentials; loops or permission errors refuse profile construction. Put denials after allows so manifest prepare_read cannot override them.
+
+Both-mode tests use empty deny_read and legacy-only homes denial. Separate sentinel reads cover an external agent-home auth link, profile auth outside HOME, .codex-<suffix>/auth.json, default auth target and unused profile. A control file outside denied paths must read (explicitly allow it for preparation). Generated profile assertions always run. On macOS sandbox-exec probes may skip only under already_sandboxed(), never merely because the platform is macOS. Hosted macos-latest CI runs real probes unsandboxed; non-macOS omits only OS probes. Trusted manifest updates after merge are optional operational cleanup, not protection prerequisites.
+
+### Clients and readers
+
+Migrate nightshift/specloop_client.py, land.py, supervisor child argv, specloop/messages.py and emitted command hints. Keep persisted job schemas, module names, service labels and RPC keys stable. Factory server uses uv run --no-sync nightshift; client/factory-model.ts offers nightshift status CHANGE --events 20. Attention already invokes nightshift attention. Preserve host path configuration, literal argv, validation, cache/stale behavior, timeouts, cleanup, redaction and confirmations.
+
+Use resolver discovery for timings.py, touchpoints.py, deploy.py and propose.py. Reports retain explicit-root injection and deduplicate compatibility links. Deploy preserves busy/unknown guards and never performs migration or changes pauses.
+
+### Documentation and deterministic checks
+
+Update active commands in README.md, KNOWN-LIMITATIONS.md, docs/specloop/{README,command-json,prepare}.md, docs/{landing,validation,deploy}.md and plugins/nightshift/README.md. The unload/reload procedure uses nightshift daemon pause/resume and retains pause across reload. Wrapper inventory keeps the exact frozen commands, bootstrap/env-file/credential/tool assertions: daemon bare run is the compatibility exception and specloop serve uses the one-release alias. No pre-merge wrapper edit is required.
+
+Keep agent-test-rules unchanged: test links, tables and parser compatibility, never exact prose or prerequisite sentences. Deterministic physical-line rule: extract single-backtick pairs on each line; also recognize lines beginning with optional whitespace and nightshift, specloop, uv run or python -m. Apply everywhere, including fences/HTML/indentation, without semantic Markdown parsing or fence exclusions. shlex-tokenize candidates; normalize only enumerated placeholders and optional-argument forms into explicit argv cases and call the real parser without dispatch. Bare command/verb references are checked as vocabulary, not complete executable examples. Unmatched delimiters around CLI candidates, shell composition or ambiguous placeholders block validation until simplified or assigned an explicit line-keyed argv case. Never silently skip ambiguous command text. Wrapper cases must match read-only exec argv, strip only the uv prefix and parse the actual compatibility command. Reject removed top-level daemon forms. Use existing deterministic link checks, not a new Markdown parser.
+
+### Verification and human rollout checklist
+
+Final acceptance requires trusted harness preparation/verification receipts under read-only source, offline verification, scenario reporting and a separate prepared plugin build directory. Local commands supplement, never replace, those gates: uv run pytest, plugin npm test and npm run typecheck (package.json is authoritative). Dependencies are installed during preparation in the separate build copy; no generated output/install in candidate source. This draft claims no runtime test pass.
+
+Include these human checks in the publish receipt, never implementing-agent tasks:
+
+- Schedule a shared quiet window for every repository, including Phreak and Compact Mixer. Pause daemon intake/delivery and every run at a task boundary. Verify detached drafting/revision/admission writers and home users have stopped; back up both roots and record repository/run identities. Daemon pause alone is insufficient.
+- Stop the supervisor before checkout sync/migration; prevent launchd KeepAlive from restarting it during inspection. Keep the daemon paused and control all writers, including other sessions.
+- Inspect unchanged wrapper diff/inventory and actual service configuration/bootstrap/credential guards. Confirm daemon startup uses nightshift daemon run or the supported frozen nightshift run; confirm the alias remains installed for the supervisor. Wrapper modernization is a follow-up, not a pre-merge edit.
+- With the new code available and supervisor stopped, run nightshift migrate. Resolve refusals before continuing; inspect all repositories, revisions, proposals, permissions, Git/worktree references, credential links, marker and read-only reports. Keep due pauses unchanged during inspection. Never use serve --once.
+- Before starting the supervisor, deliberately replace any automatic recovery pause with a requested hold while stopped, using existing resume --no-run then pause controls, and inspect that no deadline remains. Preserve original evidence in the backup. This prevents startup automatic recovery from racing explicit resume. Keep daemon pause across its restart, start supervisor, confirm intended code/dispatch and heartbeats, then explicitly resume selected runs and daemon intake.
+- Follow docs/deploy.md apply/restart and docs/validation.md unload/reload procedures in this order; validate Factory and other repositories on the actual host. Record actual sandbox-probe results separately from generated profiles. Review readability/live references and leave unperformed host checks pending.
+
+## Risks / Trade-offs
+
+Compatibility links preserve absolute historical references but retain legacy paths for one release. Existing proposal receipts demand collision refusal, and cross-device layouts need separate operator planning. Upgraded locks cannot prove detached old writers are absent; the quiet window remains necessary. Process-crash fixtures cannot prove machine/power-loss durability.
+
+Seventeen tasks are intentional: locking, relocation, recovery, activation and subprocess fixtures have distinct safety boundaries, each targeted at roughly 300 changed lines or less including tests. Boundaries are fixed before admission since implementers cannot edit openspec. Internal package moves are avoided.
+
+Nested harness sandboxing can skip OS probes; unsandboxed macOS CI must execute them. Neither CI nor synthetic fixtures prove live service setup or migration safety.

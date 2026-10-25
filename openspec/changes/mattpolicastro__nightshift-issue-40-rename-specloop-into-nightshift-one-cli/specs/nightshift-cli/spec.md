@@ -1,0 +1,54 @@
+## Purpose
+
+Unify build and daemon commands while preserving automation and frozen service callers.
+
+## ADDED Requirements
+
+### Requirement: Canonical build commands
+
+The nightshift CLI SHALL expose every existing build command with its arguments, outcomes and JSON contract, making build status the default command.
+
+#### Scenario: Build commands retain their contract
+- **WHEN** canonical admit, propose, revise, act, status, publish or other build commands are parsed and dispatched
+- **THEN** the existing handler receives equivalent arguments and retains version-1 output, exit codes, authorization and action behavior
+
+#### Scenario: Machine readable errors stay singular
+- **WHEN** invalid canonical arguments include an exact --json token before a standalone --
+- **THEN** one version-1 error document is printed to stdout with exit 2 before any handler runs; non-JSON errors and help retain their existing behavior
+
+### Requirement: Explicit daemon controls
+
+The CLI SHALL expose daemon run/status/pause/resume under the daemon group, preserve noncolliding front-door commands, and accept bare nightshift run as the sole implicit daemon compatibility form.
+
+#### Scenario: Bare run and named run dispatch separately
+- **WHEN** nightshift run, nightshift daemon run and nightshift run example-change are invoked with handlers substituted
+- **THEN** the first two reach the same daemon function and the third reaches only the build driver
+
+#### Scenario: Other missing changes refuse
+- **WHEN** nightshift pause or resume lacks CHANGE, or run CHANGE carries a daemon-only option
+- **THEN** parsing fails without touching daemon or run state
+
+#### Scenario: Daemon controls retain boundaries
+- **WHEN** daemon status, daemon pause/resume and the noncolliding jobs/attention/preflight/reconcile/digest commands run
+- **THEN** existing status, env-file, offline/config-independent control, exit and retired-worker safeguards remain; daemon alone selects daemon status
+
+### Requirement: One release alias
+
+The installed specloop script and specloop.cli module SHALL forward to the canonical CLI for one release, announce the rename on stderr, and preserve argument boundaries, stdout and exit status.
+
+#### Scenario: Specloop alias forwards
+- **WHEN** specloop or python -m specloop.cli receives existing valid command arguments including a quoted note and --json
+- **THEN** test_specloop_alias_forwards verifies the canonical handler receives the same argv, the rename notice appears only on stderr, stdout is unchanged JSON and the canonical exit code is returned
+
+#### Scenario: Packaging retains frozen callers
+- **WHEN** project script declarations and wheel contents are inspected and alias serve is parsed
+- **THEN** both existing script targets and packages remain installable and specloop serve reaches the canonical supervisor without recursive forwarding
+
+### Requirement: Canonical internal callers
+
+Python subprocess callers SHALL use canonical nightshift commands while preserving interpreter provenance, argument boundaries, injectable runners and existing request schemas.
+
+#### Scenario: Calls retain request identity
+- **WHEN** daemon client, background revise and supervisor driver calls are constructed
+- **THEN** only executable/module spelling changes; command arguments, round IDs, feedback-file boundaries, timeouts and result validation remain unchanged
+
