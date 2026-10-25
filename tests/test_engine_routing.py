@@ -47,7 +47,8 @@ spec_approved = "approved"
     cfg = load(config)
     assert cfg.repos[0].engine == "specloop"
     assert cfg.repos[0].manifest is None
-    assert cfg.repos[0].verify == "pytest"
+    assert cfg.repos[0].verify == ""
+    assert any(note.startswith("repos.verify ") for note in cfg.notes)
     assert cfg.repos[1].engine == "specloop"
     assert cfg.repos[1].manifest == manifest.resolve()
     assert cfg.repos[1].verify == ""
@@ -139,9 +140,8 @@ manifest = 42
     assert str(error.value) == reason
 
     def forbidden(*args, **kwargs):
-        pytest.fail("configuration failure must precede endpoint parsing and dispatch")
+        pytest.fail("configuration failure must precede dispatch")
 
-    monkeypatch.setattr(cli.config, "_endpoint", forbidden)
     monkeypatch.setattr(cli.config, "ENV_FILE", tmp_path / "absent-env")
     monkeypatch.setattr(subprocess, "run", forbidden)
     monkeypatch.setattr(subprocess, "Popen", forbidden)
@@ -304,6 +304,8 @@ name = "owner/held"
 ''' if entry == "missing-manifest" else ""))
     cfg = load(config)
     assert all(repo.engine == "specloop" for repo in cfg.repos)
+    if entry == "legacy-config":
+        assert any(note.startswith("daemon.max_tasks_per_night ") for note in cfg.notes)
     if entry == "missing-manifest":
         # Hold the first repository and still deliver the healthy one's draft.
         cfg.repos.reverse()

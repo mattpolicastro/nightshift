@@ -24,7 +24,8 @@ def layout(tmp_path, monkeypatch):
 
 
 def write_config(path, value=None):
-    path.write_text("" if value is None else f"[daemon]\nworktree_root = {json.dumps(value)}\n")
+    path.write_text("models = false\n[daemon]\nmax_tasks_per_night = 0\n"
+                    + ("" if value is None else f"worktree_root = {json.dumps(value)}\n"))
 
 
 def load_without_writes(path, monkeypatch):
@@ -102,7 +103,7 @@ def test_expansion_uses_home_or_selected_config(layout, monkeypatch, value, rela
 ])
 def test_invalid_root_is_a_named_configuration_error(layout, monkeypatch, literal):
     _, path = layout
-    path.write_text(f"[daemon]\nworktree_root = {literal}\n")
+    path.write_text(f"models = false\n[daemon]\nconcurrency = 0\nworktree_root = {literal}\n")
     with pytest.raises(ValueError, match=r"daemon\.worktree_root"):
         load_without_writes(path, monkeypatch)
     assert list(path.parent.iterdir()) == [path]
@@ -110,7 +111,8 @@ def test_invalid_root_is_a_named_configuration_error(layout, monkeypatch, litera
 
 @pytest.mark.scenario("host-paths/configured-worker-worktree-root/worker-root-validation-preserves-enrollment-isolation")
 @pytest.mark.parametrize("failure", ["absent", "missing", "directory", "invalid"])
-def test_valid_root_preserves_repository_local_health(layout, tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize("engine", ["", 'engine = "specloop"\n'])
+def test_valid_root_preserves_repository_local_health(layout, tmp_path, monkeypatch, failure, engine):
     _, path = layout
     manifest = path.parent / "enrollment.toml"
     healthy_manifest = path.parent / "healthy.toml"
@@ -127,8 +129,7 @@ engine = "specloop"
 manifest = "healthy.toml"
 [[repos]]
 name = "owner/bad"
-engine = "specloop"
-''' + ("" if failure == "absent" else 'manifest = "enrollment.toml"\n'))
+''' + engine + ("" if failure == "absent" else 'manifest = "enrollment.toml"\n'))
     read_text = Path.read_text
 
     def no_manifest_read(self, *args, **kwargs):
