@@ -1,3 +1,6 @@
+import shlex
+import subprocess
+
 import pytest
 
 from specloop import cli, messages
@@ -52,3 +55,37 @@ def test_fyi_can_be_kept_out_of_slack(monkeypatch, capsys):
     send(messages.for_pause("m", "phase_gate", key="section:1"))
     assert len(sent) == 1 and sent[0].startswith("🟡")
     assert "FYI (m): section 1 passed" in capsys.readouterr().out  # still logged
+
+
+@pytest.mark.scenario("worker-retirement/client-command-boundaries-remain-stable/existing-clients-use-surviving-commands")
+@pytest.mark.parametrize("reason", [*REASONS, "seal"])
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_rendered_notification_commands_parse_and_preserve_exit(monkeypatch, reason, exit_code):
+    message = messages.for_pause("retained-change", reason, label="1.2", key="section:2")
+    commands = [line[1:-1] for line in message.text().splitlines() if line.startswith("`specloop ")]
+    assert commands == [message.command]
+    parsed = []
+
+    def dispatch(args):
+        parsed.append(args)
+        return exit_code
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("command parsing must not launch a model, service or shell")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    # Keep the real CLI parser/dispatch; handlers are the action injection seam.
+    for verb in ("resume", "accept", "publish", "finish", "status"):
+        monkeypatch.setattr(cli, verb, dispatch)
+    for suggestion in commands[0].split("   or   "):
+        executable, *argv = shlex.split(suggestion)
+        assert executable == "specloop"
+        assert argv[0] == "status" or argv[0] in messages.actions_for_pause(reason)
+        assert cli.main(argv) == exit_code
+        args = parsed[-1]
+        assert args.cmd == argv[0] and args.change == "retained-change"
+        if args.cmd == "resume":
+            assert args.note == ("…" if "--note" in argv else "")
+            assert args.no_run is False
+    assert len(parsed) == len(commands[0].split("   or   "))

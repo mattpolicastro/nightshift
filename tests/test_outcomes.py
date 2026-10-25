@@ -1,4 +1,5 @@
 import json
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -281,3 +282,77 @@ def test_cli_reports_deferred_checks_as_stale_json(monkeypatch, capsys):
     assert len(payload["tasks"]) == 40
     assert len(payload["stale"]) == 8
     assert all("deferred" in i["error"] for i in payload["stale"])
+
+
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/historical-attention-remains-readable")
+@pytest.mark.scenario("worker-retirement/client-command-boundaries-remain-stable/existing-clients-use-surviving-commands")
+@pytest.mark.parametrize("failure", ["github", "specloop", "both"])
+def test_attention_refresh_stale_offline_and_resolution(tmp_path, monkeypatch, capsys, failure):
+    from nightshift import cli
+    from nightshift.config import Config
+
+    monkeypatch.setattr(cli.config, "ENV_FILE", tmp_path / "absent-env")
+    monkeypatch.setattr(cli.config, "load", lambda path: Config(repos=[]))
+    monkeypatch.setattr(outcomes, "HISTORY_INTERVAL", 0)
+    outcomes.record("a/b", 1, state="awaiting_merge", reason="historical worker PR",
+                    pr_url="https://github.com/a/b/pull/2")
+    phase, calls = "healthy", []
+
+    def read_github(args, deadline):
+        calls.append("github")
+        assert args[:3] in (["issue", "view", "1"], ["pr", "view", "https://github.com/a/b/pull/2"])
+        if phase == "outage" and failure in ("github", "both"):
+            raise RuntimeError("GitHub offline")
+        return github(pr_state="MERGED" if phase == "resolved" else "OPEN")(args)
+
+    def run(args, **kwargs):
+        calls.append("specloop")
+        assert args == ["specloop", "status", "--json"]
+        assert kwargs == {"capture_output": True, "text": True, "check": False,
+                          "timeout": outcomes.REQUEST_SECONDS}
+        if phase == "outage" and failure in ("specloop", "both"):
+            raise OSError("specloop offline")
+        runs = [] if phase == "resolved" else [{"change": "historical-pause", "status": "paused",
+                "pr": None, "pause": {"reason": "stuck"}}]
+        return subprocess.CompletedProcess(args, 0, json.dumps({"version": 1, "runs": runs}), "")
+
+    monkeypatch.setattr(outcomes, "_read_github", read_github)
+    monkeypatch.setattr(subprocess, "run", run)
+
+    def attention(offline=False, code=0):
+        assert cli.main(["attention", "--json", *(["--offline"] if offline else [])]) == code
+        output = capsys.readouterr()
+        assert output.err == ""
+        payload = json.loads(output.out)
+        assert set(payload) == {"version", "offline", "tasks", "specloop", "specloop_error", "stale"}
+        assert payload["version"] == 1 and payload["offline"] is offline
+        return payload
+
+    healthy = attention()
+    assert healthy["tasks"][0]["state"] == "awaiting_merge"
+    assert healthy["tasks"][0]["reason"] == "historical worker PR"
+    assert healthy["specloop"][0]["reason"] == "stuck"
+    phase = "outage"
+    stale = attention(code=1)
+    assert bool(stale["stale"]) == (failure in ("github", "both"))
+    assert bool(stale["specloop_error"]) == (failure in ("specloop", "both"))
+    for key, broken in (("tasks", failure != "specloop"), ("specloop", failure != "github")):
+        assert len(stale[key]) == 1
+        assert bool(stale[key][0]["error"]) is broken
+        if broken:
+            assert stale[key][0]["checked_at"] == healthy[key][0]["checked_at"]
+    before = list(calls)
+    assert attention(offline=True, code=1) == {**stale, "offline": True}
+    assert cli.main(["attention", "--offline"]) == 1
+    rendered = capsys.readouterr().out
+    assert "STALE" in rendered and "historical-pause" in rendered and "a/b#1" in rendered
+    assert calls == before
+    phase = "resolved"
+    resolved = attention()
+    assert resolved == {"version": 1, "offline": False, "tasks": [], "specloop": [],
+                        "specloop_error": None, "stale": []}
+    before = list(calls)
+    assert attention(offline=True) == {**resolved, "offline": True}
+    assert calls == before and outcomes.tasks()[0]["state"] == "resolved"
+    with outcomes.database() as db:
+        assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1

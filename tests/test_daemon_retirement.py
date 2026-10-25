@@ -1,14 +1,21 @@
 """The front door owns polling and liveness, never an execution pool."""
 
+import os
+import plistlib
+import shlex
 import signal
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 
 import pytest
 
-from nightshift import daemon, queue, specloop_job
+from manifest_fixtures import manifest_text
+from nightshift import cli, config, daemon, queue, specloop_job
 from nightshift.config import Config
+from test_engine_routing import DraftGh
+from test_specloop_intake import Commands
 
 
 @pytest.fixture
@@ -180,3 +187,97 @@ for module, names in {
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.scenario("worker-retirement/service-prerequisites-match-the-surviving-engine/codex-enrollment-needs-no-worker-login")
+@pytest.mark.real_trust
+def test_python_preflight_then_one_shot_dispatch(tmp_path, monkeypatch, capsys):
+    # Failure permutations live in test_preflight (task 1.8); here a successful
+    # preflight is followed by real CLI/daemon dispatch using the same enrollment.
+    manifest = tmp_path / "repository.toml"
+    manifest.write_text(manifest_text(tmp_path / "source"))
+    before = manifest.read_bytes()
+    selected = tmp_path / "config.toml"
+    selected.write_text('''[daemon]
+forbidden_probe = "owner/private"
+[[repos]]
+name = "owner/sample"
+manifest = "repository.toml"
+''')
+    env_file = tmp_path / "env"
+    env_file.write_text("export GH_TOKEN='github_pat_test'\n"
+                        "export NIGHTSHIFT_SLACK_WEBHOOK='https://hooks.invalid/test'\n")
+    monkeypatch.setattr(config, "ENV_FILE", env_file)
+    monkeypatch.setattr(os, "environ", {"HOME": str(tmp_path), "PATH": ""})
+    monkeypatch.setattr(daemon, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(queue, "CLAIM_DIR", tmp_path / "claims")
+    monkeypatch.setattr(specloop_job, "_children", {})
+    monkeypatch.setattr(daemon.signal, "signal", lambda *a: None)
+    gh, commands, probes = DraftGh(), Commands(), []
+
+    def external(args, **kwargs):
+        assert os.environ["GH_TOKEN"] == "github_pat_test"
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
+        assert os.environ["PATH"] == ""
+        if args[:3] == ["gh", "repo", "view"]:
+            probes.append(args)
+            assert args[4:] == ["--json", "name"]
+            return subprocess.CompletedProcess(args, int(args[3] == "owner/private"), "{}", "not found")
+        return commands(args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unexpected worker probe, claim, live process or alert")
+
+    monkeypatch.setattr(subprocess, "run", external)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(queue, "claim", forbidden)
+    monkeypatch.setattr(queue, "_gh", gh)
+    monkeypatch.setattr(daemon.notify, "send", forbidden)
+    monkeypatch.setattr(daemon.specloop_intake, "run_git", external)
+    monkeypatch.setattr(daemon, "poll_specloop", partial(daemon.poll_specloop, specloop_runner=external))
+    assert cli.main(["preflight", "--deep", "--config", str(selected)]) == 0
+    output = capsys.readouterr()
+    assert "worker probes are retired" in output.out and output.out.endswith("\nready\n")
+    assert [args[3] for args in probes] == ["owner/sample", "owner/private"]
+    assert cli.main(["run", "--once", "--config", str(selected)]) == 0
+    assert capsys.readouterr().out == "poll complete\n"
+    assert [args[:2] for args in commands.calls] == [["specloop", "propose"], ["git", "-C"]]
+    assert gh.labels == set() and len(gh.prs) == 1
+    assert not queue.CLAIM_DIR.exists() and not daemon.HEARTBEAT_FILE.exists()
+    assert manifest.read_bytes() == before
+
+
+@pytest.mark.scenario("worker-retirement/service-prerequisites-match-the-surviving-engine/services-retain-independent-roles")
+def test_bundled_service_roles_read_only():
+    # These are repository templates, not installed jobs. Never execute either
+    # wrapper: the daemon's unchanged shell guards still require legacy tools.
+    from specloop import state
+
+    assert daemon.STATE_DIR == Path.home() / ".nightshift"
+    assert state.ROOT == Path.home() / ".specloop"
+    root = Path(__file__).resolve().parents[1]
+    home = "/Users/YOUR_USERNAME"
+    for service, wrapper, target, keepalive, process_type in (
+        ("nightshift", "nightshift-daemon", ["nightshift", "run"], {"SuccessfulExit": False}, "Background"),
+        ("specloop", "specloop-serve", ["--no-sync", "specloop", "serve"], True, "Standard"),
+    ):
+        with (root / "launchd" / f"com.mattpolicastro.{service}.plist").open("rb") as stream:
+            job = plistlib.load(stream)
+        assert job["Label"] == f"com.mattpolicastro.{service}"
+        assert job["ProgramArguments"] == [f"{home}/Projects/nightshift/bin/{wrapper}"]
+        assert job["WorkingDirectory"] == f"{home}/Projects/nightshift"
+        assert job["StandardOutPath"] == job["StandardErrorPath"] == f"{home}/.logs/{service}.log"
+        assert job["RunAtLoad"] is True and job["ThrottleInterval"] == 300
+        assert job["KeepAlive"] == keepalive and job["ProcessType"] == process_type
+        assert job.get("Nice") == (5 if service == "nightshift" else None)
+        lines = [shlex.split(line, comments=True) for line in (root / "bin" / wrapper).read_text().splitlines()]
+        assert [line for line in lines if line[:1] == ["exec"]] == [["exec", "/opt/homebrew/bin/uv", "run", *target]]
+        assert ["cd", "$HOME/Projects/nightshift"] in lines
+        if service == "nightshift":
+            assert ['ENV_FILE=$HOME/.config/nightshift/env'] in lines
+            assert ["if", "[", "!", "-f", "$ENV_FILE", "];", "then"] in lines
+            assert [".", "$ENV_FILE"] in lines
+            assert ["unset", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"] in lines
+            assert ["for", "bin", "in", "gh", "claude", "pnpm", "node", "git", "swift;", "do"] in lines
+            for token in ("CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN"):
+                assert ["if", "[", "-z", "${" + token + ":-}", "];", "then"] in lines
