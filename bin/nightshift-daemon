@@ -1,7 +1,7 @@
 #!/bin/bash
 # launchd entry point.
 #
-# launchd reads NO shell config — not .zprofile, not .zshenv — so the worker's
+# launchd reads NO shell config — not .zprofile, not .zshenv — so the daemon's
 # credentials have to be sourced here explicitly. This wrapper exists for that
 # one reason; everything else is `uv run nightshift run`.
 
