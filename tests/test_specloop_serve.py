@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import time
 
 import pytest
@@ -168,6 +169,30 @@ class FakeProc:
 
     def poll(self):
         return self.code
+
+
+@pytest.mark.scenario("nightshift-cli/canonical-internal-callers/calls-retain-request-identity")
+def test_default_driver_uses_current_interpreter(home, monkeypatch):
+    change = "owner__sample-issue-7-add-a-gate"
+    make(change)
+    proc, calls = FakeProc(), []
+
+    def popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        with Run.for_change(change).lock() as mine:
+            assert mine, "the child must be able to acquire its run lock"
+        return proc
+
+    monkeypatch.setattr(serve.subprocess, "Popen", popen)
+    drivers = serve.Drivers()
+    assert serve.pass_once(lambda t: None, drivers=drivers) == [change]
+    assert calls == [([sys.executable, "-m", "nightshift.cli", "run", change], {})]
+    assert drivers.alive() == [change]
+    assert serve.pass_once(lambda t: None, drivers=drivers) == []
+    assert len(calls) == 1
+    proc.code = 0
+    drivers.reap()
+    assert drivers.alive() == []
 
 
 def test_drivers_are_polled_not_waited_on(home):

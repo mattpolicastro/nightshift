@@ -114,7 +114,7 @@ def pass_once(notify, spawn=None, drivers: Drivers | None = None, limit: int = 1
     """One sweep: lift due pauses everywhere, start a driver for each running
     change nobody is driving, up to `limit` alive at once. Returns the changes
     it started. A `spawn` that returns None is treated as having finished."""
-    spawn = spawn or (lambda change: subprocess.Popen([sys.executable, "-m", "specloop.cli", "run", change]))
+    spawn = spawn or (lambda change: subprocess.Popen([sys.executable, "-m", "nightshift.cli", "run", change]))
     drivers = drivers if drivers is not None else Drivers()
     drivers.reap()
     started = []

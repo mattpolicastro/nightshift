@@ -11,6 +11,7 @@ from nightshift import daemon, queue, specloop_intake, specloop_job
 from nightshift.config import Config, Repo
 from test_specloop_approval import ApprovalGh, BRANCH, CHANGE, HEAD
 from test_specloop_intake import idea_file
+from test_specloop_client import ALIAS_NOTICE
 
 
 REVISED = "b" * 40
@@ -105,6 +106,8 @@ class Commands:
             out = json.dumps(self.result)
         # Honor subprocess.run's output and failure semantics so callers must
         # decode git output and handle unsuccessful commands correctly.
+        if args[0] == "specloop":
+            err = ALIAS_NOTICE + err
         if not kwargs.get("text", False):
             out, err = out.encode(), err.encode()
         result = subprocess.CompletedProcess(args, code, out, err)

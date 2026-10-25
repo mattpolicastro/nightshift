@@ -14,6 +14,7 @@ from nightshift import daemon, queue, specloop_intake
 from nightshift.config import Config, Repo
 from test_engine_routing import DraftGh
 from test_specloop_jobs import release_receipt
+from test_specloop_client import ALIAS_NOTICE
 
 
 CHANGE = "owner__sample-issue-7-add-a-gate"
@@ -38,7 +39,7 @@ class Commands:
             return subprocess.CompletedProcess(args, int(self.push_fails and "push" in args), "", "push unavailable")
         assert args[:2] == ["specloop", "propose"]
         return subprocess.CompletedProcess(args, 0 if self.result["outcome"] == "drafted" else 1,
-                                           json.dumps(self.result), "")
+                                           json.dumps(self.result), ALIAS_NOTICE)
 
 
 @pytest.fixture
@@ -66,6 +67,7 @@ def calls(gh, *prefix):
 
 
 @pytest.mark.real_trust
+@pytest.mark.scenario("nightshift-cli/alias-routed-daemon-callers/daemon-calls-parse-json-despite-notice")
 @pytest.mark.parametrize("title,large", [
     pytest.param("Add a gate", True, marks=pytest.mark.scenario(
         "issue-intake/file-based-drafting-input/long-issue-thread")),

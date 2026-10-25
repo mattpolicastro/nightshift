@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from nightshift import deploy
+from test_specloop_client import ALIAS_NOTICE
 
 
 def _stat(path):
@@ -59,6 +60,11 @@ def recording(tmp_path):
             replies["git rev-parse HEAD"] = "after"
         if key == "uv sync --frozen":
             (tmp_path / ".venv").mkdir(exist_ok=True)
+        if key == SERVICE_STATUS:
+            assert argv == ["uv", "run", "--no-sync", "specloop", "status", "--json"]
+            assert timeout <= 30
+            code, stdout, stderr = value if isinstance(value, tuple) else (0, value, "")
+            return subprocess.CompletedProcess(argv, code, stdout, ALIAS_NOTICE + stderr)
         return subprocess.CompletedProcess(argv, *(value if isinstance(value, tuple) else (0, value, "")))
 
     return SimpleNamespace(context=context, replies=replies, calls=calls, runner=runner,
@@ -768,6 +774,7 @@ def test_daemon_restart_waits_for_background_jobs(restarting, state, capsys):
 
 
 @pytest.mark.scenario("deployment-drift/guarded-service-restart/driving-supervisor-defers-restart")
+@pytest.mark.scenario("nightshift-cli/alias-routed-daemon-callers/daemon-calls-parse-json-despite-notice")
 @pytest.mark.scenario("deployment-drift/guarded-service-restart/fresh-idle-or-forced-restart")
 @pytest.mark.scenario("deployment-drift/bounded-restart-confirmation/first-wait-confirms-replacement")
 @pytest.mark.scenario("deployment-drift/bounded-restart-confirmation/second-wait-or-final-failure")

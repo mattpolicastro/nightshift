@@ -395,7 +395,7 @@ def discover_run(identity: Identity, operations: Operations) -> LandingRun | Non
     status presentation fields (tasks, context, action) are not landing inputs.
     """
     data = operations.read_json(
-        [sys.executable, "-m", "specloop.cli", "status", "--json"], stage="run discovery",
+        [sys.executable, "-m", "nightshift.cli", "status", "--json"], stage="run discovery",
     )
     if type(data.get("version")) is not int or data["version"] != 1:
         raise Refusal("run discovery: unsupported status version; expected version 1")
@@ -688,7 +688,7 @@ def finish_run(
     if current is not None and run is not None and run.status != "done":
         if current.status == "paused":
             operations.run(
-                [sys.executable, "-m", "specloop.cli", "finish", current.change],
+                [sys.executable, "-m", "nightshift.cli", "finish", current.change],
                 timeout=FINISH_TIMEOUT,
                 stage=f"finish {current.change}; rerun land to recover",
             )

@@ -13,6 +13,7 @@ from revision_result_fixtures import revision_success
 from nightshift import daemon, queue, specloop_intake, specloop_job
 from nightshift.config import Config, Repo
 from test_specloop_spec_revision import Commands, RevisionGh, CHANGE, HEAD, REVISED, TIP_DATE, seed_consumed
+from test_specloop_client import ALIAS_NOTICE
 
 
 class BuildCommands(Commands):
@@ -40,7 +41,7 @@ class BuildCommands(Commands):
             self.result = revision_success(args, self._success)
             self._emitted_success_json = json.dumps(self.result, sort_keys=True)
         return subprocess.CompletedProcess(args, int(self.result.get("outcome") == "refused"),
-                                           json.dumps(self.result), "")
+                                           json.dumps(self.result), ALIAS_NOTICE)
 
 
 @pytest.fixture
@@ -71,6 +72,7 @@ def poll(setup, tmp_path):
 
 
 @pytest.mark.scenario("pr-revision/build-stage-revision/review-comments-become-tasks")
+@pytest.mark.scenario("nightshift-cli/alias-routed-daemon-callers/daemon-calls-parse-json-despite-notice")
 def test_inline_feedback_queued_through_daemon(setup, tmp_path, monkeypatch):
     repo, gh, commands = setup
     monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
