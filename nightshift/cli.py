@@ -102,6 +102,17 @@ def _progress_of(repo: str, number: int) -> str:
 
 
 def _jobs(action: str | None, job_id: str | None, *, show_all: bool = False) -> int:
+    if action == "compact":
+        report = specloop_job.compact_history(daemon.STATE_DIR)
+        for outcome in report.outcomes:
+            job = outcome.job
+            print(f"{job.id}  {job.stage}  {job.repository}#{job.number}  "
+                  f"{outcome.status}: {outcome.reason}")
+        for diagnostic in report.diagnostics:
+            print(diagnostic, file=sys.stderr)
+        print(f"Compacted: {report.compacted}; skipped: {report.skipped}.")
+        return 1 if report.error else 0
+
     if action == "release":
         assert job_id is not None  # Required by argument validation.
         try:
@@ -178,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         default="status",
         choices=["status", "pause", "resume", "jobs", "run", "reconcile", "preflight", "digest", "attention"],
     )
-    parser.add_argument("action", nargs="?", help="jobs: stop or release")
+    parser.add_argument("action", nargs="?", help="jobs: compact, stop or release")
     parser.add_argument("job_id", nargs="?", help="jobs stop/release: exact full job ID")
     parser.add_argument("--all", action="store_true", help="jobs: include historical attempts")
     parser.add_argument("--json", action="store_true", help="attention: machine-readable tasks and specloop pauses")
@@ -196,8 +207,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--all is only valid for jobs listing")
     if args.command == "jobs":
         if not (args.action is None and args.job_id is None
+                or args.action == "compact" and args.job_id is None
                 or args.action in ("stop", "release") and args.job_id is not None):
-            parser.error("expected 'jobs', 'jobs stop <id>' or 'jobs release <id>'")
+            parser.error("expected 'jobs [--all]', 'jobs compact', 'jobs stop <id>' or 'jobs release <id>'")
     elif args.action is not None or args.job_id is not None:
         parser.error(f"{args.command} does not accept positional arguments")
 

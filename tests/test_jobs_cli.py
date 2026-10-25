@@ -1,6 +1,7 @@
 """Operator-facing job commands use local durable state, even without config."""
 
 import fcntl
+import json
 import os
 import re
 import shlex
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from nightshift import cli, config, daemon, specloop_job as jobs
+from test_specloop_compaction import delivered, historical, snapshot as evidence_snapshot
 
 
 def forbidden(*args, **kwargs):
@@ -49,6 +51,234 @@ def snapshot(root):
 
 def inventory_rows(output):
     return [line for line in output.splitlines() if re.match(r"[0-9a-f]{32}  ", line)]
+
+
+@pytest.fixture
+def compact_offline(local_state, monkeypatch):
+    for name in ("start", "collect", "resume_cleanup", "process_start_identity"):
+        monkeypatch.setattr(jobs, name, forbidden)
+    monkeypatch.setattr(os, "kill", forbidden)
+    monkeypatch.setattr(daemon, "loop", forbidden)
+    monkeypatch.setattr(cli.queue, "ready", forbidden)
+    return local_state
+
+
+@pytest.mark.scenario("background-job-control/historical-compaction-pass/compact-delivered-historical-attempts-only")
+@pytest.mark.scenario("background-job-control/historical-compaction-pass/explicit-cleanup-works-while-paused")
+@pytest.mark.parametrize("broken_config", [False, True])
+def test_jobs_compact_applies_to_delivered_history_only(
+    compact_offline, historical, tmp_path, monkeypatch, capsys, broken_config,
+):
+    # Reuse the service's four-stage fixture, including keyed build revisions.
+    monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
+    path, _, directory, idea = historical
+    config_path = tmp_path / "config.toml"
+    if broken_config:
+        config_path.write_text("[broken TOML")
+    daemon.PAUSE_FILE.touch()
+    pause = evidence_snapshot(daemon.PAUSE_FILE.parent)[daemon.PAUSE_FILE]
+    with ExitStack() as locks:
+        for number, state in enumerate(("live", "pending", "stopped", "released", "failed"), 1):
+            other = attempt(tmp_path, number=number, digit=str(number + 1))
+            other_receipt = {"job": other.name, "delivered": state != "pending"}
+            if state == "live":
+                fcntl.flock(locks.enter_context((other / "lock").open()), fcntl.LOCK_EX)
+            elif state in ("stopped", "released"):
+                jobs.save(other / "stop.json", {"state": "stopped"})
+                if state == "released":
+                    other_receipt.pop("job")
+            else:
+                jobs.save(other / "result.json", {"error": "failed"} if state == "failed" else {"result": {}})
+            jobs.save(other.parent.with_suffix(".json"), other_receipt)
+        rows, errors = jobs.list_jobs(tmp_path)
+        assert not errors
+        before = evidence_snapshot(tmp_path)
+        assert cli.main(["--config", str(config_path), "jobs", "compact"]) == 0
+        output = capsys.readouterr()
+        lines = inventory_rows(output.out)
+        assert len(lines) == len(rows) == 6
+        for row, line in zip(rows, lines):
+            assert line.startswith(f"{row.id}  {row.stage}  {row.repository}#{row.number}  ")
+            assert ("compacted: " if row.directory == directory else "skipped: ") in line
+            assert line.rsplit(": ", 1)[1]
+        assert output.out.endswith("Compacted: 1; skipped: 5.\n") and output.err == ""
+        assert not idea.exists() and not (directory / "log").exists()
+        after = evidence_snapshot(tmp_path)
+        for retained in before.keys() - {idea, directory / "log", directory / "request.json"}:
+            assert after[retained] == before[retained]
+        original = json.loads(before[directory / "request.json"][0])
+        minimal = json.loads((directory / "request.json").read_text())
+        assert minimal["args"] == [arg for arg in original["args"] if arg not in ("--idea-file", str(idea))]
+        assert minimal.get("round_id") == original.get("round_id")
+        assert after[directory / "request.json"][1] == before[directory / "request.json"][1]
+        after_rows, errors = jobs.list_jobs(tmp_path)
+        assert not errors
+        assert [(row.id, row.state) for row in after_rows] == [(row.id, row.state) for row in rows]
+        assert next(row.command for row in after_rows if row.directory == directory) == tuple(minimal["args"])
+        assert not path.with_suffix(".release.lock").exists()
+    assert evidence_snapshot(daemon.PAUSE_FILE.parent)[daemon.PAUSE_FILE] == pause
+
+
+@pytest.mark.scenario("background-job-control/historical-compaction-pass/unmatched-historical-identity-is-skipped")
+@pytest.mark.parametrize("identity", ["absent", "missing", "round-only", "replaced", "context", "busy"])
+def test_jobs_compact_skips_unmatched_identity(compact_offline, monkeypatch, capsys, identity):
+    path, receipt, directory, _ = delivered(compact_offline)
+    assert jobs.compact_delivered(path, receipt, prepare_only=True) == []
+    if identity == "absent":
+        path.unlink()
+    else:
+        if identity in ("missing", "round-only"):
+            receipt.pop("job")
+            if identity == "round-only":
+                receipt["round_job"] = directory.name
+        elif identity == "replaced":
+            receipt["job"] = "f" * 32
+        elif identity == "context":
+            receipt["repo"] = "another/repository"
+        jobs.save(path, receipt)
+    # Acquire the lifetime lock after inventory to exercise the under-lock refusal.
+    inventory = jobs.list_jobs
+    with (directory / "lock").open() as lock:
+        def scan(root):
+            result = inventory(root)
+            if identity == "busy":
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            return result
+        monkeypatch.setattr(jobs, "list_jobs", scan)
+        before = evidence_snapshot(compact_offline)
+        assert cli.main(["jobs", "compact"]) == 0
+        output = capsys.readouterr()
+        reason = {"absent": "missing current receipt", "context": "conflicting receipt item context",
+                  "busy": "lifetime lock is busy"}.get(identity, "receipt lacks matching exact job identity")
+        assert output.out == f"{directory.name}  proposals  o/r#8  skipped: {reason}\nCompacted: 0; skipped: 1.\n"
+        assert evidence_snapshot(compact_offline) == before
+
+
+@pytest.mark.scenario("background-job-control/historical-compaction-pass/receipt-replacement-during-cleanup-is-refused")
+@pytest.mark.parametrize("release_exists", [False, True])
+def test_jobs_compact_refuses_receipt_replacement(compact_offline, monkeypatch, capsys, release_exists):
+    path, receipt, directory, _ = delivered(compact_offline)
+    release = path.with_suffix(".release.lock")
+    if release_exists:
+        release.touch()
+    flock, order = fcntl.flock, []
+    def racing(lock, flags):
+        result = flock(lock, flags)
+        if Path(lock.name) == directory / "control.lock" or order:
+            order.append(Path(lock.name))
+        if Path(lock.name) == directory / "control.lock":
+            jobs.save(path, {**receipt, "job": "f" * 32})
+        return result
+    monkeypatch.setattr(fcntl, "flock", racing)
+    before = evidence_snapshot(directory)
+    assert cli.main(["jobs", "compact"]) == 0
+    output = capsys.readouterr()
+    assert f"{directory.name}  proposals  o/r#8  skipped: receipt changed" in output.out
+    assert output.out.endswith("Compacted: 0; skipped: 1.\n")
+    assert "receipt changed" in output.err
+    assert order == [directory / "control.lock", *([release] if release_exists else []), directory / "lock"]
+    assert evidence_snapshot(directory) == before
+    assert json.loads(path.read_text()) == {**receipt, "job": "f" * 32}
+    assert release.exists() == release_exists
+
+
+@pytest.mark.scenario("background-job-control/historical-compaction-pass/interrupted-and-repeated-passes-are-safe")
+@pytest.mark.parametrize("point", ["journal", "request", "unlink", "completion"])
+@pytest.mark.parametrize("replaced", [False, True])
+def test_jobs_compact_retry_and_repeat(compact_offline, monkeypatch, capsys, point, replaced):
+    from test_specloop_cleanup_recovery import interrupt
+    path, receipt, directory, idea = delivered(compact_offline)
+    before = evidence_snapshot(compact_offline)
+    with monkeypatch.context() as fault:
+        interrupt(fault, directory, point)
+        assert cli.main(["jobs", "compact"]) == 1
+    output = capsys.readouterr()
+    assert "skipped:" in output.out and output.out.endswith("Compacted: 0; skipped: 1.\n")
+    assert "cleanup interrupted" in output.err
+    if replaced:
+        jobs.save(path, {**receipt, "job": "f" * 32})
+    interrupted = evidence_snapshot(compact_offline)
+    assert cli.main(["jobs", "compact"]) == 0
+    output = capsys.readouterr()
+    assert output.out.endswith(f"Compacted: {int(not replaced)}; skipped: {int(replaced)}.\n")
+    assert output.err == ""
+    if replaced:
+        assert evidence_snapshot(compact_offline) == interrupted
+    else:
+        assert not idea.exists() and not (directory / "log").exists()
+        after = evidence_snapshot(compact_offline)
+        assert after[path] == before[path]
+        assert after[directory / "result.json"] == before[directory / "result.json"]
+        assert after[directory / "request.json"][1] == before[directory / "request.json"][1]
+    after = evidence_snapshot(compact_offline)
+    assert cli.main(["jobs", "compact"]) == 0
+    output = capsys.readouterr()
+    assert output.out.endswith("Compacted: 0; skipped: 1.\n") and output.err == ""
+    assert ("receipt lacks matching exact job identity" if replaced else "already compacted") in output.out
+    assert evidence_snapshot(compact_offline) == after
+
+
+@pytest.mark.scenario("background-job-control/historical-compaction-pass/report-partial-progress-and-safe-skips")
+@pytest.mark.parametrize("damage", ["warning", "malformed", "unreadable", "symlink", "filesystem"])
+def test_jobs_compact_reports_partial_progress(compact_offline, monkeypatch, capsys, damage):
+    from test_specloop_cleanup_recovery import interrupt
+    path, _, directory, idea = delivered(compact_offline)
+    healthy = delivered(compact_offline, stage="revisions", serial=2)[2]
+    if damage == "warning":
+        idea.unlink()
+        idea = directory / "idea-directory"
+        idea.mkdir()
+        (idea / "nested").write_text("retain without recursive deletion")
+        request = json.loads((directory / "request.json").read_text())
+        request["args"][-1] = str(idea)
+        jobs.save(directory / "request.json", request)
+    elif damage == "malformed":
+        path.write_text("{")
+    elif damage == "symlink":
+        original = path.with_suffix(".original")
+        path.rename(original)
+        path.symlink_to(original)
+    before = evidence_snapshot(compact_offline)
+    with monkeypatch.context() as fault:
+        if damage == "filesystem":
+            interrupt(fault, directory, "unlink")
+        if damage in ("unreadable", "symlink"):
+            opening = os.open
+            def guarded(p, *args, **kwargs):
+                if p == path:
+                    if damage == "symlink":
+                        assert args[0] & os.O_NOFOLLOW, "must not follow receipt symlinks"
+                    else:
+                        raise PermissionError("unreadable receipt")
+                return opening(p, *args, **kwargs)
+            fault.setattr(os, "open", guarded)
+        assert cli.main(["jobs", "compact"]) == int(damage != "warning")
+    output = capsys.readouterr()
+    lines = inventory_rows(output.out)
+    assert len(lines) == 2
+    assert lines[0].startswith(f"{directory.name}  proposals  o/r#8  ")
+    assert lines[1] == f"{healthy.name}  revisions  o/r#28  compacted: delivered artifacts compacted"
+    assert output.out.endswith(f"Compacted: {2 if damage == 'warning' else 1}; skipped: {0 if damage == 'warning' else 1}.\n")
+    assert not (healthy / "log").exists() and output.err
+    if damage == "warning":
+        assert "retained idea input" in output.err and str(idea) in output.err
+        assert evidence_snapshot(compact_offline)[idea / "nested"] == before[idea / "nested"]
+    else:
+        assert "skipped:" in lines[0]
+        assert str(path) in output.err
+        if damage != "filesystem":
+            assert evidence_snapshot(directory) == {p: data for p, data in before.items() if p.is_relative_to(directory)}
+    if damage == "symlink":
+        assert path.is_symlink() and evidence_snapshot(compact_offline)[original] == before[original]
+
+
+@pytest.mark.scenario("background-job-control/historical-compaction-pass/empty-compaction-is-a-no-op")
+def test_jobs_compact_empty_is_noop(compact_offline, capsys):
+    for _ in range(2):
+        assert cli.main(["jobs", "compact"]) == 0
+        output = capsys.readouterr()
+        assert output.out == "Compacted: 0; skipped: 0.\n" and output.err == ""
+        assert not compact_offline.exists()
 
 
 @pytest.fixture
@@ -356,6 +586,8 @@ def test_jobs_work_with_missing_or_broken_config_offline(local_state, tmp_path, 
     ["jobs", "--unknown"], ["status", "stop", "a" * 32], ["pause", "extra"],
     ["jobs", "release"], ["jobs", "release", "a" * 32, "extra"],
     ["jobs", "compact", "a" * 32], ["jobs", "compact", "--all"],
+    ["jobs", "compact", "../outside"], ["jobs", "compact", "a" * 32, "extra"],
+    ["--all", "jobs", "compact"], ["jobs", "--all", "stop"],
     ["jobs", "stop", "a" * 32, "--all"], ["jobs", "--all", "release", "a" * 32],
     *[[command, "--all"] for command in (
         "status", "pause", "resume", "run", "reconcile", "preflight", "digest", "attention")],
@@ -369,7 +601,12 @@ def test_malformed_jobs_syntax_has_no_side_effects(local_state, monkeypatch, cap
     monkeypatch.setattr(jobs, "list_jobs", forbidden)
     monkeypatch.setattr(jobs, "stop_job", forbidden)
     monkeypatch.setattr(jobs, "release_job", forbidden)
-    with pytest.raises(SystemExit) as exc:
+    monkeypatch.setattr(jobs, "compact_history", forbidden)
+    with monkeypatch.context() as patch, pytest.raises(SystemExit) as exc:
+        patch.setattr(Path, "read_text", forbidden)
+        patch.setattr(Path, "open", forbidden)
+        patch.setattr(os, "open", forbidden)
+        patch.setattr(jobs, "save", forbidden)
         cli.main(args)
     assert exc.value.code == 2
     output = capsys.readouterr()
@@ -381,13 +618,16 @@ def test_malformed_jobs_syntax_has_no_side_effects(local_state, monkeypatch, cap
 @pytest.mark.scenario("background-job-control/job-command-syntax/reject-path-identifier")
 @pytest.mark.parametrize("action", ["stop", "release"])
 @pytest.mark.parametrize("identifier", ["../outside", "/tmp/outside", "./" + "a" * 32,
-                                         "a/../" + "a" * 32, "..", "a" * 8])
+                                         "a/../" + "a" * 32, "..", "a" * 8, "../" + "a" * 32])
 def test_path_ids_are_rejected_before_reading_state(local_state, monkeypatch, capsys, identifier, action):
     attempt(local_state)
     before = snapshot(local_state)
     with monkeypatch.context() as patch:
         patch.setattr(jobs, "list_jobs", forbidden)
         patch.setattr(Path, "read_text", forbidden)
+        patch.setattr(Path, "open", forbidden)
+        patch.setattr(os, "open", forbidden)
+        patch.setattr(os, "kill", forbidden)
         assert cli.main(["jobs", action, identifier]) == 1
     output = capsys.readouterr()
     assert "exact full job ID" in output.err and output.out == ""
