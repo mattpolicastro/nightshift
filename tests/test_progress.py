@@ -95,27 +95,3 @@ def test_progress_and_parse_answer_different_questions():
 
     assert trace.parse(events) is None       # "how did it end" — it has not
     assert trace.progress(events).turns == 1  # "what is it doing" — reading
-
-
-# --- transcripts must not collide across repos ------------------------------
-
-
-def test_a_transcript_name_carries_its_repo(tmp_path):
-    """Issue numbers are per repo. Without the repo in the name, sample #11 and
-    sample-app #11 both resolved to `11-impl-1.jsonl` and one silently
-    overwrote the other — and both of those issues exist today, with sample's
-    transcripts for that number already on disk.
-    """
-    from nightshift import task
-
-    sample = task._transcript_path(tmp_path, "matt/sample", "11-impl-1")
-    other = task._transcript_path(tmp_path, "matt/sample-app", "11-impl-1")
-
-    assert sample != other
-    assert sample.name == "matt__sample#11-impl-1.jsonl"
-
-
-def test_no_transcript_directory_means_no_transcript(tmp_path):
-    from nightshift import task
-
-    assert task._transcript_path(None, "matt/sample", "11-impl-1") is None

@@ -1,6 +1,8 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from nightshift import outcomes, queue
 from nightshift.config import Labels
 
@@ -89,46 +91,53 @@ def test_running_tasks_do_not_query_github():
     assert not outcomes.attention(outcomes.refresh(Labels(), runner=fail))
 
 
-def test_cli_json_and_offline_do_not_write_github(monkeypatch, capsys):
-    from nightshift import cli
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/historical-attention-remains-readable")
+@pytest.mark.parametrize("offline", [False, True])
+def test_cli_json_and_offline_do_not_write_github(tmp_path, monkeypatch, capsys, offline):
+    from nightshift import cli, specloop_attention
     from nightshift.config import Config
     monkeypatch.setattr(cli.config, "load_env_file", lambda: None)
     monkeypatch.setattr(cli.config, "load", lambda path: Config(repos=[]))
     outcomes.record("a/b", 1, state="needs_decision", reason="needs review")
+    monkeypatch.setattr(queue, "CLAIM_DIR", tmp_path / "claims")
+    claim = queue.claim_path("a/b", 1)
+    claim.parent.mkdir(parents=True)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    claim.write_text(json.dumps({"repo": "a/b", "number": 1, "branch": "claude/1",
+                                "worktree": str(worktree), "started_at": outcomes.now(),
+                                "phase": "review"}))
+    work = worktree / "work.txt"
+    work.write_text("unfinished worker change")
+    evidence = {path: path.read_bytes() for path in (claim, work)}
+    def status(args, **kwargs):
+        assert args == ["status"]
+        return {"version": 1, "runs": [{"change": "pending", "status": "paused",
+                "pr": None, "pause": {"reason": "stuck"}}]}
+    monkeypatch.setattr(specloop_attention.specloop_client, "call", status)
+    specloop_attention.snapshot()
     def forbidden(args):
         raise AssertionError("offline must not call GitHub")
     monkeypatch.setattr(queue, "_gh", forbidden)
-    assert cli.main(["attention", "--offline", "--json"]) == 0
+    def read(args, deadline):
+        assert not offline
+        assert args[:3] == ["issue", "view", "1"]
+        return github()(args)
+    monkeypatch.setattr(outcomes, "_read_github", read)
+    if offline:
+        monkeypatch.setattr(specloop_attention.specloop_client, "call", forbidden)
+    assert cli.main(["attention", "--json"] + (["--offline"] if offline else [])) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["version"] == 1
-    assert payload["offline"] is True
+    assert payload["offline"] is offline
     assert payload["tasks"][0]["issue_url"] == "https://github.com/a/b/issues/1"
-
-
-def test_daemon_crash_before_worker_and_retries_keep_history(tmp_path, monkeypatch):
-    from nightshift import daemon
-    from nightshift.config import Config, Repo
-    from types import SimpleNamespace
-    repo = Repo(name="a/b", verify="true")
-    cfg = Config(repos=[repo])
-    claimed = daemon.Claimed(repo, tmp_path, SimpleNamespace(number=1, title="task"),
-                            SimpleNamespace(worktree=str(tmp_path / "wt"), branch="claude/1"))
-    dirs = []
-    def crash(*args, **kw):
-        dirs.append(kw["transcript_dir"])
-        raise RuntimeError("fetch failed before worker")
-    monkeypatch.setattr(daemon.task, "run", crash)
-    monkeypatch.setattr(daemon.queue, "release", lambda *a, **kw: None)
-    monkeypatch.setattr(daemon.vcs, "remove_worktree", lambda *a, **kw: None)
-    monkeypatch.setattr(daemon.notify, "send", lambda *a, **kw: None)
-    for _ in range(2):
-        daemon.run_claimed(cfg, claimed, daemon.Tally())
-    assert dirs[0] != dirs[1]
-    item = outcomes.tasks()[0]
-    assert item["state"] == "needs_decision"
-    assert "fetch failed" in item["reason"]
+    assert payload["tasks"][0]["reason"] == "needs review"
+    assert payload["specloop"][0]["change"] == "pending"
+    assert payload["specloop"][0]["reason"] == "stuck"
+    assert payload["stale"] == []
+    assert {path: path.read_bytes() for path in evidence} == evidence
     with outcomes.database() as db:
-        assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 4
+        assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
 
 
 def seed_history(active=0, resolved=0):

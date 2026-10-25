@@ -381,6 +381,8 @@ sys.exit(int(result["outcome"] == "needs_input"))
         assert len(requests) == 1
     launches = [json.loads(line) for line in (root / "started").read_text().splitlines()]
     assert len(launches) == len(children) == 2
+    assert all(args[0] == "propose" and args[-1] == "--json" for args in launches)
+    assert {args[1] for args in launches} == {str(repo.manifest), str(second_manifest)}
     for number in (1, 2):
         assert sum(f"-issue-{number}-" in args[args.index("--change") + 1]
                    for args in launches) == 1

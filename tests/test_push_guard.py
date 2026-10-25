@@ -93,24 +93,3 @@ def test_a_refused_push_reaches_no_remote(origin_and_worktree):
         vcs.push(wt, "main", "main")
 
     assert git(["ls-remote", "--heads", str(origin)], wt) == before
-
-
-def test_task_ships_with_the_base_passed_through():
-    """`task.run` must hand the base down, or the guard only half applies.
-
-    Reads the RESOLVED base rather than `repo.base`: since 2026-08-09 an issue
-    may thread itself onto a theme branch with `base: <name>`, and `run()`
-    resolves that into a local before using it. The claim is unchanged — a
-    base reaches `push`, so the refuse-to-push-the-base guard can fire — only
-    the expression it reads did.
-    """
-    import inspect
-
-    from nightshift import task
-
-    source = inspect.getsource(task.run)
-    assert "vcs.push(worktree, claim.branch, base)" in source
-    # And it must be that resolution, not a bare literal: pushing a theme's
-    # work while the guard believes the base is `main` would let a worker push
-    # to the trunk it was threaded away from.
-    assert "base = queue.base_branch(issue.body) or repo.base" in source

@@ -1,6 +1,7 @@
-"""Per-repository intake engines, with real claim code and fake CLI boundaries."""
+"""Specloop intake routing, with observable claims and fake CLI boundaries."""
 
 import json
+import os
 import subprocess
 from functools import partial
 from pathlib import Path
@@ -9,9 +10,8 @@ import pytest
 
 from manifest_fixtures import manifest_text
 
-from nightshift import daemon, queue
+from nightshift import cli, daemon, queue
 from nightshift.config import Config, Repo, load
-from test_queue import FakeGh
 
 
 @pytest.fixture
@@ -77,28 +77,6 @@ def test_unknown_engine_without_worker_settings_is_rejected(tmp_path):
     config.write_text('[[repos]]\nname = "o/r"\nengine = "typo"')
     with pytest.raises(ValueError, match="engine"):
         load(config)
-
-
-@pytest.mark.scenario("issue-intake/engine-per-repository/worker-repository-unchanged")
-@pytest.mark.parametrize("engine", [None, "worker"])
-def test_worker_repository_still_claims_ready_issue(isolated, monkeypatch, engine):
-    config = isolated / "config.toml"
-    config.write_text('[[repos]]\nname = "owner/worker"\nverify = "pytest"\n'
-                      + (f'engine = "{engine}"\n' if engine else ""))
-    cfg = load(config)
-    gh = FakeGh({"agent:ready": [7]})
-    monkeypatch.setattr(queue, "claim", partial(queue.claim, runner=gh))
-    monkeypatch.setattr(daemon.specloop_intake, "propose_pending",
-                        lambda *a, **k: pytest.fail("worker entered proposal routing"))
-    daemon.poll_specloop(cfg, daemon.RepoHealth())
-    claimed = daemon.claim_next(cfg, {"owner/worker": isolated})
-    assert claimed is not None
-    assert claimed.issue.number == 7
-    assert claimed.claim.branch == "claude/7"
-    assert queue.claim_path("owner/worker", 7).is_file()
-    assert any("--add-label" in edit and "agent:working" in edit
-               and "--remove-label" in edit and "agent:ready" in edit for edit in gh.edits())
-    assert not any(call[0] == "api" for call in gh.calls)
 
 
 class DraftGh:
@@ -180,10 +158,38 @@ class DraftGh:
 
 
 @pytest.mark.scenario("issue-intake/engine-per-repository/specloop-repository-skips-worker-claims")
+@pytest.mark.scenario("worker-retirement/sole-execution-engine/worker-execution-is-absent")
+@pytest.mark.scenario("worker-retirement/retired-configuration-is-inert/old-knobs-cannot-control-builds")
+@pytest.mark.scenario("worker-retirement/service-prerequisites-match-the-surviving-engine/codex-enrollment-needs-no-worker-login")
 @pytest.mark.real_trust
+@pytest.mark.parametrize("entry", ["daemon", "cli", "legacy-config"])
 @pytest.mark.parametrize("labels", [("agent:ready",), ("spec:draft",), ("agent:ready", "spec:draft")])
-def test_specloop_repository_drafts_without_worker_claims(isolated, monkeypatch, manifest, labels):
-    cfg = Config(repos=[Repo("owner/sample", engine="specloop", manifest=manifest)])
+def test_specloop_repository_drafts_without_worker_claims(isolated, monkeypatch, manifest, labels, entry):
+    config = isolated / "config.toml"
+    config.write_text('''[[repos]]
+name = "owner/sample"
+engine = "specloop"
+manifest = "repository.toml"
+''' + ('''verify = "worker-only-verify"
+[repos.models]
+implement = "retired:unused"
+review = "retired:unused"
+[daemon]
+max_tasks_per_night = 0
+[[endpoints]]
+name = "retired"
+base_url = "http://unused.invalid"
+auth_env = "RETIRED_ENDPOINT_TOKEN"
+[models]
+implement = "retired:unused"
+''' if entry == "legacy-config" else ""))
+    cfg = load(config)
+    original_manifest = manifest.read_bytes()
+    # Exercise Python's env-file loading with only front-door credentials.
+    env_file = isolated / "env"
+    env_file.write_text("export GH_TOKEN='github_pat_test'\n")
+    monkeypatch.setattr(cli.config, "ENV_FILE", env_file)
+    monkeypatch.setattr(os, "environ", {"PATH": "", "HOME": str(isolated)})
     gh = DraftGh(labels)
     commands = []
 
@@ -200,10 +206,6 @@ def test_specloop_repository_drafts_without_worker_claims(isolated, monkeypatch,
             "commit": "abc123", "questions": [], "contradictions": [], "risks": [], "problems": [],
         }), "")
 
-    for name in ("claim", "reconcile"):
-        monkeypatch.setattr(queue, name, lambda *a, **k: pytest.fail("worker queue used"))
-    monkeypatch.setattr(daemon, "endpoints_ready", lambda *a, **k: pytest.fail("worker endpoint probed"))
-    monkeypatch.setattr(daemon, "run_claimed", lambda *a, **k: pytest.fail("worker started"))
     monkeypatch.setattr(queue, "_gh", gh)
     monkeypatch.setattr(daemon.specloop_intake, "run_git", run)
     # Inject completed CLI results for this routing/delivery test; production
@@ -211,9 +213,15 @@ def test_specloop_repository_drafts_without_worker_claims(isolated, monkeypatch,
     monkeypatch.setattr(daemon, "poll_specloop", partial(daemon.poll_specloop, specloop_runner=run))
 
     # No worker checkout is required. A second poll does not duplicate delivery.
-    daemon.loop(cfg, {}, once=True)
-    daemon.loop(cfg, {}, once=True)
-    assert daemon.claim_next(cfg, {"owner/sample": isolated}) is None
+    for _ in range(2):
+        if entry == "daemon":
+            daemon.loop(cfg, {}, once=True)
+        else:
+            assert cli.main(["run", "--once", "--config", str(config)]) == 0
+            assert os.environ["GH_TOKEN"] == "github_pat_test"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
+    assert "RETIRED_ENDPOINT_TOKEN" not in os.environ
+    assert manifest.read_bytes() == original_manifest
     assert len(commands) == 2
     assert commands[1] == ["git", "-C", str(isolated / "source"), "push", "origin",
                            "abc123:refs/heads/spec/owner__sample-issue-7-add-a-gate"]
@@ -230,6 +238,7 @@ def test_specloop_repository_drafts_without_worker_claims(isolated, monkeypatch,
     assert receipt["result"]["outcome"] == "drafted"
     assert receipt["result"]["commit"] == "abc123"
     assert not queue.CLAIM_DIR.exists()
+    assert not any("--add-label" in call and "agent:working" in call for call in gh.calls)
     assert len([call for call in gh.calls if call[:2] == ["pr", "create"]]) == 1
     assert gh.labels == set()
     assert gh.pr_url in gh.comments[-1]["body"]
@@ -240,27 +249,6 @@ def test_pause_prevents_specloop_commands(isolated, monkeypatch, manifest):
     monkeypatch.setattr(daemon.specloop_intake, "propose_pending",
                         lambda *a, **k: pytest.fail("drafted while paused"))
     daemon.loop(Config(repos=[Repo("o/r", engine="specloop", manifest=manifest)]), {}, once=True)
-
-
-def test_specloop_poll_is_independent_of_worker_cap(isolated, monkeypatch, manifest):
-    seen = []
-    monkeypatch.setattr(queue, "_gh", DraftGh(()))
-    monkeypatch.setattr(daemon.specloop_intake, "propose_pending", lambda *a, **k: seen.append(a[0].name))
-    daemon.loop(Config(repos=[Repo("o/r", engine="specloop", manifest=manifest)], max_tasks_per_night=0),
-                {}, once=True)
-    assert seen == ["o/r"]
-
-
-def test_mixed_repos_keep_worker_recovery_and_claims(isolated, monkeypatch, manifest):
-    cfg = Config(repos=[Repo("o/spec", engine="specloop", manifest=manifest), Repo("o/worker", "true")])
-    recovered, claimed = [], []
-    monkeypatch.setattr(queue, "_gh", FakeGh())
-    monkeypatch.setattr(queue, "reconcile", lambda name, labels: recovered.append(name) or [])
-    monkeypatch.setattr(queue, "claim", lambda name, *a: claimed.append(name))
-    dirs = {repo.name: isolated for repo in cfg.repos}
-    daemon.startup(cfg, dirs)
-    daemon.claim_next(cfg, dirs)
-    assert recovered == claimed == ["o/worker"]
 
 
 def test_unavailable_specloop_repo_does_not_stop_other_repos(isolated, monkeypatch, manifest):

@@ -20,11 +20,9 @@ push, spending another full budget each time.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
-from nightshift import queue, task, vcs
+from nightshift import queue, vcs
 from nightshift.queue import Labels
 
 @pytest.fixture(autouse=True)
@@ -66,23 +64,6 @@ def test_an_ordinary_push_failure_is_left_alone(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError) as caught:
         vcs.push(tmp_path, "claude/14", "main")
     assert not isinstance(caught.value, vcs.WorkflowScopeRefusal)
-
-
-def test_the_escalation_says_where_the_work_is(monkeypatch):
-    """The push is the step that FAILED, so the branch is local only. A human
-    sent to look for it on the remote finds nothing."""
-    text = task._WORKFLOW_ESCALATION.format(branch="claude/14", detail=REJECTION)
-
-    flat = " ".join(text.split())
-    assert "claude/14" in flat
-    assert "A human has to make this change" in flat
-    # WHERE the work is. The push is the step that failed, so a human sent to
-    # look for this branch on the remote finds nothing.
-    assert "the push is the step that failed" in flat.lower()
-    assert "nowhere else" in flat
-    # It must not read as an infrastructure fault to be fixed by widening the
-    # token — that would delete the property the review model rests on.
-    assert "the fix is not to grant the scope" in flat.lower()
 
 
 # --- refusing before anything is spent --------------------------------------
