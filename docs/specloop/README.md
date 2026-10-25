@@ -1,7 +1,7 @@
 # specloop — Nightshift's build engine
 
 Nightshift turns approved OpenSpec changes into reviewed, verified pull requests.
-specloop is the engine that does the building: it takes an admitted change through
+specloop is the sole/default engine: it takes an admitted change through
 its `tasks.md` one task at a time, and the daemon is its GitHub front end. For the
 JSON contract see [command-json.md](command-json.md); for dependency setup see
 [prepare.md](prepare.md).
@@ -24,8 +24,10 @@ resolve beside `config.toml`; `~` expands. Set its `[run]` source `repo`,
 `github` and `pr_base` to match the repository, and supply provider profiles,
 roles, allowed/frozen paths and verification commands. Template `run.change` and
 `run.branch` are optional: intake supplies both per change, overriding any
-defaults. Admission saves the effective manifest with the run. The worker's
-`verify` setting is not needed for specloop.
+defaults. Admission saves the effective manifest with the run. Omit `engine`
+or set it to `specloop`; explicit `worker` fails loading before dispatch.
+Worker `verify`, model/endpoint, task-cap, phase-budget and concurrency settings
+are inert, with key-only ignored-setting notes; no manifest is generated from them.
 See [enrollment and preparation](../../README.md#enroll-a-repository) and the
 [CLI contract](command-json.md).
 
@@ -157,7 +159,7 @@ status, instead return a version-1 error document and exit 1
 Per-run `status_error` rows refresh alongside healthy entries; a failed
 top-level status read instead retains the previous snapshot marked `STALE`
 and exits 1 ([PR #32](https://github.com/mattpolicastro/nightshift/pull/32)).
-JSON carries `specloop` beside worker
+JSON carries `specloop` beside historical worker
 `tasks`. The Paseo plugin source now includes the Factory section described
 below. Daemon quota pacing for these runs remains separate work.
 
@@ -172,9 +174,51 @@ timeout fails verification before later steps run. Commands are trusted;
 use a frozen lockfile for reproducible fetching. See the
 [pnpm preparation example](prepare.md).
 
-**Rollout:** `worker` remains the default when `engine` is omitted, with its
-existing behavior; retiring it is a later change. See [operations](#operations)
-for pause, job control and supervisor boundaries.
+### Retirement rollout
+
+Worker retirement ([issue #16](https://github.com/mattpolicastro/nightshift/issues/16))
+preserves attention, outcomes, transcripts and safe leftover-work recovery.
+The `nightshift` front door and `specloop` supervisor keep separate CLIs/jobs,
+and `~/.nightshift` and `~/.specloop` stay in place. CLI/package merging and
+state relocation belong to [issue #40](https://github.com/mattpolicastro/nightshift/issues/40).
+There is no automatic host migration, interrupted-worker restart or rollback
+of remote effects. `[daemon].worktree_root` remains compatibility-only.
+
+Direct Python prerequisites are Python 3.12+, `uv`, `gh`, git and scoped GitHub
+access with preflight negative-control/alert checks; providers and verification
+commands retain their manifest requirements. Worker OAuth, endpoint models,
+verify strings, Claude, pnpm and Swift are not Python front-door prerequisites.
+The frozen `bin/nightshift-daemon` still requires `~/.config/nightshift/env`,
+`CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN` and `gh/claude/pnpm/node/git/swift` before
+Python starts, and scrubs conflicting Anthropic variables. Wrappers/plists and
+their stale comments remain unchanged. Hosts lacking these legacy prerequisites
+need separate wrapper work or an independently provisioned operator service
+preserving trusted env loading, scoped GH_TOKEN refusal, required front-door
+tools, credential isolation and preflight guards. See
+[startup and host paths](../../README.md#host-path-setup).
+
+**Before merge, a human must complete these live checks; CI cannot establish them:**
+
+- [ ] Confirm proposal blockers are satisfied. Before admission, check the trusted
+  implementation manifest allows `docs/landing.md`; preserve all frozen paths.
+- [ ] Confirm no active worker process before replacing code; inspect and preserve
+  unfinished claims, branches and worktrees.
+- [ ] Inspect the actual service config: remove explicit worker enrollment, supply
+  trusted manifests, review ignored-key notes and manifest provider credentials.
+- [ ] Inspect installed plists and loaded jobs: ProgramArguments, WorkingDirectory,
+  environments and wrapper targets for both daemon and supervisor. Record whether
+  legacy prerequisites exist; complete and validate separate service work if needed.
+- [ ] Inspect external scripts, aliases, cron/launchd and Paseo calls for retired
+  `task.run`, probes, worker status/model output and configuration assumptions.
+- [ ] Verify the front door and independent supervisor with intended config/provider
+  profiles, historical attention and leftover recovery. Pause/unload does not stop
+  admitted builds; inspect supervisor and run processes separately.
+- [ ] Review operational prose and live issue/PR references; record pending or failed
+  checks on the PR. Merge only after live config/plist/caller inspection completes.
+
+These checks are pending operator work, not performed validation. See
+[deferred cleanup](../../KNOWN-LIMITATIONS.md#retirement-follow-ups) and
+[pause, job control and supervisor boundaries](#pause-stop-and-the-supervisor).
 
 ## Operations
 
@@ -219,8 +263,11 @@ Rows show full job ID, stage, repository/item, command, execution state, elapsed
 seconds and remaining time or `OVERDUE by Ns`. Starting/legacy jobs without
 timing report unavailable. Full history, including failed jobs, is in
 `nightshift jobs --all`.
-These rows are separate from daemon/worker liveness and independent
+These rows are separate from daemon liveness and independent
 `specloop status` run state ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+Worker working counts, claim/phase/transcript lines and the off-subscription
+model report are retired. Other status output and exits, including liveness,
+alerts, queue lists/counts, contradiction and inventory diagnostics, are unchanged.
 
 | Command | Budget (seconds) |
 | --- | ---: |

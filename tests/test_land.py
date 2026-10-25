@@ -223,7 +223,9 @@ def test_invalid_identity_refused(config_path, scripted_runner, capsys, argv, re
     ('[[repos]]\nname = "owner/project"\nverify = "true"\n'
      '[[repos]]\nname = "OWNER/PROJECT"\nverify = "true"\n', "ambiguous enrollment"),
     ('[[repos]]\nname = 42\nverify = "true"\n', "invalid repository identity"),
-    ('[[repos]]\nname = "owner/project"\n', "cannot read configuration"),
+    ('[[repos]]\nname = "owner/project"\nengine = "worker"\n',
+     'owner/project: worker engine is retired; use engine = "specloop" '
+     '(or omit engine) and configure a trusted manifest'),
     ('repos = "wrong shape"', "cannot read configuration"),
     ('[invalid toml', "cannot read configuration"),
 ])
@@ -338,13 +340,14 @@ def test_every_status_row_must_be_readable(
     assert [argv for argv, _ in scripted_runner.calls] == [VIEW, MAIN, STATUS]
 
 
-@pytest.mark.parametrize("engine", ["worker", "specloop"])
+@pytest.mark.scenario("reviewed-pr-landing/landing-interpreter-prerequisites/operator-prepares-the-environment")
+@pytest.mark.parametrize("engine", [None, "specloop"])
 @pytest.mark.parametrize("matching", [False, True])
 def test_discovery_uses_pr_identity_regardless_of_engine(
     config_path, scripted_runner, capsys, engine, matching,
 ):
-    config_path.write_text(f'[[repos]]\nname = "{REPO}"\nverify = "true"\nengine = "{engine}"\n'
-                          'manifest = "manifest.toml"\n')
+    config_path.write_text(f'[[repos]]\nname = "{REPO}"\nmanifest = "manifest.toml"\n'
+                          + (f'engine = "{engine}"\n' if engine else ""))
     config_path.with_name("manifest.toml").write_text("")
     # Similar branches/change names and the same PR number in another repo
     # cannot identify a front-door PR. Unpublished runs have an empty URL.
@@ -357,7 +360,7 @@ def test_discovery_uses_pr_identity_regardless_of_engine(
     scripted_runner.expect(STATUS, {**EMPTY_STATUS, "runs": rows})
     operations = land.Operations(scripted_runner, lambda _: None, lambda: 100.0)
     identity = land.Identity(REPO, 78)
-    assert land.enrolled_repo(land.load_config(config_path), identity).engine == engine
+    assert land.enrolled_repo(land.load_config(config_path), identity).engine == "specloop"
     found = land.discover_run(identity, operations)
     if matching:
         assert found == land.LandingRun("reviewed-change", URL, HEAD, "paused", "human_checks")

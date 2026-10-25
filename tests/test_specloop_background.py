@@ -21,7 +21,6 @@ from nightshift.config import Config, Repo
 from specloop import serve, state
 from specloop.state import Run
 from test_engine_routing import DraftGh
-from test_queue import FakeGh
 from test_specloop_approval import ApprovalGh, HEAD
 from test_specloop_command_json import BRANCH, CHANGE, git, template
 from test_specloop_isolation import Pipeline, CHECKS
@@ -218,63 +217,176 @@ sys.exit(cli.main(args))
         assert mine
 
 
-@pytest.mark.scenario("issue-intake/engine-per-repository/worker-repository-unchanged")
-def test_long_propose_allows_worker_claim_heartbeat_and_harvest(background, monkeypatch):
-    root, repo, _ = background
-    gh = DraftGh(("spec:draft",))
-    worker_gh = FakeGh({"agent:ready": [7]})
-    cfg = Config(repos=[repo, Repo("owner/worker", verify="true")], poll_seconds=.01)
+@pytest.mark.scenario("worker-retirement/sole-execution-engine/polling-remains-responsive")
+def test_long_propose_allows_specloop_progress_heartbeat_and_reaping(background, monkeypatch):
+    root, repo, children = background
+    second_manifest = root / "second.toml"
+    second_manifest.write_text(manifest_text(root / "second-source"))
+    second_repo = Repo("owner/second", engine="specloop", manifest=second_manifest)
+    first, second = Pipeline(repo), Pipeline(second_repo)
+    first.issue(1)
+    second.issue(2)
+    first.issues[1]["body"] = "Keep the voltage at 5 V — retain this input."
+    original_item = deepcopy(first.issues[1])
+    cfg = Config(repos=[repo, second_repo], poll_seconds=.01)
+
+    # Both proposals use the production detached wrapper, lock and receipts.
+    # Separate barriers let the later repo finish while the first stays live.
+    (root / "specloop").write_text(f"#!{sys.executable}\n" + r'''
+import json, os, sys, time
+from pathlib import Path
+root = Path(os.environ["TEST_INTAKE_ROOT"])
+args = sys.argv[1:]
+assert args[0] == "propose"
+change = args[args.index("--change") + 1]
+second = "-issue-2-" in change
+idea = Path(args[args.index("--idea-file") + 1])
+original = idea.read_bytes()
+with (root / "started").open("a") as log:
+    log.write(json.dumps(args) + "\n")
+deadline = time.monotonic() + 15
+while not (root / "release").exists():
+    if second and (root / "second-release").exists():
+        break
+    if time.monotonic() > deadline:
+        (root / "timed-out").touch()
+        sys.exit(1)
+    time.sleep(.01)
+assert idea.read_bytes() == original
+result = ({"version": 1, "outcome": "drafted", "branch": "spec/" + change,
+           "commit": "a" * 40} if second else
+          json.loads((root / "cli-result.json").read_text()))
+(root / ("second-finished" if second else "finished")).touch()
+print(json.dumps(result))
+sys.exit(int(result["outcome"] == "needs_input"))
+''')
+
+    def gh(args):
+        name = ("/".join(args[1].split("/")[1:3]) if args[0] == "api"
+                else args[args.index("--repo") + 1])
+        assert name in (repo.name, second_repo.name)
+        return (first if name == repo.name else second).gh(args)
+
+    def status(args, **kwargs):
+        assert args[:2] == ["specloop", "status"]
+        return subprocess.CompletedProcess(args, 0, '{"version": 1, "runs": []}', "")
+
     monkeypatch.setattr(queue, "_gh", gh)
+    monkeypatch.setattr(subprocess, "run", status)
+    monkeypatch.setattr(specloop_intake, "run_git", second.command)
     monkeypatch.setattr(daemon, "startup", lambda *a: None)
     monkeypatch.setattr(daemon, "_note_unclean_exit", lambda *a: None)
     monkeypatch.setattr(daemon.notify, "send", lambda *a: None)
-    monkeypatch.setattr(queue, "claim", partial(queue.claim, runner=worker_gh))
-    claim = daemon.claim_next
-    claims, beats, harvested = [], [], []
-    real_beat, real_harvest = daemon.beat, daemon._harvest
+    monkeypatch.setattr(specloop_job, "_children", {})
+    real_poll, real_beat, real_reap = daemon.poll_specloop, daemon.beat, specloop_job.reap
+    beats, reaps, polls = [], [], []
+    first_path = daemon.STATE_DIR / "proposals/owner__sample/1.json"
+    second_path = daemon.STATE_DIR / "proposals/owner__second/2.json"
+    retained = {}
+    deadline = time.monotonic() + 5
 
     def beat(*args):
         real_beat(*args)
         beats.append(json.loads(daemon.HEARTBEAT_FILE.read_text()))
 
-    def claim_worker(*args, **kwargs):
-        eventually(lambda: (root / "started").exists())
-        # This is still the first poll: the spec repo precedes the worker repo.
-        assert len(beats) == 2  # startup and this poll
-        assert not (root / "finished").exists()
-        result = claim(*args, **kwargs)
-        claims.append(result)
-        return result
-
-    def run_worker(cfg, claimed, tally):
-        assert claimed.repo.engine == "worker"
-        tally.shipped += 1
+    def reap():
+        before = dict(specloop_job._children)
+        real_reap()
+        removed = set(before) - set(specloop_job._children)
+        assert all(before[key].returncode is not None for key in removed)
+        reaps.append((len(beats), removed))
 
     class Stop(Exception):
         pass
 
-    def harvest(in_flight, tally):
-        result = real_harvest(in_flight, tally)
-        if tally.shipped and not harvested:
-            assert not (root / "finished").exists()
-            harvested.append(tally.shipped)
-            raise Stop
-        return result
+    def assert_pending():
+        assert first_path.read_bytes() == retained["receipt"]
+        assert retained["idea"].read_bytes() == retained["input"]
+        assert retained["request"].read_bytes() == retained["request_bytes"]
+        assert not (retained["directory"] / "result.json").exists()
+        assert not (retained["directory"] / "collected.json").exists()
+        assert not (root / "finished").exists() and not (root / "timed-out").exists()
+        assert first.issues[1] == original_item and not first.prs
+        assert str(retained["directory"]) in specloop_job._children
+        assert specloop_job._children[str(retained["directory"])].poll() is None
 
-    monkeypatch.setattr(daemon, "claim_next", claim_worker)
-    monkeypatch.setattr(daemon, "run_claimed", run_worker)
+    def poll(cfg, health):
+        assert time.monotonic() < deadline, "daemon did not progress while proposal was running"
+        real_poll(cfg, health)
+        polls.append(health)
+        if not retained:
+            eventually(lambda: (root / "started").exists()
+                       and len((root / "started").read_text().splitlines()) == 2)
+            receipt = json.loads(first_path.read_bytes())
+            assert "job" in receipt and "result" not in receipt and not receipt.get("delivered")
+            directory = first_path.parent / "1.jobs" / receipt["job"]
+            request = directory / "request.json"
+            args = json.loads(request.read_bytes())["args"]
+            assert args[0] == "propose" and "--idea" not in args
+            idea = Path(args[args.index("--idea-file") + 1])
+            assert idea.read_text(encoding="utf-8") == receipt["idea"] == receipt["input"]
+            assert original_item["body"] in receipt["input"]
+            retained.update(receipt=first_path.read_bytes(), directory=directory,
+                            request=request, request_bytes=request.read_bytes(),
+                            idea=idea, input=idea.read_bytes())
+            assert not second.issues[2]["comments"] and not second.prs
+            assert second.issues[2]["labels"] == [{"name": "spec:draft"}]
+            (root / "second-release").touch()
+        assert_pending()
+        assert not health.failures and not health.item_failures
+        second_receipt = json.loads(second_path.read_bytes())
+        second_key = str(second_path.parent / "2.jobs" / second_receipt["job"])
+        if (len(polls) >= 3 and second_receipt.get("delivered")
+                and any(second_key in removed for _, removed in reaps)):
+            raise Stop
+
     monkeypatch.setattr(daemon, "beat", beat)
-    monkeypatch.setattr(daemon, "_harvest", harvest)
+    monkeypatch.setattr(specloop_job, "reap", reap)
+    monkeypatch.setattr(daemon, "poll_specloop", poll)
     with pytest.raises(Stop):
-        daemon.loop(cfg, {"owner/worker": root})
-    assert len(claims) == 1 and claims[0].issue.number == 7
-    assert queue.claim_path("owner/worker", 7).exists()
-    assert harvested and len(beats) >= 3
-    assert any("agent:working" in edit and "agent:ready" in edit for edit in worker_gh.edits())
-    receipt = json.loads((daemon.STATE_DIR / "proposals/owner__sample/7.json").read_text())
-    assert "job" in receipt and "result" not in receipt
-    assert len((root / "started").read_text().splitlines()) == 1
-    assert gh.labels == {"spec:draft"}
+        daemon.loop(cfg, {})
+    assert_pending()
+    assert len(beats) >= 4  # Startup and at least three completed service polls.
+    assert all(beat["pid"] == os.getpid() for beat in beats)
+    assert len({beat["started_at"] for beat in beats}) == 1
+    assert all(a["last_poll"] < b["last_poll"] for a, b in zip(beats, beats[1:]))
+    assert {number for number, _ in reaps} >= set(range(2, len(beats) + 1))
+    assert not daemon.HEARTBEAT_FILE.exists()
+    assert not list(queue.CLAIM_DIR.rglob("*.json"))
+    assert (root / "second-finished").exists()
+    assert not second.issues[2]["labels"]
+    assert len(second.issues[2]["comments"]) == len(second.prs) == 1
+    assert json.loads(second_path.read_bytes())["result"]["outcome"] == "drafted"
+    assert "Spec draft ready" in second.issues[2]["comments"][0]["body"]
+    assert all("--add-label" not in call or "agent:working" not in call
+               for pipeline in (first, second) for call in pipeline.calls)
+    delivered_second = deepcopy(second.issues[2])
+
+    # Completion and repeated collection preserve one launch and one delivery.
+    (root / "release").touch()
+    for child in children:
+        child.wait(timeout=5)
+    for _ in range(3):
+        real_poll(cfg, polls[-1])
+    assert not specloop_job._children
+    receipt = json.loads(first_path.read_bytes())
+    assert receipt["delivered"] and receipt["result"]["outcome"] == "needs_input"
+    assert first.issues[1]["labels"] == [{"name": "needs-human"}]
+    assert len(first.issues[1]["comments"]) == 1 and not first.prs
+    assert "Which voltage?" in first.issues[1]["comments"][0]["body"]
+    assert second.issues[2] == delivered_second and len(second.prs) == 1
+    assert not polls[-1].failures and not polls[-1].item_failures
+    for receipt_path in (first_path, second_path):
+        requests = list((receipt_path.parent / f"{receipt_path.stem}.jobs").glob("*/request.json"))
+        assert len(requests) == 1
+    launches = [json.loads(line) for line in (root / "started").read_text().splitlines()]
+    assert len(launches) == len(children) == 2
+    assert all(args[0] == "propose" and args[-1] == "--json" for args in launches)
+    assert {args[1] for args in launches} == {str(repo.manifest), str(second_manifest)}
+    for number in (1, 2):
+        assert sum(f"-issue-{number}-" in args[args.index("--change") + 1]
+                   for args in launches) == 1
+    assert not (root / "timed-out").exists()
 
 
 @pytest.mark.parametrize("command,outcome", [

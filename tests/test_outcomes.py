@@ -1,5 +1,8 @@
 import json
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 
 from nightshift import outcomes, queue
 from nightshift.config import Labels
@@ -89,46 +92,53 @@ def test_running_tasks_do_not_query_github():
     assert not outcomes.attention(outcomes.refresh(Labels(), runner=fail))
 
 
-def test_cli_json_and_offline_do_not_write_github(monkeypatch, capsys):
-    from nightshift import cli
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/historical-attention-remains-readable")
+@pytest.mark.parametrize("offline", [False, True])
+def test_cli_json_and_offline_do_not_write_github(tmp_path, monkeypatch, capsys, offline):
+    from nightshift import cli, specloop_attention
     from nightshift.config import Config
     monkeypatch.setattr(cli.config, "load_env_file", lambda: None)
     monkeypatch.setattr(cli.config, "load", lambda path: Config(repos=[]))
     outcomes.record("a/b", 1, state="needs_decision", reason="needs review")
+    monkeypatch.setattr(queue, "CLAIM_DIR", tmp_path / "claims")
+    claim = queue.claim_path("a/b", 1)
+    claim.parent.mkdir(parents=True)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    claim.write_text(json.dumps({"repo": "a/b", "number": 1, "branch": "claude/1",
+                                "worktree": str(worktree), "started_at": outcomes.now(),
+                                "phase": "review"}))
+    work = worktree / "work.txt"
+    work.write_text("unfinished worker change")
+    evidence = {path: path.read_bytes() for path in (claim, work)}
+    def status(args, **kwargs):
+        assert args == ["status"]
+        return {"version": 1, "runs": [{"change": "pending", "status": "paused",
+                "pr": None, "pause": {"reason": "stuck"}}]}
+    monkeypatch.setattr(specloop_attention.specloop_client, "call", status)
+    specloop_attention.snapshot()
     def forbidden(args):
         raise AssertionError("offline must not call GitHub")
     monkeypatch.setattr(queue, "_gh", forbidden)
-    assert cli.main(["attention", "--offline", "--json"]) == 0
+    def read(args, deadline):
+        assert not offline
+        assert args[:3] == ["issue", "view", "1"]
+        return github()(args)
+    monkeypatch.setattr(outcomes, "_read_github", read)
+    if offline:
+        monkeypatch.setattr(specloop_attention.specloop_client, "call", forbidden)
+    assert cli.main(["attention", "--json"] + (["--offline"] if offline else [])) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["version"] == 1
-    assert payload["offline"] is True
+    assert payload["offline"] is offline
     assert payload["tasks"][0]["issue_url"] == "https://github.com/a/b/issues/1"
-
-
-def test_daemon_crash_before_worker_and_retries_keep_history(tmp_path, monkeypatch):
-    from nightshift import daemon
-    from nightshift.config import Config, Repo
-    from types import SimpleNamespace
-    repo = Repo(name="a/b", verify="true")
-    cfg = Config(repos=[repo])
-    claimed = daemon.Claimed(repo, tmp_path, SimpleNamespace(number=1, title="task"),
-                            SimpleNamespace(worktree=str(tmp_path / "wt"), branch="claude/1"))
-    dirs = []
-    def crash(*args, **kw):
-        dirs.append(kw["transcript_dir"])
-        raise RuntimeError("fetch failed before worker")
-    monkeypatch.setattr(daemon.task, "run", crash)
-    monkeypatch.setattr(daemon.queue, "release", lambda *a, **kw: None)
-    monkeypatch.setattr(daemon.vcs, "remove_worktree", lambda *a, **kw: None)
-    monkeypatch.setattr(daemon.notify, "send", lambda *a, **kw: None)
-    for _ in range(2):
-        daemon.run_claimed(cfg, claimed, daemon.Tally())
-    assert dirs[0] != dirs[1]
-    item = outcomes.tasks()[0]
-    assert item["state"] == "needs_decision"
-    assert "fetch failed" in item["reason"]
+    assert payload["tasks"][0]["reason"] == "needs review"
+    assert payload["specloop"][0]["change"] == "pending"
+    assert payload["specloop"][0]["reason"] == "stuck"
+    assert payload["stale"] == []
+    assert {path: path.read_bytes() for path in evidence} == evidence
     with outcomes.database() as db:
-        assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 4
+        assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
 
 
 def seed_history(active=0, resolved=0):
@@ -272,3 +282,77 @@ def test_cli_reports_deferred_checks_as_stale_json(monkeypatch, capsys):
     assert len(payload["tasks"]) == 40
     assert len(payload["stale"]) == 8
     assert all("deferred" in i["error"] for i in payload["stale"])
+
+
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/historical-attention-remains-readable")
+@pytest.mark.scenario("worker-retirement/client-command-boundaries-remain-stable/existing-clients-use-surviving-commands")
+@pytest.mark.parametrize("failure", ["github", "specloop", "both"])
+def test_attention_refresh_stale_offline_and_resolution(tmp_path, monkeypatch, capsys, failure):
+    from nightshift import cli
+    from nightshift.config import Config
+
+    monkeypatch.setattr(cli.config, "ENV_FILE", tmp_path / "absent-env")
+    monkeypatch.setattr(cli.config, "load", lambda path: Config(repos=[]))
+    monkeypatch.setattr(outcomes, "HISTORY_INTERVAL", 0)
+    outcomes.record("a/b", 1, state="awaiting_merge", reason="historical worker PR",
+                    pr_url="https://github.com/a/b/pull/2")
+    phase, calls = "healthy", []
+
+    def read_github(args, deadline):
+        calls.append("github")
+        assert args[:3] in (["issue", "view", "1"], ["pr", "view", "https://github.com/a/b/pull/2"])
+        if phase == "outage" and failure in ("github", "both"):
+            raise RuntimeError("GitHub offline")
+        return github(pr_state="MERGED" if phase == "resolved" else "OPEN")(args)
+
+    def run(args, **kwargs):
+        calls.append("specloop")
+        assert args == ["specloop", "status", "--json"]
+        assert kwargs == {"capture_output": True, "text": True, "check": False,
+                          "timeout": outcomes.REQUEST_SECONDS}
+        if phase == "outage" and failure in ("specloop", "both"):
+            raise OSError("specloop offline")
+        runs = [] if phase == "resolved" else [{"change": "historical-pause", "status": "paused",
+                "pr": None, "pause": {"reason": "stuck"}}]
+        return subprocess.CompletedProcess(args, 0, json.dumps({"version": 1, "runs": runs}), "")
+
+    monkeypatch.setattr(outcomes, "_read_github", read_github)
+    monkeypatch.setattr(subprocess, "run", run)
+
+    def attention(offline=False, code=0):
+        assert cli.main(["attention", "--json", *(["--offline"] if offline else [])]) == code
+        output = capsys.readouterr()
+        assert output.err == ""
+        payload = json.loads(output.out)
+        assert set(payload) == {"version", "offline", "tasks", "specloop", "specloop_error", "stale"}
+        assert payload["version"] == 1 and payload["offline"] is offline
+        return payload
+
+    healthy = attention()
+    assert healthy["tasks"][0]["state"] == "awaiting_merge"
+    assert healthy["tasks"][0]["reason"] == "historical worker PR"
+    assert healthy["specloop"][0]["reason"] == "stuck"
+    phase = "outage"
+    stale = attention(code=1)
+    assert bool(stale["stale"]) == (failure in ("github", "both"))
+    assert bool(stale["specloop_error"]) == (failure in ("specloop", "both"))
+    for key, broken in (("tasks", failure != "specloop"), ("specloop", failure != "github")):
+        assert len(stale[key]) == 1
+        assert bool(stale[key][0]["error"]) is broken
+        if broken:
+            assert stale[key][0]["checked_at"] == healthy[key][0]["checked_at"]
+    before = list(calls)
+    assert attention(offline=True, code=1) == {**stale, "offline": True}
+    assert cli.main(["attention", "--offline"]) == 1
+    rendered = capsys.readouterr().out
+    assert "STALE" in rendered and "historical-pause" in rendered and "a/b#1" in rendered
+    assert calls == before
+    phase = "resolved"
+    resolved = attention()
+    assert resolved == {"version": 1, "offline": False, "tasks": [], "specloop": [],
+                        "specloop_error": None, "stale": []}
+    before = list(calls)
+    assert attention(offline=True) == {**resolved, "offline": True}
+    assert calls == before and outcomes.tasks()[0]["state"] == "resolved"
+    with outcomes.database() as db:
+        assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1

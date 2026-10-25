@@ -19,8 +19,6 @@ flaky, retry" from "the token can no longer read this repo, stop". Retrying a
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from nightshift import daemon, notify, queue
@@ -139,47 +137,35 @@ def test_an_unrecognised_error_is_treated_as_permanent(monkeypatch):
 # --- half two: one repo's outage is not the daemon's ------------------------
 
 
-def cfg(**kw) -> Config:
-    kw.setdefault(
-        "repos", [Repo(name=SANDBOX, verify="true"), Repo(name=OTHER, verify="true")]
-    )
-    return Config(**kw)
-
-
-def test_startup_skips_the_failing_repo_and_still_reconciles_the_next(monkeypatch):
+@pytest.mark.parametrize("transient", [True, False])
+def test_startup_skips_the_failing_repo_and_still_reconciles_the_next(tmp_path, monkeypatch, transient):
     """The 105-traceback path. This call was unguarded until 2026-09-05."""
     seen: list[str] = []
 
-    def reconcile(repo, labels):
+    monkeypatch.setattr(queue, "CLAIM_DIR", tmp_path / "claims")
+    monkeypatch.setattr(daemon, "STATE_DIR", tmp_path / "state")
+    sent = []
+    monkeypatch.setattr(notify, "send", lambda hook, text: sent.append(text))
+
+    def gh(args):
+        assert args[:2] == ["issue", "list"]
+        assert args[args.index("--label") + 1] == "agent:working"
+        repo = args[args.index("--repo") + 1]
         seen.append(repo)
         if repo == SANDBOX:
-            raise queue.GhError("gh issue list failed: " + TLS, transient=True)
-        return []
+            raise queue.GhError(TLS if transient else FORBIDDEN, transient=transient)
+        return "[]"
 
-    monkeypatch.setattr(daemon.queue, "reconcile", reconcile)
-    repairs = daemon.startup(cfg(), {SANDBOX: Path("/tmp/a"), OTHER: Path("/tmp/b")})
+    monkeypatch.setattr(queue, "_gh", gh)
+    cfg = Config(repos=[Repo(name, engine="specloop") for name in (SANDBOX, OTHER)],
+                 slack_webhook="hook")
+    health = daemon.RepoHealth()
+    daemon.startup(cfg, {}, health)
 
     assert seen == [SANDBOX, OTHER]  # the second repo was still reached
-    assert repairs == []
-
-
-def test_claim_next_skips_a_failing_repo_and_claims_from_the_next(monkeypatch):
-    """Same fairness mechanism as the per-repo concurrency cap: skip, do not stop."""
-    claimed_from: list[str] = []
-
-    def claim(repo, root, labels):
-        if repo == SANDBOX:
-            raise queue.GhError("gh issue list failed: " + FIVE_XX, transient=True)
-        claimed_from.append(repo)
-        return None
-
-    monkeypatch.setattr(daemon.queue, "claim", claim)
-    result = daemon.claim_next(
-        cfg(), {SANDBOX: Path("/tmp/a"), OTHER: Path("/tmp/b")}
-    )
-
-    assert result is None
-    assert claimed_from == [OTHER]
+    assert health.failures == {SANDBOX: 1}
+    assert len(sent) == (0 if transient else 1)
+    assert not queue.CLAIM_DIR.exists()
 
 
 # --- part three: skipped forever, in silence, is worse ----------------------

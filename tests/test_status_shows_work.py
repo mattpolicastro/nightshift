@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from nightshift import cli, queue
+from nightshift import queue
 from nightshift.queue import Claim
 
 REPO = "o/r"
@@ -88,25 +88,6 @@ def test_a_bad_claim_file_is_reported_and_NOT_deleted(claim_dir):
     assert [c.number for c in running] == [26]
     assert unreadable == [bad.name]
     assert bad.exists(), "status must not repair"
-
-
-def test_elapsed_reads_as_duration_not_a_timestamp():
-    assert cli._elapsed((NOW - timedelta(minutes=11)).isoformat(), NOW) == "11m"
-    assert cli._elapsed((NOW - timedelta(minutes=59)).isoformat(), NOW) == "59m"
-    assert cli._elapsed((NOW - timedelta(minutes=64)).isoformat(), NOW) == "1h 04m"
-
-
-def test_elapsed_survives_a_clock_it_cannot_read():
-    """An unreadable clock must not cost the line saying WHICH issue is running."""
-    assert cli._elapsed("not a date", NOW) == "?"
-    assert cli._elapsed("", NOW) == "?"
-    # Clock skew between the writing daemon and the reading terminal.
-    assert cli._elapsed((NOW + timedelta(minutes=5)).isoformat(), NOW) == "?"
-
-
-def test_a_naive_timestamp_is_read_as_utc():
-    """Claims are written with a tz, but a hand-edited one may not be."""
-    assert cli._elapsed("2026-08-06T11:49:00", NOW) == "11m"
 
 
 def test_title_of_degrades_to_empty_when_github_is_unreachable():

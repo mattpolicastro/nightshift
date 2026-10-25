@@ -23,14 +23,13 @@ with no judged result pause; no mutable lines skips mutation but retains
 coverage checks ([PR #48](https://github.com/mattpolicastro/nightshift/pull/48)).
 The result lands on the same PR, with a checklist of what only a human can check.
 
-Each repository chooses an engine: `engine = "specloop"` for that flow, or the
-original `worker` engine, which runs headless
-[Claude Code](https://claude.com/claude-code) workers on `agent:ready` issues.
-The worker engine remains the default until it is retired.
+Specloop is the sole engine and the default when `engine` is omitted. Explicit
+`engine = "worker"` is refused before dispatch; enroll with a trusted manifest
+([issue #16](https://github.com/mattpolicastro/nightshift/issues/16)).
 
 Nightshift runs on macOS under launchd.
 
-- **The worker engine** drove 79 tasks across two real repositories by
+- **The retired worker engine** drove 79 tasks across two real repositories by
   September 2026: 66 merged, 13 escalated.
 - **specloop** has since built several multi-section changes end to end,
   including parts of Nightshift itself.
@@ -54,15 +53,11 @@ checks that judge its work — the guarantee rests on the credential, not on the
 agent's good behaviour. A task that genuinely needs a CI change fails its push
 and escalates, which is correct.
 
-**Review is a separate session.** The worker engine's reviewer is a fresh Claude Code process
-with a read-only tool contract — `Write`, `Edit` and `git add` are explicitly
-denied — that sees the diff and the issue, but not the implementer's chain of
-thought. It has caught a CI-green diff whose only tell was a `toBe`→`toEqual`
-edit weakening the assertion that guarded the behaviour being removed, and
-found an unplanted latent bug while doing so. **CI cannot catch test weakening,
-because the weakened test is the thing CI runs.**
+**Review is a separate session.** Specloop gives an independent reviewer the
+spec and sealed diff. Trusted verification runs outside the implementing agent.
+**CI cannot catch test weakening when the weakened test is what CI runs.**
 
-**Escalation is a success.** A worker that decides its issue is wrong, or
+**Escalation is a success.** An agent that decides its issue is wrong, or
 under-specified, or contradicted by the repo's own documentation, is expected
 to stop, write up why, and label the issue for a human. Of the first six
 escalations, four found defects in the *issue* rather than in the code. A
@@ -71,8 +66,7 @@ system that cannot refuse is a system that will confidently do the wrong thing.
 ## How a specloop change flows
 
 For an enrolled specloop repository, the daemon drives the specloop CLI;
-the separate `specloop serve` supervisor executes admitted tasks. Worker
-claims never run for that repository.
+the separate `specloop serve` supervisor executes admitted tasks.
 
 | Label | Where and stage | Effect |
 | --- | --- | --- |
@@ -219,8 +213,11 @@ base = "main"
 block). Template `run.change` and `run.branch` are optional because intake
 supplies both per change. The template also defines provider
 profiles and roles, allowed and frozen paths, and trusted verification commands.
-Admission saves the effective manifest with the run. The worker's `verify`
-command is not required for this engine. See [manifest templates and CLI outcomes](docs/specloop/command-json.md).
+Admission saves the effective manifest with the run. Omission of `engine` selects
+specloop too; explicit `worker` fails configuration loading. Worker `verify`,
+model/endpoint tables, concurrency, task caps and phase budgets are inert, with
+sorted key-only ignored-setting notes. They do not configure manifests or
+providers. See [manifest templates and CLI outcomes](docs/specloop/command-json.md).
 
 Each unpaused poll checks regular-file status and validates the template before
 new work. Symlinks to regular files work; directories, FIFOs and devices are
@@ -337,55 +334,30 @@ dependency contract requires that. See [prepare details](docs/specloop/prepare.m
 
 ## How a worker task flows
 
-```
-issue labelled agent:ready
-        │
-        ▼
-  claim  ─── crash-safe: a claim file records the phase, so an
-        │    interrupted task resumes by decision, not by guess
-        ▼
-  git worktree, branch cut from base (or from a `base:` theme branch)
-        │
-        ▼
-  implement  ── claude -p, scoped tool permissions, --max-turns budget
-        │
-        ▼
-  verify  ───── the repo's own command (`pnpm -r test`, `swift test`, …),
-        │       checked against the Bash commands the worker actually ran
-        ▼                                     rather than against its prose
-  review  ───── separate session, read-only, VERDICT: PASS | FAIL
-        │
-        ├── FAIL ──▶ retry, then escalate
-        │
-        ▼
-  push + PR ──▶ CI runs ──▶ a human merges
-```
-
-Anything that goes wrong lands on the issue as a comment and a `needs-human`
-label, with the findings that produced it.
+Historical only: the worker executor and its resume/ship path are retired.
+See [the current flow](#how-a-specloop-change-flows) and
+[retirement rollout](docs/specloop/README.md#retirement-rollout).
 
 ## Quickstart
 
-This starts with the default worker configuration; specloop enrollment is
-described [above](#enroll-a-repository).
+Create the repository labels, choose a trusted manifest and configure its
+providers using [enrollment](#enroll-a-repository), then run directly:
 
 ```sh
 uv sync
-cp config.example.toml config.toml   # then edit: repos, verify commands, caps
-uv run nightshift preflight          # is it safe to leave this alone tonight?
-uv run nightshift preflight --deep   # …and can each endpoint hold a tool loop?
-uv run nightshift run --once         # claim and run exactly one task
+cp config.example.toml config.toml   # edit repositories, manifests and alerting
+uv run nightshift preflight
+uv run nightshift run --once         # one poll; detached jobs may still be running
+uv run specloop serve                # independent supervisor, in another terminal
 ```
 
-`preflight` is the one to run first. Its most important check is a **negative
-control**: `forbidden_probe` names a repo the token must *not* be able to
-reach, and a token that merely succeeds against an enrolled repo has proven
-nothing about what else it can touch. Asserted scoping is not proven scoping.
-The same shape applies to a second endpoint: preflight builds the environment a
-worker on it would actually get and asserts the subscription token is *not* in
-it. `--deep` adds a Read → Write tool-loop probe per model — slow, because a
-cold model load is minutes, and worth it because serving `/v1/messages` and
-holding a tool loop are different claims.
+Python preflight checks scoped `GH_TOKEN`, enrolled-repository reachability,
+alerting and the `forbidden_probe` negative control. A token that reaches an
+enrolled repo proves nothing about what else it can reach. `--deep` remains
+accepted with a retired-probe notice; it launches no model/tool-loop probe.
+Direct Python operation needs no worker OAuth, endpoint models or worker
+verification string. Manifest providers and verification retain their own
+requirements; [bundled service startup](#enabling-the-daemon) has extra guards.
 
 ## Documentation
 
@@ -398,7 +370,7 @@ holding a tool loop are different claims.
 | `examples/specloop/` | an example trusted manifest and its helper scripts |
 | `KNOWN-LIMITATIONS.md` | open gaps and queued follow-ups |
 | `CHANGELOG.md` | what changed |
-| `CLAUDE.md` | the constraints an agent working on *this* repo has to hold to |
+| `CLAUDE.md` | frozen repository instructions; obsolete worker guidance awaits cleanup |
 | `openspec/` | the specs this repo is built from, and its archived changes |
 
 > **Scope.** This is a personal system shaped around one person's machine, quota
@@ -410,20 +382,17 @@ holding a tool loop are different claims.
 
 ## Layout
 
-| module                                        | state                                                                           |
-| --------------------------------------------- | ------------------------------------------------------------------------------- |
-| `worker.py`                                   | ✅ validated — the `claude -p` invocations, hand-run end-to-end                 |
-| `trace.py`                                    | ✅ validated — stream-json parsing, checked against real transcripts            |
-| `prompts.py`                                  | ✅ validated — implement + reviewer prompts, both exercised                     |
-| `queue.py`                                    | ✅ validated — claim/reconcile, 16 tests + a live crash-recovery run            |
-| `daemon.py`                                   | ✅ loop, reconcile, escalation and crash recovery — all run live                |
-| `recovery.py`                                 | ✅ what to do with an interrupted task, by recorded phase                       |
-| `preflight.py`                                | ✅ what must hold before an unattended night, incl. a token negative control    |
-| `tests/`                                      | regression suite; rerun `uv run pytest` to establish a current count/result    |
-| `cli.py`                                      | ✅ `attention`/`status`/`pause`/`resume`/`jobs`/`run`/`reconcile`/`preflight`; `digest` is Phase 2 |
-| `specloop_intake.py`, `specloop_job.py`, `specloop_client.py`, `specloop_attention.py` | ✅ the GitHub front door for specloop repositories: drafting, admission, revision, publication, attention |
-| `../specloop/` | ✅ the build engine (its own CLI): loop, seal, verify, review, evidence, gates, serve |
-| `config.py`, `vcs.py`, `task.py`, `notify.py` | ✅ config, worktrees, state machine, Slack                                      |
+Modules are under `nightshift/`; directory paths are repository-relative.
+
+| Module | Responsibility |
+| --- | --- |
+| `cli.py`, `config.py`, `preflight.py` | Commands, enrollment and front-door checks |
+| `daemon.py`, `specloop_intake.py`, `specloop_job.py` | Polling, durable jobs and delivery |
+| `specloop_client.py`, `specloop_attention.py` | Independent engine CLI and attention adapter |
+| `queue.py`, `vcs.py` | Shared queue/git utilities; daemon owns safe leftover recovery |
+| `outcomes.py`, `trace.py`, `mirror.py` | Historical outcomes, transcripts and optional import utility |
+| `specloop/` | Build engine, supervisor, verification and evidence gates |
+| `tests/` | Regression checks; run `uv run pytest` |
 
 ## Usage
 
@@ -434,8 +403,8 @@ uv run nightshift attention --offline  # cached outcomes, no GitHub calls
 uv run nightshift attention --json     # versioned output for a display adapter
 uv run nightshift status      # what's running now, queue depth, blocked, alerting
 uv run nightshift preflight   # is it safe to leave alone tonight?
-uv run nightshift reconcile   # repair crash state
-uv run nightshift run --once  # claim and run one task
+uv run nightshift reconcile   # safe leftover-claim recovery; never resume workers
+uv run nightshift run --once  # one poll; does not wait for detached jobs
 uv run nightshift pause       # hold new work and completion delivery
 uv run nightshift jobs        # active, stopped, pending and diagnostic rows
 uv run nightshift jobs --all  # full history, including delivered and failed jobs
@@ -496,21 +465,21 @@ operator service preserving equivalent credential and preflight guards,
 including required tokens, credential isolation, tool checks and startup
 refusals. The direct supervisor example does not replace those daemon guards.
 
-Worker worktrees use `[daemon].worktree_root` in `config.toml`, default
+Compatibility-only `[daemon].worktree_root` remains in `config.toml`, default
 `~/Projects/nightshift-wt`; see [config.example.toml](config.example.toml).
 Leading `~/` expands. Relative roots now resolve beside the selected config
 file, instead of the daemon's working directory; set the old location's
 absolute path before restart if you need to retain it. Absolute paths and
 existing worktrees stay in place; loading neither creates nor migrates them.
-This setting does not relocate specloop run state. Second-install macOS and
-actual Paseo host validation remain pending as described in the platform limits.
+It enables no worker execution and does not relocate specloop run state.
+Second-install macOS and actual Paseo host validation remain pending.
 
 ### Pause and job control
 
 `nightshift status` shows local active background jobs before repository network
 queries: full job ID, stage, repository/item, command, execution state, elapsed
 seconds and time remaining or `OVERDUE by Ns`. Starting/legacy attempts without
-timing say unavailable. These rows are separate from daemon/worker liveness and
+timing say unavailable. These rows are separate from daemon liveness and
 independent `specloop status` run state; `nightshift jobs --all` includes history.
 
 Reporting deadlines are **propose 3600 seconds, admit 300 seconds, revise 1800
@@ -530,7 +499,7 @@ An already-running job can finish and write its local result while paused;
 its receipt stays undelivered. Resume delivers eligible retained results once
 without rerunning the job, including after a daemon restart. An external
 operation already dispatched when pause appears may finish. Pause does not
-roll back git or GitHub effects, or terminate current worker-engine tasks.
+roll back git or GitHub effects, or terminate running jobs or admitted builds.
 
 `nightshift jobs`, `nightshift jobs --all`, `nightshift jobs compact`,
 `nightshift jobs stop <id>` and `nightshift jobs release <id>` work offline
@@ -638,7 +607,7 @@ independent `specloop serve` supervisor may start or continue the build even
 while Nightshift withholds delivery. Control that supervisor and its active
 run processes separately if they must stop; unloading a supervisor alone is
 not proof that detached run processes exited. Job control does not cancel
-worker-engine tasks or already-admitted runs.
+already-admitted runs or recover interrupted historical worker execution.
 
 After inspection, run `nightshift jobs release <id>` with that exact full ID
 ([issue #34](https://github.com/mattpolicastro/nightshift/issues/34)). Release
@@ -688,7 +657,7 @@ starts or the issue is closed.
 
 It also lists specloop runs paused for a human decision, with the change,
 pause reason and PR link. Running and finished runs are omitted. JSON output
-has a `specloop` list beside worker `tasks`.
+has a `specloop` list beside historical worker `tasks`; retirement preserves it.
 
 The command reads GitHub and `specloop status --json`. Failed checks retain
 the last known outcome, print `STALE` with the last successful check time,
@@ -702,16 +671,11 @@ capacity and normally waits an hour between checks. Large backlogs rotate across
 refreshes, and deferred checks are marked stale. Reopened historical tasks appear
 when their next historical check runs. See the [refresh policy](plugins/nightshift/README.md#nightshift-task-refresh-behavior).
 
-History starts with this version; this does not backfill old tasks from
-ambiguous transcripts. The daemon records immutable events in
-`~/.nightshift/outcomes.sqlite3`, including failures before workers start.
-Concurrent writes use SQLite transactions, and refresh observations belong to
-the exact event they checked so they cannot hide a newer attempt. New runs keep
-transcripts under `~/.nightshift/transcripts/<run-id>/`; older files remain
-readable by `status`. Recording failures are logged without failing the task.
-
-Automatic phase mirroring is disabled; the legacy `mirror_to_paseo`
-setting is accepted but inactive. Reading a task does not resolve it.
+Historical events remain in `~/.nightshift/outcomes.sqlite3`, with the same
+resolution, stale/offline and exit behavior. Retirement does not backfill,
+move or delete history, branches, worktrees or transcripts. Transcript readers
+and the mirror utility remain available; automatic phase mirroring is disabled
+and `mirror_to_paseo` is inert. Reading attention does not resolve a task.
 
 ### Paseo attention page
 
@@ -727,58 +691,37 @@ finish, abort); see the plugin README.
 
 ### Watching it work
 
-```
-running
-  alerts: slack
-  example-owner/sample: 1 working, 3 ready, 1 blocked
-    >> #26 sample-ui: carry theme support across from sample-midi  (reviewing, 15m on claude/26)
-    #23 sample-ui: default generation toward n-bar phrases
-    -- #11 sample-ui: settings become a view  (waiting on #26)
-```
-
-The `>>` line comes from the claim file, not GitHub — a claimed issue carries
-`agent:working`, so the label query that builds the rest of this listing cannot
-see it. `status` is read-only: an unparseable claim file is reported, never
-repaired, because that file names the worktree holding a running task's only
-copy of its work.
-
-`tail -f ~/.logs/nightshift.log` is the live feed — claims, ships,
-escalations, and the blocked-issue skips as they happen.
-
-There is no way to watch a worker think. Transcripts land in
-`~/.nightshift/transcripts/<issue>-<step>-<n>.jsonl` and are written from a
-captured subprocess, so a file appears only once that step has finished.
+`nightshift status` reports daemon liveness, alerts, active background jobs and
+repository ready/blocked counts and lists, including contradiction diagnostics.
+Worker working counts, claim/phase/transcript lines and the off-subscription
+model report are removed; other status behavior and exit codes are unchanged.
+Use `nightshift jobs --all` for job history and `specloop status` for independent
+run state. Timing and inventory details are in [job control](#pause-and-job-control).
+`tail -f ~/.logs/nightshift.log` follows daemon activity; it is not agent reasoning.
 
 ## Prerequisites
 
-macOS with Python 3.12 and `uv`, `gh`, and git. For specloop also: Node (the
-OpenSpec CLI runs through `npx`) and the Codex CLI or Claude Code for agents.
+macOS with Python 3.12 or later, `uv`, `gh` and git. Specloop drafting also uses
+Node/`npx` for OpenSpec; install the CLI and credentials required by the trusted
+manifest's provider profiles and verification commands.
 
-The worker setup below applies to the default engine. For specloop provider
-profiles and manifests, see [repository enrollment](#enroll-a-repository).
+Direct Python front-door operation requires scoped GitHub access and preflight
+checks, not worker OAuth, Claude, pnpm or Swift. The CLI retains env-file
+loading. Each enrolled repo needs a local checkout, trusted manifest, an
+`AGENTS.md` and PR CI. Use `dir` for a separate daemon checkout; align it with the
+manifest's source repository. See [enrollment](#enroll-a-repository).
 
-- `~/.config/nightshift/env` (chmod 600) with `CLAUDE_CODE_OAUTH_TOKEN`, and
-  `GH_TOKEN` scoped to the enrolled repos
-- `gh` authenticated
-- Each enrolled repo needs an `AGENTS.md` stating the agent rules and a CI
-  workflow that runs on pull requests — CI is the held-out verifier, and the
-  agent cannot edit what runs there after it pushes
-- Each enrolled repo needs a local checkout to cut worktrees from, defaulting
-  to `~/Projects/<repo-name>`. Pointing it at the checkout you work in yourself
-  is the default and is deliberate: the daemon's `fetch --prune` keeps your
-  origin refs fresh and its worktrees stay visible in your `git worktree list`.
-  The cost is that a branch held by a running worker cannot be checked out
-  locally, and a crashed teardown wants a `git worktree prune`. Set `dir` to
-  point the daemon at a checkout of its own if you would rather not have either
-
-See `CLAUDE.md` for the constraints an agent working on this repo must hold
-to, `CHANGELOG.md` for what changed, and `KNOWN-LIMITATIONS.md` for what is
-currently broken or unverified.
+The frozen bundled daemon wrapper additionally requires
+`~/.config/nightshift/env` (chmod 600), `CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`,
+and all of `gh`, `claude`, `pnpm`, `node`, `git`, `swift` before Python starts.
+Python retirement does not bypass these shell checks. See
+[platform limits](KNOWN-LIMITATIONS.md#platform-assumptions).
 
 ## Enabling the daemon
 
-The launchd unit is **not** auto-installed. Work through this first — the
-first item is a real credential problem, not a formality.
+The launchd units are **not** auto-installed. Complete the
+[pre-merge retirement checklist](docs/specloop/README.md#retirement-rollout)
+and these startup checks before using the bundled daemon:
 
 - [ ] **Scope `GH_TOKEN`.** The `gho_` OAuth credential from `gh auth login`
       reaches _every_ repo the account owns. Replace it with a fine-grained
@@ -792,12 +735,10 @@ first item is a real credential problem, not a formality.
       at a sandbox; promoting a repo you care about is a deliberate edit, and
       worth leaving a week.
 - [ ] **Confirm the pause file works** — `nightshift pause`, then check the log
-      shows it declining to claim.
-- [ ] **Watch the first unattended night.** `max_tasks_per_night` is a cap PER
-      SUBSCRIPTION WINDOW, not per process — at ~$4–8.50 per shipped PR and a
-      five-hour window, a cap of 8 is roughly $35–70 per window and up to ~4.8
-      windows a day, so the name undersells it badly. Set it to what you want
-      spent between resets, not per night.
+      shows it holding new launches and completion delivery.
+- [ ] **Review manifest provider quotas and costs.** Retired worker caps and
+      model settings cannot pace specloop builds.
+
 - [ ] **Check the control boundaries.** Pause holds daemon launches and
       delivery; `nightshift jobs stop <id>` terminates one tracked group.
       On disposable work, unload the daemon, then list and stop the surviving
@@ -831,39 +772,23 @@ revision jobs, and does not revoke committed admission or stop independent
 specloop builds. Keep pause in place until inspection is complete; reloading
 the daemon does not clear pause or stopped-job holds.
 
-`bin/nightshift-daemon` exists because launchd reads no shell config — not
-`.zprofile`, not `.zshenv` — so credentials must be sourced explicitly. It
-refuses to start (exit 78) if the env file or the OAuth token is missing, and
-unsets `ANTHROPIC_API_KEY` so an inherited key cannot silently move workers
-onto metered billing.
+`bin/nightshift-daemon` still refuses missing env-file/OAuth/GH_TOKEN or any
+listed tool (exit 78), and scrubs `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` and
+`ANTHROPIC_AUTH_TOKEN`. Wrappers, plists and their comments are frozen, including
+stale worker/pause descriptions. A host without legacy prerequisites needs
+separate wrapper work or an independently provisioned operator service retaining
+trusted env loading, scoped GH_TOKEN refusal, required front-door tool checks,
+credential isolation and preflight negative-control/alert checks. No live
+installation or restart is implied; control the supervisor and its runs separately.
 
 ### Not yet built
 
 - **Digest.** Phase 2.
-- **Quota awareness, the remaining half.** `max_tasks_per_night` now resets on
-  the `resetsAt` the runs themselves report, so the cap is per subscription
-  window rather than per process lifetime — the daemon holds at the cap and
-  resumes when the window turns, instead of retiring after N tasks however many
-  days that took. Still missing: nothing reacts to `isUsingOverage`, which is
-  logged loudly and otherwise ignored, so an exhausted subscription would keep
-  working on metered billing; and nothing paces _within_ a window.
-- **Model routing, the policy half.** The *mechanism* is built —
-  `[[endpoints]]` declares where an invocation goes, `endpoint:model` routes a
-  phase there, and a per-repo `[repos.models]` can run one repo local while
-  everything else stays on the subscription (`SPEC-endpoints.md` Phase A). What
-  is not built is anything that *decides*: routing by task shape, cost or
-  measured capability still waits on per-run data, because
-  choosing a model per task without per-run data is guesswork — the one time a
-  model change was made on intuition, opus for implement, a day of measurement
-  reverted it. There is also no chores phase for `[models] chores` to route.
-- **Retry after a reviewer FAIL.** Built, and fired exactly once — sample #83 on
-  2026-08-08, `reviewer failed 2 attempts`, which escalated. So the unattended
-  path works and the retry is 0-for-1 at turning a FAIL into a pass. The gate
-  itself is validated against a hand-written CI-green bad diff (2026-08-03); what
-  it has never faced is a diff from an agent *trying* to get something past it.
+- Historical worker budgets/model routing are retired; manifest provider policy
+  is separate. [Historical documents and deferred cleanup](KNOWN-LIMITATIONS.md#retirement-follow-ups)
+  retain the old evaluation evidence.
 
-[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) holds the rest: what is broken, what is unverified,
-and what is queued.
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) lists unresolved work and validation limits.
 
 ## The GitHub token
 
@@ -887,7 +812,8 @@ and escalate, which is the correct outcome.
 Nothing else is needed. In particular the daemon never reads Actions logs,
 never touches releases or packages, and never administers the repo.
 
-Put it in `~/.config/nightshift/env` (chmod 600) beside the OAuth token:
+Put it in `~/.config/nightshift/env` (chmod 600); the bundled wrapper also
+requires its legacy OAuth token:
 
 ```sh
 export GH_TOKEN='github_pat_...'
@@ -917,9 +843,8 @@ blocked-by: #15
 blocked-by: #9, #12
 ```
 
-`claim()` skips any ready issue with an unmet blocker and takes the next one
-instead, so the queue is safe to fill in advance and will drain in dependency
-order. `nightshift status` lists blocked issues separately with what they are
+An open or unreadable blocker defers new drafting, leaving its trigger intact.
+Existing work can still be collected and delivered under normal eligibility rules. `nightshift status` lists blocked issues separately with what they are
 waiting on — a queue full of blocked work otherwise looks exactly like an idle
 daemon.
 
@@ -934,75 +859,12 @@ the voice-count issue (#5)_ is loose enough to block on a citation.
 
 ## Theme branches
 
-A `base:` line points an issue at a branch other than the repo default. The
-work is cut from it, and the PR opens against it:
-
-```
-base: narrow-tier
-```
-
-**Why this exists.** Measured in sample on 2026-08-09: all four merge conflicts
-in one day were two parallel issues editing one file, and every resolution ran
-against a `main` that had moved underneath the branch. Separately, a merged PR
-cost ~9 billed GitHub Actions minutes across six jobs — the PR check, a second
-check on `main`, a deploy, and one Pages build per deploy target. At the rate a
-working queue files issues, that is a month's allowance in a week.
-
-Threading a cluster of siblings onto one theme branch changes both halves.
-Conflicts resolve **inside** the theme, between changes meant to fit together,
-rather than against a trunk unrelated work is also landing on. And the theme
-merges to `main` **once**, which is the arithmetic that matters.
-
-The branch must already exist on the remote. A task whose `base:` names a
-missing branch **escalates** rather than falling back to the default: silently
-branching from `main` is the failure that looks like success — the work lands,
-CI is green, the PR merges into the trunk the theme was meant to be kept off,
-and nobody learns the marker was a typo until a conflict weeks later.
-
-Pair a theme with an **unarmed tracking issue** holding what the children
-share: the design source, the constraints, and a deferred/known-gaps ledger.
-Children are written in isolation, so the gaps *between* them are otherwise
-found by accident — in sample one issue hid a view below 640px and silently
-removed the only way to create a source, which surfaced later through manual
-probing rather than from anything written down.
+Historical worker `base:` issue markers no longer select build branches.
+Configure the trusted manifest and repository base for the
+[current publication flow](docs/specloop/README.md#publication-and-base-recovery).
 
 ## Revising a shipped worker PR
 
-This section describes worker repositories. For specloop repositories, put
-`agent:revise` on the PR as described [above](#how-a-specloop-change-flows).
-
-`agent:ready` always cuts a branch from base. That is right for new work and
-wrong for "this PR is close, change these two things" — it restarts work that
-was mostly correct, then fails late, because the fresh branch shares no history
-with the remote and `vcs.push` is deliberately not a force push.
-
-`agent:revise` is the other door. It resumes the branch the task already
-shipped and adds commits on top:
-
-1. **Say what should change.** On the PR — conversation, a review, or an inline
-   comment on the line — or on the issue. All of it is read. Inline comments
-   keep their `path:line` and are the best input the worker can get, since they
-   anchor to the diff instead of describing it.
-2. **Close the PR** (optional). A closed PR frees the branch for a fresh one;
-   leaving it open also works, and the push just updates it with no second PR.
-3. **Add `agent:revise`.** `agent:done` can stay; `claim()` removes both.
-
-Only feedback newer than the branch's last commit counts — anything older is
-what the branch was already built from. Only the most recent PR for the branch
-is read, so a second revision does not re-litigate the first.
-
-**A revise with nothing to revise refuses.** If no comment, review or inline
-note is newer than the tip, the task escalates without running an agent. The
-daemon's own escalation write-ups do not count as instructions — it comments as
-you, so the `**nightshift** —` prefix is the only thing telling them apart. This
-exists because "nothing was asked" and "the issue body is the ask" are
-indistinguishable to a worker, and guessing between them means redoing shipped
-work while looking like it succeeded.
-
-The worker is told the branch already carries reviewed work, is pointed at
-`git diff <base>...HEAD`, and is forbidden to reset, rebase, amend, revert or
-force-push it. PR feedback is kept in its own prompt section, separate from the
-issue discussion — one is about this diff, the other about the task. A revise
-against a branch that exists neither on origin nor locally raises
-`NoBranchToResume` rather than quietly starting from scratch and opening a
-second PR.
+The worker revision path is retired. Preserve old branches for inspection;
+current specloop revisions use authorized PR labels and consumed feedback IDs
+as described in [the front-door flow](#how-a-specloop-change-flows).

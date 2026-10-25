@@ -18,9 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import task, vcs
-from nightshift.config import Config, Repo
-from nightshift.queue import Claim, Issue
+from nightshift import vcs
+from nightshift.config import Repo
 
 
 def git(args: list[str], cwd: Path) -> str:
@@ -125,69 +124,3 @@ def test_diff_against_a_stale_base_attributes_someone_elses_merge(
 
     assert "dependency.txt" in stale, "someone else's merge, read as the worker's"
     assert fresh == ["mine.txt"]
-
-
-class Stop(Exception):
-    """Halt task.run once it is past the part under test."""
-
-
-def test_task_fetches_before_it_creates_the_worktree(monkeypatch, tmp_path):
-    """Ordering is the whole fix — a fetch after the branch is decorative."""
-    calls: list[str] = []
-    monkeypatch.setattr(vcs, "fetch", lambda repo_dir: calls.append("fetch"))
-    monkeypatch.setattr(vcs, "add_worktree", lambda *a, **k: calls.append("add_worktree"))
-
-    def stop(*_a, **_k):
-        raise Stop
-
-    monkeypatch.setattr(vcs, "install", stop)
-    monkeypatch.setattr(vcs, "remove_worktree", lambda *a, **k: None)
-
-    cfg = Config(repos=[], worktree_root=tmp_path / "wt")
-    claim = Claim(
-        repo="x/y", number=1, branch="claude/1",
-        worktree=str(tmp_path / "wt" / "x-1"), started_at="now",
-    )
-    issue = Issue(repo="x/y", number=1, title="t", body="b")
-
-    with pytest.raises(Stop):
-        task.run(
-            cfg, Repo(name="x/y", verify="true"), tmp_path / "clone",
-            issue, claim, transcript_dir=tmp_path / "tr",
-        )
-
-    assert calls == ["fetch", "add_worktree"]
-
-
-def test_add_worktree_is_given_the_remote_ref_not_the_local_branch(
-    monkeypatch, tmp_path
-):
-    """The bug was one argument. Pin the argument."""
-    seen: dict[str, str] = {}
-    monkeypatch.setattr(vcs, "fetch", lambda repo_dir: None)
-    monkeypatch.setattr(
-        vcs,
-        "add_worktree",
-        lambda repo_dir, wt, branch, base, **k: seen.update(base=base),
-    )
-
-    def stop(*_a, **_k):
-        raise Stop
-
-    monkeypatch.setattr(vcs, "install", stop)
-    monkeypatch.setattr(vcs, "remove_worktree", lambda *a, **k: None)
-
-    cfg = Config(repos=[], worktree_root=tmp_path / "wt")
-    claim = Claim(
-        repo="x/y", number=1, branch="claude/1",
-        worktree=str(tmp_path / "wt" / "x-1"), started_at="now",
-    )
-
-    with pytest.raises(Stop):
-        task.run(
-            cfg, Repo(name="x/y", verify="true"), tmp_path / "clone",
-            Issue(repo="x/y", number=1, title="t", body="b"),
-            claim, transcript_dir=tmp_path / "tr",
-        )
-
-    assert seen["base"] == "origin/main"

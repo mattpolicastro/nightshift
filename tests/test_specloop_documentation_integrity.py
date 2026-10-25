@@ -139,6 +139,9 @@ def heading_ids(markdown):
 @pytest.mark.scenario(
     "specloop-documentation/keyed-revision-recovery-guidance/recovery-limits-remain-reviewable"
 )
+@pytest.mark.scenario(
+    "specloop-documentation/worker-retirement-guidance/existing-installation-is-checked-before-merge"
+)
 @pytest.mark.parametrize("path", (*DOCS, "docs/specloop/command-json.md"))
 def test_relative_documentation_links_resolve_including_heading_fragments(path):
     document = ROOT / path
@@ -196,7 +199,12 @@ def guide_table(schema):
 
 @pytest.mark.scenario("specloop-documentation/deadline-guidance/operator-handles-overdue-work")
 @pytest.mark.scenario("specloop-documentation/git-timeout-guidance/operator-understands-timeout-limits")
+@pytest.mark.scenario("specloop-documentation/active-job-status-guidance/operator-reads-job-status")
 def test_documented_command_budgets_match_dispatch(monkeypatch):
+    from test_stopped_job_release_docs import commands
+
+    for path in DOCS:
+        assert ("jobs", "--all") in commands(path)
     budgets = guide_table("| Command | Budget (seconds) |")
     git_budget = int(budgets.pop("daemon intake `git`"))
     assert {key.strip("`"): int(value) for key, value in budgets.items()} == (

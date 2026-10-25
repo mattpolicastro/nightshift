@@ -44,7 +44,7 @@ def write(path, *, pid=None, age=0.0, uptime=600.0):
 
 
 def cfg(**kw) -> Config:
-    kw.setdefault("repos", [Repo(name="matt/sandbox", verify="true")])
+    kw.setdefault("repos", [Repo(name="matt/sandbox", engine="specloop")])
     return Config(**kw)
 
 
@@ -131,11 +131,14 @@ def test_a_one_shot_run_does_not_touch_the_daemon_s_heartbeat(hb, monkeypatch):
 
     monkeypatch.setattr(daemon, "startup", lambda *a, **k: [])
     monkeypatch.setattr(daemon, "paused", lambda: False)
-    monkeypatch.setattr(daemon, "claim_next", lambda *a, **k: None)
+    polls = []
+    monkeypatch.setattr(daemon, "poll_specloop", lambda cfg_, health: polls.append(cfg_))
     monkeypatch.setattr(daemon.notify, "send", lambda *a: None)
 
-    daemon.loop(cfg(), {}, once=True)
+    config = cfg()
+    daemon.loop(config, {}, once=True)
 
+    assert polls == [config]
     assert hb.exists(), "a one-shot run must not delete the daemon's heartbeat"
     assert hb.read_text() == before, "nor overwrite it with its own pid"
 

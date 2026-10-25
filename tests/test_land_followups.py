@@ -150,7 +150,7 @@ def test_landing_documents_interpreter_prerequisites():
     assert "Authenticate `gh` as the operator with permission" in prerequisites
     assert "read and edit the PR and issue comments, update the branch, and merge" in prerequisites
     assert "repository's protection rules" in prerequisites
-    assert "`-m specloop.cli status --json` can read the applicable runs, including for worker repositories" in prerequisites
+    assert "`-m specloop.cli status --json` can read the applicable runs" in prerequisites
 
 
 PARSER_ERROR = "unexpected end of JSON input"

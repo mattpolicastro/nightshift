@@ -1,36 +1,62 @@
 """Worker retirement uses durable evidence even with unhealthy enrollment."""
 
+import importlib.util
 import json
+from pathlib import Path
 
 import pytest
 
 from manifest_fixtures import manifest_text
-from nightshift import daemon, outcomes, queue
+from nightshift import daemon, outcomes, queue, vcs
 from nightshift.config import Config, Repo
 from test_specloop_isolation import Pipeline, poll
 
 
+class RecoveryPipeline(Pipeline):
+    """Include the ready-label event produced by historical claim recovery."""
+
+    def _gh(self, args):
+        result = super()._gh(args)
+        if args[0] == "api" and args[1].endswith("/events"):
+            pages = json.loads(result)
+            pages[0].append({"id": 2, "event": "labeled", "label": {"name": "agent:ready"},
+                             "actor": {"login": "owner"}})
+            return json.dumps(pages)
+        return result
+
+
 @pytest.fixture
 def switched(tmp_path, monkeypatch):
+    # Durable recovery must work after the executable decision tree is deleted.
+    assert importlib.util.find_spec("nightshift.recovery") is None
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("safe recovery must not claim work or destroy its worktree/branch")
+
+    monkeypatch.setattr(queue, "claim", forbidden)
+    monkeypatch.setattr(queue, "reconcile", forbidden)
+    monkeypatch.setattr(vcs, "remove_worktree", forbidden)
     monkeypatch.setattr(daemon, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(queue, "CLAIM_DIR", tmp_path / "claims")
     manifest = tmp_path / "template.toml"
     manifest.write_text(manifest_text(tmp_path / "source"))
-    pipeline = Pipeline(Repo("owner/switched", engine="specloop", manifest=manifest))
+    pipeline = RecoveryPipeline(Repo("owner/switched", engine="specloop", manifest=manifest))
     monkeypatch.setattr(queue, "_gh", pipeline.gh)
     monkeypatch.setattr(daemon.specloop_intake, "run_git", pipeline.command)
     return pipeline
 
 
-def working(pipeline, number, tmp_path, *, survives=False):
-    pipeline.issue(number)
+def working(pipeline, number, tmp_path, *, survives=False, attempt=None):
+    """Seed historical evidence without claiming or resuming executable work."""
+    if number not in pipeline.issues:
+        pipeline.issue(number)
     pipeline.issues[number]["labels"] = [{"name": "agent:working"}, {"name": "keep-me"}]
-    worktree = tmp_path / f"work-{number}"
+    worktree = tmp_path / (f"work-{number}" + (f"-{attempt}" if attempt else ""))
     if survives:
         worktree.mkdir()
         (worktree / "diff.txt").write_text("unfinished work")
     claim = queue.Claim(pipeline.repo.name, number, f"claude/{number}", str(worktree),
-                        "yesterday", phase="reviewing")
+                        attempt or "yesterday", phase="reviewing")
     claim.write()
     return claim
 
@@ -40,37 +66,31 @@ def labels(pipeline, number):
 
 
 @pytest.mark.scenario("config-resilience/worker-switch-reconciliation/switch-recovers-working-issues")
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/recovery-preserves-interrupted-work")
 def test_engine_switch_recovers_working_issues(switched, tmp_path, monkeypatch):
     orphan = working(switched, 1, tmp_path)
     orphan.clear()
     missing = working(switched, 2, tmp_path)
     surviving = working(switched, 3, tmp_path, survives=True)
-    worker = Repo("owner/worker", "true")
-    cfg = Config(repos=[switched.repo, worker])
-    recovered = []
-
-    def reconcile(name, labels):
-        assert name == worker.name  # Destructive reconciliation never sees switched claims.
-        return [queue.Reconciliation(queue.Repair.RESUMABLE, 9, "worker work")]
-
-    monkeypatch.setattr(queue, "reconcile", reconcile)
-    monkeypatch.setattr(daemon, "_recover", lambda cfg, repo, path, number:
-                        recovered.append((repo.name, number)))
-    monkeypatch.setattr(queue, "claim", lambda *a: pytest.fail("worker claim for specloop"))
-    original = switched.gh
+    independent = RecoveryPipeline(Repo("owner/other", engine="specloop", manifest=switched.repo.manifest))
+    peer_claim = working(independent, 9, tmp_path)
+    cfg = Config(repos=[switched.repo, independent.repo])
+    pipelines = [switched, independent]
+    monkeypatch.setattr(queue, "reconcile", lambda *a, **k: pytest.fail("discarded switch evidence"))
 
     def journal_before_write(args):
+        name = args[1].split("/")[2] if args[0] == "api" else args[args.index("--repo") + 1].split("/")[1]
+        pipeline = next(p for p in pipelines if p.repo.name == f"owner/{name}")
         if args[:2] in (["issue", "edit"], ["issue", "comment"]):
-            journal = daemon.STATE_DIR / "engine-switch/owner__switched" / f"{args[2]}.json"
+            journal = daemon.STATE_DIR / "engine-switch" / f"owner__{name}" / f"{args[2]}.json"
             saved = json.loads(journal.read_text())
             assert saved["version"] == 1 and saved["marker"] and not saved["done"]
-        return original(args)
+        return pipeline.gh(args)
 
     monkeypatch.setattr(queue, "_gh", journal_before_write)
     health = daemon.RepoHealth()
-    daemon.startup(cfg, {worker.name: tmp_path}, health)
-    assert not health.failures and recovered == [(worker.name, 9)]
-    assert daemon.claim_next(Config(repos=[switched.repo]), {}) is None
+    assert daemon.startup(cfg, {}, health) == []
+    assert not health.failures
     assert labels(switched, 1) == labels(switched, 2) == {"agent:ready", "keep-me"}
     assert labels(switched, 3) == {"needs-human", "keep-me"}
     comment, = switched.issues[3]["comments"]
@@ -80,15 +100,40 @@ def test_engine_switch_recovers_working_issues(switched, tmp_path, monkeypatch):
     assert not missing.path.exists() and not surviving.path.exists()
     assert all(t["state"] == "needs_decision" and "interrupted worker recovery" in t["reason"]
                for t in outcomes.tasks())
-    assert len(outcomes.tasks()) == 3
-    daemon.startup(Config(repos=[switched.repo]), {}, health)
-    assert len(switched.issues[3]["comments"]) == 1 and len(outcomes.tasks()) == 3
+    assert len(outcomes.tasks()) == 4
+    assert labels(independent, 9) == {"agent:ready", "keep-me"}
+    assert not peer_claim.path.exists()
+    journals = {}
+    for pipeline, numbers in ((switched, (1, 2, 3)), (independent, (9,))):
+        for number in numbers:
+            path = daemon.STATE_DIR / "engine-switch" / pipeline.repo.name.replace("/", "__") / f"{number}.json"
+            assert json.loads(path.read_text())["done"]
+            journals[path] = path.read_bytes()
+    recovered = outcomes.tasks()
+    daemon.startup(cfg, {}, health)
+    assert len(switched.issues[3]["comments"]) == 1 and len(outcomes.tasks()) == 4
+    for pipeline in pipelines:
+        pipeline.issue(7)
+        pipeline.approved(8)
+    poll(pipelines, health)
+    assert not health.failures and not health.item_failures
+    for pipeline in pipelines:
+        assert not pipeline.issues[7]["labels"] and not pipeline.prs[8]["labels"]
+        assert any(c[:2] == ["specloop", "propose"] for c in pipeline.calls)
+        assert any(c[:2] == ["specloop", "admit"] for c in pipeline.calls)
+    assert labels(switched, 3) == {"needs-human", "keep-me"}
+    assert (tmp_path / "work-3/diff.txt").read_text() == "unfinished work"
+    assert not missing.path.exists() and not surviving.path.exists() and not peer_claim.path.exists()
+    assert outcomes.tasks() == recovered
+    assert {path: path.read_bytes() for path in journals} == journals
+    assert labels(switched, 1) == labels(switched, 2) == labels(independent, 9) == {"keep-me"}
+    assert len(switched.issues[3]["comments"]) == 1
 
 
 @pytest.mark.scenario("config-resilience/worker-switch-reconciliation/switch-recovers-working-issues")
 @pytest.mark.parametrize("first_survives", [False, True])
 @pytest.mark.parametrize("next_work", ["missing", "surviving", "orphan"])
-def test_later_worker_attempt_gets_separate_recovery(switched, tmp_path, first_survives, next_work):
+def test_later_historical_attempt_gets_separate_recovery(switched, tmp_path, first_survives, next_work):
     working(switched, 1, tmp_path, survives=first_survives)
     cfg = Config(repos=[switched.repo])
     health = daemon.RepoHealth()
@@ -98,16 +143,14 @@ def test_later_worker_attempt_gets_separate_recovery(switched, tmp_path, first_s
     previous["future_field"] = "retained evidence"
     path.write_text(json.dumps(previous))
 
-    # Switch back to worker and rearm through the ordinary claim interface.
-    switched.issues[1]["labels"] = [{"name": "agent:ready"}, {"name": "keep-me"}]
-    _, claim = queue.claim(switched.repo.name, tmp_path, runner=switched.gh)
+    # A distinct historical attempt must not reuse a completed recovery intent.
+    claim = working(switched, 1, tmp_path, survives=next_work == "surviving", attempt="later")
     if next_work == "surviving":
-        worktree = tmp_path / "switched-1"
-        worktree.mkdir()
+        worktree = Path(claim.worktree)
         (worktree / "diff.txt").write_text("new unfinished work")
     elif next_work == "orphan":
         claim.clear()
-    daemon.startup(cfg, {}, health)  # Switch to specloop again.
+    daemon.startup(cfg, {}, health)
 
     assert not health.failures and not claim.path.exists()
     target = "needs-human" if next_work == "surviving" else "agent:ready"
@@ -166,9 +209,16 @@ def test_completed_recovery_checks_current_evidence(switched, tmp_path, state):
 
 
 @pytest.mark.scenario("config-resilience/worker-switch-reconciliation/recovery-does-not-need-a-manifest")
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/recovery-preserves-interrupted-work")
 @pytest.mark.parametrize("manifest", ["absent", "missing", "invalid"])
-def test_recovery_without_healthy_manifest(switched, tmp_path, manifest):
+@pytest.mark.parametrize("startup_first", [False, True])
+def test_recovery_without_healthy_manifest(switched, tmp_path, manifest, startup_first):
     claim = working(switched, 1, tmp_path)
+    good = tmp_path / "healthy.toml"
+    good.write_bytes(switched.repo.manifest.read_bytes())
+    independent = Pipeline(Repo("owner/other", engine="specloop", manifest=good))
+    independent.issue(7)
+    independent.approved(8)
     switched.issue(7)
     switched.approved(8)
     if manifest == "invalid":
@@ -178,18 +228,31 @@ def test_recovery_without_healthy_manifest(switched, tmp_path, manifest):
         if manifest == "absent":
             switched.repo = Repo(switched.repo.name, engine="specloop")
     health = daemon.RepoHealth()
-    poll([switched], health)
+    if startup_first:
+        daemon.startup(Config(repos=[switched.repo]), {}, health)
+        assert labels(switched, 1) == {"agent:ready", "keep-me"}
+        assert not claim.path.exists() and not health.failures
+    poll([switched, independent], health)
     assert labels(switched, 1) == {"agent:ready", "keep-me"} and not claim.path.exists()
     assert health.failures == {switched.repo.name: 1}
     assert not any(c[:2] in (["specloop", "propose"], ["specloop", "admit"])
                    for c in switched.calls)
     assert labels(switched, 7) == {"spec:draft"}
     assert switched.prs[8]["labels"] == [{"name": "spec:approved"}]
+    assert not independent.issues[7]["labels"] and not independent.prs[8]["labels"]
+    assert any(c[:2] == ["specloop", "propose"] for c in independent.calls)
+    assert any(c[:2] == ["specloop", "admit"] for c in independent.calls)
+    journal = json.loads(recovery_path().read_text())
+    assert journal["done"] and journal["action"] == "release"
+    outcome, = outcomes.tasks()
+    assert outcome["engine_switch_id"] == journal["id"]
 
 
 @pytest.mark.scenario("config-resilience/worker-switch-reconciliation/unknown-recovery-state-is-retained")
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/recovery-preserves-interrupted-work")
 @pytest.mark.parametrize("failure", ["claim", "list", "labels", "comments"])
-def test_unknown_recovery_retains_evidence_and_isolates_intake(switched, tmp_path, failure):
+@pytest.mark.parametrize("startup_first", [False, True])
+def test_unknown_recovery_retains_evidence_and_isolates_intake(switched, tmp_path, failure, startup_first, monkeypatch):
     claim = working(switched, 1, tmp_path, survives=True)
     if failure == "claim":
         claim.path.write_text("{unreadable")
@@ -197,8 +260,9 @@ def test_unknown_recovery_retains_evidence_and_isolates_intake(switched, tmp_pat
     switched.issue(7)
     switched.ready(9, daemon.STATE_DIR)
     switched.approved(8)
-    independent = Pipeline(Repo("owner/other", engine="specloop", manifest=switched.repo.manifest))
+    independent = RecoveryPipeline(Repo("owner/other", engine="specloop", manifest=switched.repo.manifest))
     independent.issue(7)
+    peer_claim = working(independent, 2, tmp_path)
     original = switched.gh
 
     def unavailable(args):
@@ -211,15 +275,38 @@ def test_unknown_recovery_retains_evidence_and_isolates_intake(switched, tmp_pat
 
     switched.gh = unavailable
     health = daemon.RepoHealth()
+    switched.calls.clear()  # Admission above seeds the already-running work.
+    if startup_first:
+        monkeypatch.setattr(queue, "_gh", unavailable)
+        daemon.startup(Config(repos=[switched.repo]), {}, health)
+        assert health.failures == {switched.repo.name: 1}
+        assert claim.path.read_bytes() == before
     poll([switched, independent], health)
-    assert health.failures == {switched.repo.name: 1}
+    assert health.failures == {switched.repo.name: 1 + startup_first}
+    assert not health.item_failures
     assert claim.path.read_bytes() == before
     assert (tmp_path / "work-1/diff.txt").read_text() == "unfinished work"
     assert labels(switched, 1) == {"agent:working", "keep-me"}
     assert labels(switched, 7) == {"spec:draft"}
     assert switched.prs[8]["labels"] == [{"name": "spec:approved"}]
+    assert not any(c[:2] in (["specloop", "propose"], ["specloop", "admit"])
+                   for c in switched.calls)
+    assert not any(c[:2] in (["issue", "edit"], ["issue", "comment"]) and c[2] == "1"
+                   for c in switched.calls)
     assert any(c[:2] == ["specloop", "publish"] for c in switched.calls)
     assert any(c[:2] == ["specloop", "propose"] for c in independent.calls)
+    assert labels(independent, 2) == {"keep-me"}
+    assert not peer_claim.path.exists()
+    peer_journal = daemon.STATE_DIR / "engine-switch/owner__other/2.json"
+    recovered_peer = json.loads(peer_journal.read_text())
+    assert recovered_peer["done"] and recovered_peer["action"] == "release"
+    peer_outcome, = [task for task in outcomes.tasks() if task["repo"] == independent.repo.name]
+    assert peer_outcome["engine_switch_id"] == recovered_peer["id"]
+    if recovery_path().exists():
+        pending = json.loads(recovery_path().read_text())
+        assert not pending["done"] and pending["claim"]["worktree"] == claim.worktree
+    assert not any(task["repo"] == switched.repo.name and task["issue"] == 1
+                   for task in outcomes.tasks())
 
 
 @pytest.mark.scenario("config-resilience/durable-switch-recovery/partial-recovery-retries-safely")
@@ -260,11 +347,9 @@ def test_unfinished_recovery_cannot_retire_a_new_claim(
     journal["future_field"] = "retain this unfinished attempt"
     path.write_text(json.dumps(journal))
 
-    # Worker startup clears the released claim; a later worker takes the issue.
-    queue.reconcile(switched.repo.name, runner=switched.gh)
-    _, claim = queue.claim(switched.repo.name, tmp_path, runner=switched.gh)
-    worktree = tmp_path / "switched-1"
-    worktree.mkdir()
+    # Seed a later historical claim beside an unfinished recovery journal.
+    claim = working(switched, 1, tmp_path, survives=True, attempt="later")
+    worktree = Path(claim.worktree)
     (worktree / "diff.txt").write_text("new unfinished work")
     if not current_working:
         switched.issues[1]["labels"] = [{"name": "agent:ready"}, {"name": "keep-me"}]

@@ -7,10 +7,10 @@ Isolate specloop enrollment failures and recover leftover worker claims without 
 
 ### Requirement: Repository manifest health
 
-Omitted or unusable manifests SHALL cause repository health failures, not config-load failures. Every enrollment-manifest read SHALL require a regular file first. Readiness SHALL use `specloop.manifest.template()` with safe change/branch overrides, accepting omitted per-change fields without persisting probe values. Other schema and configuration-shape checks SHALL remain strict; worker defaults SHALL remain unchanged. File repair SHALL clear the hold on a later eligible poll.
+Omitted or unusable manifests SHALL cause repository health failures, not config-load failures. Every enrollment-manifest read SHALL require a regular file first. Readiness SHALL use `specloop.manifest.template()` with safe change/branch overrides, accepting omitted per-change fields without persisting probe values. Other schema and configuration-shape checks SHALL remain strict; omitted engines SHALL default to specloop and explicit worker engines SHALL be rejected. File repair SHALL clear the hold on a later eligible poll.
 
 #### Scenario: Bad manifest isolates the repository
-- **WHEN** configuration enrolls a healthy worker, a healthy specloop repository and a specloop repository with an absent, missing, unreadable, malformed or schema-invalid manifest
+- **WHEN** configuration enrolls a healthy default-engine repository, a healthy explicit-specloop repository and a repository with an absent, missing, unreadable, malformed or schema-invalid manifest
 - **THEN** configuration loads, the bad repository reports health failure and launches no new draft or admission, and healthy repositories continue normal work
 
 #### Scenario: Nonregular manifest is never read
@@ -59,12 +59,12 @@ Repository configuration health SHALL gate new drafting and admission, including
 
 ### Requirement: Worker switch reconciliation
 
-On unpaused startup/polls for specloop repositories, the daemon SHALL reconcile leftover working issues before new intake even when their manifest is unhealthy. It SHALL release work with no surviving worktree to ready, hold surviving work for human inspection, preserve branches/worktrees and never start a worker for that repository. Unknown state SHALL fail locally without guessing. Worker repositories SHALL retain existing recovery behavior.
+On unpaused startup/polls for every enrolled repository, the daemon SHALL reconcile leftover working issues before new intake even when their manifest is unhealthy. It SHALL release work with no surviving worktree to ready, hold surviving work for human inspection, preserve branches/worktrees and never start a worker for that repository. Unknown state SHALL fail locally without guessing. Legacy worker resume, ship and destructive reconciliation paths SHALL NOT run.
 
 #### Scenario: Switch recovers working issues
 - **WHEN** a formerly worker repository starts as specloop with orphaned working issues, claims with missing worktrees and claims with surviving worktrees
 - **THEN** the first two cases transition to ready and surviving-work cases transition to needs-human with a phase/branch/location explanation
-- **THEN** outcomes record recovery, surviving work remains intact, no worker starts for the switched repository and other worker repositories still recover normally
+- **THEN** outcomes record recovery, surviving work remains intact, no worker starts for the switched repository and independent repositories still receive normal specloop polling and safe leftover-claim recovery
 
 #### Scenario: Recovery does not need a manifest
 - **WHEN** the switched repository's manifest is missing or invalid

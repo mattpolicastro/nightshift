@@ -8,9 +8,28 @@ Fixes land through Nightshift's own front door; these gaps remain unresolved.
 
 - **Sync at task boundaries:** pick up fast-forward human commits on the source
   branch without pausing.
-- **Retire the worker engine,** once one real issue has gone through the
-  specloop front door end to end. Then rename specloop's CLI and state into
-  Nightshift's, so one name remains.
+- **Merge CLI/package names and relocate state:** deferred to
+  [issue #40](https://github.com/mattpolicastro/nightshift/issues/40).
+  Worker retirement leaves `nightshift`, `specloop`, `~/.nightshift` and
+  `~/.specloop` unchanged.
+
+## Retirement follow-ups
+
+Specloop is the sole/default engine; explicit worker enrollment is refused
+([issue #16](https://github.com/mattpolicastro/nightshift/issues/16)). History and
+safe leftover recovery remain. Complete the human
+[pre-merge config/plist/external-caller checklist](docs/specloop/README.md#retirement-rollout);
+tests do not validate an installed host or migrate its configuration.
+
+Frozen `bin/**` and `launchd/**`, including worker/pause comments, await separate
+cleanup. Frozen `CLAUDE.md` retains obsolete worker instructions and
+`pyproject.toml` its old project description; neither defines a supported engine.
+[Provider notes](docs/providers.md), [endpoint design](SPEC-endpoints.md) and
+[validation history](docs/validation.md) are excluded historical worker material.
+Their evaluation counts and links to removed source remain unchanged; historical
+link repair is deferred. Resolved diagnostics in `mypy-baseline.txt` also await
+cleanup; check mode permits them without repairing that frozen baseline.
+None of these follow-ups establishes live validation or a completed host rollout.
 
 ## Open gaps
 
@@ -191,7 +210,7 @@ Candidate files and manifest env files cannot configure the harness resolver.
 See [direct CLI setup](README.md#host-path-setup) and
 [plugin installation](plugins/nightshift/README.md#installation).
 
-Worker placement remains `[daemon].worktree_root` in the selected config file,
+Compatibility-only `[daemon].worktree_root` remains in the selected config file,
 defaulting to `~/Projects/nightshift-wt`; there is no parallel environment key.
 Leading `~/` expands and absolute paths keep their location. Relative values
 now resolve beside the selected config file, instead of the daemon's working
@@ -199,11 +218,12 @@ directory. To retain an old relative location, set its absolute path before
 restarting. Spaces remain literal; wrong types, blank strings, unsupported
 tilde forms and NUL/line breaks are rejected. Loading does not create or migrate
 worktrees. Existing worktrees, state, credentials and manifests do not move;
-this worker root is separate from specloop run state. See
+this inert root enables no worker execution and is separate from specloop state. See
 [the example config](config.example.toml).
 
 **Frozen service wrappers: portability deferred.** `bin/**` is frozen for this
-change. The unchanged wrappers retain these bootstrap commands:
+change, as are `launchd/**` and wrapper/plist comments. The unchanged wrappers
+retain these bootstrap commands:
 
 | Wrapper | Checkout | Executable and arguments | PATH |
 | --- | --- | --- | --- |
@@ -216,10 +236,13 @@ does not change their internal paths either. No new helper changes this.
 Direct CLI examples select an actual checkout and uv executable explicitly;
 they do not configure bundled service startup. Full daemon rollout on another
 layout remains pending separate wrapper work or an independently provisioned
-operator service with equivalent credential and preflight guards: require the
-trusted credential file and OAuth/GitHub tokens, clear conflicting Anthropic
-API credentials/base URL, check required tools, and preserve startup refusal
-and preflight checks. Do not bypass these guards to relocate the daemon.
+operator service preserving trusted env loading, scoped GH_TOKEN refusal,
+required front-door tools, credential isolation and preflight negative-control/
+alert checks. The frozen daemon requires `~/.config/nightshift/env`,
+`CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, and `gh/claude/pnpm/node/git/swift`, and
+clears conflicting Anthropic API credentials/base URL before Python starts.
+Direct Python operation removes worker prerequisites only at the Python boundary;
+it cannot bypass these shell guards. See [current prerequisites](README.md#prerequisites).
 
 **Pending manual validation.** Automated tests check configuration propagation,
 not end-to-end portability. A real second macOS installation with different
@@ -227,9 +250,9 @@ tool, Node, checkout and worktree locations remains unvalidated. Record its
 layout, launch method and results using a direct supervisor invocation or an
 independently provisioned service with equivalent guards. Run disposable
 prepare/verify steps, check agent/quota tool lookup and real sandbox denials,
-and confirm existing worktrees did not move. Check new worker placement when
-a daemon with those guards is available; otherwise leave that rollout check
-pending. In the actual Paseo host, check attention/Factory and a disposable
+and confirm existing worktrees did not move. Validate daemon rollout only after
+separate service work or confirmation of frozen-wrapper prerequisites; otherwise
+leave it pending. In the actual Paseo host, check attention/Factory and a disposable
 action requiring `npx` (finish only after its normal human checks), including
 checkout selection and confirmation/error behavior. These second-install and
 Paseo host integration checks remain pending; a temporary directory on the
