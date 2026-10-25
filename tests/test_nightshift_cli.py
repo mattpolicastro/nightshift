@@ -61,8 +61,9 @@ def test_build_dispatch_equivalence(monkeypatch, capsys, argv, handler):
             print(json.dumps({"version": 1, "error": "refusal"}))
         return 1
     monkeypatch.setattr(build, handler, command)
-    assert build.main(argv) == 1
+    assert build.dispatch(build.build_parser().parse_args(argv)) == 1
     legacy = capsys.readouterr()
+    assert legacy.err == ""
     assert cli.main(argv) == 1
     assert capsys.readouterr() == legacy
     assert calls[0] == calls[1]

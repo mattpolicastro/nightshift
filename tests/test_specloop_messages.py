@@ -3,6 +3,8 @@ import subprocess
 
 import pytest
 
+from nightshift.cli import main
+
 from specloop import cli, messages
 
 REASONS = ["phase_gate", "stuck", "blocked", "needs_human", "violation_repeat", "review_invalid", "secret",
@@ -82,7 +84,7 @@ def test_rendered_notification_commands_parse_and_preserve_exit(monkeypatch, rea
         executable, *argv = shlex.split(suggestion)
         assert executable == "specloop"
         assert argv[0] == "status" or argv[0] in messages.actions_for_pause(reason)
-        assert cli.main(argv) == exit_code
+        assert main(argv) == exit_code
         args = parsed[-1]
         assert args.cmd == argv[0] and args.change == "retained-change"
         if args.cmd == "resume":

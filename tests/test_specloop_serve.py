@@ -4,6 +4,8 @@ import time
 
 import pytest
 
+from nightshift.cli import main
+
 from specloop import cli, serve, state
 from specloop.state import Pause, Run, TaskState
 
@@ -85,7 +87,7 @@ def test_pass_preserves_action_after_loading_due_pause(home, monkeypatch, capfd,
     def act_after_snapshot():
         snapshot = original_runs()
         # The action completes after discovery loaded the supervisor's snapshot.
-        assert cli.main(["act", "c", verb, "--note", "Keep this guidance", "--json"]) == 0
+        assert main(["act", "c", verb, "--note", "Keep this guidance", "--json"]) == 0
         assert json.loads(capfd.readouterr().out)["outcome"] == "done"
         for name in ("state.json", "events.jsonl"):
             saved[name] = (run.dir / name).read_bytes()

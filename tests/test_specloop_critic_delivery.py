@@ -5,6 +5,8 @@ import subprocess
 
 import pytest
 
+from nightshift.cli import main
+
 from nightshift import queue, specloop_intake
 from nightshift.config import Repo
 from specloop import agents, cli, critic, openspec, state
@@ -104,7 +106,7 @@ run = ["true"]
         return agents.Result("ok", {"contradictions": [], "risks": FEASIBILITY_RISKS})
 
     monkeypatch.setattr(agents, "run", agent)
-    code = cli.main(["propose", str(template), "--change", CHANGE, "--branch", BRANCH,
+    code = main(["propose", str(template), "--change", CHANGE, "--branch", BRANCH,
                      "--base", "main", "--idea", "Define sign at zero", "--json"])
     captured = capfd.readouterr()
     assert code == 0, captured.err

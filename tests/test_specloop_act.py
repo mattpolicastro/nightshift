@@ -6,6 +6,8 @@ from dataclasses import asdict
 
 import pytest
 
+from nightshift.cli import main
+
 from specloop import cli, seal, state, tasks
 from specloop.state import Run
 from test_specloop_command_json import BRANCH, CHANGE, TASKS, admission, git, template
@@ -32,7 +34,7 @@ def paused(tmp_path, monkeypatch):
 
 
 def act(capfd, run, verb, *extra, code=0):
-    assert cli.main(["act", run.state.change, verb, *extra, "--json"]) == code
+    assert main(["act", run.state.change, verb, *extra, "--json"]) == code
     result = json.loads(capfd.readouterr().out)
     assert set(result) == {"version", "outcome", "verb", "detail"}
     assert result["version"] == 1
@@ -102,7 +104,7 @@ def test_long_note_refused(paused, capfd, verb):
 @pytest.mark.parametrize("change", ["missing", "../outside", ""])
 def test_unknown_or_unsafe_change_refused(paused, capfd, change):
     before = sorted(state.ROOT.rglob("*"))
-    assert cli.main(["act", change, "abort", "--json"]) == 1
+    assert main(["act", change, "abort", "--json"]) == 1
     result = json.loads(capfd.readouterr().out)
     assert result["version"] == 1 and result["outcome"] == "refused"
     assert result["verb"] == "abort" and result["detail"]
@@ -160,7 +162,7 @@ def admitted(template, monkeypatch, capfd, request):
     path, source = template
     github = getattr(request, "param", "example/repo")
     path.write_text(path.read_text().replace('github = "example/repo"', f'github = "{github}"'))
-    assert cli.main(admission(path, "--skip-feasibility")) == 0
+    assert main(admission(path, "--skip-feasibility")) == 0
     capfd.readouterr()
 
     def no_drive(*args):
@@ -208,17 +210,17 @@ def test_resume_imports_source_corrections(admitted, monkeypatch, capfd, reason,
     monkeypatch.setattr(cli, "_sync", sync)
     if command == "resume":
         monkeypatch.setattr(cli.loop, "run", drive)
-        assert cli.main(["resume", CHANGE, "--note", "Use the correction"]) == 0
+        assert main(["resume", CHANGE, "--note", "Use the correction"]) == 0
     else:
         # admitted's driver stub fails if either deferred command drives inline.
         if command == "act":
             act(capfd, run, "resume", "--note", "Use the correction")
         else:
-            assert cli.main(["resume", CHANGE, "--no-run", "--note", "Use the correction"]) == 0
+            assert main(["resume", CHANGE, "--no-run", "--note", "Use the correction"]) == 0
         assert syncs == [head] and driven == []
         monkeypatch.setattr(cli.loop, "run", drive)
         # This is the CLI entry point spawned by the supervisor.
-        assert cli.main(["run", CHANGE]) == 0
+        assert main(["run", CHANGE]) == 0
     assert syncs == driven == [head]
 
 
@@ -264,7 +266,7 @@ def test_direct_resume_locked_run_preserves_pause(admitted, capfd, extra):
     before = (run.dir / "state.json").read_bytes()
     with run.lock() as mine:
         assert mine
-        assert cli.main(["resume", CHANGE, *extra]) == 1
+        assert main(["resume", CHANGE, *extra]) == 1
     assert "being driven elsewhere" in capfd.readouterr().err
     assert (run.dir / "state.json").read_bytes() == before
 
@@ -277,7 +279,7 @@ def test_direct_command_refused_while_act_resumes(paused, monkeypatch, capfd, co
     def sync(ctx):
         before = {name: (paused.dir / name).read_bytes()
                   for name in ("state.json", "events.jsonl")}
-        assert cli.main([command[0], "change", *command[1:]]) == 1
+        assert main([command[0], "change", *command[1:]]) == 1
         output = capfd.readouterr()
         assert "being driven elsewhere" in output.err
         for name, contents in before.items():
@@ -294,7 +296,7 @@ def test_direct_publish_lock_contention_is_a_retryable_error(paused, capfd):
     # and retries errors.
     with paused.lock() as mine:
         assert mine
-        assert cli.main(["publish", "change", "--json"]) == 1
+        assert main(["publish", "change", "--json"]) == 1
     document = json.loads(capfd.readouterr().out)
     assert document["version"] == 1 and "outcome" not in document
     assert "being driven elsewhere" in document["error"]
@@ -334,7 +336,7 @@ def test_direct_push_holds_lock_against_act_abort(admitted, monkeypatch, capfd, 
     # The fake transport supplies an unchanged base before publication.
     monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
     monkeypatch.setattr(cli, "_gh", lambda *args: "")
-    assert cli.main([command, CHANGE]) == 0
+    assert main([command, CHANGE]) == 0
     capfd.readouterr()
     run.reload()
     assert len(pushes) == 1
@@ -390,7 +392,7 @@ def test_direct_command_reloads_after_act_wins_race(
 
     monkeypatch.setattr(Run, "lock", act_before_lock)
     monkeypatch.setattr(Run, "reload", reload)
-    assert cli.main([command, "change", *extra]) == code
+    assert main([command, "change", *extra]) == code
     assert raced and len(reloaded) == 2  # act and the direct command
     paused.reload()
     if verb == "abort":
@@ -419,7 +421,7 @@ def test_pause_rechecks_running_state_after_act_abort(paused, monkeypatch, capfd
             yield mine
 
     monkeypatch.setattr(Run, "lock", abort_before_lock)
-    assert cli.main(["pause", "change"]) == 1
+    assert main(["pause", "change"]) == 1
     paused.reload()
     assert paused.state.status == "aborted"
     assert not paused.pause_requested()
@@ -431,7 +433,7 @@ def test_pause_signals_busy_driver_without_saving_state(paused, capfd):
     before = (paused.dir / "state.json").read_bytes()
     with paused.lock() as mine:
         assert mine
-        assert cli.main(["pause", "change"]) == 0
+        assert main(["pause", "change"]) == 0
     assert paused.pause_requested()
     assert (paused.dir / "state.json").read_bytes() == before
 
@@ -484,7 +486,7 @@ def test_accept_recovers_completed_landing(admitted, monkeypatch, capfd, reason,
         else:
             crash.setattr(cli.loop, "_land", land_then_stop)
         with pytest.raises(SystemExit, match="acceptance interrupted"):
-            cli.main(["act", CHANGE, "accept", "--json"])
+            main(["act", CHANGE, "accept", "--json"])
     capfd.readouterr()
     run.reload()
     landed = git(bare, "rev-parse", BRANCH)
@@ -500,7 +502,7 @@ def test_accept_recovers_completed_landing(admitted, monkeypatch, capfd, reason,
     if retry_command == "act":
         act(capfd, run, "accept")
     else:
-        assert cli.main(["accept", CHANGE, key, "--no-run"]) == 0
+        assert main(["accept", CHANGE, key, "--no-run"]) == 0
         capfd.readouterr()
         run.reload()
     assert run.state.status == "running" and run.state.pause is None
@@ -527,18 +529,18 @@ def test_completed_accept_cannot_clear_later_pause(admitted, capfd, reason, late
     ts.candidate_base = base
     ts.candidate = seal.commit_files(bare, base, {"out/accepted.txt": "accepted\n"}, "candidate")
     run.pause(reason, task=key)
-    assert cli.main(["accept", CHANGE, key, "--no-run"]) == 0
+    assert main(["accept", CHANGE, key, "--no-run"]) == 0
     run.reload()
     assert run.state.tasks[key].status == "accepted"
     if later_pause == "requested":
-        assert cli.main(["pause", CHANGE]) == 0
+        assert main(["pause", CHANGE]) == 0
     elif later_pause:
         # Even a subsequent pause with the same reason and task is unrelated.
         run.pause(later_pause, task=key)
     capfd.readouterr()
     landed = git(bare, "rev-parse", BRANCH)
     before = {name: (run.dir / name).read_bytes() for name in ("state.json", "events.jsonl")}
-    assert cli.main(["accept", CHANGE, key, "--no-run"]) == 1
+    assert main(["accept", CHANGE, key, "--no-run"]) == 1
     assert git(bare, "rev-parse", BRANCH) == landed
     for name, contents in before.items():
         assert (run.dir / name).read_bytes() == contents
@@ -563,7 +565,7 @@ def test_interrupted_accept_requires_matching_pause(admitted, monkeypatch, capfd
     with monkeypatch.context() as crash:
         crash.setattr(cli.loop, "_land", land_then_stop)
         with pytest.raises(SystemExit, match="acceptance interrupted"):
-            cli.main(["accept", CHANGE, key, "--no-run"])
+            main(["accept", CHANGE, key, "--no-run"])
     run.reload()
     if later_pause == "requested":
         run.pause("requested", task=key)
@@ -574,7 +576,7 @@ def test_interrupted_accept_requires_matching_pause(admitted, monkeypatch, capfd
         run.save()
     landed = git(bare, "rev-parse", BRANCH)
     before = {name: (run.dir / name).read_bytes() for name in ("state.json", "events.jsonl")}
-    assert cli.main(["accept", CHANGE, key, "--no-run"]) == 1
+    assert main(["accept", CHANGE, key, "--no-run"]) == 1
     assert git(bare, "rev-parse", BRANCH) == landed
     for name, contents in before.items():
         assert (run.dir / name).read_bytes() == contents
@@ -647,7 +649,7 @@ def test_direct_accept_preserves_abort_that_wins_lock(admitted, monkeypatch, cap
             yield mine
 
     monkeypatch.setattr(Run, "lock", abort_before_lock)
-    assert cli.main(["accept", CHANGE, key, "--no-run"]) == 1
+    assert main(["accept", CHANGE, key, "--no-run"]) == 1
     assert "aborted" in capfd.readouterr().err
     assert git(bare, "rev-parse", BRANCH) == head
     for name, contents in aborted.items():
@@ -691,7 +693,7 @@ def test_publish_and_finish_use_existing_transitions(admitted, tmp_path, monkeyp
     assert run.state.pause.reason == "human_checks"
     assert git(remote, "rev-parse", BRANCH) == completed
     assert calls == []  # Adopt the existing PR.
-    assert cli.main(["status", "--json", CHANGE]) == 0
+    assert main(["status", "--json", CHANGE]) == 0
     entry = json.loads(capfd.readouterr().out)["runs"][0]
     assert entry["context"]["github"] == (
         f"https://github.com/example/repo/tree/{BRANCH}/openspec/changes/{CHANGE}"
@@ -700,7 +702,7 @@ def test_publish_and_finish_use_existing_transitions(admitted, tmp_path, monkeyp
     assert run.state.status == "done" and run.state.pause is None
     assert calls == [("pr", "ready", run.state.pr, "-R", "example/repo")]
     assert "archive/" in git(remote, "ls-tree", "-r", "--name-only", BRANCH)
-    assert cli.main(["status", "--json", CHANGE]) == 0
+    assert main(["status", "--json", CHANGE]) == 0
     entry = json.loads(capfd.readouterr().out)["runs"][0]
     assert entry["status"] == "done"
     assert entry["context"]["github"] == (
@@ -783,7 +785,7 @@ def test_publish_recovers_unrecorded_pr(admitted, tmp_path, monkeypatch, capfd, 
         if interruption == "before_save":
             crash.setattr(cli.loop.Ctx, "pause", crash_before_save)
             with pytest.raises(SystemExit, match="publication interrupted"):
-                cli.main(["act", CHANGE, "publish", "--json"])
+                main(["act", CHANGE, "publish", "--json"])
             capfd.readouterr()
         else:
             assert "create response lost" in act(capfd, run, "publish", code=1)["detail"]
@@ -799,14 +801,14 @@ def test_publish_recovers_unrecorded_pr(admitted, tmp_path, monkeypatch, capfd, 
     if retry_command == "act":
         act(capfd, run, "publish")
     else:
-        assert cli.main(["publish", CHANGE, "--json"]) == 0
+        assert main(["publish", CHANGE, "--json"]) == 0
         assert json.loads(capfd.readouterr().out) == {"version": 1, "outcome": "published", "pr": url}
         run.reload()
     assert run.state.pr == url and run.state.pause.reason == "human_checks"
     assert url in run.state.pause.detail
     assert calls == [lookup] * pages + [("pr", "create")] + [lookup] * (2 * pages)
     assert git(remote, "rev-parse", BRANCH) == git(run.dir / "repo.git", "rev-parse", BRANCH)
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     entry = json.loads(capfd.readouterr().out)["runs"][0]
     assert entry["pr"] == url and entry["pause"]["reason"] == "human_checks"
     assert entry["action"]["actions"] == ["finish", "abort"]
@@ -912,7 +914,7 @@ def test_finish_restarts_from_archive(admitted, tmp_path, monkeypatch, capfd, fa
         assert archives == [CHANGE]
         assert pushes == [archived] * len(pushes)
         assert git(bare, "show", f"{archived}:openspec/changes/archive/2026-10-20-{CHANGE}/tasks.md")
-        assert cli.main(["status", "--json"]) == 0
+        assert main(["status", "--json"]) == 0
         entry = json.loads(capfd.readouterr().out)["runs"][0]
         assert entry["status"] == "paused" and entry["pause"]["reason"] == "human_checks"
         assert entry["head"] == archived and entry["tasks"] == {"done": 1, "total": 1}
@@ -921,7 +923,7 @@ def test_finish_restarts_from_archive(admitted, tmp_path, monkeypatch, capfd, fa
             f"https://github.com/example/repo/tree/{BRANCH}"
             f"/openspec/changes/archive/2026-10-20-{CHANGE}"
         )
-        assert cli.main(["status"]) == 0
+        assert main(["status"]) == 0
         output = capfd.readouterr().out
         assert "tasks: 1/1 done" in output and "could not read tasks" not in output
 
@@ -929,14 +931,14 @@ def test_finish_restarts_from_archive(admitted, tmp_path, monkeypatch, capfd, fa
     if retry_command == "act":
         act(capfd, run, "finish")
     else:
-        assert cli.main(["finish", CHANGE]) == 0
+        assert main(["finish", CHANGE]) == 0
         capfd.readouterr()
         run.reload()
     assert run.state.status == "done" and run.state.pause is None
     assert not draft
     assert git(bare, "rev-parse", BRANCH) == git(remote, "rev-parse", BRANCH) == archived
     assert archives == [CHANGE] and pushes == [archived] * 3
-    assert cli.main(["status", "--json", CHANGE]) == 0
+    assert main(["status", "--json", CHANGE]) == 0
     entry = json.loads(capfd.readouterr().out)["runs"][0]
     assert entry["status"] == "done"
     assert entry["context"]["github"] == (
@@ -1009,7 +1011,7 @@ def test_status_after_partial_finish(admitted, template, tmp_path, monkeypatch, 
     git(healthy_source, "update-ref", f"refs/heads/{healthy_branch}", healthy_head)
     healthy_template = tmp_path / "healthy.toml"
     healthy_template.write_text(template[0].read_text().replace(str(source), str(healthy_source)))
-    assert cli.main(["admit", str(healthy_template), "--change", healthy_change,
+    assert main(["admit", str(healthy_template), "--change", healthy_change,
                      "--branch", healthy_branch, "--skip-feasibility"]) == 0
     capfd.readouterr()
     healthy = status_document(capfd, healthy_change)["runs"][0]
@@ -1105,7 +1107,7 @@ def test_finish_still_refuses_unfinished_tasks(admitted, monkeypatch, capfd, arc
                                              ("phase_gate:section:1", "refused")])
 def test_act_refuses_a_pause_other_than_the_one_shown(paused, capfd, expect, outcome):
     # The page sends the pause it showed; a newer pause of the same kind is not it.
-    code = cli.main(["act", "change", "resume", f"--expect={expect}", "--json"])
+    code = main(["act", "change", "resume", f"--expect={expect}", "--json"])
     document = json.loads(capfd.readouterr().out)
     assert document["outcome"] == outcome and code == (0 if outcome == "done" else 1)
     if outcome == "refused":
@@ -1141,7 +1143,7 @@ def test_publish_to_an_origin_of_another_repository_is_refused(admitted, monkeyp
     detail = act(capfd, run, "publish", code=1)["detail"]
     assert "repoint origin" in detail and "example/repo" in detail
     assert asdict(run.state) == before
-    assert cli.main(["publish", CHANGE, "--json"]) == 1
+    assert main(["publish", CHANGE, "--json"]) == 1
     document = json.loads(capfd.readouterr().out)
     assert document["outcome"] == "refused" and document["reasons"] == [detail]
     run.reload()

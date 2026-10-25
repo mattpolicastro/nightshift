@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from nightshift.cli import main
+
 from nightshift import daemon, queue, specloop_intake as intake
 from specloop import cli, state
 from test_specloop_base_publication import publication, scheduled
@@ -31,7 +33,7 @@ def merged_publication(publication, tmp_path):
     assert len(p.poll()) == 1
     old_receipt = p.receipt()
     scheduled(p)
-    assert cli.main(["run", "c"]) == 0
+    assert main(["run", "c"]) == 0
     head = p.ctx.head()
     assert sh(p.ctx.repo, "git", "show", "-s", "--format=%P", head).split() == [old, base]
     # The base-publication fixture deliberately has no evidence. Supply a

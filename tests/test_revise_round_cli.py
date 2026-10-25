@@ -6,6 +6,8 @@ from dataclasses import asdict
 
 import pytest
 
+from nightshift.cli import main
+
 from revision_result_fixtures import revision_success
 from specloop import cli, seal
 from test_revise_idempotency import ctx, snapshot
@@ -22,7 +24,7 @@ def test_keyed_append_and_replay(ctx, tmp_path, capfd, json_mode, status):
     feedback.write_text('["Handle empty input."]')
     argv = ["revise", ctx.m.change, "--feedback", str(feedback), "--feedback-format", "json",
             "--round-id", "round:1", *(["--json"] if json_mode else [])]
-    assert cli.main(argv) == 0
+    assert main(argv) == 0
     output = capfd.readouterr().out
     commit = seal.git(ctx.repo, "rev-parse", ctx.ref).decode().strip()
     expected = dict(version=1, outcome="revised", commit=commit, round_id="round:1",
@@ -43,7 +45,7 @@ def test_keyed_append_and_replay(ctx, tmp_path, capfd, json_mode, status):
     before = snapshot(ctx)
     expected.update(replayed=True, status=status,
                     pause=asdict(ctx.run.state.pause) if ctx.run.state.pause else None)
-    assert cli.main(argv) == 0
+    assert main(argv) == 0
     output = capfd.readouterr().out
     assert snapshot(ctx) == before
     if json_mode:
@@ -69,7 +71,7 @@ def test_invalid_keys_and_legacy_calls(ctx, tmp_path, capfd, key, json_mode):
     if json_mode:
         argv += ["--json"]
     before = snapshot(ctx)
-    assert cli.main(argv) == (0 if key is None else 1)
+    assert main(argv) == (0 if key is None else 1)
     output = capfd.readouterr()
     if key is not None:
         assert snapshot(ctx) == before
@@ -85,13 +87,13 @@ def test_invalid_keys_and_legacy_calls(ctx, tmp_path, capfd, key, json_mode):
             assert json.loads(output.out) == dict(version=1, outcome="revised", commit=first)
         else:
             assert "run is running" in output.out
-        assert cli.main(argv) == 0
+        assert main(argv) == 0
         capfd.readouterr()
         assert seal.git(ctx.repo, "rev-parse", ctx.ref).decode().strip() != first
         assert not list((ctx.run.dir / "revision-rounds").glob("*.json"))
         ctx.run.pause("stuck")
         before = snapshot(ctx)
-        assert cli.main(argv) == 1
+        assert main(argv) == 1
         output = capfd.readouterr()
         assert snapshot(ctx) == before
         assert "stuck" in (json.loads(output.out)["reasons"][0] if json_mode else output.err)
@@ -104,12 +106,12 @@ def test_keyed_feedback_refusal_preserves_original(ctx, tmp_path, capfd, feedbac
     feedback.write_text("Original feedback")
     key = "A" + "a0._:-" * 21 + "z"  # All allowed punctuation, exactly 128 ASCII characters.
     argv = ["revise", ctx.m.change, "--feedback", str(feedback), "--round-id", key, "--json"]
-    assert cli.main(argv) == 0
+    assert main(argv) == 0
     original = json.loads(capfd.readouterr().out)
     assert original["round_id"] == key and original["replayed"] is False
     before = snapshot(ctx)
     feedback.write_text(feedback_text)
-    assert cli.main(argv) == 1
+    assert main(argv) == 1
     document = json.loads(capfd.readouterr().out)
     assert document == {"version": 1, "outcome": "refused", "reasons": document["reasons"]}
     assert document["reasons"] and snapshot(ctx) == before

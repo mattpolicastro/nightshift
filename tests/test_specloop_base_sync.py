@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from nightshift.cli import main
+
 from specloop import cli, loop, manifest, seal, serve, state
 
 
@@ -705,7 +707,7 @@ def publish_without_preparing(monkeypatch, command, code):
         for name in ("prepare_publish", "_merge_publish_base", "_merge_commits", "run", "finals"):
             guard.setattr(loop, name, forbidden)
         guard.setattr(loop.verify, "run_steps", forbidden)
-        assert cli.main(command) == code
+        assert main(command) == code
 
 
 @pytest.mark.scenario("publish-base-sync/fetch-current-base/publish-fetches-again")

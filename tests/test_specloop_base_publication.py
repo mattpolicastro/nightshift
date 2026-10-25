@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from nightshift.cli import main
+
 from nightshift import queue, specloop_intake
 from nightshift.config import Repo
 from specloop import cli, loop, serve, state
@@ -200,7 +202,7 @@ run = ["/usr/bin/true"]
     p.poll_once = poll_once
     p.status = lambda: json.loads(runner(["specloop", "status", "--json"]).stdout)["runs"][0]
     p.publish = lambda: runner(["specloop", "publish", "c", "--json"], timeout=30)
-    assert cli.main(["run", "c"]) == 0
+    assert main(["run", "c"]) == 0
     assert p.status()["pause"]["reason"] == "ready_to_publish"
     p.fetches.clear()
     p.operations.clear()
@@ -221,7 +223,7 @@ def scheduled(p):
 
 
 def finish(p, old_receipt):
-    assert cli.main(["run", "c"]) == 0
+    assert main(["run", "c"]) == 0
     status = p.status()
     merged = p.ctx.head()
     saved = state.Run.for_change("c").state
@@ -260,7 +262,7 @@ def recover_merged_publication(p, monkeypatch, failure):
     scheduled(p)
     assert not p.merges and not p.verified
 
-    assert cli.main(["run", "c"]) == 0
+    assert main(["run", "c"]) == 0
     p.ctx.run.reload()
     ready = p.status()
     merged = p.ctx.head()
@@ -445,7 +447,7 @@ def test_driver_restart_retains_obligation_even_when_base_is_incorporated(
         crash.setattr(loop, "git", interrupted_git)
         crash.setattr(state.Run, "save", interrupted_save)
         with pytest.raises(Interrupted):
-            cli.main(["run", "c"])
+            main(["run", "c"])
     run = state.Run.for_change("c", require_existing=True)
     intent = run.state.base_sync
     merged = intent["merged_head"]
@@ -511,7 +513,7 @@ def test_successive_base_advances_publish_only_latest_verified_receipt(publicati
         if attempt == 2:
             finish(p, receipt)
         else:
-            assert cli.main(["run", "c"]) == 0
+            assert main(["run", "c"]) == 0
         merged = p.ctx.head()
         heads.append(merged)
         expected_fetches.append(300)

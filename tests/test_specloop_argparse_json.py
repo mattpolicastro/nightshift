@@ -3,7 +3,15 @@ import sys
 
 import pytest
 
+from nightshift import cli as canonical_cli
+from nightshift.cli import main
+
 from specloop import cli
+
+
+pytestmark = pytest.mark.scenario(
+    "nightshift-cli/canonical-build-commands/canonical-tests-retain-output-contracts"
+)
 
 
 INVALID_ARGUMENTS = [
@@ -39,6 +47,8 @@ def forbid_command_side_effects(monkeypatch):
         "load_env", "notifier", "runs_dir", "_ctx", "_manifest",
     ):
         monkeypatch.setattr(cli, name, unexpected)
+    monkeypatch.setattr(canonical_cli, "_daemon_command", unexpected)
+    monkeypatch.setattr(canonical_cli.config, "load_env_file", unexpected)
     for name in ("for_change", "save", "reload", "event"):
         monkeypatch.setattr(cli.Run, name, unexpected)
 
@@ -47,11 +57,11 @@ def forbid_command_side_effects(monkeypatch):
 def invoke(request, monkeypatch):
     def call(argv):
         if request.param == "process":
-            monkeypatch.setattr(sys, "argv", ["specloop", *argv])
-            return cli.main()
+            monkeypatch.setattr(sys, "argv", ["nightshift", *argv])
+            return main()
         # Explicit argv must take precedence over the process arguments.
-        monkeypatch.setattr(sys, "argv", ["specloop", "--help"])
-        return cli.main(argv)
+        monkeypatch.setattr(sys, "argv", ["nightshift", "--help"])
+        return main(argv)
 
     return call
 
@@ -69,11 +79,11 @@ def test_argparse_errors_emit_json(invoke, capsys, argv, diagnostic, flag_positi
     assert set(document) == {"version", "error"}
     assert document["version"] == 1
     assert isinstance(document["error"], str) and diagnostic in document["error"]
-    assert "Traceback" not in output.err
+    assert output.err == ""
 
 
 @pytest.mark.scenario("specloop-interface/json-argument-errors/human-errors-and-help-remain-compatible")
-@pytest.mark.parametrize("argv, diagnostic", INVALID_ARGUMENTS + [
+@pytest.mark.parametrize("argv, diagnostic", [case for case in INVALID_ARGUMENTS if case.values[0]] + [
     pytest.param(["status", "--jsonish"], "unrecognized arguments", id="json-substring"),
     pytest.param(["status", "--events", "bad", "--jso"], "invalid int value", id="json-abbreviation"),
     pytest.param(["status", "--json=true"], "ignored explicit argument", id="json-assignment"),
@@ -88,7 +98,7 @@ def test_human_argument_errors(invoke, capsys, argv, diagnostic):
     assert error.value.code == 2
     output = capsys.readouterr()
     assert output.out == ""
-    assert "usage: specloop" in output.err
+    assert "usage: nightshift" in output.err
     assert "error:" in output.err and diagnostic in output.err
 
 
@@ -100,7 +110,7 @@ def test_help_remains_ordinary_help(invoke, capsys, command, flags):
         invoke([*command, *flags])
     assert error.value.code == 0
     output = capsys.readouterr()
-    assert output.out.startswith("usage: specloop")
+    assert output.out.startswith("usage: nightshift")
     assert "--help" in output.out
     assert output.err == ""
 
@@ -149,3 +159,13 @@ def test_command_exceptions_are_not_parser_errors(invoke, monkeypatch, capsys, e
         invoke(["status", "--json"])
     assert error.value is exception
     assert capsys.readouterr().out == ""
+
+
+def test_empty_human_argv_dispatches_build_status(invoke, monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(cli, "status", lambda args: calls.append(args) or 0)
+    assert invoke([]) == 0
+    args, = calls
+    assert args.cmd == "status" and args.change is None and args.json is False
+    output = capsys.readouterr()
+    assert output.out == output.err == ""

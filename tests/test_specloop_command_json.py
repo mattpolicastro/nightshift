@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from nightshift.cli import main
+
 from specloop import agents, cli, critic, openspec, seal, state, tasks
 from specloop.state import Run
 
@@ -84,7 +86,7 @@ def review(monkeypatch, contradictions=()):
 def test_refused_admission_as_json(template, monkeypatch, capfd):
     path, repo = template
     review(monkeypatch, [CONTRADICTION])
-    assert cli.main(admission(path, "--json")) == 1
+    assert main(admission(path, "--json")) == 1
     document = json.loads(capfd.readouterr().out)
     assert document["version"] == 1
     assert document["outcome"] == "refused"
@@ -100,7 +102,7 @@ def test_template_admission(template, monkeypatch, capfd):
     path, repo = template
     original = path.read_text()
     review(monkeypatch)
-    assert cli.main(admission(path, "--json")) == 0
+    assert main(admission(path, "--json")) == 0
     head = git(repo, "rev-parse", BRANCH)
     assert json.loads(capfd.readouterr().out) == {
         "version": 1, "outcome": "admitted", "head": head, "reasons": [], "risks": [RISK],
@@ -119,7 +121,7 @@ def test_template_admission(template, monkeypatch, capfd):
     assert not Run.for_change("x").dir.exists()
     # Refusing a duplicate must preserve the already admitted run.
     before = run.manifest_path.read_text()
-    assert cli.main(admission(path, "--json")) == 1
+    assert main(admission(path, "--json")) == 1
     assert "already exists" in json.loads(capfd.readouterr().out)["reasons"][0]
     assert run.manifest_path.read_text() == before
     assert (run.dir / "state.json").exists()
@@ -267,7 +269,7 @@ def test_approval_recovers_interrupted_admission(template, tmp_path, monkeypatch
     capfd.readouterr()
     assert run.dir.exists()
     assert not (run.dir / "state.json").exists()
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     assert json.loads(capfd.readouterr().out)["runs"] == []
     assert not gh.comments
     assert gh.labels == {"spec:approved", "spec:review"}
@@ -278,7 +280,7 @@ def test_approval_recovers_interrupted_admission(template, tmp_path, monkeypatch
     assert checked == [gh.head] * (2 if interruption == "state" else 1)
     assert not (run.dir / "interrupted-artifact").exists()
     assert Run.for_change(CHANGE).state.pr == gh.pr_url
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     entry, = json.loads(capfd.readouterr().out)["runs"]
     assert (entry["change"], entry["status"], entry["head"], entry["pr"]) == (
         CHANGE, "running", gh.head, gh.pr_url,
@@ -292,7 +294,7 @@ def test_approval_recovers_interrupted_admission(template, tmp_path, monkeypatch
 def test_admit_unavailable_head_refused(template, capfd, head):
     path, source = template
     before = git(source, "rev-parse", BRANCH)
-    assert cli.main(admission(path, "--head", head, "--skip-feasibility", "--json")) == 1
+    assert main(admission(path, "--head", head, "--skip-feasibility", "--json")) == 1
     result = json.loads(capfd.readouterr().out)
     assert result["outcome"] == "refused" and result["reasons"]
     assert list(Run.for_change(CHANGE).dir.iterdir()) == [Run.for_change(CHANGE).dir / "lock"]
@@ -313,7 +315,7 @@ def test_questions_as_json(template, monkeypatch, capfd):
         return agents.Result("ok", {"status": "needs_input", "summary": "", "questions": questions})
 
     monkeypatch.setattr(agents, "run", agent)
-    assert cli.main(["propose", str(path), "--change", "new-change", "--branch", "draft/new-change",
+    assert main(["propose", str(path), "--change", "new-change", "--branch", "draft/new-change",
                      "--idea", "Implement empty input", "--json"]) == 2
     assert json.loads(capfd.readouterr().out) == {
         "version": 1, "outcome": "needs_input", "branch": "draft/new-change", "commit": "",
@@ -345,7 +347,7 @@ def test_propose_drafts_to_effective_branch(template, monkeypatch, capfd, argume
         return agents.Result("ok", {"status": "drafted", "summary": "", "questions": []})
 
     monkeypatch.setattr(agents, "run", agent)
-    assert cli.main(["propose", str(path), *arguments, "--idea", "Add a feature",
+    assert main(["propose", str(path), *arguments, "--idea", "Add a feature",
                      *(["--json"] if json_mode else [])]) == 0
     output = capfd.readouterr().out
     head = git(repo, "rev-parse", branch)
@@ -409,7 +411,7 @@ def test_propose_json_reports_real_ref(template, tmp_path, monkeypatch, capfd, c
         return agents.Result("ok", {"status": "drafted", "summary": "New spec", "questions": []})
 
     monkeypatch.setattr(agents, "run", agent)
-    assert cli.main(["propose", str(path), "--change", CHANGE, "--branch", branch,
+    assert main(["propose", str(path), "--change", CHANGE, "--branch", branch,
                      "--from-branch", "main", "--idea", "Handle empty input", "--json"]) == 0
     output = capfd.readouterr()
     result = json.loads(output.out)  # Reject extra stdout documents or progress.
@@ -455,7 +457,7 @@ def test_propose_from_branch_continues_existing_spec(template, monkeypatch, capf
         return agents.Result("ok", {"status": "drafted", "summary": "Updated empty input", "questions": []})
 
     monkeypatch.setattr(agents, "run", agent)
-    assert cli.main(["propose", str(path), "--change", CHANGE, "--branch", BRANCH,
+    assert main(["propose", str(path), "--change", CHANGE, "--branch", BRANCH,
                      "--from-branch", start, "--idea", "Handle empty input", "--json"]) == 0
     result = json.loads(capfd.readouterr().out)
     assert result["outcome"] == "drafted" and result["branch"] == BRANCH
@@ -500,7 +502,7 @@ def test_propose_from_checked_out_spec_preserves_review_checkout(template, tmp_p
         return agents.Result("ok", {"status": "drafted", "summary": "Revised spec", "questions": []})
 
     monkeypatch.setattr(agents, "run", agent)
-    assert cli.main(["propose", str(path), "--change", CHANGE, "--branch", BRANCH,
+    assert main(["propose", str(path), "--change", CHANGE, "--branch", BRANCH,
                      "--from-branch", start, "--idea", "Handle empty input", "--json"]) == 0
     result = json.loads(capfd.readouterr().out)
     assert result["outcome"] == "drafted" and result["branch"] == f"refs/specloop/proposals/{CHANGE}"
@@ -525,7 +527,7 @@ def test_rejected_draft_reports_details(template, monkeypatch, capfd, contradict
     path, repo = template
     monkeypatch.setattr(propose, "draft", lambda *a, **kw: propose.Draft(
         "x", repo, problems=problems, contradictions=contradictions, risks=[RISK], commit="candidate"))
-    assert cli.main(["propose", str(path), "--idea", "feature", "--json"]) == 1
+    assert main(["propose", str(path), "--idea", "feature", "--json"]) == 1
     document = json.loads(capfd.readouterr().out)
     assert document["outcome"] == "rejected"
     assert document["version"] == 1 and document["branch"] == "spec/x"
@@ -548,7 +550,7 @@ def test_propose_publication_failure_retains_rejected_outcome(template, tmp_path
     monkeypatch.setattr(propose, "draft", lambda *a, **kw: propose.Draft(
         CHANGE, missing, branch=BRANCH, risks=[RISK], commit="candidate"))
     # Real publication selects the private ref, then fails to fetch the draft.
-    assert cli.main(["propose", str(path), "--change", CHANGE, "--branch", BRANCH,
+    assert main(["propose", str(path), "--change", CHANGE, "--branch", BRANCH,
                      "--idea", "feature", "--json"]) == 1
     result = json.loads(capfd.readouterr().out)
     assert result == {
@@ -564,7 +566,7 @@ def test_propose_publication_failure_retains_rejected_outcome(template, tmp_path
 @pytest.mark.parametrize("hook_exit", [0, 1])
 def test_publish_json(template, monkeypatch, capfd, tmp_path, json_mode, hook_exit):
     path, _ = template
-    assert cli.main(admission(path, "--skip-feasibility", "--json")) == 0
+    assert main(admission(path, "--skip-feasibility", "--json")) == 0
     capfd.readouterr()
     run = Run.for_change(CHANGE)
     run.pause("ready_to_publish")
@@ -590,9 +592,9 @@ def test_publish_json(template, monkeypatch, capfd, tmp_path, json_mode, hook_ex
     command = ["publish", CHANGE, *(["--json"] if json_mode else [])]
     if hook_exit and not json_mode:
         with pytest.raises(subprocess.CalledProcessError):
-            cli.main(command)
+            main(command)
     else:
-        assert cli.main(command) == hook_exit
+        assert main(command) == hook_exit
     output = capfd.readouterr()
     assert "pre-push progress" in (output.err if json_mode else output.out)
     if json_mode:
@@ -628,7 +630,7 @@ def test_publish_json(template, monkeypatch, capfd, tmp_path, json_mode, hook_ex
     (["publish", "unknown"], "not ready to publish"),
 ])
 def test_command_errors_are_json(template, capfd, command, detail):
-    assert cli.main([*command, "--json"]) == 1
+    assert main([*command, "--json"]) == 1
     document = json.loads(capfd.readouterr().out)
     assert document["version"] == 1
     assert document["outcome"] in ("refused", "rejected")
@@ -641,7 +643,7 @@ def test_publish_reuses_admitted_pr(template, monkeypatch, capfd, tmp_path, json
     path, repo = template
     url = "https://github.com/example/repo/pull/42"
     output_flags = ["--json"] if json_mode else []
-    assert cli.main(admission(path, "--skip-feasibility", "--pr", url, *output_flags)) == 0
+    assert main(admission(path, "--skip-feasibility", "--pr", url, *output_flags)) == 0
     capfd.readouterr()
     run = Run.for_change(CHANGE)
     assert run.state.pr == url
@@ -661,7 +663,7 @@ def test_publish_reuses_admitted_pr(template, monkeypatch, capfd, tmp_path, json
         pytest.fail(f"Publishing an adopted PR must not call gh: {args}")
 
     monkeypatch.setattr(cli, "_gh", gh)
-    assert cli.main(["publish", CHANGE, *output_flags]) == 0
+    assert main(["publish", CHANGE, *output_flags]) == 0
     output = capfd.readouterr().out
     if json_mode:
         assert json.loads(output) == {"version": 1, "outcome": "published", "pr": url}
@@ -677,7 +679,7 @@ def test_publish_reuses_admitted_pr(template, monkeypatch, capfd, tmp_path, json
 @pytest.mark.parametrize("pr", ["", "https://github.com/example/repo/pull/42"])
 def test_publish_failure_is_json_and_remains_ready(template, monkeypatch, capfd, pr):
     path, _ = template
-    assert cli.main(admission(path, "--skip-feasibility", "--json", *(["--pr", pr] if pr else []))) == 0
+    assert main(admission(path, "--skip-feasibility", "--json", *(["--pr", pr] if pr else []))) == 0
     capfd.readouterr()
     Run.for_change(CHANGE).pause("ready_to_publish")
     monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
@@ -688,7 +690,7 @@ def test_publish_failure_is_json_and_remains_ready(template, monkeypatch, capfd,
         raise RuntimeError("push failed")
 
     monkeypatch.setattr(cli, "_push", fail)
-    assert cli.main(["publish", CHANGE, "--json"]) == 1
+    assert main(["publish", CHANGE, "--json"]) == 1
     assert json.loads(capfd.readouterr().out) == {
         "version": 1, "error": "push failed",
     }
@@ -699,7 +701,7 @@ def test_publish_failure_is_json_and_remains_ready(template, monkeypatch, capfd,
 @pytest.fixture
 def revision_run(template, capfd, monkeypatch):
     path, source = template
-    assert cli.main(admission(path, "--skip-feasibility", "--pr", "https://github.com/example/repo/pull/42")) == 0
+    assert main(admission(path, "--skip-feasibility", "--pr", "https://github.com/example/repo/pull/42")) == 0
     capfd.readouterr()
     run = Run.for_change(CHANGE)
     run.state.gates_passed = [1]
@@ -731,7 +733,7 @@ def test_revision_feedback_becomes_tasks(revision_run, tmp_path, capfd, json_mod
     for number in (1, 2):
         parent = git(repo, "rev-parse", BRANCH)
         previous = git(repo, "show", f"{BRANCH}:openspec/changes/{CHANGE}/tasks.md")
-        assert cli.main(["revise", CHANGE, "--feedback", str(feedback), *flags]) == 0
+        assert main(["revise", CHANGE, "--feedback", str(feedback), *flags]) == 0
         output = capfd.readouterr().out
         head = git(repo, "rev-parse", BRANCH)
         if json_mode:
@@ -839,7 +841,7 @@ def test_invalid_or_empty_json_feedback_preserves_run(revision_run, tmp_path, ca
     events = (run.dir / "events.jsonl").read_bytes()
     feedback = tmp_path / "feedback.json"
     feedback.write_text(feedback_text)
-    assert cli.main(["revise", CHANGE, "--feedback", str(feedback),
+    assert main(["revise", CHANGE, "--feedback", str(feedback),
                      "--feedback-format", "json", "--json"]) == 1
     result = json.loads(capfd.readouterr().out)
     assert result["outcome"] == "refused" and result["reasons"]
@@ -861,7 +863,7 @@ def test_revision_empty_feedback_refused(revision_run, tmp_path, capfd, feedback
     feedback = tmp_path / "feedback.md"
     feedback.write_text(feedback_text)
     flags = ["--json"] if json_mode else []
-    assert cli.main(["revise", CHANGE, "--feedback", str(feedback), *flags]) == 1
+    assert main(["revise", CHANGE, "--feedback", str(feedback), *flags]) == 1
     output = capfd.readouterr()
     if json_mode:
         document = json.loads(output.out)
@@ -885,7 +887,7 @@ def test_revision_numbering_and_duplicate_comments(revision_run, tmp_path, capfd
     git(repo, "update-ref", ref, commit, head)
     feedback = tmp_path / "feedback.md"
     feedback.write_text("Fix this --- inline separator.\n---\nFix this --- inline separator.")
-    assert cli.main(["revise", CHANGE, "--feedback", str(feedback), "--json"]) == 0
+    assert main(["revise", CHANGE, "--feedback", str(feedback), "--json"]) == 0
     capfd.readouterr()
     text = git(repo, "show", f"{ref}:{path}")
     assert "## 13. Review round 4\n" in text
@@ -918,9 +920,9 @@ def test_revision_refusal_preserves_run(revision_run, tmp_path, capfd, monkeypat
     if failure == "busy":
         with run.lock() as mine:
             assert mine
-            result = cli.main(command)
+            result = main(command)
     else:
-        result = cli.main(command)
+        result = main(command)
     assert result == 1
     document = json.loads(capfd.readouterr().out)
     assert document["version"] == 1 and document["outcome"] == "refused"

@@ -1086,15 +1086,11 @@ def build_parser(*, prog="specloop", json_errors=False):
 
 
 def main(argv=None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    option_end = argv.index("--") if "--" in argv else len(argv)
-    ap = build_parser(json_errors="--json" in argv[:option_end])
-    try:
-        args = ap.parse_args(argv)
-    except ParseError as e:
-        print(json.dumps({"version": 1, "error": str(e)}))
-        return 2
-    return dispatch(args)
+    """One-release compatibility entry point; handlers remain in this module."""
+    from nightshift.cli import main as canonical_main
+
+    print("specloop has been renamed to nightshift; use nightshift instead.", file=sys.stderr)
+    return canonical_main(argv)
 
 
 def dispatch(args) -> int:
