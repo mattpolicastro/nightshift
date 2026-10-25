@@ -48,7 +48,9 @@ class Call:
 
 
 def homes_dir() -> Path:
-    return Path.home() / ".specloop" / "homes"
+    from specloop import state
+
+    return state.homes_dir()
 
 
 def reachable(base_url: str) -> bool:

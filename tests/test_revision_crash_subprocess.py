@@ -33,7 +33,9 @@ root = Path(os.environ['CANDIDATE_SOURCE'])
 for module in (cli, revise, state, jobs):
     assert Path(module.__file__).resolve() == root.joinpath(*module.__name__.split('.')).with_suffix('.py')
 assert Path(sys.executable) == Path(os.environ['CANDIDATE_PYTHON'])
-assert state.ROOT.resolve() == Path(os.environ['HOME']) / '.specloop'
+assert state.ROOT is None
+assert state.state_root() == Path(os.environ['NIGHTSHIFT_STATE_ROOT'])
+assert state.legacy_root() == Path(os.environ['NIGHTSHIFT_LEGACY_STATE_ROOT'])
 assert state.Run.for_change(os.environ['CHANGE']).dir.resolve() == Path(os.environ['RUN_DIR'])
 """
 CRASH = PROVENANCE + """
@@ -91,7 +93,9 @@ def process_case(build_setup, tmp_path, monkeypatch, request):
     executable.chmod(0o755)
     crash = tmp_path / 'crash.py'
     crash.write_text(CRASH)
-    env = {**os.environ, 'HOME': str(home), 'PYTHONPATH': str(SOURCE),
+    env = {**os.environ, 'HOME': str(home),
+           'NIGHTSHIFT_STATE_ROOT': str(home / '.nightshift'),
+           'NIGHTSHIFT_LEGACY_STATE_ROOT': str(home / '.specloop'), 'PYTHONPATH': str(SOURCE),
            'PATH': str(sentinel) + os.pathsep + os.environ['PATH'],
            'CANDIDATE_SOURCE': str(SOURCE), 'CANDIDATE_PYTHON': sys.executable,
            'CHANGE': CHANGE, 'RUN_DIR': str(directory), 'CRASH_SCRIPT': str(crash)}

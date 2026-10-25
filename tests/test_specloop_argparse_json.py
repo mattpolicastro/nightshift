@@ -44,7 +44,7 @@ def forbid_command_side_effects(monkeypatch):
     for name in (
         "admit", "run_cmd", "status", "act", "resume", "revise", "accept", "waive",
         "abort", "publish", "finish", "serve_cmd", "propose", "drill_cmd", "pause_cmd",
-        "load_env", "notifier", "runs_dir", "_ctx", "_manifest",
+        "load_env", "notifier", "iter_run_dirs", "run_dir", "proposals_dir", "_ctx", "_manifest",
     ):
         monkeypatch.setattr(cli, name, unexpected)
     monkeypatch.setattr(canonical_cli, "_daemon_command", unexpected)

@@ -33,7 +33,7 @@ AUTO_RESUME = {"usage_limit": None, "infra": 2}  # reason -> max lifts per task 
 
 
 def heartbeat_path() -> Path:
-    return state.ROOT / "serve.json"
+    return state.heartbeat_path()
 
 
 def parallel() -> int:
@@ -53,7 +53,7 @@ def beat(started: float, driving: list[str] = (), poll: float = 60) -> None:
 
 
 def liveness() -> str:
-    p = heartbeat_path()
+    p = state.heartbeat_path(existing=True)
     if not p.exists():
         return "not running"
     hb = json.loads(p.read_text())
@@ -89,7 +89,12 @@ def lift_due(run: Run, now: float, notify) -> bool:
 
 
 def runs() -> list[Run]:
-    found = [Run(d) for d in state.runs_dir().glob("*") if (d / "state.json").exists()]
+    found = []
+    for directory in state.iter_run_dirs():
+        try:
+            found.append(Run(directory, require_existing=True))
+        except Exception as e:
+            print(f"{directory.name}: could not read run: {e}", file=sys.stderr)
     return sorted(found, key=lambda r: r.state.created)
 
 
@@ -137,7 +142,7 @@ def pass_once(notify, spawn=None, drivers: Drivers | None = None, limit: int = 1
 
 def serve(poll: float, notify, once: bool = False) -> int:
     started = time.time()
-    previous = heartbeat_path()
+    previous = state.heartbeat_path(existing=True)
     if previous.exists():
         hb = json.loads(previous.read_text())
         try:

@@ -332,15 +332,19 @@ def test_questions_as_json(template, monkeypatch, capfd):
     (["legacy"], "legacy", "spec/legacy", False),
     (["--change", "new-change", "--branch", "draft/custom"], "new-change", "draft/custom", True),
 ])
+@pytest.mark.scenario("state-migration/lazy-isolated-roots/defaults-and-overrides-are-lazy")
 def test_propose_drafts_to_effective_branch(template, monkeypatch, capfd, arguments, change, branch, json_mode):
     path, repo = template
 
     def agent(call):
+        assert call.home == state.homes_dir() / call.profile.name
         if call.access == "read":
             assert f"openspec/changes/{change}/" in call.prompt
             if call.prompt.startswith("# Spec critic of an OpenSpec change"):
                 return agents.Result("ok", {"contradictions": [], "risks": []})
             return agents.Result("ok", {"contradictions": [], "risks": [RISK]})
+        assert call.cwd == state.proposals_dir() / change / "work"
+        assert call.cwd.parent.parent == state.state_root() / "drafts"
         task_file = call.cwd / "openspec" / "changes" / change / "tasks.md"
         task_file.parent.mkdir(parents=True, exist_ok=True)
         task_file.write_text(TASKS)

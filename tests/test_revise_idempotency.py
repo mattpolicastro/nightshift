@@ -127,14 +127,18 @@ from pathlib import Path
 from dataclasses import asdict
 from specloop import manifest, revise, state
 assert Path(revise.__file__).resolve() == Path(sys.argv[1]) / 'specloop/revise.py'
-assert state.ROOT == Path.home() / '.specloop'
+assert state.ROOT is None
+assert state.state_root() == Path.home() / '.nightshift'
+assert state.legacy_root() == Path.home() / '.specloop'
 run = state.Run(Path(sys.argv[2]), require_existing=True)
 result = revise.revise_result(run, manifest.load(run.manifest_path), sys.argv[3],
                               feedback_format='json', round_id='round:1')
 print(json.dumps(asdict(result)))
 """
     child = subprocess.run([sys.executable, "-c", script, str(root), str(ctx.run.dir), FEEDBACK],
-                           cwd=root, env={**os.environ, "HOME": str(home), "PYTHONPATH": str(root)},
+                           cwd=root, env={**os.environ, "HOME": str(home), "PYTHONPATH": str(root),
+                                          "NIGHTSHIFT_STATE_ROOT": str(home / ".nightshift"),
+                                          "NIGHTSHIFT_LEGACY_STATE_ROOT": str(home / ".specloop")},
                            capture_output=True, text=True, timeout=60)
     assert child.returncode == 0, child.stderr
     assert json.loads(child.stdout) == dict(commit=record["commit"], round_id="round:1",

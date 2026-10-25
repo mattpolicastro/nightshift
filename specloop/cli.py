@@ -18,7 +18,7 @@ from urllib.parse import quote
 
 from specloop import feasibility, loop, manifest, messages, openspec, tasks, verify
 from specloop.seal import git
-from specloop.state import SAFE_CHANGE, Busy, Run, TaskState, runs_dir
+from specloop.state import SAFE_CHANGE, Busy, Run, TaskState, iter_run_dirs, proposals_dir, run_dir
 
 DEFAULT_ENV = Path.home() / ".config" / "specloop" / "env"
 
@@ -664,7 +664,7 @@ def propose(args) -> int:
         _outcome(args, problems=["give --idea or --idea-file"])
         print("give --idea or --idea-file", file=sys.stderr)
         return 1
-    out = runs_dir().parent / "proposals" / m.change
+    out = proposals_dir() / m.change
     d = drafting.draft(m.repo, args.base, m.change, idea, args.source or [], m, out,
                        branch=m.branch, from_branch=args.from_branch)
     _outcome(args, commit=d.commit, questions=d.questions, contradictions=d.contradictions,
@@ -904,12 +904,16 @@ def _status_entry(name: str) -> dict:
 def _status_error_entry(name: str, error: Exception) -> dict:
     summary = "Run status could not be read."
     detail = f"{summary} Inspect specloop status --json for details."
+    try:
+        since = _pause_since(run_dir(name, check_conflict=False))
+    except (OSError, ValueError):
+        since = None
     # Compatibility placeholders only: never persist this pause or offer actions.
     return {
         "change": name,
         "status": "paused",
         "pause": {"reason": "status_error", "task": "", "detail": detail,
-                  "auto_resumes_remaining": 0, "since": _pause_since(runs_dir() / name)},
+                  "auto_resumes_remaining": 0, "since": since},
         "tasks": {"done": 0, "total": 0},
         "head": "",
         "pr": "",
@@ -928,11 +932,15 @@ def _status_json(change: str | None) -> int:
             # check is a per-run read failure, not an unknown named change.
             if not SAFE_CHANGE.fullmatch(change) or change in (".", ".."):
                 raise ValueError(f"unsafe change name {change!r}: use letters, digits, '.', '_' or '-'")
-            if not (runs_dir() / change / "state.json").exists():
+            try:
+                (run_dir(change, check_conflict=False) / "state.json").stat()
+            except FileNotFoundError:
                 raise ValueError(f"{change}: no such change (not admitted, or admission was refused)")
+            except OSError:
+                pass  # Collection reports unreadable state as a per-run error.
             names = [change]
         else:
-            names = sorted(p.name for p in runs_dir().glob("*") if (p / "state.json").exists())
+            names = [p.name for p in iter_run_dirs()]
         entries = []
         for name in names:
             try:
@@ -953,10 +961,14 @@ def status(args) -> int:
 
     if args.json:
         return _status_json(args.change)
-    names = [args.change] if args.change else sorted(p.name for p in runs_dir().glob("*") if (p / "state.json").exists())
+    names = [args.change] if args.change else [p.name for p in iter_run_dirs()]
     print(f"supervisor: {serve.liveness()}")
     for name in names:
-        run = Run.for_change(name)
+        try:
+            run = Run.for_change(name)
+        except Exception as e:
+            print(f"{name}: could not read run: {e}")
+            continue
         if not (run.dir / "state.json").exists():
             print(f"{name}: no such change (not admitted, or admission was refused)")
             continue
@@ -969,12 +981,13 @@ def status(args) -> int:
             for line in st.pause.detail.splitlines()[:12]:
                 print(f"    {line}")
         try:
-            ctx = _ctx(run)
-            head = ctx.head()
-            task_path = _tasks_path(ctx.repo, head, ctx.m.change)
-            all_tasks = tasks.parse(git(ctx.repo, "show", f"{head}:{task_path}").decode())
+            m = _manifest(run)
+            repo = run.dir / "repo.git"
+            head = git(repo, "rev-parse", f"refs/heads/{m.branch}").decode().strip()
+            task_path = _tasks_path(repo, head, m.change)
+            all_tasks = tasks.parse(git(repo, "show", f"{head}:{task_path}").decode())
             done = sum(t.done for t in all_tasks)
-            print(f"  tasks: {done}/{len(all_tasks)} done on {ctx.m.branch} @ {ctx.head()[:12]}")
+            print(f"  tasks: {done}/{len(all_tasks)} done on {m.branch} @ {head[:12]}")
             nxt = next((t for t in all_tasks if not t.done), None)
             if nxt:
                 ts = st.tasks.get(nxt.key)

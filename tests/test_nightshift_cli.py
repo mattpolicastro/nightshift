@@ -19,7 +19,7 @@ def isolated(monkeypatch):
     for target, names in ((cli.config, ("load", "load_env_file")),
                           (cli.daemon, ("loop", "startup")),
                           (cli.specloop_job, ("list_jobs", "stop_job", "release_job")),
-                          (build, ("load_env", "runs_dir", "_ctx", "admit", "propose", "revise",
+                          (build, ("load_env", "iter_run_dirs", "run_dir", "proposals_dir", "_ctx", "admit", "propose", "revise",
                                    "act", "status", "publish", "run_cmd", "pause_cmd", "resume",
                                    "accept", "waive", "abort", "finish", "drill_cmd", "serve_cmd"))):
         for name in names:

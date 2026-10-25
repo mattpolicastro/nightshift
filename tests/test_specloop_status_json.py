@@ -87,6 +87,92 @@ run = ["true"]
     return make
 
 
+@pytest.mark.scenario("state-migration/read-only-fallback/mixed-roots-remain-visible")
+def test_status_unions_roots_read_only(admitted, home, capsys):
+    from test_state_roots import tree_snapshot
+
+    canonical, _ = admitted("a-canonical", github="example/one")
+    old, _ = admitted("z-legacy", github="example/two")
+    legacy = state.legacy_root() / "runs"
+    legacy.mkdir(parents=True)
+    old.dir.rename(legacy / old.dir.name)
+    (legacy / canonical.dir.name).symlink_to(canonical.dir, target_is_directory=True)
+    before = tree_snapshot(home, state.legacy_root())
+    assert main(["status", "--json"]) == 0
+    entries = json.loads(capsys.readouterr().out)["runs"]
+    assert [entry["change"] for entry in entries] == ["a-canonical", "z-legacy"]
+    assert all("error" not in entry for entry in entries)
+    for entry in entries:
+        assert main(["status", entry["change"], "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["runs"] == [entry]
+    assert Run.for_change("z-legacy").dir == legacy / "z-legacy"
+    assert tree_snapshot(home, state.legacy_root()) == before
+
+
+@pytest.mark.scenario("state-migration/read-only-fallback/conflicting-roots-remain-visible")
+def test_conflict_and_corrupt_runs_preserve_healthy_reads(admitted, home, capsys):
+    from test_state_roots import tree_snapshot
+
+    healthy, _ = admitted("healthy")
+    conflict, _ = admitted("conflict")
+    corrupt, _ = admitted("corrupt")
+    (corrupt.dir / "state.json").write_text("{")
+    legacy = state.legacy_root() / "runs/conflict"
+    legacy.mkdir(parents=True)
+    (legacy / "state.json").write_text('{"change":"conflict","status":"done"}')
+    before = tree_snapshot(home, state.legacy_root())
+    assert main(["status", "--json"]) == 0
+    entries = json.loads(capsys.readouterr().out)["runs"]
+    assert [entry["change"] for entry in entries] == ["conflict", "corrupt", "healthy"]
+    assert "conflicting run directories" in entries[0]["error"]
+    assert "JSONDecodeError" in entries[1]["error"]
+    assert "error" not in entries[2]
+    assert main(["status", "conflict", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["runs"] == [entries[0]]
+    assert main(["status"]) == 0
+    assert "conflicting run directories" in capsys.readouterr().out
+    assert [run.dir for run in serve.runs()] == [healthy.dir]
+    assert "conflicting run directories" in capsys.readouterr().err
+    with pytest.raises(ValueError, match="conflicting run directories"):
+        Run.for_change("conflict")
+    for write in (conflict.save, lambda: conflict.event("test")):
+        with pytest.raises(ValueError, match="conflicting run directories"):
+            write()
+    with pytest.raises(ValueError, match="conflicting run directories"):
+        with conflict.lock():
+            pytest.fail("conflicting writer acquired a lock")
+    assert tree_snapshot(home, state.legacy_root()) == before
+
+
+@pytest.mark.scenario("state-migration/read-only-fallback/conflicting-roots-remain-visible")
+def test_unreadable_run_remains_visible(admitted, monkeypatch, capsys):
+    healthy, _ = admitted("healthy")
+    unreadable, _ = admitted("unreadable")
+    original_stat = Path.stat
+
+    def stat(path, *args, **kwargs):
+        if path == unreadable.dir / "state.json":
+            raise PermissionError("state metadata denied")
+        return original_stat(path, *args, **kwargs)
+
+    original_read = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path == unreadable.dir / "state.json":
+            raise PermissionError("state contents denied")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(Path, "read_text", read)
+    for argv in (["status", "--json"], ["status", "unreadable", "--json"]):
+        assert main(argv) == 0
+        entries = json.loads(capsys.readouterr().out)["runs"]
+        assert entries[-1]["change"] == "unreadable"
+        assert "PermissionError" in entries[-1]["error"]
+    assert [run.dir for run in serve.runs()] == [healthy.dir]
+    assert "state contents denied" in capsys.readouterr().err
+
+
 @pytest.mark.scenario("nightshift-cli/canonical-build-commands/canonical-tests-retain-output-contracts")
 @pytest.mark.scenario("specloop-interface/status-json/paused-run-reported")
 @pytest.mark.parametrize("named", [False, True])

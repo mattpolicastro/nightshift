@@ -204,7 +204,9 @@ from specloop import state
 assert daemon.STATE_DIR == Path.home() / ".nightshift"
 assert outcomes.DB_PATH == daemon.STATE_DIR / "outcomes.sqlite3"
 assert queue.CLAIM_DIR == daemon.STATE_DIR / "claims"
-assert state.ROOT == Path.home() / ".specloop"
+assert state.ROOT is None
+assert state.state_root() == Path.home() / ".nightshift"
+assert state.legacy_root() == Path.home() / ".specloop"
 for module, names in {
     "nightshift.cli": ("_elapsed", "_progress_of"),
     "nightshift.preflight": ("_endpoint_checks", "_one_endpoint", "_default_prober",
@@ -410,7 +412,9 @@ def test_bundled_service_roles_read_only():
     from specloop import state
 
     assert daemon.STATE_DIR == Path.home() / ".nightshift"
-    assert state.ROOT == Path.home() / ".specloop"
+    assert state.ROOT is None
+    assert state.state_root() == Path.home() / ".nightshift"
+    assert state.legacy_root() == Path.home() / ".specloop"
     root = Path(__file__).resolve().parents[1]
     home = "/Users/YOUR_USERNAME"
     for service, wrapper, target, keepalive, process_type in (

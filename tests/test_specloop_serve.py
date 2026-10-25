@@ -26,6 +26,25 @@ def make(change, status="running", pause=None, tasks=None):
     return run
 
 
+@pytest.mark.scenario("state-migration/read-only-fallback/supervisor-discovers-both-roots")
+def test_discovery_unions_roots_without_writes(home):
+    from test_state_roots import tree_snapshot
+
+    canonical = make("a-canonical", "paused", Pause("infra", resume_at=1))
+    canonical.state.created = 20
+    canonical.save()
+    (state.runs_dir() / ".DS_Store").write_bytes(b"directory metadata")
+    legacy_parent = state.legacy_root() / "runs"
+    legacy_parent.mkdir(parents=True)
+    (legacy_parent / canonical.dir.name).symlink_to(canonical.dir, target_is_directory=True)
+    legacy = Run(legacy_parent / "z-legacy")
+    legacy.state.created = 10
+    legacy.save()
+    before = tree_snapshot(home, state.legacy_root())
+    assert [run.dir for run in serve.runs()] == [legacy.dir, canonical.dir]
+    assert tree_snapshot(home, state.legacy_root()) == before
+
+
 def test_lock_is_exclusive(home):
     run = make("c")
     with run.lock() as first:

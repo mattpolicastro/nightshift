@@ -14,12 +14,77 @@ import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-ROOT = Path.home() / ".specloop"
+ROOT: Path | None = None  # Explicit local overrides remain supported; defaults are lazy.
 SAFE_CHANGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
+def _root(variable: str, default: str) -> Path:
+    value = os.environ.get(variable)
+    if value is None:
+        return Path.home() / default
+    if not value.strip() or not Path(value).is_absolute():
+        raise ValueError(f"{variable} must be a nonblank absolute path")
+    return Path(value)
+
+
+def state_root() -> Path:
+    return Path(ROOT) if ROOT is not None else _root("NIGHTSHIFT_STATE_ROOT", ".nightshift")
+
+
+def legacy_root() -> Path:
+    return _root("NIGHTSHIFT_LEGACY_STATE_ROOT", ".specloop")
+
+
 def runs_dir() -> Path:
-    return ROOT / "runs"
+    return state_root() / "runs"
+
+
+def proposals_dir() -> Path:
+    """Disposable build workspaces, separate from daemon proposal receipts."""
+    return state_root() / "drafts"
+
+
+def homes_dir() -> Path:
+    return state_root() / "homes"
+
+
+def heartbeat_path(*, existing: bool = False) -> Path:
+    canonical = state_root() / "serve.json"
+    legacy = legacy_root() / "serve.json"
+    return legacy if existing and not canonical.exists() and legacy.exists() else canonical
+
+
+def _present(path: Path) -> bool:
+    try:
+        path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return True
+
+
+def run_dir(change: str, *, check_conflict: bool = True) -> Path:
+    if not SAFE_CHANGE.fullmatch(change or "") or change in (".", ".."):
+        raise ValueError(f"unsafe change name {change!r}")
+    canonical, legacy = runs_dir() / change, legacy_root() / "runs" / change
+    if _present(canonical):
+        if check_conflict and _present(legacy) and not canonical.samefile(legacy):
+            raise ValueError(f"{change}: conflicting run directories: {canonical} and {legacy}")
+        return canonical
+    return legacy if _present(legacy) else canonical
+
+
+def iter_run_dirs():
+    """Name-sorted read-only union; loading each run reports its own errors."""
+    found = {}
+    for parent in (legacy_root() / "runs", runs_dir()):
+        for directory in parent.glob("*"):
+            try:
+                admitted = _present(directory / "state.json")
+            except OSError:
+                admitted = True  # Keep unreadable entries visible to readers.
+            if admitted:
+                found[directory.name] = directory
+    yield from (found[name] for name in sorted(found))
 
 
 @dataclass
@@ -100,6 +165,7 @@ class Run:
     def __init__(self, directory: Path, *, require_existing: bool = False):
         self.dir = directory
         self.require_existing = require_existing
+        self._check_conflict()
         self.state = self._load()
 
     @classmethod
@@ -108,13 +174,18 @@ class Run:
             # An empty or path-like name would resolve to the runs directory or
             # outside it, and admission clears a run's directory.
             raise ValueError(f"unsafe change name {change!r}: use letters, digits, '.', '_' or '-'")
-        return cls(runs_dir() / change, require_existing=require_existing)
+        return cls(run_dir(change), require_existing=require_existing)
+
+    def _check_conflict(self) -> None:
+        if self.dir.parent in (runs_dir(), legacy_root() / "runs"):
+            run_dir(self.dir.name)
 
     @property
     def manifest_path(self) -> Path:
         return self.dir / "manifest.toml"
 
     def attempt_dir(self, key: str, n: int) -> Path:
+        self._check_conflict()
         d = self.dir / key / f"a{n}"
         d.mkdir(parents=True, exist_ok=True)
         return d
@@ -136,6 +207,7 @@ class Run:
                         raw.get("evidence_scores", {}), raw.get("base_sync", {}))
 
     def save(self) -> None:
+        self._check_conflict()
         self.dir.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".state-")
         with os.fdopen(fd, "w") as f:
@@ -143,6 +215,7 @@ class Run:
         os.replace(tmp, self.dir / "state.json")
 
     def event(self, kind: str, **data) -> None:
+        self._check_conflict()
         self.dir.mkdir(parents=True, exist_ok=True)
         with open(self.dir / "events.jsonl", "a") as f:
             f.write(json.dumps({"at": time.time(), "event": kind, **data}) + "\n")
@@ -154,6 +227,7 @@ class Run:
         The directory and lock file must survive admission cleanup so all
         contenders keep locking the same inode.
         """
+        self._check_conflict()
         self.dir.mkdir(parents=True, exist_ok=True)
         with open(self.dir / "lock", "w") as f:
             try:
@@ -167,16 +241,19 @@ class Run:
                 fcntl.flock(f, fcntl.LOCK_UN)
 
     def reload(self) -> None:
+        self._check_conflict()
         self.state = self._load()
 
     def request_pause(self) -> None:
         """Ask the driver to stop at its next task boundary (`specloop pause`)."""
+        self._check_conflict()
         (self.dir / "pause-requested").touch()
 
     def pause_requested(self) -> bool:
         return (self.dir / "pause-requested").exists()
 
     def clear_pause_request(self) -> None:
+        self._check_conflict()
         (self.dir / "pause-requested").unlink(missing_ok=True)
 
     def pause(self, reason: str, task: str = "", detail: str = "", resume_at: float = 0) -> None:
