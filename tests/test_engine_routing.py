@@ -118,7 +118,7 @@ def test_direct_repo_rejects_engine_before_manifest(engine, reason, verify, mani
 ])
 @pytest.mark.parametrize("verify", ["", 'verify = "pytest"\n'])
 @pytest.mark.parametrize("legacy", [False, True])
-@pytest.mark.parametrize("command", [["run", "--once"], ["status"], ["preflight"]])
+@pytest.mark.parametrize("command", [["run", "--once"], ["daemon", "status"], ["preflight"]])
 def test_invalid_engine_rejected_before_dispatch(
     tmp_path, monkeypatch, capsys, engine, reason, verify, legacy, command,
 ):
@@ -167,6 +167,7 @@ def test_cli_reports_other_config_value_errors(isolated, monkeypatch, capsys, se
     assert output.err == f"configuration error: {error.value}\n"
 
 
+@pytest.mark.scenario("nightshift-cli/explicit-daemon-controls/daemon-controls-retain-boundaries")
 @pytest.mark.parametrize("command", ["pause", "resume", "jobs"])
 def test_config_rejection_does_not_block_local_controls(isolated, monkeypatch, capsys, command):
     config = isolated / "config.toml"
@@ -184,7 +185,7 @@ def test_config_rejection_does_not_block_local_controls(isolated, monkeypatch, c
         daemon.PAUSE_FILE.touch()
     if command == "jobs":
         monkeypatch.setattr(cli.config, "load_env_file", forbidden)
-    assert cli.main([command, "--config", str(config)]) == 0
+    assert cli.main([*([] if command == "jobs" else ["daemon"]), command, "--config", str(config)]) == 0
     assert daemon.PAUSE_FILE.exists() == (command == "pause")
     assert jobs == ([((None, None), {"show_all": False})] if command == "jobs" else [])
     assert capsys.readouterr().err == ""

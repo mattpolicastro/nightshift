@@ -994,23 +994,22 @@ def status(args) -> int:
     return 0
 
 
-def main(argv=None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    option_end = argv.index("--") if "--" in argv else len(argv)
-    json_errors = "--json" in argv[:option_end]
+class ParseError(Exception):
+    """An argument error requested as a version-1 JSON document."""
 
-    class ParseError(Exception):
-        pass
 
+def argument_parser_class(json_errors=False):
     class ArgumentParser(argparse.ArgumentParser):
         def error(self, message):
             if json_errors:
                 raise ParseError(message)
             super().error(message)
 
-    # argparse uses the parent's class for subparsers, sharing this error mode.
-    ap = ArgumentParser(prog="specloop")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    return ArgumentParser
+
+
+def add_build_parsers(sub, *, optional_run=False):
+    """Register build syntax without loading configuration or run state."""
     a = sub.add_parser("admit")
     a.add_argument("manifest")
     a.add_argument("--implement")
@@ -1022,7 +1021,7 @@ def main(argv=None) -> int:
     a.add_argument("--pr", default="", help="adopt an existing PR URL for publish to reuse")
     a.add_argument("--json", action="store_true", help="print one version-1 outcome document")
     r = sub.add_parser("run")
-    r.add_argument("change")
+    r.add_argument("change", **({"nargs": "?"} if optional_run else {}))
     s = sub.add_parser("status")
     s.add_argument("change", nargs="?")
     s.add_argument("--events", type=int, default=6)
@@ -1077,11 +1076,29 @@ def main(argv=None) -> int:
     sv = sub.add_parser("serve")
     sv.add_argument("--poll", type=float, default=60)
     sv.add_argument("--once", action="store_true")
+    return r
+
+
+def build_parser(*, prog="specloop", json_errors=False):
+    ap = argument_parser_class(json_errors)(prog=prog)
+    add_build_parsers(ap.add_subparsers(dest="cmd", required=True))
+    return ap
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    option_end = argv.index("--") if "--" in argv else len(argv)
+    ap = build_parser(json_errors="--json" in argv[:option_end])
     try:
         args = ap.parse_args(argv)
     except ParseError as e:
         print(json.dumps({"version": 1, "error": str(e)}))
         return 2
+    return dispatch(args)
+
+
+def dispatch(args) -> int:
+    """Execute a parsed build command with its existing output contract."""
     command = {"admit": admit, "run": run_cmd, "status": status, "act": act, "resume": resume, "revise": revise,
             "accept": accept, "waive": waive, "abort": abort, "publish": publish, "finish": finish,
             "serve": serve_cmd, "propose": propose, "drill": drill_cmd, "pause": pause_cmd}[args.cmd]

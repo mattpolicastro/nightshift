@@ -584,7 +584,7 @@ def test_jobs_work_with_missing_or_broken_config_offline(local_state, tmp_path, 
 @pytest.mark.parametrize("args", [
     ["jobs", "unknown"], ["jobs", "stop"], ["jobs", "list"],
     ["jobs", "stop", "a" * 32, "extra"], ["jobs", "unknown", "a" * 32],
-    ["jobs", "--unknown"], ["status", "stop", "a" * 32], ["pause", "extra"],
+    ["jobs", "--unknown"], ["daemon", "status", "stop", "a" * 32], ["daemon", "pause", "extra"],
     ["jobs", "release"], ["jobs", "release", "a" * 32, "extra"],
     ["jobs", "compact", "a" * 32], ["jobs", "compact", "--all"],
     ["jobs", "compact", "../outside"], ["jobs", "compact", "a" * 32, "extra"],
@@ -672,9 +672,10 @@ def test_stop_operational_failure_is_actionable(local_state, monkeypatch, capsys
 
 
 @pytest.mark.scenario("background-job-control/active-jobs-in-status/status-preserves-compatibility")
+@pytest.mark.scenario("nightshift-cli/explicit-daemon-controls/daemon-controls-retain-boundaries")
 @pytest.mark.parametrize("args, expected, fragment", [
-    ([], 0, "status sentinel"), (["status"], 0, "status sentinel"),
-    (["pause"], 0, "paused"), (["resume"], 0, "resumed"),
+    (["daemon"], 0, "status sentinel"), (["daemon", "status"], 0, "status sentinel"),
+    (["daemon", "pause"], 0, "paused"), (["daemon", "resume"], 0, "resumed"),
     (["run"], 0, ""), (["run", "--once"], 0, "poll complete"),
     (["reconcile"], 0, "clean"), (["preflight", "--deep"], 0, "ready"),
     (["digest"], 2, "not implemented"),
@@ -704,26 +705,26 @@ def test_existing_commands_and_options_remain_compatible(tmp_path, monkeypatch, 
     monkeypatch.setattr(cli.specloop_attention, "snapshot", attention)
     inventory_reads = []
     def inventory(root):
-        assert args in ([], ["status"])
+        assert args in (["daemon"], ["daemon", "status"])
         inventory_reads.append(root)
         return [], []
     monkeypatch.setattr(jobs, "list_jobs", inventory)
     monkeypatch.setattr(jobs, "stop_job", forbidden)
     monkeypatch.setattr(jobs, "release_job", forbidden)
-    if args == ["resume"]:
+    if args == ["daemon", "resume"]:
         daemon.PAUSE_FILE.touch()
     assert cli.main(["--config", str(config_path), *args]) == expected
     output = capsys.readouterr()
     assert fragment in output.out + output.err
-    assert loaded == (["env"] if args in (["pause"], ["resume"]) else ["env", config_path])
-    assert inventory_reads == ([daemon.STATE_DIR] if args in ([], ["status"]) else [])
-    if args in ([], ["status"]):
+    assert loaded == (["env"] if args in (["daemon", "pause"], ["daemon", "resume"]) else ["env", config_path])
+    assert inventory_reads == ([daemon.STATE_DIR] if args in (["daemon"], ["daemon", "status"]) else [])
+    if args in (["daemon"], ["daemon", "status"]):
         assert output.out == "status sentinel\n  alerts: NOT CONFIGURED\n" and output.err == ""
     if args in (["run"], ["run", "--once"]):
         assert output.out == ("poll complete\n" if "--once" in args else "")
         assert output.err == ""
-    if args in (["pause"], ["resume"]):
-        assert daemon.PAUSE_FILE.exists() == (args == ["pause"])
+    if args in (["daemon", "pause"], ["daemon", "resume"]):
+        assert daemon.PAUSE_FILE.exists() == (args == ["daemon", "pause"])
 
 
 @pytest.fixture
@@ -770,7 +771,7 @@ review = "retired:unused"
 
 
 @pytest.mark.scenario("background-job-control/active-jobs-in-status/status-preserves-compatibility")
-@pytest.mark.parametrize("args", [[], ["status"]])
+@pytest.mark.parametrize("args", [["daemon"], ["daemon", "status"]])
 def test_status_empty_inventory_omits_retired_worker_output(status_state, capsys, args):
     root, before_network = status_state
     claims = snapshot(cli.queue.CLAIM_DIR)
@@ -784,7 +785,7 @@ def test_status_empty_inventory_omits_retired_worker_output(status_state, capsys
 
 
 @pytest.mark.scenario("background-job-control/active-jobs-in-status/status-preserves-compatibility")
-@pytest.mark.parametrize("args", [[], ["status"]])
+@pytest.mark.parametrize("args", [["daemon"], ["daemon", "status"]])
 def test_status_retains_queue_and_contradiction_diagnostics(status_state, monkeypatch, capsys, args):
     root, before_network = status_state
     ready = cli.queue.ready
@@ -817,8 +818,8 @@ def test_status_retains_queue_and_contradiction_diagnostics(status_state, monkey
     shlex.split(re.search(r"`nightshift (jobs --all)`", (Path(__file__).resolve().parents[1] / path).read_text())[1])
     for path in ("README.md", "docs/specloop/README.md")
 ])
-@pytest.mark.parametrize("args", [[], ["status"], *[
-    shlex.split(re.search(r"`nightshift (status)`", (Path(__file__).resolve().parents[1] / path).read_text())[1])
+@pytest.mark.parametrize("args", [["daemon"], ["daemon", "status"], *[
+    shlex.split(re.search(r"`nightshift (daemon status)`", (Path(__file__).resolve().parents[1] / path).read_text())[1])
     for path in ("README.md", "docs/specloop/README.md")
 ]])
 def test_status_active_jobs_before_network(status_state, capsys, args, history_args):
@@ -880,7 +881,7 @@ def test_status_active_jobs_before_network(status_state, capsys, args, history_a
 
 
 @pytest.mark.scenario("background-job-control/active-jobs-in-status/status-tolerates-damaged-inventory")
-@pytest.mark.parametrize("args", [[], ["status"]])
+@pytest.mark.parametrize("args", [["daemon"], ["daemon", "status"]])
 @pytest.mark.parametrize("damage", ["malformed", "unreadable", "timing"])
 def test_status_damaged_inventory_is_read_only(status_state, monkeypatch, capsys, args, damage):
     root, before_network = status_state

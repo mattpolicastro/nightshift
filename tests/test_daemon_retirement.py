@@ -222,6 +222,7 @@ for module, names in {
 
 @pytest.mark.scenario("worker-retirement/service-prerequisites-match-the-surviving-engine/codex-enrollment-needs-no-worker-login")
 @pytest.mark.scenario("worker-retirement/retired-configuration-is-inert/old-knobs-cannot-control-builds")
+@pytest.mark.scenario("nightshift-cli/explicit-daemon-controls/daemon-controls-retain-boundaries")
 @pytest.mark.scenario("worker-retirement/sole-execution-engine/pause-and-one-shot-retain-control-boundaries")
 @pytest.mark.real_trust
 @pytest.mark.parametrize("legacy", [False, True])
@@ -278,7 +279,7 @@ manifest = "repository.toml"
     output = capsys.readouterr()
     assert "worker probes are retired" in output.out and output.out.endswith("\nready\n")
     assert [args[3] for args in probes] == ["owner/sample", "owner/private"]
-    assert cli.main(["run", "--once", "--config", str(selected)]) == 0
+    assert cli.main(["daemon", "run", "--once", "--config", str(selected)]) == 0
     assert capsys.readouterr().out == "poll complete\n"
     assert [args[:2] for args in commands.calls] == [["specloop", "propose"], ["git", "-C"]]
     assert gh.labels == set() and len(gh.prs) == 1
@@ -294,7 +295,7 @@ manifest = "repository.toml"
 
 
 @pytest.mark.scenario("worker-retirement/retired-configuration-is-inert/worker-rejection-takes-precedence")
-@pytest.mark.parametrize("command", [["run", "--once"], ["preflight", "--deep"], ["attention", "--json"]])
+@pytest.mark.parametrize("command", [["daemon", "run", "--once"], ["preflight", "--deep"], ["attention", "--json"]])
 @pytest.mark.parametrize("manifest", ["", 'manifest = 42\n'])
 def test_worker_cli_refuses_before_any_child(tmp_path, monkeypatch, capsys, caplog, command, manifest):
     selected = tmp_path / "config.toml"
@@ -341,7 +342,7 @@ def test_one_shot_recovery_then_public_attention(tmp_path, monkeypatch, capsys, 
     for target, name in ((subprocess, "run"), (subprocess, "Popen"), (queue, "claim"),
                          (queue, "reconcile"), (vcs, "remove_worktree")):
         monkeypatch.setattr(target, name, forbidden)
-    assert cli.main(["run", "--once", "--config", str(selected)]) == 0
+    assert cli.main(["daemon", "run", "--once", "--config", str(selected)]) == 0
     assert capsys.readouterr().out == "poll complete\n"
     assert labels(pipeline, 1) == {"keep-me", {
         "surviving": "needs-human", "missing": "agent:ready", "unreadable": "agent:working",

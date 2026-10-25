@@ -476,7 +476,7 @@ Second-install macOS and actual Paseo host validation remain pending.
 
 ### Pause and job control
 
-`nightshift status` shows local active background jobs before repository network
+`nightshift daemon status` shows local active background jobs before repository network
 queries: full job ID, stage, repository/item, command, execution state, elapsed
 seconds and time remaining or `OVERDUE by Ns`. Starting/legacy attempts without
 timing say unavailable. These rows are separate from daemon liveness and

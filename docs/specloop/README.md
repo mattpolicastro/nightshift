@@ -258,7 +258,7 @@ eligible admitted publication/build revisions and other repositories continue.
 
 ### Pause, stop and the supervisor
 
-`nightshift status` reads local active attempts before repository network calls.
+`nightshift daemon status` reads local active attempts before repository network calls.
 Rows show full job ID, stage, repository/item, command, execution state, elapsed
 seconds and remaining time or `OVERDUE by Ns`. Starting/legacy jobs without
 timing report unavailable. Full history, including failed jobs, is in
