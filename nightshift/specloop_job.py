@@ -361,26 +361,30 @@ def revision_attempt(path: Path, receipt: dict):
 def _read_delivery(path: Path) -> tuple[bool, tuple[str, ...]]:
     """Read display metadata without following a receipt link or creating state."""
     try:
-        # O_NOFOLLOW also rejects dangling links and replacement races at open.
-        # Nonblocking open lets us diagnose a FIFO instead of waiting on it.
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise ValueError("expected a regular receipt file")
-            with os.fdopen(descriptor, "r", encoding="utf-8", closefd=False) as stream:
-                receipt = json.load(stream)
-        finally:
-            # Also close non-regular files and descriptors fdopen rejects.
-            os.close(descriptor)
-        if not isinstance(receipt, dict):
-            raise ValueError("expected a JSON object")
-        if "delivered" in receipt and type(receipt["delivered"]) is not bool:
-            raise ValueError("delivered must be a JSON boolean")
+        receipt = _read_receipt(path)
         return receipt.get("delivered") is True, ()
     except FileNotFoundError:
         return False, ()  # Missing legacy receipts are normal.
     except (OSError, ValueError) as exc:
         return False, (f"{path}: {exc}",)
+
+
+def _read_receipt(path: Path) -> dict:
+    # O_NOFOLLOW also rejects dangling links and replacement races at open.
+    # Nonblocking open lets us diagnose a FIFO instead of waiting on it.
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("expected a regular receipt file")
+        with os.fdopen(descriptor, "r", encoding="utf-8", closefd=False) as stream:
+            receipt = json.load(stream)
+    finally:
+        os.close(descriptor)
+    if not isinstance(receipt, dict):
+        raise ValueError("expected a JSON object")
+    if "delivered" in receipt and type(receipt["delivered"]) is not bool:
+        raise ValueError("delivered must be a JSON boolean")
+    return receipt
 
 
 def list_jobs(state_dir: Path, *, include_delivery: bool = False) -> tuple[list[Job], list[str]]:
@@ -426,6 +430,7 @@ def list_jobs(state_dir: Path, *, include_delivery: bool = False) -> tuple[list[
                     started_at = timeout_seconds = deadline_at = None
                     record_errors = []
                     try:
+                        _cleanup_file(directory / "request.json")
                         request = _read_object(directory / "request.json")
                         args = request.get("args")
                         if not isinstance(args, list) or not args or not all(isinstance(a, str) for a in args):
@@ -436,10 +441,13 @@ def list_jobs(state_dir: Path, *, include_delivery: bool = False) -> tuple[list[
                     except (OSError, ValueError) as exc:
                         record_errors.append(str(exc))
                     try:
+                        _cleanup_file(directory / "process.json")
                         process = _read_process(directory)
                     except (OSError, ValueError) as exc:
                         record_errors.append(str(exc))
                     try:
+                        for name in ("lock", "stop.json", "result.json"):
+                            _cleanup_file(directory / name)
                         state = _job_state(directory, process)
                     except (OSError, ValueError) as exc:
                         record_errors.append(str(exc))
@@ -500,17 +508,24 @@ def _redact_idea(args: object) -> tuple[list[str], list[str]]:
     return retained, files
 
 
+class _IdeaOwnershipRefused(ValueError):
+    """An unsafe deletion target, distinct from damaged ownership evidence."""
+
+
 def _owned_idea(directory: Path, value: str) -> Path:
-    _cleanup_file(Path(value).absolute())  # Check links before normalizing '..'.
     target = Path(os.path.abspath(value))
     root = directory.parent
-    _cleanup_file(target)
+    try:
+        _cleanup_file(Path(value).absolute())  # Check links before normalizing '..'.
+        _cleanup_file(target)
+    except ValueError as exc:
+        raise _IdeaOwnershipRefused(str(exc)) from exc
     if (not target.is_relative_to(root)
             or target.name in {"request.json", "result.json", "process.json", "stop.json",
                                "collected.json", "cleanup.json", "lock", "control.lock", "log"}
             or any(p != directory and p.is_dir() and target.is_relative_to(p)
                    for p in root.iterdir())):
-        raise ValueError("idea file is outside this attempt's ownership")
+        raise _IdeaOwnershipRefused("idea file is outside this attempt's ownership")
     # A malformed sibling cannot prove exclusive ownership. Compacted siblings
     # retain their deletion references in the journal after argv is redacted.
     for other in root.iterdir():
@@ -523,7 +538,11 @@ def _owned_idea(directory: Path, value: str) -> Path:
             journal = other / "cleanup.json"
             _cleanup_file(journal)
             if journal.exists():
-                references += _read_object(journal)["idea_references"]
+                journal_references = _read_object(journal).get("idea_references")
+                if (not isinstance(journal_references, list)
+                        or not all(isinstance(ref, str) for ref in journal_references)):
+                    raise ValueError(f"{journal}: invalid idea references")
+                references += journal_references
         else:
             references = []
         # Preserve feedback (and any other file argument), even if also named
@@ -534,9 +553,9 @@ def _owned_idea(directory: Path, value: str) -> Path:
         for ref in references:
             candidate = Path(ref).absolute()
             if any(p.is_symlink() for p in (candidate, *candidate.parents)):
-                raise ValueError("cannot prove ownership through a symlinked reference")
+                raise _IdeaOwnershipRefused("cannot prove ownership through a symlinked reference")
             if Path(os.path.abspath(ref)) == target:
-                raise ValueError("idea file is shared by another argument or attempt")
+                raise _IdeaOwnershipRefused("idea file is shared by another argument or attempt")
     return target
 
 
@@ -561,22 +580,98 @@ def _cleanup_save(path: Path, data: dict, *, timestamps=None) -> None:
 
 def resume_cleanup(path: Path, job_id: str) -> list[str]:
     """Resume journaled delivery after the caller checks current item authority."""
-    return _compact_delivered(path, {"job": job_id}, resume=True)
+    return _compact_delivered(path, {"job": job_id}, resume=True).diagnostics
 
 
 def compact_delivered(path: Path, receipt: dict, *, prepare_only=False) -> list[str]:
     """Journal validated delivery; optionally defer artifact changes until resume."""
-    return _compact_delivered(path, receipt, prepare_only=prepare_only)
+    return _compact_delivered(path, receipt, prepare_only=prepare_only).diagnostics
 
 
-def _compact_delivered(path: Path, receipt: dict, *, resume=False, prepare_only=False) -> list[str]:
-    """Compact one durably delivered attempt; return local diagnostics.
+@dataclass(frozen=True)
+class CompactionOutcome:
+    job: Job
+    status: str
+    reason: str
 
-    The caller must have passed this visit's eligibility, authorization and
-    pause gates. Neither a delivered receipt nor a journal grants that authority.
+
+@dataclass(frozen=True)
+class CompactionReport:
+    outcomes: tuple[CompactionOutcome, ...]
+    diagnostics: tuple[str, ...]
+    error: bool
+
+    @property
+    def compacted(self) -> int:
+        return sum(outcome.status == "compacted" for outcome in self.outcomes)
+
+    @property
+    def skipped(self) -> int:
+        return len(self.outcomes) - self.compacted
+
+
+@dataclass
+class _CleanupResult:
+    diagnostics: list[str]
+    status: str = "skipped"
+    reason: str = "cleanup prepared"
+    error: bool = False
+    retained_inputs: tuple[str, ...] = ()
+
+
+class _CleanupSkipped(ValueError):
+    """Valid evidence that does not authorize this cleanup transaction."""
+
+
+def compact_history(state_dir: Path) -> CompactionReport:
+    """Explicit local cleanup; current exact receipts remain mandatory.
+
+    Never use journal-only recovery here. Each transaction rereads the receipt
+    under the same locks as daemon compaction, including already-complete jobs.
+    """
+    rows, diagnostics = list_jobs(state_dir)
+    outcomes = []
+    error = bool(diagnostics)
+    for job in rows:
+        path = job.directory.parent.with_suffix(".json")
+        result = _CleanupResult([])
+        try:
+            if job.diagnostics:
+                raise _CleanupSkipped("invalid inventory evidence")
+            receipt = _read_receipt(path)
+            if receipt.get("delivered") is not True:
+                raise _CleanupSkipped("delivery is incomplete")
+            if receipt.get("job") != job.id:
+                raise _CleanupSkipped("receipt lacks matching exact job identity")
+            if job.state != "finished":
+                raise _CleanupSkipped(f"{job.state} attempts retain their evidence")
+            result = _compact_delivered(path, receipt)
+            result.diagnostics.extend(f"retained idea input: {value} (ownership not established)"
+                                      for value in result.retained_inputs)
+        except FileNotFoundError:
+            result.reason = "missing current receipt"
+        except _CleanupSkipped as exc:
+            result.reason = str(exc)
+        except (OSError, ValueError) as exc:
+            result.reason = f"cannot compact {path}: {exc}"
+            result.diagnostics.append(result.reason)
+            result.error = True
+        outcomes.append(CompactionOutcome(job, result.status, result.reason))
+        diagnostics.extend(result.diagnostics)
+        error |= result.error
+    return CompactionReport(tuple(outcomes), tuple(diagnostics), error)
+
+
+def _compact_delivered(path: Path, receipt: dict, *, resume=False, prepare_only=False) -> _CleanupResult:
+    """Compact one durably delivered attempt with structured local outcomes.
+
+    Daemon callers must pass this visit's eligibility, authorization and pause
+    gates. Explicit historical compaction authorizes local cleanup only with a
+    current matching delivered receipt; it cannot use journal-only recovery.
     No receipt, result, control record or directory is removed or rewritten.
     """
     diagnostics: list[str] = []
+    outcome = _CleanupResult(diagnostics)
     try:
         job_id = receipt.get("job")
         if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
@@ -598,18 +693,28 @@ def _compact_delivered(path: Path, receipt: dict, *, resume=False, prepare_only=
                 if record == release and not record.exists():
                     continue  # Never manufacture a release lock for cleanup.
                 lock = locks.enter_context(record.open("r"))
-                fcntl.flock(lock, fcntl.LOCK_EX | (fcntl.LOCK_NB if record.name == "lock" else 0))
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | (fcntl.LOCK_NB if record.name == "lock" else 0))
+                except BlockingIOError as exc:
+                    if record.name != "lock":
+                        raise
+                    raise _CleanupSkipped("lifetime lock is busy") from exc
             for record in evidence:
                 _cleanup_file(record)
-            if not resume and (_read_object(path) != receipt or receipt.get("delivered") is not True):
-                raise ValueError("receipt changed or delivery is incomplete")
+            if not resume:
+                try:
+                    current = _read_receipt(path)
+                except FileNotFoundError as exc:
+                    raise _CleanupSkipped("current receipt disappeared") from exc
+                if current != receipt or receipt.get("delivered") is not True:
+                    raise _CleanupSkipped("receipt changed or delivery is incomplete")
             context = {"repo": path.parent.name.replace("__", "/", 1),
                        "issue" if stage == "proposals" else "pr": int(path.stem)}
             if any(key in receipt and (type(receipt[key]) is not type(value) or receipt[key] != value)
                    for key, value in context.items()):
-                raise ValueError("conflicting receipt item context")
+                raise _CleanupSkipped("conflicting receipt item context")
             if _read_stop(directory) is not None:
-                raise ValueError("stopped attempts retain their evidence")
+                raise _CleanupSkipped("stopped attempts retain their evidence")
             _read_process(directory)
             if (directory / "collected.json").exists():
                 collected = _read_object(directory / "collected.json")
@@ -618,9 +723,18 @@ def _compact_delivered(path: Path, receipt: dict, *, resume=False, prepare_only=
             request_path = directory / "request.json"
             original = request_path.stat()  # Capture before the first request read.
             request = _read_object(request_path)
-            _request_round_id(request)
+            key = _request_round_id(request)
             if not resume:
-                validate_revision_request(request, receipt, job_id=job_id)
+                if key is not None:
+                    source = _argument(request["args"], "--feedback")
+                    if source is not None:
+                        _cleanup_file(Path(source))
+                try:
+                    validate_revision_request(request, receipt, job_id=job_id)
+                except (json.JSONDecodeError, UnicodeError):
+                    raise
+                except ValueError as exc:
+                    raise _CleanupSkipped(str(exc)) from exc
             timing = _read_timing(request, stage)
             args, idea_files = _redact_idea(request.get("args"))
             outcomes = {"propose": ("drafted", "needs_input", "rejected"),
@@ -631,22 +745,23 @@ def _compact_delivered(path: Path, receipt: dict, *, resume=False, prepare_only=
             if (set(result) != {"result"} or not isinstance(payload, dict)
                     or type(payload.get("version")) is not int or payload["version"] != 1
                     or "error" in payload or payload.get("outcome") not in outcomes.get(command, ())
-                    or not resume and payload != receipt.get("result")
-                    or command != receipt.get("command", command)
                     or stage == "proposals" and command != "propose"
                     or stage == "admissions" and command != "admit"
                     or stage == "revisions" and command not in ("propose", "revise")
-                    or payload.get("outcome") in ("drafted", "revised") and not payload.get("commit")
+                    or payload.get("outcome") in ("drafted", "revised") and not payload.get("commit")):
+                raise ValueError("invalid or conflicting terminal result")
+            if (not resume and payload != receipt.get("result")
+                    or command != receipt.get("command", command)
                     or not resume and payload.get("outcome") == "drafted"
                     and payload.get("branch") != f"spec/{receipt.get('change')}"):
-                raise ValueError("invalid or conflicting terminal result")
+                raise _CleanupSkipped("conflicting terminal result or command")
             for flag in ("change", "head", "branch"):
                 values = [a.split("=", 1)[1] for a in args if a.startswith(f"--{flag}=")]
                 values += [args[i + 1] for i, a in enumerate(args[:-1]) if a == f"--{flag}"]
                 if flag == "change" and command == "revise":
                     values.append(args[1])
                 if flag in receipt and any(v != receipt[flag] for v in values):
-                    raise ValueError(f"conflicting request {flag}")
+                    raise _CleanupSkipped(f"conflicting request {flag}")
             minimal = dict(stage=stage, args=args, **dict(zip(
                 ("started_at", "timeout_seconds", "deadline_at"), timing)))
             if "round_id" in request:
@@ -664,6 +779,8 @@ def _compact_delivered(path: Path, receipt: dict, *, resume=False, prepare_only=
                                or not all(isinstance(v, str) for v in journal[key])
                                for key in ("idea_files", "idea_references"))):
                     raise ValueError("invalid cleanup journal identity")
+                outcome.retained_inputs = tuple(value for value in journal["idea_references"]
+                                                if value not in journal["idea_files"])
             else:
                 if resume:
                     raise ValueError("missing cleanup journal")
@@ -673,20 +790,28 @@ def _compact_delivered(path: Path, receipt: dict, *, resume=False, prepare_only=
                         owned.append(str(_owned_idea(directory, value)))
                     except (OSError, ValueError, KeyError) as exc:
                         diagnostics.append(f"retained idea input: {exc}")
+                        outcome.error |= not isinstance(exc, _IdeaOwnershipRefused)
                 journal = dict(**identity, atime_ns=original.st_atime_ns,
                                mtime_ns=original.st_mtime_ns, idea_files=owned, complete=False,
                                idea_references=[os.path.abspath(v) for v in idea_files])
                 _cleanup_save(journal_path, journal)
             if prepare_only or journal["complete"]:
-                return diagnostics
+                outcome.reason = "already compacted" if journal["complete"] else "cleanup prepared"
+                return outcome
             _cleanup_save(request_path, minimal, timestamps=(journal["atime_ns"], journal["mtime_ns"]))
             for value in journal["idea_files"]:
                 _owned_idea(directory, value).unlink(missing_ok=True)
             (directory / "log").unlink(missing_ok=True)
             _cleanup_save(journal_path, {**journal, "complete": True})
+            outcome.status, outcome.reason = "compacted", "delivered artifacts compacted"
+    except _CleanupSkipped as exc:
+        outcome.reason = str(exc)
+        diagnostics.append(f"cannot compact {path}: {outcome.reason}")
     except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
-        diagnostics.append(f"cannot compact {path}: {exc}")
-    return diagnostics
+        outcome.reason = f"cannot compact {path}: {exc}"
+        outcome.error = True
+        diagnostics.append(outcome.reason)
+    return outcome
 
 
 @contextmanager
