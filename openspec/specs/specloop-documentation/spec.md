@@ -60,7 +60,7 @@ checklist items.
 The guide and root README SHALL consistently explain dependency gating,
 trigger authorization, revision feedback IDs, file-based drafting input and
 isolated status reads, with citations to their implementation PRs. They SHALL
-retain the distinction between specloop and worker behavior.
+describe specloop as the only engine, with historical worker material clearly identified as retired behavior.
 
 #### Scenario: Dependencies and label actors gate work
 - **WHEN** a reader arms an issue or applies an approval or revision label
@@ -218,7 +218,7 @@ SHALL NOT claim live-provider error wording has been validated by fixtures.
 #### Scenario: Operator configures an alternate layout
 - **WHEN** an operator follows the setup and platform guidance
 - **THEN** they can identify `NIGHTSHIFT_BIN_DIR`, `NIGHTSHIFT_NODE_BIN`, `NIGHTSHIFT_UV` and `NIGHTSHIFT_CHECKOUT`, their defaults, applicable consumers and how to supply applicable settings to Python and Paseo processes, including inherited service environments, the existing daemon env file's precedence for downstream settings and required process restarts
-- **THEN** examples in the root README, preparation guide, plugin README and example config agree with the platform guidance on configurable checkout/tool paths and `[daemon].worktree_root`, including its default
+- **THEN** examples in the root README, preparation guide, plugin README and example config agree with the platform guidance on configurable checkout/tool paths and `[daemon].worktree_root`, including its default and compatibility-only role after worker retirement
 - **THEN** guidance explains literal path handling and the changed relative-root anchor, and retains manifest preparation-read restrictions
 
 #### Scenario: Platform claims retain their evidence limits
@@ -231,6 +231,7 @@ SHALL NOT claim live-provider error wording has been validated by fixtures.
 - **THEN** guidance names `bin/nightshift-daemon` and `bin/specloop-serve` as unchanged wrappers with fixed bootstrap checkout, uv and PATH locations, and says environment settings do not relocate those wrapper commands
 - **THEN** guidance describes wrapper portability as deferred because `bin/**` is frozen, distinguishes direct CLI configuration from bundled service startup, and does not claim a new helper or relocated wrapper pathname solves the limitation
 - **THEN** full daemon rollout remains pending separate wrapper work or an independently provisioned operator service preserving credential and preflight guards
+- **THEN** the same freeze covers launchd plists and wrapper comments; current guidance explains the retained worker startup prerequisites and real pause/supervisor boundaries without promising those files were corrected
 
 ### Requirement: Stopped job release workflow
 
@@ -280,7 +281,7 @@ The root README and specloop guide SHALL describe active background rows in nigh
 #### Scenario: Operator reads job status
 - **WHEN** a reader follows status instructions
 - **THEN** the docs explain job ID, stage, repository/item, elapsed and remaining or overdue time, legacy timing unavailability, and historical inspection through `nightshift jobs --all`
-- **THEN** they preserve the distinction between Nightshift job status, worker liveness and independent specloop run status
+- **THEN** they preserve the distinction between Nightshift job status, daemon liveness and independent specloop run status
 
 ### Requirement: Delivered retention guidance
 
@@ -327,3 +328,22 @@ The root README's specloop passages, specloop guide, CLI JSON guide and known li
 - **THEN** they can identify default active/stopped/pending and diagnostic rows, hidden-history counts, full history including failed jobs via `--all`, and the item-receipt basis for `delivered` versus `finished (delivery pending)`
 - **THEN** they can run the explicit one-pass compact command, interpret compacted/skipped counts and retained-target warnings, and understand that missing or replaced attempt identity prevents deletion even when the display says delivered
 - **THEN** the docs explain pausing and comparing full inventory before/after on the real tree as a human validation step, without claiming CI performed it or changing pause/stop/release and supervisor boundaries
+
+### Requirement: Worker retirement guidance
+
+Current guidance in allowed documentation SHALL explain sole-engine enrollment and worker retirement, distinguish retained history from execution, and document compatibility boundaries and human rollout checks without claiming unperformed validation.
+
+#### Scenario: New enrollment follows one engine
+- **WHEN** an operator follows README, config.example.toml and the specloop guide
+- **THEN** the runnable example enrolls a specloop repository with a trusted manifest and explains omission defaults, explicit worker rejection and inert obsolete settings
+- **THEN** it explains repository-local holds for missing or unusable manifests and removal of worker status output, including the off-subscription model report, while all other status output remains unchanged
+- **THEN** direct Python front-door instructions do not require worker verification strings, endpoint models or OAuth; manifest providers retain their own requirements
+- **THEN** bundled service instructions explicitly retain the frozen daemon wrapper's env-file, worker OAuth, GH_TOKEN and gh/claude/pnpm/node/git/swift checks, distinguishing direct invocation from service startup without claiming Python changes bypass shell checks
+
+#### Scenario: Existing installation is checked before merge
+- **WHEN** an operator reads retirement and rollout guidance
+- **THEN** it identifies retained historical attention/recovery, unchanged CLI and state locations, separate daemon/supervisor jobs and the need to inspect live config/plists/external callers before merge
+- **THEN** it keeps the CLI merge and state move assigned to #40, preserves unrelated limitations, and cites issue #16 without inventing an implementation PR
+- **THEN** live config, plist and external-caller inspection remains a pre-merge human checklist, never a claimed CI result
+- **THEN** it does not claim host checks performed, automatic migration, rollback of remote effects or automatic restart of interrupted worker work
+- **THEN** it identifies obsolete worker instructions/metadata in frozen CLAUDE.md and pyproject.toml, historical worker documents and their removed-source references, and resolved type-baseline entries as deferred cleanup outside the implementation allowance

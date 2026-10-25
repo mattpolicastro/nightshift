@@ -6,18 +6,6 @@ engine routing, drafting from issues, approval and publication.
 
 ## Requirements
 
-### Requirement: Engine per repository
-
-Each enrolled repository SHALL have an engine, `worker` (the default, unchanged) or `specloop` with a manifest path required for new work. An omitted or unusable manifest SHALL be a repository health hold under Repository manifest health rather than preventing all configuration loading. The daemon SHALL never run worker claims for a specloop repository, nor specloop intake for a worker repository; reconciling leftover worker claims on a switch SHALL not launch workers. Specloop triggers SHALL satisfy Latest label actor authorization before acting.
-
-#### Scenario: Worker repository unchanged
-- **WHEN** a repository has no engine set and an issue is labelled agent:ready
-- **THEN** the daemon claims it for the worker exactly as before
-
-#### Scenario: Specloop repository skips worker claims
-- **WHEN** a healthy repository has engine specloop and an eligible issue is labelled agent:ready by a trusted actor
-- **THEN** no worker claim is made and the issue is drafted as a spec instead
-
 ### Requirement: Drafting from an issue
 
 For a healthy specloop repository, an otherwise eligible issue labelled `spec:draft` (or `agent:ready`) SHALL be drafted with `specloop propose`, using its title, body and comments, only after Latest label actor authorization succeeds. New drafts SHALL use Owner qualified new identities, while recovery SHALL follow Recorded identities remain authoritative. Existing issue-author and comment trust checks SHALL remain in force. On success the daemon SHALL push `spec/<change>`, open a draft PR titled `Spec: <issue title>` that links the issue, label it `spec:review`, comment the PR link on the issue and remove the drafting label. Unhealthy enrollment SHALL defer new dispatch without consuming its trigger.
@@ -387,8 +375,8 @@ Daemon intake git commands SHALL run in a new session with the existing 30-secon
 #### Scenario: Production runner preserves daemon progress
 - **WHEN** poll_specloop dispatches git or a git timeout interrupts delivery
 - **THEN** the production guarded runner uses the process-group implementation, while explicit injected git runners remain usable and pause is checked immediately before dispatch
-- **THEN** other items, worker claims, heartbeat and harvest continue under existing scheduling and timeout behavior; retry reuses saved results without duplicate delivery
-- **THEN** GitHub, worker git, synchronous specloop publication and status runner contracts remain unchanged
+- **THEN** other eligible specloop items, heartbeat and background-child reaping continue under existing scheduling and timeout behavior; retry reuses saved results without duplicate delivery
+- **THEN** GitHub, shared git utilities, synchronous specloop publication and status runner contracts remain unchanged
 
 ### Requirement: Exact proposal source refs
 
@@ -425,3 +413,24 @@ effects, eligibility gates, replacement leases and retries.
 - **WHEN** delivery of a successful fallback result fails during push or GitHub notification and a later eligible poll resumes after restart
 - **THEN** the retained result delivers its original commit without redrafting or substituting the current local spec branch tip
 - **THEN** existing PR/comment reconciliation prevents duplicate delivery artifacts and completion is recorded only through the existing success path
+
+### Requirement: Specloop repository engine
+
+Every repository SHALL use specloop when engine is omitted or explicitly specloop. Worker and unknown engines SHALL fail loading before dispatch. Missing or unusable manifests SHALL hold only that repository; supplied empty/wrong-type paths SHALL remain config errors. Dispatch SHALL preserve Latest label actor authorization and never claim worker work. Legacy recovery SHALL never launch workers.
+
+#### Scenario: Omitted engine uses specloop
+- **WHEN** a repository omits engine and has a healthy manifest and an otherwise eligible agent:ready issue authorized by a trusted actor
+- **THEN** it drafts through specloop with no worker claim, just as explicit specloop enrollment does
+
+#### Scenario: Specloop repository skips worker claims
+- **WHEN** a healthy repository has engine specloop and an eligible issue is labelled agent:ready by a trusted actor
+- **THEN** no worker claim is made and the issue is drafted as a spec instead
+
+#### Scenario: Explicit worker fails clearly
+- **WHEN** configuration names engine worker
+- **THEN** loading fails before dispatch with the repository name, retired-engine explanation and specloop manifest guidance, including when verify or manifest is absent
+- **THEN** the CLI reports the configuration error on stderr with exit 2 and no traceback
+
+#### Scenario: Omitted manifest holds only its repository
+- **WHEN** a repository omits both engine and manifest alongside a healthy specloop repository
+- **THEN** config loading succeeds, the missing-manifest repository holds new work without consuming triggers, and the healthy repository continues

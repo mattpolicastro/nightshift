@@ -68,7 +68,7 @@ Both plugin execution adapters and the attention installation check SHALL use se
 
 ### Requirement: Configured worker worktree root
 
-`nightshift.config.load()` SHALL retain `[daemon].worktree_root` and its default `~/Projects/nightshift-wt`. It SHALL expand leading `~/`, preserve absolute locations and resolve relative values beside the selected config file independent of process cwd. It SHALL reject invalid types, blank values, unsupported tilde forms and NUL/line breaks with a `ValueError` naming `daemon.worktree_root`. Loading SHALL NOT create or migrate worktrees or eagerly validate repository manifests.
+`nightshift.config.load()` SHALL retain `[daemon].worktree_root` and its default `~/Projects/nightshift-wt`. It SHALL expand leading `~/`, preserve absolute locations and resolve relative values beside the selected config file independent of process cwd. It SHALL reject invalid types, blank values, unsupported tilde forms and NUL/line breaks with a `ValueError` naming `daemon.worktree_root`. Loading SHALL NOT create or migrate worktrees or eagerly validate repository manifests. This setting SHALL remain a compatibility value after retirement and SHALL NOT create worker execution capacity or relocate existing evidence.
 
 #### Scenario: Worker default and absolute roots remain compatible
 - **WHEN** worktree_root is omitted or names an absolute path
@@ -81,5 +81,5 @@ Both plugin execution adapters and the attention installation check SHALL use se
 #### Scenario: Worker root validation preserves enrollment isolation
 - **WHEN** worktree_root has an invalid type or path value
 - **THEN** config loading rejects it with a ValueError naming daemon.worktree_root
-- **WHEN** the root is valid and a specloop enrollment manifest is absent or unusable alongside a healthy worker repository
+- **WHEN** the root is valid and a default or explicit specloop enrollment manifest is absent or unusable alongside a healthy specloop repository
 - **THEN** configuration still loads and existing repository-local manifest-health behavior remains in force
