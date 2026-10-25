@@ -18,11 +18,16 @@ State path resolution SHALL be lazy, default to ~/.nightshift with ~/.specloop f
 
 ### Requirement: Read only fallback
 
-Readers SHALL discover canonical and unmigrated legacy runs once per change without moving state or weakening existing error isolation.
+Readers SHALL discover canonical and unmigrated legacy runs once per change without moving state or weakening existing error isolation. Supervisor scheduling SHALL discover runs through the same iter_run_dirs() union as status.
 
 #### Scenario: Mixed roots remain visible
 - **WHEN** named and all-run reads encounter canonical, legacy and compatibility-linked runs across repositories
 - **THEN** each run appears once in deterministic order, legacy-only runs remain accessible, and state bytes and directory contents stay unchanged
+
+#### Scenario: Supervisor discovers both roots
+- **WHEN** isolated roots contain a legacy-only run and a canonical run with a legacy compatibility link, and specloop.serve.runs() enumerates scheduling candidates
+- **THEN** runs() returns both logical runs exactly once through state.iter_run_dirs(), including the unmigrated run, while retaining its existing created-time ordering
+- **THEN** discovery leaves state and pauses unchanged; scheduling retains existing eligibility, run-lock and reload checks
 
 #### Scenario: Conflicting roots remain visible
 - **WHEN** both roots contain distinct unjournaled state for one change or a run is unreadable
