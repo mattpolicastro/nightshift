@@ -70,8 +70,8 @@ def test_ready_pr_is_labelled_once(polling, legacy):
 @pytest.mark.parametrize("blocked", [False, True])
 def test_matching_assessment_is_cached(polling, monkeypatch, blocked):
     e = polling
-    if blocked:
-        e.gh.checks = []
+    if blocked:  # A non-CI blocker: CI blockers are reassessed each poll (see below).
+        e.gh.pr["body"] = "## Checks a human must make\n- [ ] no citation here"
     e.poll()
     assert e.gh.operations.count("view") == e.gh.operations.count("checks") == 1
     receipt = e.path.read_bytes()
@@ -295,3 +295,23 @@ def test_legacy_fake_retains_readiness_effects_and_poll_budget(polling):
     assert len(gh.readiness.comments[("owner/repo", "1")]) == 1 and not gh.comments and not gh.labels
     e.poll(runner=gh)
     assert len(gh.calls) == 6 and gh.calls[-1][:2] == ["pr", "view"] and not e.errors
+
+
+@pytest.mark.scenario("merge-readiness/head-bound-polling/ci-blocked-assessment-is-reassessed-until-green")
+def test_ci_blocked_assessment_is_reassessed_until_green(polling):
+    e = polling
+    e.gh.checks = [{"name": "CI", "bucket": "pending", "state": "IN_PROGRESS"}]
+    e.poll()
+    assert e.receipt()["label"] == "merge:blocked" and e.receipt()["reasons"][0].startswith("CI:")
+    e.poll()  # still pending: CI is read again, but nothing is rewritten
+    assert e.gh.operations.count("checks") == 1 and "post" not in e.gh.operations
+    assert e.receipt()["label"] == "merge:blocked"
+    e.gh.checks = [{"name": "CI", "bucket": "pass", "state": "COMPLETED"}]
+    e.poll()
+    assert e.receipt()["label"] == "merge:ready" and not e.receipt()["reasons"]
+    assert e.gh.labels & {"merge:ready", "merge:blocked"} == {"merge:ready"}
+    assert len(e.gh.readiness_comments) == 1
+    for _ in range(2):
+        assert e.poll() == [] and e.gh.operations == ["view"]
+    assert not e.errors
+
