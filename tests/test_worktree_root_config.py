@@ -1,14 +1,13 @@
-"""Worker placement is config-local and independent of enrollment health."""
+"""The historical worktree root is config-local, independent of enrollment health."""
 
 import json
-from functools import partial
 from pathlib import Path
 
 import pytest
 
-from nightshift import config, daemon, queue
-from test_queue import FakeGh
-from test_specloop_isolation import Pipeline
+from manifest_fixtures import manifest_text
+from nightshift import config, daemon, queue, specloop_intake
+from test_specloop_isolation import Pipeline, poll
 
 
 @pytest.fixture
@@ -55,6 +54,8 @@ def test_default_and_absolute_roots_do_not_create_or_migrate(layout, monkeypatch
     cfg = load_without_writes(path, monkeypatch)
 
     assert cfg.worktree_root == expected
+    assert old_worktree.read_text() == "existing work"
+    assert json.loads(claims.read_text())["worktree"] == str(old_worktree.parent)
     assert {p.relative_to(home): p.read_bytes() for p in home.rglob("*") if p.is_file()} == before
     if explicit:
         assert not expected.exists()
@@ -84,6 +85,7 @@ def test_expansion_uses_home_or_selected_config(layout, monkeypatch, value, rela
 
     assert cfg.worktree_root.is_absolute()
     assert cfg.worktree_root.resolve() == expected.resolve()
+    assert cfg.worktree_root.name == expected.name
     assert not expected.exists()
     # The returned path must keep its location even after the caller changes cwd.
     monkeypatch.chdir(home)
@@ -103,6 +105,7 @@ def test_invalid_root_is_a_named_configuration_error(layout, monkeypatch, litera
     path.write_text(f"[daemon]\nworktree_root = {literal}\n")
     with pytest.raises(ValueError, match=r"daemon\.worktree_root"):
         load_without_writes(path, monkeypatch)
+    assert list(path.parent.iterdir()) == [path]
 
 
 @pytest.mark.scenario("host-paths/configured-worker-worktree-root/worker-root-validation-preserves-enrollment-isolation")
@@ -110,6 +113,8 @@ def test_invalid_root_is_a_named_configuration_error(layout, monkeypatch, litera
 def test_valid_root_preserves_repository_local_health(layout, tmp_path, monkeypatch, failure):
     _, path = layout
     manifest = path.parent / "enrollment.toml"
+    healthy_manifest = path.parent / "healthy.toml"
+    healthy_manifest.write_text(manifest_text(tmp_path / "source"))
     if failure == "directory":
         manifest.mkdir()
     elif failure == "invalid":
@@ -117,8 +122,9 @@ def test_valid_root_preserves_repository_local_health(layout, tmp_path, monkeypa
     write_config(path, "worker roots")
     path.write_text(path.read_text() + '''
 [[repos]]
-name = "owner/worker"
-verify = "true"
+name = "owner/healthy"
+engine = "specloop"
+manifest = "healthy.toml"
 [[repos]]
 name = "owner/bad"
 engine = "specloop"
@@ -126,7 +132,7 @@ engine = "specloop"
     read_text = Path.read_text
 
     def no_manifest_read(self, *args, **kwargs):
-        assert self != manifest, "config loading eagerly read enrollment"
+        assert self not in (manifest, healthy_manifest), "config loading eagerly read enrollment"
         return read_text(self, *args, **kwargs)
 
     with monkeypatch.context() as patch:
@@ -134,23 +140,31 @@ engine = "specloop"
         cfg = load_without_writes(path, patch)
     assert cfg.worktree_root == path.parent / "worker roots"
     assert not cfg.worktree_root.exists()
-    worker, bad = cfg.repos
-    assert worker.engine == "worker" and worker.verify == "true"
+    healthy, bad = cfg.repos
+    assert healthy.engine == bad.engine == "specloop"
+    assert healthy.manifest == healthy_manifest
     assert bad.manifest == (None if failure == "absent" else manifest)
 
     monkeypatch.setattr(daemon, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(queue, "CLAIM_DIR", tmp_path / "claims")
-    pipeline = Pipeline(bad)
-    pipeline.issue(7)
-    pipeline.approved(8)
+    pipelines = [Pipeline(repo) for repo in cfg.repos]
+    peer, pipeline = pipelines
+    for candidate in pipelines:
+        candidate.issue(7)
+        candidate.approved(8)
+    monkeypatch.setattr(specloop_intake, "run_git", peer.command)
     health = daemon.RepoHealth()
-    daemon.poll_specloop(cfg, health, runner=pipeline.gh, specloop_runner=pipeline.command)
+    poll(pipelines, health)
     assert health.failures == {bad.name: 1}
     assert not health.item_failures
     assert not any(c[0] == "git" or c[:2] in (["specloop", "propose"], ["specloop", "admit"])
                    for c in pipeline.calls)
-    gh = FakeGh({"agent:ready": [7]})
-    monkeypatch.setattr(queue, "claim", partial(queue.claim, runner=gh))
-    claimed = daemon.claim_next(cfg, {worker.name: tmp_path}, health=health)
-    assert claimed is not None and claimed.repo == worker and claimed.issue.number == 7
+    assert pipeline.issues[7]["labels"] == [{"name": "spec:draft"}]
+    assert pipeline.prs[8]["labels"] == [{"name": "spec:approved"}]
+    assert any(c[:2] == ["specloop", "propose"] for c in peer.calls)
+    assert any(c[:2] == ["specloop", "admit"] for c in peer.calls)
+    assert not peer.issues[7]["labels"] and not peer.prs[8]["labels"]
+    change = peer.prs[8]["headRefName"].removeprefix("spec/")
+    assert peer.runs[change]["pr"] == peer.prs[8]["url"]
     assert health.failures == {bad.name: 1}
+    assert not cfg.worktree_root.exists()

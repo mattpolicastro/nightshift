@@ -4,7 +4,6 @@ import builtins
 import json
 import logging
 import os
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +13,6 @@ from nightshift import daemon, queue, specloop_intake as intake, specloop_job as
 from nightshift.config import Config, Repo, load
 from specloop import manifest
 from manifest_fixtures import manifest_text
-from test_queue import FakeGh
 from test_specloop_isolation import Pipeline, poll
 from test_engine_routing import DraftGh
 from test_specloop_intake import Commands as DraftCommands
@@ -37,7 +35,6 @@ def enrollment(tmp_path, monkeypatch):
 
 
 @pytest.mark.scenario("config-resilience/repository-manifest-health/bad-manifest-isolates-the-repository")
-@pytest.mark.scenario("issue-intake/engine-per-repository/worker-repository-unchanged")
 @pytest.mark.parametrize("failure", ["absent", "missing", "directory", "unreadable", "toml", "schema",
                                       "encoding", "overflow", "source_home"])
 def test_bad_manifest_marks_repo_unhealthy_not_config(enrollment, tmp_path, monkeypatch, failure):
@@ -78,8 +75,9 @@ def test_bad_manifest_marks_repo_unhealthy_not_config(enrollment, tmp_path, monk
         monkeypatch.setattr(Path, "read_text", unreadable)
     config = tmp_path / "config.toml"
     config.write_text('''[[repos]]
-name = "owner/worker"
-verify = "true"
+name = "owner/peer"
+engine = "specloop"
+manifest = "good.toml"
 [[repos]]
 name = "owner/good"
 engine = "specloop"
@@ -89,30 +87,36 @@ name = "owner/bad"
 engine = "specloop"
 ''' + ('' if failure == "absent" else 'manifest = "template.toml"\n'))
     cfg = load(config)
-    pipelines = [Pipeline(repo) for repo in cfg.repos[1:]]
+    pipelines = [Pipeline(repo) for repo in cfg.repos]
     for pipeline in pipelines:
         pipeline.issue(7)
         pipeline.approved(8)
     monkeypatch.setattr(intake, "run_git", pipelines[0].command)
     health = daemon.RepoHealth()
     for attempt in range(1, 4):
+        for pipeline in pipelines[:-1]:
+            pipeline.issue(10 + attempt)
+            pipeline.approved(20 + attempt)
         poll(pipelines, health)
         assert health.failures == {"owner/bad": attempt}
+        for pipeline in pipelines[:-1]:
+            assert not pipeline.issues[10 + attempt]["labels"]
+            change = pipeline.prs[20 + attempt]["headRefName"].removeprefix("spec/")
+            assert pipeline.runs[change]["status"] == "running"
     assert len(messages) == 1 and "token" not in messages[0]
     assert "owner/bad" in messages[0] and "manifest" in messages[0]
     assert not health.item_failures
-    good_commands = [c[:2] for c in pipelines[0].calls]
-    assert ["specloop", "propose"] in good_commands
-    assert ["specloop", "admit"] in good_commands
-    bad = pipelines[1]
+    for pipeline in pipelines[:-1]:
+        good_commands = [c[:2] for c in pipeline.calls]
+        assert ["specloop", "propose"] in good_commands
+        assert ["specloop", "admit"] in good_commands
+        assert not pipeline.issues[7]["labels"]
+        assert not pipeline.prs[8]["labels"]
+    bad = pipelines[-1]
     assert not any(c[0] == "git" or c[:2] in (["specloop", "propose"], ["specloop", "admit"])
                    for c in bad.calls)
     assert bad.issues[7]["labels"] == [{"name": "spec:draft"}]
     assert bad.prs[8]["labels"] == [{"name": "spec:approved"}]
-    gh = FakeGh({"agent:ready": [7]})
-    monkeypatch.setattr(queue, "claim", partial(queue.claim, runner=gh))
-    claimed = daemon.claim_next(cfg, {"owner/worker": tmp_path})
-    assert claimed is not None and claimed.issue.number == 7
 
 
 @pytest.mark.scenario("config-resilience/repository-manifest-health/template-omits-per-change-fields")
@@ -137,21 +141,24 @@ def test_manifest_template_accepts_omitted_change_fields(enrollment, monkeypatch
     health = daemon.RepoHealth()
     poll([pipeline], health)
     assert bool(health.failures) == (omitted == ("repo",))
+    assert not health.item_failures
     assert parsed == [{"change": "readiness-probe", "branch": "spec/readiness-probe"}]
     assert path.read_bytes() == before
 
 
 @pytest.mark.scenario("config-resilience/repository-manifest-health/nonregular-manifest-is-never-read")
 @pytest.mark.parametrize("kind", ["directory", "fifo", "device"])
-def test_nonregular_manifest_is_never_read(enrollment, tmp_path, monkeypatch, kind):
+@pytest.mark.parametrize("replaced", [False, True], ids=["initial", "between-polls"])
+def test_nonregular_manifest_is_never_read(enrollment, tmp_path, monkeypatch, kind, replaced):
     path, _ = enrollment
     repo = Repo("owner/bad", engine="specloop", manifest=path)
     good = tmp_path / "good.toml"
     good.write_bytes(path.read_bytes())
     pipelines = [Pipeline(repo), Pipeline(Repo("owner/good", engine="specloop", manifest=good))]
     health = daemon.RepoHealth()
-    poll(pipelines, health)
-    assert not health.failures
+    if replaced:
+        poll(pipelines, health)
+        assert not health.failures
     path.unlink()
     if kind == "directory":
         path.mkdir()
@@ -168,8 +175,21 @@ def test_nonregular_manifest_is_never_read(enrollment, tmp_path, monkeypatch, ki
             return _original(file, *args, **kwargs)
 
         monkeypatch.setattr(owner, name, guarded)
+    bad, healthy = pipelines
+    for pipeline in pipelines:
+        pipeline.issue(7)
+        pipeline.approved(8)
+    monkeypatch.setattr(intake, "run_git", healthy.command)
     poll(pipelines, health)
     assert health.failures == {repo.name: 1}
+    assert not health.item_failures
+    assert bad.issues[7]["labels"] == [{"name": "spec:draft"}]
+    assert bad.prs[8]["labels"] == [{"name": "spec:approved"}]
+    assert not any(c[:2] in (["specloop", "propose"], ["specloop", "admit"])
+                   for c in bad.calls)
+    assert not healthy.issues[7]["labels"] and not healthy.prs[8]["labels"]
+    assert any(c[:2] == ["specloop", "propose"] for c in healthy.calls)
+    assert any(c[:2] == ["specloop", "admit"] for c in healthy.calls)
     # Direct stage callers use the same regular-file guard.
     with pytest.raises(intake.ConfigurationError):
         intake._require_manifest(repo)
@@ -182,17 +202,23 @@ def test_repair_clears_hold_and_rearms_notification(enrollment, monkeypatch, cap
     path.write_text("[broken")
     pipeline = Pipeline(Repo("owner/sample", engine="specloop", manifest=path))
     pipeline.issue(7)
+    pipeline.approved(8)
     monkeypatch.setattr(intake, "run_git", pipeline.command)
     health = daemon.RepoHealth()
     for _ in range(3):
         poll([pipeline], health)
     assert len(messages) == 1 and health.failures == {pipeline.repo.name: 3}
+    assert pipeline.issues[7]["labels"] == [{"name": "spec:draft"}]
+    assert pipeline.prs[8]["labels"] == [{"name": "spec:approved"}]
     path.write_bytes(valid)
     with caplog.at_level(logging.INFO):
         poll([pipeline], health)
     assert not health.failures and not health.announced
     assert "healthy again" in caplog.text
     assert pipeline.issues[7]["labels"] == []
+    assert pipeline.prs[8]["labels"] == []
+    assert sum(c[:2] == ["specloop", "propose"] for c in pipeline.calls) == 1
+    assert sum(c[:2] == ["specloop", "admit"] for c in pipeline.calls) == 1
     path.unlink()
     poll([pipeline], health)
     assert len(messages) == 2
@@ -203,7 +229,8 @@ def test_repair_clears_hold_and_rearms_notification(enrollment, monkeypatch, cap
                                       'manifest = []', 'manifest = false', '[broken'])
 def test_configuration_shape_remains_strict(tmp_path, settings):
     path = tmp_path / "config.toml"
-    path.write_text('[[repos]]\nname = "o/r"\nverify = "true"\n' + settings)
+    engine = '' if settings.startswith('engine =') else 'engine = "specloop"\n'
+    path.write_text('[[repos]]\nname = "o/r"\n' + engine + settings)
     with pytest.raises(ValueError):
         load(path)
 
@@ -223,7 +250,7 @@ def test_manifest_path_semantics(enrollment, tmp_path, monkeypatch):
         repo = load(config).repos[0]
         assert repo.manifest == path
         assert isinstance(intake.manifest_readiness(repo), manifest.Manifest)
-    assert Repo("o/r", manifest=Path("local.toml")).manifest == elsewhere / "local.toml"
+    assert Repo("o/r", engine="specloop", manifest=Path("local.toml")).manifest == elsewhere / "local.toml"
 
 
 @pytest.mark.scenario("config-resilience/repository-manifest-health/repair-clears-the-hold")
@@ -374,6 +401,9 @@ def test_template_readiness_preserves_dispatch_identity(enrollment, monkeypatch,
     expected = "owner__" + CHANGE if stage == "propose" else CHANGE
     assert expected in evidence and f"spec/{expected}" in evidence
     assert "readiness-probe" not in evidence and "unrelated-default" not in evidence
+    assert not health.item_failures
+    assert ("agent:revise" if stage == "revise" else
+            "spec:approved" if stage == "admit" else "spec:draft") not in gh.labels
 
 
 @pytest.mark.scenario("issue-intake/approval-admits/unhealthy-enrollment-retains-approval")
