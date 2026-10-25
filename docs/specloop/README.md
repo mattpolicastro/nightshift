@@ -64,6 +64,9 @@ and restarts until durable delivery; each round has a distinct input
 [PR #35](https://github.com/mattpolicastro/nightshift/pull/35)).
 Delivered background inputs may then be compacted; undelivered and stopped
 inputs remain unchanged ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+The explicit paused cleanup pass also requires the current receipt to match the
+attempt; see [job control and retention](#pause-stop-and-the-supervisor)
+([issue #103](https://github.com/mattpolicastro/nightshift/issues/103)).
 
 Draft questions or rejection remove both issue intake labels. Answer the
 questions or resolve the rejection on the issue, remove `needs-human`, and
@@ -214,7 +217,8 @@ eligible admitted publication/build revisions and other repositories continue.
 `nightshift status` reads local active attempts before repository network calls.
 Rows show full job ID, stage, repository/item, command, execution state, elapsed
 seconds and remaining time or `OVERDUE by Ns`. Starting/legacy jobs without
-timing report unavailable. Finished/failed/stopped history is in `nightshift jobs`.
+timing report unavailable. Full history, including failed jobs, is in
+`nightshift jobs --all`.
 These rows are separate from daemon/worker liveness and independent
 `specloop status` run state ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
 
@@ -240,9 +244,22 @@ and revision jobs can finish locally; an already-dispatched external operation
 may finish too. `nightshift resume` removes the pause and delivers eligible
 retained results without rerunning the job.
 
-`nightshift jobs` lists local background attempts and history offline, without
-a running daemon or valid repository configuration. Copy the exact full job ID
-into `nightshift jobs stop <id>`; prefixes and paths are not accepted. Stop
+`nightshift jobs` lists local active (including starting/overdue), stopping,
+stopped, finished-undelivered and diagnostic rows. Ordinary failed and
+finished-delivered history is hidden with
+`Hidden historical jobs: N (use --all to show).`; `nightshift jobs --all` shows
+every attempt without that footer. Only hidden history yields
+`No active background jobs.` before the count; empty state says `No background jobs.`
+Record/receipt errors remain visible and exit 1 alongside healthy rows.
+Finished rows say `delivered` only when the item's current receipt has JSON
+`delivered: true`, otherwise `finished (delivery pending)`. A successor receipt
+or one without job identity can label older attempts delivered; that item-level
+display does not authorize deleting them. Listing is read-only
+([issue #103](https://github.com/mattpolicastro/nightshift/issues/103)).
+
+All jobs commands work offline without a running daemon, valid repository
+configuration or credentials. Copy the exact full job ID into
+`nightshift jobs stop <id>`; prefixes and paths are not accepted. Stop
 verifies process-start identity, process group and job-directory ownership
 before sending SIGTERM, then SIGKILL if needed, to that group. It records
 `stopped` only after no executing group members remain; unverifiable identity
@@ -268,10 +285,35 @@ touchpoint history and date filtering across receipt replacement
 The directory, workflow receipts and build-feedback files remain. Undelivered
 and stopped/released evidence is retained. Minimal records still accumulate;
 missing history stays missing, and retained text means this is not secure erasure.
-Interrupted cleanup waits for a later eligible, authorized, unpaused item visit;
-a journal proves delivery, not current authorization. Final-trigger removal,
+Automatic interrupted cleanup waits for a later eligible, authorized,
+unpaused item visit; a journal proves delivery, not current authorization. Final-trigger removal,
 closure or authorization denial can leave residual logs/inputs indefinitely.
 Do not rearm solely for cleanup: normal new work may follow.
+
+Explicit `nightshift jobs compact` authorizes one local pass even while paused,
+without current GitHub labels. It takes no ID; `--all` is only for listing.
+Cleanup requires the current delivered receipt to name the exact attempt, plus
+validated identity, an idle lifetime lock and proven ownership. Missing identity
+or a replacement receipt prevents deletion even with an old journal or a
+`delivered` display. Each attempt reports `compacted` or `skipped`, with context
+and a reason; the summary is `Compacted: N; skipped: M.` Unsafe idea targets
+remain with warnings even when other artifacts were compacted. Expected
+ineligibility skips successfully; damaged evidence/filesystem errors exit 1
+while healthy attempts continue. Repeat safely: completed cleanup is skipped,
+and interruptions resume only with a still-matching current receipt. The pass
+does not launch, deliver, mutate receipts or clear pause
+([issue #103](https://github.com/mattpolicastro/nightshift/issues/103)).
+
+The design's real-tree validation remains a pending human check: pause the
+daemon, capture `nightshift jobs --all` and receipts/artifacts on `~/.nightshift`,
+run `nightshift jobs compact` once, then capture full inventory again. Compare
+IDs, execution/delivery labels, counts, request mtimes, results, control records
+and skipped artifacts. Verify only reported eligible logs/owned inputs and idea
+arguments changed; inspect retained-target warnings and identity skips. Confirm
+the default view exposes pending/stopped/active work, and record commands,
+outcomes and unexplained differences before resuming. Detached jobs may finish
+while paused; account for that separately. CI validates synthetic trees, not
+this host's historical tree. Live references and changed prose still need review.
 
 Stopped jobs stay held across polling, daemon restart, resume and label
 removal/reapplication. Only explicit release can enable a replacement;

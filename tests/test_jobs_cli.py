@@ -769,11 +769,15 @@ def test_status_empty_inventory_preserves_worker_output(status_state, capsys, ar
 
 @pytest.mark.scenario("background-job-control/active-jobs-in-status/active-attempts-are-visible")
 @pytest.mark.scenario("specloop-documentation/active-job-status-guidance/operator-reads-job-status")
+@pytest.mark.parametrize("history_args", [
+    shlex.split(re.search(r"`nightshift (jobs --all)`", (Path(__file__).resolve().parents[1] / path).read_text())[1])
+    for path in ("README.md", "docs/specloop/README.md")
+])
 @pytest.mark.parametrize("args", [[], ["status"], *[
     shlex.split(re.search(r"`nightshift (status)`", (Path(__file__).resolve().parents[1] / path).read_text())[1])
     for path in ("README.md", "docs/specloop/README.md")
 ]])
-def test_status_active_jobs_before_network(status_state, capsys, args):
+def test_status_active_jobs_before_network(status_state, capsys, args, history_args):
     root, before_network = status_state
     with ExitStack() as locks:
         for digit, stage, command, state, start, deadline in [
@@ -818,7 +822,7 @@ def test_status_active_jobs_before_network(status_state, capsys, args):
         assert "enrolled/repo: 1 working, 0 ready, 0 blocked" in output.out
         assert ">> #42 Worker title  (claimed, ? on worker-branch)" in output.out
         assert "worker progress" in output.out
-        assert cli.main(["jobs", "--all"]) == 0
+        assert cli.main(history_args) == 0
         history = capsys.readouterr().out
         for digit, state in [("f", "finished"), ("0", "failed"), ("1", "stopped")]:
             assert digit * 32 not in early.out + output.out
