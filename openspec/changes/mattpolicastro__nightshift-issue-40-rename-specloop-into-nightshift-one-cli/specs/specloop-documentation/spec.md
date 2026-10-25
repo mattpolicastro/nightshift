@@ -11,6 +11,7 @@ Active operator documentation SHALL use canonical command forms, explain the ali
 #### Scenario: Guides distinguish daemon and build
 - **WHEN** README, the build guide and command-JSON guide describe status, run and pause/resume
 - **THEN** examples distinguish daemon controls from build controls and retain schemas, operational boundaries, issue citations and valid links
+- **THEN** state guidance maps legacy build proposals/<change> to canonical drafts/<change> and distinguishes unchanged daemon proposals/<repository> receipts and jobs
 
 #### Scenario: Executable examples retain regression coverage
 - **WHEN** the keyed revision guide and direct supervisor README example switch to canonical commands
