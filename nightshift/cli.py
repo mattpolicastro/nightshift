@@ -139,6 +139,7 @@ def _front_options(parser, *, json_option=True):
     parser.add_argument("--config", type=Path, default=argparse.SUPPRESS)
     for flag, help_text in (
         ("all", "jobs: include historical attempts"),
+        # mutation-equivalent: 'or' -> 'and' only rewords help; --offline parsing and execution are unchanged.
         ("offline", "attention: use cached records without GitHub or specloop"),
         ("once", "one task, then exit"),
         ("deep", "preflight: accepted for compatibility; worker probes are retired"),

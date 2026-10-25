@@ -36,6 +36,32 @@ def test_parser_is_side_effect_free():
         assert parser.parse_args(argv).handler is build.dispatch
 
 
+@pytest.mark.parametrize("argv, diagnostic", [
+    pytest.param([], "cmd", id="missing-command"),
+    pytest.param(["run"], "change", id="missing-build-operand"),
+    pytest.param(["status", "--events", "bad"], "--events", id="invalid-option-value"),
+])
+def test_internal_build_parser_defaults_to_human_errors(capsys, argv, diagnostic):
+    # This parser seam retains required commands even though the public CLI
+    # defaults empty argv to status and accepts bare run for the daemon.
+    parser = build.build_parser()
+    with pytest.raises(SystemExit) as error:
+        parser.parse_args(argv)
+    assert error.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "usage: specloop" in output.err
+    assert diagnostic in output.err
+
+
+def test_internal_build_parser_json_errors_require_opt_in(capsys):
+    parser = build.build_parser(json_errors=True)
+    with pytest.raises(build.ParseError, match="cmd"):
+        parser.parse_args([])
+    output = capsys.readouterr()
+    assert output.out == output.err == ""
+
+
 @pytest.mark.scenario("nightshift-cli/canonical-build-commands/build-commands-retain-their-contract")
 @pytest.mark.parametrize("argv, handler", [
     (["admit", "m.toml", "--implement", "impl", "--review", "review", "--head", "abc", "--json"], "admit"),
