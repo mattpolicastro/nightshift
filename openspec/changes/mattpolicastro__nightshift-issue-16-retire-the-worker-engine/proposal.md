@@ -12,7 +12,7 @@ Blocked by: #58, #47, #49, #50, #51, #52, #46, #5, #6, #7, #9, #10, #12, #13, #1
 - Preserve historical outcomes, transcript readers, attention JSON, legacy claim evidence and durable safe recovery. Do not resume or destroy interrupted worker work.
 - Remove worker-only prerequisites from Python preflight and update allowed setup instructions and examples. Keep the daemon and supervisor jobs distinct. Frozen wrappers retain their existing startup checks; document the separate host rollout requirement.
 - Check Paseo command adapters and message commands against the retained CLI boundaries; no rename is necessary.
-- Use bounded caller-first deletion tasks, including affected test callers. Deletions count toward the approximately 300-line ceiling. More than eight tasks is intentional and authorized for this retirement.
+- Use 13 caller-first tasks in one atomic change, including affected test callers. The approximately 300-line ceiling applies to added or modified lines, including tests; whole-file and contiguous retired-block deletions stay together regardless of removed line count. Every task leaves the suite green.
 
 Out of scope: #40's package/CLI rename and merge, moving `~/.nightshift` or `~/.specloop`, changing plugin RPC schemas, deleting historical data, rewriting shared queue/git/trace utilities, changing provider profiles or specloop quotas, and automatically editing or installing live host configuration/plists. Mutation/test workers are unrelated to the retired engine.
 
