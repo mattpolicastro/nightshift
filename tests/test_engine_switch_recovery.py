@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from manifest_fixtures import manifest_text
-from nightshift import daemon, outcomes, queue
+from nightshift import daemon, outcomes, queue, vcs
 from nightshift.config import Config, Repo
 from test_specloop_isolation import Pipeline, poll
 
@@ -26,6 +26,12 @@ class RecoveryPipeline(Pipeline):
 
 @pytest.fixture
 def switched(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("safe recovery must not claim work or destroy its worktree/branch")
+
+    monkeypatch.setattr(queue, "claim", forbidden)
+    monkeypatch.setattr(queue, "reconcile", forbidden)
+    monkeypatch.setattr(vcs, "remove_worktree", forbidden)
     monkeypatch.setattr(daemon, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(queue, "CLAIM_DIR", tmp_path / "claims")
     manifest = tmp_path / "template.toml"
@@ -79,7 +85,7 @@ def test_engine_switch_recovers_working_issues(switched, tmp_path, monkeypatch):
 
     monkeypatch.setattr(queue, "_gh", journal_before_write)
     health = daemon.RepoHealth()
-    daemon.startup(cfg, {}, health)
+    assert daemon.startup(cfg, {}, health) == []
     assert not health.failures
     assert labels(switched, 1) == labels(switched, 2) == {"agent:ready", "keep-me"}
     assert labels(switched, 3) == {"needs-human", "keep-me"}
@@ -201,7 +207,8 @@ def test_completed_recovery_checks_current_evidence(switched, tmp_path, state):
 @pytest.mark.scenario("config-resilience/worker-switch-reconciliation/recovery-does-not-need-a-manifest")
 @pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/recovery-preserves-interrupted-work")
 @pytest.mark.parametrize("manifest", ["absent", "missing", "invalid"])
-def test_recovery_without_healthy_manifest(switched, tmp_path, manifest):
+@pytest.mark.parametrize("startup_first", [False, True])
+def test_recovery_without_healthy_manifest(switched, tmp_path, manifest, startup_first):
     claim = working(switched, 1, tmp_path)
     good = tmp_path / "healthy.toml"
     good.write_bytes(switched.repo.manifest.read_bytes())
@@ -217,6 +224,10 @@ def test_recovery_without_healthy_manifest(switched, tmp_path, manifest):
         if manifest == "absent":
             switched.repo = Repo(switched.repo.name, engine="specloop")
     health = daemon.RepoHealth()
+    if startup_first:
+        daemon.startup(Config(repos=[switched.repo]), {}, health)
+        assert labels(switched, 1) == {"agent:ready", "keep-me"}
+        assert not claim.path.exists() and not health.failures
     poll([switched, independent], health)
     assert labels(switched, 1) == {"agent:ready", "keep-me"} and not claim.path.exists()
     assert health.failures == {switched.repo.name: 1}
@@ -236,7 +247,8 @@ def test_recovery_without_healthy_manifest(switched, tmp_path, manifest):
 @pytest.mark.scenario("config-resilience/worker-switch-reconciliation/unknown-recovery-state-is-retained")
 @pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/recovery-preserves-interrupted-work")
 @pytest.mark.parametrize("failure", ["claim", "list", "labels", "comments"])
-def test_unknown_recovery_retains_evidence_and_isolates_intake(switched, tmp_path, failure):
+@pytest.mark.parametrize("startup_first", [False, True])
+def test_unknown_recovery_retains_evidence_and_isolates_intake(switched, tmp_path, failure, startup_first, monkeypatch):
     claim = working(switched, 1, tmp_path, survives=True)
     if failure == "claim":
         claim.path.write_text("{unreadable")
@@ -260,8 +272,13 @@ def test_unknown_recovery_retains_evidence_and_isolates_intake(switched, tmp_pat
     switched.gh = unavailable
     health = daemon.RepoHealth()
     switched.calls.clear()  # Admission above seeds the already-running work.
+    if startup_first:
+        monkeypatch.setattr(queue, "_gh", unavailable)
+        daemon.startup(Config(repos=[switched.repo]), {}, health)
+        assert health.failures == {switched.repo.name: 1}
+        assert claim.path.read_bytes() == before
     poll([switched, independent], health)
-    assert health.failures == {switched.repo.name: 1}
+    assert health.failures == {switched.repo.name: 1 + startup_first}
     assert not health.item_failures
     assert claim.path.read_bytes() == before
     assert (tmp_path / "work-1/diff.txt").read_text() == "unfinished work"

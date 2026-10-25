@@ -674,7 +674,7 @@ def test_stop_operational_failure_is_actionable(local_state, monkeypatch, capsys
 @pytest.mark.parametrize("args, expected, fragment", [
     ([], 0, "status sentinel"), (["status"], 0, "status sentinel"),
     (["pause"], 0, "paused"), (["resume"], 0, "resumed"),
-    (["run"], 0, "shipped=0"), (["run", "--once"], 0, "shipped=0"),
+    (["run"], 0, ""), (["run", "--once"], 0, "poll complete"),
     (["reconcile"], 0, "clean"), (["preflight", "--deep"], 0, "ready"),
     (["digest"], 2, "not implemented"),
     (["attention", "--offline", "--json"], 0, '"offline": true'),
@@ -688,7 +688,7 @@ def test_existing_commands_and_options_remain_compatible(tmp_path, monkeypatch, 
     monkeypatch.setattr(cli, "_liveness", lambda cfg: "status sentinel")
     def loop(actual, repos, *, once):
         assert actual is cfg and repos == {} and once == ("--once" in args)
-        return daemon.Tally()
+        return None
     monkeypatch.setattr(daemon, "loop", loop)
     monkeypatch.setattr(daemon, "startup", lambda cfg, repos: [])
     def preflight(actual, env, *, deep):
@@ -718,6 +718,9 @@ def test_existing_commands_and_options_remain_compatible(tmp_path, monkeypatch, 
     assert inventory_reads == ([daemon.STATE_DIR] if args in ([], ["status"]) else [])
     if args in ([], ["status"]):
         assert output.out == "status sentinel\n  alerts: NOT CONFIGURED\n" and output.err == ""
+    if args in (["run"], ["run", "--once"]):
+        assert output.out == ("poll complete\n" if "--once" in args else "")
+        assert output.err == ""
     if args in (["pause"], ["resume"]):
         assert daemon.PAUSE_FILE.exists() == (args == ["pause"])
 

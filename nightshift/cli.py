@@ -364,14 +364,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "run":
-        tally = daemon.loop(cfg, _repo_dirs(cfg), once=args.once)
-        print(
-            f"shipped={tally.shipped} escalated={tally.escalated} "
-            f"turns={tally.turns} cost=${tally.cost:.2f}"
-            + (f" unbilled={tally.unbilled}" if tally.unbilled else "")
-        )
-        for line in tally.lines:
-            print(f"  {line}")
+        daemon.loop(cfg, _repo_dirs(cfg), once=args.once)
+        if args.once:
+            print("poll complete")
         return 0
 
     if args.command == "digest":
