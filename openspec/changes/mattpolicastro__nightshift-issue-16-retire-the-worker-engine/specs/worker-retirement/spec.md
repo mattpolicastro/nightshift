@@ -51,18 +51,20 @@ Retirement SHALL preserve historical state, outcomes, transcripts, branches and 
 
 ### Requirement: Service prerequisites match the surviving engine
 
-The daemon wrapper and preflight SHALL retain env-file loading, GitHub token checks, the negative control and alerts, without worker-only prerequisites. Manifest providers SHALL retain their own requirements. Deep preflight SHALL remain accepted with an explicit retired-probe notice and no model invocation. Both services SHALL retain their existing identities, locations and lifecycle policy.
+The Python CLI and preflight SHALL operate without worker-only prerequisites while preserving env-file loading and front-door checks. Manifest providers SHALL retain their own requirements. Frozen wrappers and plists SHALL remain unchanged; their shell startup checks remain outside the Python prerequisite guarantee.
 
 #### Scenario: Codex enrollment needs no worker login
-- **WHEN** the wrapper and preflight are exercised with valid front-door prerequisites but no worker OAuth token, Claude executable, pnpm or Swift
-- **THEN** worker-only prerequisites do not prevent operation, and deep preflight launches no model or tool-loop probe
-- **THEN** missing environment file or GH_TOKEN still prevents wrapper startup and token scoping or alert failures still fail preflight
-- **THEN** the wrapper checks gh, git, node and npx, keeps its absolute uv invocation and existing ambient Anthropic-variable scrubbing, and preflight does not perform worker verify-allowlist checks
+- **WHEN** Python CLI one-shot polling and preflight are exercised directly with a valid specloop enrollment and front-door prerequisites but no worker OAuth token, Claude executable, pnpm or Swift
+- **THEN** worker-only prerequisites do not prevent Python operation, and the CLI retains existing env-file loading
+- **THEN** deep preflight remains accepted, emits an explicit retired-probe notice and launches no model or tool-loop probe or worker verify-allowlist check
+- **THEN** missing GH_TOKEN, token scoping or alert failures still fail Python preflight, and manifest providers retain their own credential/tool requirements
+- **THEN** this does not assert successful startup through the unchanged daemon wrapper, which still requires its environment file, worker OAuth, GH_TOKEN and legacy tool list before Python starts
 
 #### Scenario: Services retain independent roles
-- **WHEN** bundled launchd jobs and wrappers are inspected or exercised with fake executables
-- **THEN** the daemon still invokes `nightshift run` and the independent supervisor still invokes `specloop serve`, with existing labels, bootstrap paths and state locations
+- **WHEN** bundled launchd jobs and wrappers are inspected read-only
+- **THEN** the daemon still invokes `nightshift run` and the independent supervisor still invokes `specloop serve`, with existing labels, bootstrap paths, state locations and lifecycle policy
 - **THEN** no live service is installed, unloaded or restarted by retirement code
+- **THEN** wrappers, plists and their comments remain unchanged; any service adaptation is separate operator work, with host readiness checked before rollout
 
 ### Requirement: Client command boundaries remain stable
 

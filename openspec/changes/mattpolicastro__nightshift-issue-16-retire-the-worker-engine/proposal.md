@@ -10,11 +10,13 @@ Blocked by: #58, #47, #49, #50, #51, #52, #46, #5, #6, #7, #9, #10, #12, #13, #1
 - Remove worker orchestration, execution, prompts, endpoint probes and active worker configuration. Preserve manifest health isolation, front-door authorization and independent specloop supervision.
 - Remove worker session status output, including the off-subscription model report. Preserve all other status output and behavior.
 - Preserve historical outcomes, transcript readers, attention JSON, legacy claim evidence and durable safe recovery. Do not resume or destroy interrupted worker work.
-- Remove worker-only service prerequisites and update current setup instructions, examples and package description. Keep the daemon and supervisor jobs distinct.
+- Remove worker-only prerequisites from Python preflight and update allowed setup instructions and examples. Keep the daemon and supervisor jobs distinct. Frozen wrappers retain their existing startup checks; document the separate host rollout requirement.
 - Check Paseo command adapters and message commands against the retained CLI boundaries; no rename is necessary.
 - Use bounded caller-first deletion tasks, including affected test callers. Deletions count toward the approximately 300-line ceiling. More than eight tasks is intentional and authorized for this retirement.
 
 Out of scope: #40's package/CLI rename and merge, moving `~/.nightshift` or `~/.specloop`, changing plugin RPC schemas, deleting historical data, rewriting shared queue/git/trace utilities, changing provider profiles or specloop quotas, and automatically editing or installing live host configuration/plists. Mutation/test workers are unrelated to the retired engine.
+
+Implementation edits are limited to `nightshift/**`, `specloop/**`, `tests/**`, `README.md`, `KNOWN-LIMITATIONS.md`, `config.example.toml` and `docs/specloop/**`. Do not edit `mypy-baseline.txt`, `bin/**`, `launchd/**`, `plugins/**`, `CLAUDE.md`, `pyproject.toml` or other paths outside that allowance. Resolved type diagnostics may remain in the baseline; wrapper cleanup, frozen instructions/metadata and historical-document corrections are deferred. This draft itself changes only this OpenSpec change directory.
 
 ## Capabilities
 

@@ -6,17 +6,22 @@ Describe the single-engine workflow and retained operational boundaries.
 
 ### Requirement: Worker retirement guidance
 
-Current guidance SHALL describe specloop as sole/default engine, worker rejection, manifest holds and retired worker prerequisites/status. It SHALL distinguish historical evidence from execution, preserve CLI/state/service boundaries pending #40 and unrelated limitations, and cite issue #16 without inventing a PR. Live config/plist/caller checks SHALL remain pre-merge human checks, not claimed CI results.
+Current guidance in allowed documentation SHALL explain sole-engine enrollment and worker retirement, distinguish retained history from execution, and document compatibility boundaries and human rollout checks without claiming unperformed validation.
 
 #### Scenario: New enrollment follows one engine
 - **WHEN** an operator follows README, config.example.toml and the specloop guide
 - **THEN** the runnable example enrolls a specloop repository with a trusted manifest and explains omission defaults, explicit worker rejection and inert obsolete settings
-- **THEN** instructions do not require worker verification strings, endpoint models or OAuth to start the front door
+- **THEN** it explains repository-local holds for missing or unusable manifests and removal of worker status output, including the off-subscription model report, while all other status output remains unchanged
+- **THEN** direct Python front-door instructions do not require worker verification strings, endpoint models or OAuth; manifest providers retain their own requirements
+- **THEN** bundled service instructions explicitly retain the frozen daemon wrapper's env-file, worker OAuth, GH_TOKEN and gh/claude/pnpm/node/git/swift checks, distinguishing direct invocation from service startup without claiming Python changes bypass shell checks
 
 #### Scenario: Existing installation is checked before merge
 - **WHEN** an operator reads retirement and rollout guidance
 - **THEN** it identifies retained historical attention/recovery, unchanged CLI and state locations, separate daemon/supervisor jobs and the need to inspect live config/plists/external callers before merge
+- **THEN** it keeps the CLI merge and state move assigned to #40, preserves unrelated limitations, and cites issue #16 without inventing an implementation PR
+- **THEN** live config, plist and external-caller inspection remains a pre-merge human checklist, never a claimed CI result
 - **THEN** it does not claim host checks performed, automatic migration, rollback of remote effects or automatic restart of interrupted worker work
+- **THEN** it identifies obsolete worker instructions/metadata in frozen CLAUDE.md and pyproject.toml, historical worker documents and their removed-source references, and resolved type-baseline entries as deferred cleanup outside the implementation allowance
 
 
 ## MODIFIED Requirements
@@ -72,3 +77,4 @@ The root README and specloop guide SHALL describe active background rows in nigh
 - **THEN** guidance names `bin/nightshift-daemon` and `bin/specloop-serve` as unchanged wrappers with fixed bootstrap checkout, uv and PATH locations, and says environment settings do not relocate those wrapper commands
 - **THEN** guidance describes wrapper portability as deferred because `bin/**` is frozen, distinguishes direct CLI configuration from bundled service startup, and does not claim a new helper or relocated wrapper pathname solves the limitation
 - **THEN** full daemon rollout remains pending separate wrapper work or an independently provisioned operator service preserving credential and preflight guards
+- **THEN** the same freeze covers launchd plists and wrapper comments; current guidance explains the retained worker startup prerequisites and real pause/supervisor boundaries without promising those files were corrected
