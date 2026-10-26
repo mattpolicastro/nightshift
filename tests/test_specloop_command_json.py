@@ -151,22 +151,30 @@ def test_cli_draft_replacement_preserves_daemon_evidence(template, monkeypatch, 
 
     monkeypatch.setattr(agents, "run", agent)
     monkeypatch.setattr(cli, "notifier", lambda secrets: lambda message: None)
-    for iteration, entry in enumerate((main, cli.main, main, cli.main)):
-        # Exercise both names before and after relocating a legacy workspace.
+    for iteration, entry in enumerate((main, cli.main) * 3):
+        # Both names before migration, after relocation, and after marker no-op.
         if iteration == 2:
             legacy.parent.mkdir(parents=True)
             out.rename(legacy)
             workspace = draft_evidence_snapshot(legacy)
-            with migrate.preflight() as intent:
-                migrate.relocate(intent)
-                assert draft_evidence_snapshot(out) == workspace
-                assert legacy.readlink() == out
-                assert draft_evidence_snapshot(evidence) == before
-                assert jobs.list_jobs(state.state_root(), include_delivery=True) == inventory
-                # Stand in for journal retirement by the completion caller;
-                # marker publication/no-op recovery belongs to task 2.7.
-                state_locks.journal_path().unlink()
+            assert main(["migrate"]) == 0
+            capfd.readouterr()
+            assert draft_evidence_snapshot(out) == workspace
+            assert legacy.readlink() == out
+            assert draft_evidence_snapshot(evidence) == before
+            assert jobs.list_jobs(state.state_root(), include_delivery=True) == inventory
+            assert json.loads((state.legacy_root() / migrate.MARKER).read_text())["completed"] is True
+            assert not state_locks.journal_path().exists()
             legacy_link = draft_evidence_snapshot(legacy)
+        if iteration == 4:
+            late = legacy.parent / "late-draft"
+            late.mkdir()
+            (late / "retained").write_text("completion must not rescan this workspace")
+            roots = state.legacy_root(), state.state_root()
+            completed = [draft_evidence_snapshot(root) for root in roots]
+            assert main(["migrate"]) == 0
+            capfd.readouterr()
+            assert [draft_evidence_snapshot(root) for root in roots] == completed
         assert entry(["propose", str(path), change, "--idea", "Add a gate", "--json"]) == 0
         output = capfd.readouterr()
         document = json.loads(output.out)
