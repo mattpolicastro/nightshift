@@ -17,6 +17,8 @@ from test_land import (
     expect_update_request, invoke, invoke_ci, merge_command, merge_commit,
     no_live_processes, scripted_runner, status_rows,
 )
+from doc_commands import argv_cases, parse_command, physical_commands
+from specloop import cli as build_cli
 
 
 @pytest.fixture
@@ -34,6 +36,7 @@ def without_console_script(monkeypatch, tmp_path):
 @pytest.mark.scenario("reviewed-pr-landing/discovery-through-the-interpreter/console-script-absent")
 @pytest.mark.scenario("reviewed-pr-landing/finish-through-the-interpreter/eligible-finish-uses-the-current-interpreter")
 @pytest.mark.scenario("nightshift-cli/canonical-internal-callers/calls-retain-request-identity")
+@pytest.mark.scenario("reviewed-pr-landing/landing-interpreter-prerequisites/operator-prepares-the-environment")
 @pytest.mark.parametrize("kind", ["direct", "finish", "done"])
 def test_land_runs_nightshift_through_its_interpreter(
     config_path, scripted_runner, without_console_script, capsys, kind,
@@ -140,18 +143,15 @@ def test_land_refuses_interpreter_finish_failure(
 @pytest.mark.scenario("reviewed-pr-landing/landing-interpreter-prerequisites/operator-prepares-the-environment")
 def test_landing_documents_interpreter_prerequisites():
     guide = (Path(__file__).resolve().parents[1] / "docs" / "landing.md").read_text()
-    prerequisites = " ".join(
-        guide.split("## Prerequisites and flags\n", 1)[1].split("| Argument |", 1)[0].split()
-    )
-    assert "`uv` and `gh` available on PATH" in prerequisites
-    assert "interpreter running `nightshift.land` must be able to import `specloop.cli`" in prerequisites
-    assert "`specloop` console script need not be on PATH" in prerequisites
-    assert "virtual-environment activation is not required" in prerequisites
-    assert "exactly one case-insensitive enrollment for the repository" in prerequisites
-    assert "Authenticate `gh` as the operator with permission" in prerequisites
-    assert "read and edit the PR and issue comments, update the branch, and merge" in prerequisites
-    assert "repository's protection rules" in prerequisites
-    assert "`-m specloop.cli status --json` can read the applicable runs" in prerequisites
+    # Prerequisite wording belongs to human review; executable examples use
+    # the same argv/handler contract as the interpreter regressions above.
+    commands = [command for _, command in physical_commands(guide)
+                if command.startswith("python -m nightshift.cli ")]
+    assert [argv for command in commands for argv in argv_cases(command)] == [
+        ["nightshift", "status", "--json"], ["nightshift", "finish", "example-change"]]
+    for command in commands:
+        args, = parse_command(command)
+        assert args.handler is build_cli.dispatch
 
 
 PARSER_ERROR = "unexpected end of JSON input"

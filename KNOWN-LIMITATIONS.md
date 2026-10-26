@@ -8,10 +8,14 @@ Fixes land through Nightshift's own front door; these gaps remain unresolved.
 
 - **Sync at task boundaries:** pick up fast-forward human commits on the source
   branch without pausing.
-- **Merge CLI/package names and relocate state:** deferred to
-  [issue #40](https://github.com/mattpolicastro/nightshift/issues/40).
-  Worker retirement leaves `nightshift`, `specloop`, `~/.nightshift` and
-  `~/.specloop` unchanged.
+- **CLI/state compatibility:** [issue #40](https://github.com/mattpolicastro/nightshift/issues/40)
+  makes `nightshift` canonical and moves build state to `~/.nightshift`.
+  The `specloop` alias and legacy-path links remain for one release; their
+  removal and frozen-wrapper modernization are follow-ups. Migration requires
+  a stopped supervisor and controlled writers; follow the
+  [host rollout checklist](docs/deploy.md#human-host-checklist).
+  Legacy build `proposals/<change>` moves to `drafts/<change>`; daemon
+  `proposals/<owner__repo>` receipts and jobs stay in place.
 
 ## Retirement follow-ups
 
@@ -51,7 +55,7 @@ None of these follow-ups establishes live validation or a completed host rollout
   accumulate with retained runs; deletion or incomplete backups lose protection.
 - **Pause boundary:** jobs already running can finish while the daemon is
   paused. An admission that completes while paused can still build under the
-  independent `specloop serve` supervisor. Jobs have their own sessions, so
+  independent `nightshift serve` supervisor. Jobs have their own sessions, so
   unloading the daemon does not stop them. `nightshift jobs stop <id>` stops
   a background job ([PR #28](https://github.com/mattpolicastro/nightshift/pull/28));
   it does not pause an already admitted run.
@@ -76,7 +80,7 @@ None of these follow-ups establishes live validation or a completed host rollout
     next authorized, eligible, unpaused poll; no automatic termination or retry.
     Restart does not reset timing. Daemon/GitHub outages, removed triggers and
     authorization holds delay reporting; wall-clock jumps affect observation.
-    `nightshift status` shows active timing/`OVERDUE`; legacy timing is unavailable.
+    `nightshift daemon status` shows active timing/`OVERDUE`; legacy timing is unavailable.
     Use `nightshift jobs --all` for history and the recovery instructions above
     ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
   - Default `nightshift jobs` shows active (including starting/overdue),
@@ -229,6 +233,10 @@ retain these bootstrap commands:
 | --- | --- | --- | --- |
 | `bin/nightshift-daemon` | `$HOME/Projects/nightshift` | `/opt/homebrew/bin/uv run nightshift run` | `/opt/homebrew/bin:$HOME/n/bin:$PATH` (prepends to incoming PATH) |
 | `bin/specloop-serve` | `$HOME/Projects/nightshift` | `/opt/homebrew/bin/uv run --no-sync specloop serve` | `$HOME/n/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin` |
+
+The daemon's bare `nightshift run` is the sole implicit daemon compatibility
+form; the supervisor's `specloop serve` uses the one-release alias. Neither
+requires a wrapper edit for this rollout.
 
 Neither wrapper consumes the new settings for its own bootstrap. Environment
 settings do not relocate these commands; changing a plist's wrapper pathname

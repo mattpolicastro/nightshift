@@ -17,14 +17,28 @@ pending rather than inferring success from pytest.
    disposable tracked drafting/admission/revision job. Confirm it is running
    with `uv run nightshift jobs`; record its full ID, process identity and log
    path before unloading.
-2. Run `uv run nightshift pause`, then unload the disposable daemon's actual
+2. Run `uv run nightshift daemon pause`, then unload the disposable daemon's actual
    plist using `launchctl unload <disposable-daemon.plist>`. Verify the daemon
    service is unloaded. Pause itself must not terminate the tracked job.
 3. From another terminal in the same test account, run `uv run nightshift jobs`
    and verify the detached job survived. Run `uv run nightshift jobs stop <id>`
    with its full ID. Record the exit code and elapsed time; check the group has
    no executing members, inventory says `stopped`, and logs/receipts remain.
-4. Reload the disposable daemon with pause still present, then resume and poll.
+4. For a code/state upgrade, stop the independent supervisor and prevent KeepAlive
+   restart before syncing the checkout. Control all writers and back up both roots;
+   follow the [migration inspection checklist](deploy.md#human-host-checklist).
+   With new code available and the supervisor stopped, run `nightshift migrate`
+   and inspect `nightshift status --json`, revisions, drafts, unchanged daemon
+   receipts/jobs, references and credential links. Resolve refusals before restart.
+   Preserve due pauses during inspection, then replace automatic recovery pauses
+   with requested holds using `nightshift resume <change> --no-run` followed by
+   `nightshift pause <change>`. Inspect `nightshift status <change> --json` to
+   confirm no recovery deadline remains before starting the supervisor.
+5. Reload the disposable daemon with pause still present; check
+   `nightshift daemon status`. Start the supervisor only after inspection/holds,
+   confirm intended dispatch and heartbeats, then explicitly resume selected runs
+   with `nightshift resume <change> --no-run` and intake with
+   `uv run nightshift daemon resume`, then poll.
    Verify the stopped attempt is neither delivered nor replaced. If testing
    admitted work, inspect the independent supervisor and its run processes
    separately; unloading Nightshift does not stop them. Keep or restore pause

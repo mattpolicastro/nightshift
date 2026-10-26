@@ -31,7 +31,7 @@ Each row also has **Details**, collapsed initially. Open it to see the change
 summary, repository and branch, current or paused task, full pause detail and
 recent events, when available. Home directories appear as `~`. A published
 change can include an **Open change on GitHub** link to its change folder.
-Details always includes `specloop status <change> --events 20` to run on the Paseo host.
+Details always includes `nightshift status <change> --events 20` to run on the Paseo host.
 
 **Open in Paseo** appears in Details when the host supports workspace navigation
 and has a matching workspace for the run's repository. The page loads workspaces
@@ -44,24 +44,24 @@ absent and the other details remain available.
 **Publish and Finish both push to GitHub, so the page asks for confirmation
 before sending either action.** Cancel sends nothing. Finish does not merge
 the PR. After an action, the page shows the result and refreshes the list.
-Resume and Accept leave further execution to the `specloop serve` supervisor.
+Resume and Accept leave further execution to the `nightshift serve` supervisor.
 These controls apply to specloop runs; Nightshift worker tasks remain read-only.
 
-Factory reads `specloop status --json` on opening, every 60 seconds while the
+Factory reads `nightshift status --json` on opening, every 60 seconds while the
 page is visible and active, and on return to the foreground. **Refresh Factory**
 requests a read too. The server shares reads and caches them for 15 seconds;
 an action invalidates that cache. A failed read keeps the last good list marked
 stale with an error. If no list has loaded yet, it shows an error rather than
 claiming there are no runs.
 
-### `specloop act`
+### `nightshift act`
 
 The page uses the same narrow command available to other interfaces:
 
 ```sh
-uv run specloop status --json
-uv run specloop act <change> <verb> [--note TEXT] --json
-uv run specloop act example-change resume --note "Use the revised acceptance criteria" --json
+uv run nightshift status --json
+uv run nightshift act <change> <verb> [--note TEXT] --json
+uv run nightshift act example-change resume --note "Use the revised acceptance criteria" --json
 ```
 
 The verbs are `resume`, `accept`, `publish`, `finish` and `abort`. Each paused
@@ -74,7 +74,7 @@ applying the matching command. It refuses an unknown change, an unavailable
 verb, a note over 2,000 characters or a busy lock. A stale page or duplicate
 request therefore cannot repeat an action after its pause has gone. Resume
 and Accept behave as with `--no-run`: `act` never drives the build itself, so
-`specloop serve` must be running to continue automatically.
+`nightshift serve` must be running to continue automatically.
 
 With `--json`, the outcome has `version: 1`, `outcome` (`done` or `refused`),
 `verb` and a human-readable `detail`. Exit status is 0 for done and 1 for
@@ -84,11 +84,11 @@ refused. For example:
 {"version":1,"outcome":"done","verb":"resume","detail":"resume completed for example-change"}
 ```
 
-Confirmation belongs to the Paseo page: direct `specloop act` calls do not
+Confirmation belongs to the Paseo page: direct `nightshift act` calls do not
 prompt before publishing or finishing. Callers must obtain confirmation
 before invoking either GitHub-pushing action.
 
-The Factory server runs the fixed host checkout's `uv run --no-sync specloop`
+The Factory server runs the fixed host checkout's `uv run --no-sync nightshift`
 with an argument array, never a shell. It accepts only a change in the last
 good status and a verb in that run's action list; specloop rechecks the live
 state. Notes are passed as literal arguments. Only validated display fields
@@ -112,7 +112,12 @@ back and reloading again.
 
 ## Development
 
+Use a separate build copy from the repository root so installation leaves source untouched:
+
 ```sh
+mkdir -p build/plugin
+cp -R plugins/nightshift/. build/plugin/
+cd build/plugin
 npm ci --ignore-scripts
 npm run typecheck
 npm test
@@ -192,9 +197,9 @@ after a minute. Reopened historical items therefore appear on a later historical
 check, not necessarily the next minute. Large backlogs need multiple refreshes.
 Checks deferred by the work/time limit retain their prior state and show stale.
 
-The server calls the configured uv executable with `run --no-sync nightshift
-attention --json` in the configured checkout, using literal argv without a
-shell. RPC input is only a refresh boolean.
+The server invokes `uv run --no-sync nightshift attention --json` through the
+configured uv executable in the configured checkout, using literal argv without
+a shell. RPC input is only a refresh boolean.
 It accepts CLI exit 1 as a valid stale-data response. Timeouts, malformed output
 and transport errors retain the last list with an error. Limits: 15 seconds for
 a cache read, 60 seconds for GitHub refresh, 2 MiB for command output. A missing

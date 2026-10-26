@@ -45,7 +45,7 @@ manifest = "~/.config/specloop/manifests/sample-sandbox.toml"
 # engine = "specloop"  # optional: omission selects the same engine
 base = "main"
 # Historical clone-path compatibility; the manifest's run.repo selects the
-# specloop checkout. Omitted dir retains ~/Projects/<repo-name> for utilities.
+# build checkout. Omitted dir retains ~/Projects/<repo-name> for utilities.
 # dir = "~/Projects/nightshift-clones/sample"
 
 # Relative manifest paths resolve beside config.toml; ~ expands. Loading does
@@ -63,10 +63,10 @@ base = "main"
 # env file, worker OAuth, GH_TOKEN and gh/claude/pnpm/node/git/swift before Python
 # starts; service rollout needs separate host checks (see docs/specloop/README.md).
 # Make specloop available on the daemon's PATH and run its separate supervisor
-# (specloop serve). Pausing or stopping the daemon does not stop admitted builds.
-# nightshift status omits worker sessions, working counts and the off-subscription
+# (`nightshift serve`). Pausing or stopping the daemon does not stop admitted builds.
+# `nightshift daemon status` omits worker sessions, working counts and the off-subscription
 # model report; all other status output remains unchanged. Historical outcomes
-# remain available through nightshift attention.
+# remain available through `nightshift attention`.
 #
 # Label flow: spec:draft (or agent:ready) on an issue -> draft PR with spec:review
 # -> human adds spec:approved on the PR -> admitted build -> publish to SAME PR
@@ -80,7 +80,7 @@ base = "main"
 # and reapply spec:draft or agent:ready. Removing needs-human alone does not
 # requeue the issue. A refused admission removes spec:approved; resolve it,
 # remove needs-human and reapply spec:approved on the PR.
-# nightshift attention lists human pauses; unreadable status retains STALE data.
+# `nightshift attention` lists human pauses; unreadable status retains STALE data.
 #
 # Optional [[prepare]] belongs in the MANIFEST, not this daemon config:
 #   [vars]
@@ -113,7 +113,7 @@ base = "main"
 # that file (chmod 600) is already where the OAuth and GitHub tokens live, so
 # there is one file to audit and one to rotate. The env var wins if both are
 # set. Unconfigured is a silent no-op, so an unattended night runs and tells
-# you nothing; `nightshift status` says whether alerting is live.
+# you nothing; `nightshift daemon status` says whether alerting is live.
 slack_webhook = ""
 
 [labels]

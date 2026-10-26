@@ -130,6 +130,7 @@ def test_portability_documentation_links_resolve(path):
 @pytest.mark.scenario(
     "specloop-documentation/host-portability-guidance/frozen-service-wrappers-remain-explicit"
 )
+@pytest.mark.scenario("specloop-documentation/safe-migration-guidance/frozen-inventories-match-the-parser")
 def test_fixed_bootstrap_commands_and_guarded_rollout_are_explicit():
     limits = read("KNOWN-LIMITATIONS.md")
     wrapper = read("bin/nightshift-daemon")
