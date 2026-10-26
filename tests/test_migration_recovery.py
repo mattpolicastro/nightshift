@@ -84,6 +84,72 @@ def test_state_migrates_once_and_leaves_a_marker(tmp_path, roots, monkeypatch, e
         pass  # Completion also releases the pending-journal write barrier.
 
 
+@pytest.mark.scenario("state-migration/journaled-completion/state-migrates-once-and-leaves-a-marker")
+def test_migration_creates_missing_destination_ancestors(tmp_path, monkeypatch):
+    source = state.legacy_root()
+    destination = tmp_path / "new" / "nested" / "canonical"
+    monkeypatch.setenv("NIGHTSHIFT_STATE_ROOT", str(destination))
+    old = source / "proposals/example"
+    old.mkdir(parents=True)
+    (old / "spec.md").write_text("draft evidence")
+    inode = old.stat().st_ino
+    assert not destination.parent.exists()
+
+    result = child()
+    assert result.returncode == 0, result.stderr
+    new = destination / "drafts/example"
+    assert old.readlink() == new
+    assert new.stat().st_ino == inode
+    assert (new / "spec.md").read_text() == "draft evidence"
+    assert json.loads((source / migrate.MARKER).read_text())["completed"] is True
+    assert not state_locks.journal_path().exists()
+    before = snapshot((source, destination))
+    assert child().returncode == 0
+    assert snapshot((source, destination)) == before
+
+
+@pytest.mark.parametrize("field", ["device", "inode"])
+@pytest.mark.parametrize("value", [0, 1, -1, False])
+def test_journal_identity_accepts_nonnegative_integers(roots, field, value):
+    source, destination = roots
+    with migrate.preflight() as intent:
+        # Exercise the serialized identity boundary independently of whichever
+        # device/inode numbers the host filesystem assigns to this fixture.
+        intent["entries"][0][field] = value
+        journal = state_locks.journal_path()
+        journal.write_text(json.dumps(intent))
+        if type(value) is int and value >= 0:
+            assert migrate._intent(source, destination) == intent
+        else:
+            with pytest.raises(migrate.Refusal, match="Invalid migration journal"):
+                migrate._intent(source, destination)
+
+
+@pytest.mark.scenario("state-migration/journaled-completion/ambiguous-recovery-refuses")
+@pytest.mark.parametrize("damage", ["completed-false", "completed-missing", "unlinked-entry"])
+def test_invalid_marker_refuses_without_leftover_journal(roots, damage):
+    source, destination = roots
+    assert child().returncode == 0
+    journal, marker = state_locks.journal_path(), source / migrate.MARKER
+    assert not journal.exists()
+    document = json.loads(marker.read_text())
+    if damage == "completed-false":
+        document["completed"] = False
+    elif damage == "completed-missing":
+        del document["completed"]
+    else:
+        document["entries"][0]["phase"] = "moved"
+    marker.write_text(json.dumps(document))
+    marker_bytes, before = marker.read_bytes(), snapshot((source, destination))
+
+    result = child()
+    assert result.returncode == 1
+    assert "Invalid migration marker" in result.stderr
+    assert marker.read_bytes() == marker_bytes
+    assert snapshot((source, destination)) == before
+    assert not journal.exists()
+
+
 @pytest.mark.scenario("state-migration/journaled-completion/interrupted-transitions-resume")
 @pytest.mark.parametrize("relative,mapped", [("runs/a", "runs/a"),
                                            ("proposals/owner__repo", "drafts/owner__repo")])
