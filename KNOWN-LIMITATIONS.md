@@ -37,6 +37,22 @@ None of these follow-ups establishes live validation or a completed host rollout
 
 ## Open gaps
 
+- **Codex session scratch:** cleanup now attempts to remove disposable
+  `<stem>.tmp` at adapter finalization after the existing runner returns or
+  setup/spawning/result interpretation raises
+  ([issue #116](https://github.com/mattpolicastro/nightshift/issues/116)).
+  Transcripts, schema/output JSON, seals, receipts, reviews and verify build
+  directories remain under existing retention policies. Removal failures append
+  `session_tmpdir_cleanup_failed` events to session `<stem>.stderr`; neither
+  cleanup nor diagnostic-write failure changes the original result or exception,
+  and an unwritable sink can leave no durable event. There is no confirmed
+  process-group exit: surviving descendants may race removal, cause failure or
+  recreate scratch. Runner timeout handling and Claude behavior are unchanged.
+  Historical leftovers are not swept; harness SIGKILL and host failure can
+  bypass finalization. After the first updated build, inspection of one finished
+  real Codex attempt remains a pending human check: record its path/outcome,
+  confirm scratch absence, inspect stderr and confirm the retained evidence and
+  verify builds. Automated fixtures cannot establish live-host cleanup.
 - **Revision recovery limits:** keyed build revisions now recover the same
   logical round across tested process-crash windows, including a commit before
   wrapper result persistence ([issue #7](https://github.com/mattpolicastro/nightshift/issues/7)).
