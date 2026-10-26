@@ -77,6 +77,7 @@ class Manifest:
     mutation_skip: tuple[str, ...] = ()  # literal, case-sensitive whole-line exclusions
     mutation_step: tuple[Step, ...] = ()
     mutation_routes: tuple[MutationRoute, ...] = ()
+    auth_targets: tuple[str, ...] = ()  # all profiles, including unused and fallback logins
 
 
 def _path(s: str) -> Path:
@@ -189,6 +190,7 @@ def parse(data: dict, roles_override: dict[str, str] | None = None) -> Manifest:
         coverage_step=_coverage_step(data.get("coverage", {}), verify),
         coverage_exempt=dict(data.get("coverage", {}).get("exempt", {})),
         chains=chains,
+        auth_targets=tuple(p.auth for p in profiles.values() if p.auth),
         **_gates(data.get("gates", {}), verify + mutation_step),
         drills=tuple(dict(d) for d in data.get("drill", [])),
     )

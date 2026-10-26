@@ -63,7 +63,8 @@ assert not Path("visited").exists()
 Path("visited").touch()
 '''), timeout=120)
     later = manifest.Step("later", (sys.executable, "-c", "print('later')"), timeout=120)
-    m = manifest.Manifest(repo, "change", "main", "main", "", {"kept": "value"},
+    m = manifest.Manifest(repo, "change", "main", "main", "",
+                          {"kept": manifest.Profile("value", "codex", "m")},
                           ("**",), (), (inspect, test, later), prepare=(prepare,),
                           mutation_steps=("inspect", "test", "later"), mutation_parallel=1)
     calls = []
