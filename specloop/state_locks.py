@@ -1,4 +1,4 @@
-"""Stable supervisor exclusion, shared by serve and future migration startup.
+"""Stable supervisor and writer exclusion, shared by serve and migration.
 
 Lock order is serve, migration coordination, then run locks. Never unlink or
 relocate serve.lock. Pass the yielded ownership token to nested startup work;
@@ -15,6 +15,47 @@ from pathlib import Path
 from typing import IO, Iterator
 
 from specloop import state
+
+
+class MigrationBusy(state.Busy):
+    """State ownership or pending recovery prevents an ordinary write."""
+
+
+def journal_path() -> Path:
+    return state.state_root() / ".specloop-migration-v1.json"
+
+
+@contextmanager
+def coordination(*, exclusive: bool = False) -> Iterator[None]:
+    """Stable shared writer / exclusive migration ownership; never unlink it."""
+    path = state.legacy_root() / ".migration.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        try:
+            fcntl.flock(handle, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise MigrationBusy(f"State writers or migration are active at {path}; stop/pause writers and retry") from exc
+        yield
+
+
+@contextmanager
+def writer() -> Iterator[None]:
+    """Enter before resolving run/draft/home paths; retain through all writes.
+
+    Shared acquisitions may nest, including agent calls inside a driver.
+    Checking intent under ownership closes the path-resolution/migration race.
+    """
+    with coordination():
+        path = journal_path()
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise MigrationBusy(f"Cannot inspect migration journal at {path}; run nightshift migrate before writing") from exc
+        else:
+            raise MigrationBusy(f"Pending migration journal at {path}; run nightshift migrate to recover before writing")
+        yield
 
 
 class SupervisorBusy(RuntimeError):

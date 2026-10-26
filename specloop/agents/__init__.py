@@ -21,6 +21,7 @@ from pathlib import Path
 
 from nightshift.host_paths import tool_path
 from specloop.manifest import Profile
+from specloop.state_locks import writer
 
 
 @dataclass
@@ -128,6 +129,7 @@ def validate(output, schema: dict) -> str | None:
     return check(output, schema, "$")
 
 
+@writer()
 def run(call: Call) -> Result:
     from specloop.agents import claude, codex
 

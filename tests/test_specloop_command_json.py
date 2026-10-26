@@ -176,7 +176,7 @@ def test_cli_draft_replacement_preserves_daemon_evidence(template, monkeypatch, 
 @pytest.mark.parametrize("entry", [main, cli.main], ids=["nightshift", "specloop"])
 @pytest.mark.parametrize("unsafe", ["legacy", "daemon-link"])
 def test_cli_unsafe_draft_refuses_without_touching_evidence(template, monkeypatch, capfd, entry, unsafe):
-    from specloop import propose
+    from specloop import propose, state_locks
     from test_specloop_propose import draft_evidence_snapshot
 
     path, _ = template
@@ -192,6 +192,10 @@ def test_cli_unsafe_draft_refuses_without_touching_evidence(template, monkeypatc
         (out / "retained").write_text("canonical workspace")
     else:
         out.symlink_to(directory.parent.parent)
+    # Initialize the stable coordination inode before snapshotting; even a
+    # refused writer acquires it, while all draft/receipt evidence must survive.
+    with state_locks.writer():
+        pass
     roots = (state.state_root(), state.legacy_root())
     before = [draft_evidence_snapshot(root) for root in roots]
     monkeypatch.setattr(propose, "start_commit", lambda *a: pytest.fail("Git ran before refusal"))

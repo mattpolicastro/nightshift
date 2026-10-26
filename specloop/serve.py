@@ -28,7 +28,7 @@ from pathlib import Path
 
 from specloop import messages, state
 from specloop.state import Run
-from specloop.state_locks import ServeLock, SupervisorBusy, serve_lock
+from specloop.state_locks import MigrationBusy, ServeLock, SupervisorBusy, serve_lock, writer
 
 AUTO_RESUME = {"usage_limit": None, "infra": 2}  # reason -> max lifts per task (None: unlimited)
 
@@ -116,6 +116,7 @@ class Drivers:
         return sorted(self.procs)
 
 
+@writer()
 def pass_once(notify, spawn=None, drivers: Drivers | None = None, limit: int = 1) -> list[str]:
     """One sweep: lift due pauses everywhere, start a driver for each running
     change nobody is driving, up to `limit` alive at once. Returns the changes
@@ -145,7 +146,7 @@ def serve(poll: float, notify, once: bool = False) -> int:
     try:
         with serve_lock() as owned:
             return _serve_owned(poll, notify, once, owned)
-    except SupervisorBusy as exc:
+    except (SupervisorBusy, MigrationBusy) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 

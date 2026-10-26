@@ -19,6 +19,7 @@ from urllib.parse import quote
 from specloop import feasibility, loop, manifest, messages, openspec, tasks, verify
 from specloop.seal import git
 from specloop.state import SAFE_CHANGE, Busy, Run, TaskState, iter_run_dirs, proposals_dir, run_dir
+from specloop.state_locks import MigrationBusy, writer
 
 DEFAULT_ENV = Path.home() / ".config" / "specloop" / "env"
 
@@ -1111,8 +1112,24 @@ def dispatch(args) -> int:
     command = {"admit": admit, "run": run_cmd, "status": status, "act": act, "resume": resume, "revise": revise,
             "accept": accept, "waive": waive, "abort": abort, "publish": publish, "finish": finish,
             "serve": serve_cmd, "propose": propose, "drill": drill_cmd, "pause": pause_cmd}[args.cmd]
+    def execute():
+        if args.cmd in ("status", "serve"):
+            return command(args)
+        # Own coordination before handlers resolve any run, draft or agent home.
+        with writer():
+            return command(args)
+
     if args.cmd not in ("admit", "propose", "revise", "publish") or not args.json:
-        return command(args)
+        try:
+            return execute()
+        except MigrationBusy as exc:
+            if getattr(args, "json", False):
+                document = ({"version": 1, "outcome": "refused", "verb": args.verb, "detail": str(exc)}
+                            if args.cmd == "act" else {"version": 1, "error": str(exc)})
+                print(json.dumps(document))
+            else:
+                print(str(exc), file=sys.stderr)
+            return 1
     if args.cmd == "propose":
         args.document = {"version": 1, "outcome": "rejected", "branch": "", "commit": "",
                          "questions": [], "contradictions": [], "risks": [], "problems": []}
@@ -1123,7 +1140,7 @@ def dispatch(args) -> int:
     # Notifications and progress remain visible without contaminating stdout.
     with _diagnostics_to_stderr():
         try:
-            code = command(args)
+            code = execute()
         except Exception as e:
             if args.cmd == "publish" or isinstance(e, Busy):
                 # An interrupted push is retryable, not a domain refusal that
