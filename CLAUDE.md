@@ -9,7 +9,12 @@ requests. It has three parts:
 It runs on macOS under launchd. **Merge is always human.**
 
 Read `docs/specloop/README.md` before engine work, and `KNOWN-LIMITATIONS.md`
-for what is open. Every enrolled repository runs the `specloop` engine. The
+for what is open. Every enrolled repository runs the `specloop` engine.
+Since #40 one CLI drives both halves: `nightshift <verb> <change>` for builds
+and `nightshift daemon status|pause|resume` for the front door; bare
+`nightshift run` still starts the daemon for the frozen wrapper, and
+`specloop` is a one-release alias. Build state lives in `~/.nightshift`
+(`runs/`, `drafts/`, `homes/`); `~/.specloop` keeps compatibility links. The
 original `worker` engine, which ran headless Claude Code sessions on
 `agent:ready` issues, was retired in #16 (2026-10-25); its history lives in the
 vault, not here.
@@ -55,7 +60,7 @@ skipped, and anything unrecognised fails fast, so a 404 is never retried into
 silence.
 
 **The daemon keeps a heartbeat** at `~/.nightshift/heartbeat.json`, written
-every poll and removed on a clean exit. `nightshift status` reads it, so the
+every poll and removed on a clean exit. `nightshift daemon status` reads it, so the
 first line tells you `running` / `WEDGED` / `DEAD` / `not running` rather than
 reporting the queue and leaving liveness to `ps`. A file whose pid is gone is
 the crash signal, and the next start announces it — that is the only way a
