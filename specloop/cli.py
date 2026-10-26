@@ -1022,6 +1022,12 @@ def argument_parser_class(json_errors=False):
     return ArgumentParser
 
 
+def migrate_cmd(args) -> int:
+    from specloop.migrate import migrate
+
+    return migrate()
+
+
 def add_build_parsers(sub, *, optional_run=False):
     """Register build syntax without loading configuration or run state."""
     a = sub.add_parser("admit")
@@ -1090,6 +1096,7 @@ def add_build_parsers(sub, *, optional_run=False):
     sv = sub.add_parser("serve")
     sv.add_argument("--poll", type=float, default=60)
     sv.add_argument("--once", action="store_true")
+    sub.add_parser("migrate", help="relocate legacy state without scheduling runs")
     return r
 
 
@@ -1111,9 +1118,9 @@ def dispatch(args) -> int:
     """Execute a parsed build command with its existing output contract."""
     command = {"admit": admit, "run": run_cmd, "status": status, "act": act, "resume": resume, "revise": revise,
             "accept": accept, "waive": waive, "abort": abort, "publish": publish, "finish": finish,
-            "serve": serve_cmd, "propose": propose, "drill": drill_cmd, "pause": pause_cmd}[args.cmd]
+            "serve": serve_cmd, "migrate": migrate_cmd, "propose": propose, "drill": drill_cmd, "pause": pause_cmd}[args.cmd]
     def execute():
-        if args.cmd in ("status", "serve"):
+        if args.cmd in ("status", "serve", "migrate"):
             return command(args)
         # Own coordination before handlers resolve any run, draft or agent home.
         with writer():

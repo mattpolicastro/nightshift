@@ -132,9 +132,10 @@ def process_case(build_setup, tmp_path, monkeypatch, request):
         old = case.run.dir
         identity, lock_inode = old.stat().st_ino, (old / 'lock').stat().st_ino
         before = {p.relative_to(old): data for p, data in run_snapshot(case).items()}
-        # Use the staged helper directly: startup activation is a separate task.
+        # Exercise public activation while retaining both provenance probes.
         result = subprocess.run(
-            [sys.executable, '-c', PROVENANCE + '\nassert migrate.migrate() == 0\n' + PROVENANCE],
+            [sys.executable, '-c', PROVENANCE +
+             '\nfrom nightshift.cli import main\nassert main(["migrate"]) == 0\n' + PROVENANCE],
             cwd=SOURCE, env=env, capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stderr
         case.run = Run.for_change(CHANGE, require_existing=True)

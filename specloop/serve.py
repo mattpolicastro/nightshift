@@ -26,7 +26,7 @@ import sys
 import time
 from pathlib import Path
 
-from specloop import messages, state
+from specloop import messages, migrate, state
 from specloop.state import Run
 from specloop.state_locks import MigrationBusy, ServeLock, SupervisorBusy, serve_lock, writer
 
@@ -152,7 +152,8 @@ def serve(poll: float, notify, once: bool = False) -> int:
 
 
 def _serve_owned(poll: float, notify, once: bool, owned: ServeLock) -> int:
-    # Future startup migration can borrow owned before any scheduling begins.
+    if migrate.migrate(owned) != 0:
+        return 1
     started = time.time()
     for pid in owned.dead_pids:
         notify(messages.Message(messages.ACTION, "supervisor", "Check the log: the specloop supervisor crashed",

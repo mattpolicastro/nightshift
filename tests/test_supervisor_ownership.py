@@ -192,7 +192,7 @@ def line(proc, expected):
 def test_subprocess_lifetime(module, exit_kind):
     daemon.beat(time.time())
     daemon_bytes = daemon.HEARTBEAT_FILE.read_bytes()
-    # Legacy entries must stay put: supervisor ownership does not activate relocation.
+    # Startup relocates entries before the first scheduling pass.
     entry = state.legacy_root() / "homes" / "fixture"
     entry.mkdir(parents=True)
     (entry / "sentinel").write_bytes(b"preserved")
@@ -233,8 +233,9 @@ def test_subprocess_lifetime(module, exit_kind):
         assert daemon.HEARTBEAT_FILE.read_bytes() == daemon_bytes
         assert daemon.heartbeat().alive
         assert (entry / "sentinel").read_bytes() == b"preserved"
-        assert not (state.state_root() / "homes").exists()
-        assert not (state.legacy_root() / ".migrated-to-nightshift-v1.json").exists()
+        assert entry.is_symlink()
+        assert entry.readlink() == state.state_root() / "homes" / "fixture"
+        assert (state.legacy_root() / ".migrated-to-nightshift-v1.json").exists()
     finally:
         if proc.poll() is None:
             proc.kill()
