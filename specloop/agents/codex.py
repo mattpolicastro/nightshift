@@ -11,6 +11,8 @@ memories, multi-agent, goals and image tools from the session.
 import json
 import os
 import re
+import shutil
+import stat
 from pathlib import Path
 
 from specloop.agents import Call, Result, base_env, read_jsonl, spawn
@@ -64,6 +66,37 @@ def argv(call: Call, schema_path: Path, out_path: Path) -> list[str]:
     return a + ["--output-schema", str(schema_path), "--json", "-o", str(out_path), "-C", str(call.cwd), "-"]
 
 
+def _remove_session_tmpdir(tmp: Path) -> None:
+    """Use stdlib traversal; repair only an unlink/rmdir's confined parent."""
+    if not shutil.rmtree.avoids_symlink_attacks:
+        raise RuntimeError("symlink-resistant rmtree is unavailable")
+
+    def repair(function, path, error):
+        if isinstance(error, FileNotFoundError) and Path(path) == tmp:
+            try:
+                tmp.lstat()  # A dangling root link still exists; do not follow it.
+            except FileNotFoundError:
+                return
+        relative = Path(path).relative_to(tmp)
+        if (not isinstance(error, PermissionError) or function not in (os.unlink, os.rmdir)
+                or not relative.parts or ".." in relative.parts):
+            raise error
+        # Open every component without following links, including a replaced root.
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        fd = os.open(tmp, flags)
+        try:
+            for part in relative.parts[:-1]:
+                child = os.open(part, flags, dir_fd=fd)
+                os.close(fd)
+                fd = child
+            os.fchmod(fd, stat.S_IMODE(os.fstat(fd).st_mode) | stat.S_IWUSR)
+            function(relative.name, dir_fd=fd)  # One retry, still relative to the safe fd.
+        finally:
+            os.close(fd)
+
+    shutil.rmtree(tmp, onexc=repair)
+
+
 def run(call: Call) -> Result:
     d = call.transcript.parent
     d.mkdir(parents=True, exist_ok=True)
@@ -73,32 +106,49 @@ def run(call: Call) -> Result:
     # Compilers need a writable temp dir; /tmp stays shut, so each session gets
     # a private one as $TMPDIR, which workspace-write leaves writable.
     tmp = d / f"{call.transcript.stem}.tmp"
-    tmp.mkdir(exist_ok=True)
-    env = base_env("CODEX_HOME", _home(call), TMPDIR=str(tmp))
-    code, timeout = spawn(argv(call, schema_path, out_path), env, call, stdin=call.prompt)
-
-    session, errors, usage = "", [], {}
-    diagnostics: list[str] = []
-    for e in read_jsonl(call.transcript):
-        if e.get("type") == "thread.started":
-            session = e.get("thread_id", "")
-        elif e.get("type") in ("error", "turn.failed"):
-            errors.append(json.dumps(e)[:500])
-            error = e.get("error")
-            # Match decoded messages: JSON escaping hides boundaries after newlines.
-            diagnostics.extend(value for value in (e.get("message"),
-                error.get("message") if isinstance(error, dict) else error) if isinstance(value, str))
-        elif e.get("type") == "turn.completed":
-            usage = e.get("usage", {})
-    stderr = call.transcript.with_suffix(".stderr").read_text(errors="replace")[-2000:]
-    if timeout:
-        return Result("infra", session=session, detail=timeout, usage=usage)
-    if code != 0:
-        text = " ".join(errors) + stderr
-        diagnostic = "\n".join([*diagnostics, stderr])
-        kind = "usage_limit" if USAGE.search(text) else "unavailable" if UNAVAILABLE.search(diagnostic) else "infra"
-        return Result(kind, session=session, detail=f"exit {code}: {text[-600:]}", usage=usage)
     try:
-        return Result("ok", json.loads(out_path.read_text()), session, usage=usage)
-    except (OSError, json.JSONDecodeError) as e:
-        return Result("invalid_output", session=session, detail=f"final message is not JSON: {e}", usage=usage)
+        tmp.mkdir(exist_ok=True)
+        env = base_env("CODEX_HOME", _home(call), TMPDIR=str(tmp))
+        code, timeout = spawn(argv(call, schema_path, out_path), env, call, stdin=call.prompt)
+
+        session, errors, usage = "", [], {}
+        diagnostics: list[str] = []
+        for e in read_jsonl(call.transcript):
+            if e.get("type") == "thread.started":
+                session = e.get("thread_id", "")
+            elif e.get("type") in ("error", "turn.failed"):
+                errors.append(json.dumps(e)[:500])
+                error = e.get("error")
+                # Match decoded messages: JSON escaping hides boundaries after newlines.
+                diagnostics.extend(value for value in (e.get("message"),
+                    error.get("message") if isinstance(error, dict) else error) if isinstance(value, str))
+            elif e.get("type") == "turn.completed":
+                usage = e.get("usage", {})
+        stderr = call.transcript.with_suffix(".stderr").read_text(errors="replace")[-2000:]
+        if timeout:
+            return Result("infra", session=session, detail=timeout, usage=usage)
+        if code != 0:
+            text = " ".join(errors) + stderr
+            diagnostic = "\n".join([*diagnostics, stderr])
+            kind = "usage_limit" if USAGE.search(text) else "unavailable" if UNAVAILABLE.search(diagnostic) else "infra"
+            return Result(kind, session=session, detail=f"exit {code}: {text[-600:]}", usage=usage)
+        try:
+            return Result("ok", json.loads(out_path.read_text()), session, usage=usage)
+        except (OSError, json.JSONDecodeError) as e:
+            return Result("invalid_output", session=session, detail=f"final message is not JSON: {e}", usage=usage)
+    finally:
+        try:
+            _remove_session_tmpdir(tmp)
+        except Exception as error:
+            # Classification above must finish before these diagnostics enter stderr.
+            try:
+                event = {"event": "session_tmpdir_cleanup_failed", "tmpdir": str(tmp),
+                         "error_type": type(error).__name__, "errno": getattr(error, "errno", None)}
+                with call.transcript.with_suffix(".stderr").open("a+b") as stream:
+                    if stream.tell():
+                        stream.seek(-1, os.SEEK_END)
+                        if stream.read(1) != b"\n":
+                            stream.write(b"\n")
+                    stream.write(json.dumps(event).encode() + b"\n")
+            except Exception:
+                pass  # Evidence may be unwritable; preserve the original outcome.
