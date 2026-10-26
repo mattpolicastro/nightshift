@@ -12,7 +12,7 @@ The plugin README and engine guide SHALL describe Land as a separate confirmed a
 - **WHEN** the operator reads the Factory action table and engine guide's status-verbs passage
 - **THEN** both distinguish Finish from Land, explain human-check confirmation and head/pause binding, and show that Land invokes existing landing as a background job while Finish alone does not merge
 - **THEN** results/refusals stay in view, stale confirmation requires another review, and recovery after finish uses standalone landing without offering Land for done runs
-- **THEN** the plugin's general no-merge-operation claim is updated to describe this explicit operator action
+- **THEN** the plugin's general no-merge-operation claim is updated to describe this explicit operator action, and its standalone gateway is distinguished from the unchanged canonical CLI
 
 ### Requirement: Landing hold recovery
 
@@ -39,6 +39,6 @@ Documentation tests SHALL verify the landing guidance's structure, executable co
 
 #### Scenario: Examples describe executable behavior
 - **WHEN** root Python documentation tests inspect the four updated documents
-- **THEN** uniquely identified headings/tables and enumerated command examples parse against the real CLI without live effects, example receipts distinguish intake from landing, and relative links resolve
-- **THEN** headings match `^#{1,6} +\S`, tables use physical pipe rows, and whole-line or isolated single-backtick commands count wherever they occur; fences, HTML and indentation receive no semantic parsing
+- **THEN** uniquely identified headings/tables and enumerated operator command examples parse against the existing canonical or standalone land parser without live effects, example receipts distinguish intake from landing, and relative links resolve
+- **THEN** headings match `^#{1,6} +\S`, tables use physical pipe rows, and whole-line or isolated single-backtick commands matching the existing command-prefix rule count wherever they occur; fences, HTML and indentation receive no semantic parsing
 - **THEN** unmatched command backticks, unknown placeholders, continuations or ambiguous structure block the check, and no existing assertion is weakened

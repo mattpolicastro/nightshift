@@ -96,9 +96,9 @@ Landing stop SHALL use a dedicated wrapper-command verifier and escalation adapt
 
 #### Scenario: Stop verifies each job kind
 - **WHEN** executable fixtures stop real intake and landing wrapper groups with descendants, including a TERM-resistant member
-- **THEN** each adapter checks its own module command and exact directory, start identity and session, applies the existing 5-second TERM and 1-second KILL bounds, and confirms stopped only after execution ends
+- **THEN** the intake adapter checks its unchanged module command and the landing adapter checks its independently resolved trusted worker script path, each with the exact directory, start identity and session, applies the existing 5-second TERM and 1-second KILL bounds, and confirms stopped only after execution ends
 - **THEN** unrelated processes and the caller survive; wrong wrapper kinds, altered paths, reused identities and unavailable ownership refuse without unsafe signals
-- **THEN** escalation rechecks the correct wrapper or previously witnessed surviving group members instead of calling the intake-only verifier for landing
+- **THEN** escalation rechecks the correct wrapper or previously witnessed surviving group members instead of calling the intake-only verifier for landing; neither control adapter imports or launches the worker
 
 #### Scenario: Cancellation wins or preserves completion
 - **WHEN** durable stop intent races with landing progress or result persistence

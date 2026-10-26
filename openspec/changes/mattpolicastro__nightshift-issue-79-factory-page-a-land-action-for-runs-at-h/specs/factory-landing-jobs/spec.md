@@ -34,17 +34,32 @@ The gateway SHALL bind each valid request UUID to its immutable confirmed payloa
 
 ### Requirement: Gateway command contract
 
-The canonical CLI SHALL expose bounded landing status, request resolution and confirmed start commands with singular version-1 JSON outcomes and literal arguments. New admissions SHALL require checks_done and refuse a daemon pause or failed eligibility read before launch.
+The standalone `nightshift.factory_land` module SHALL expose bounded landing status, request resolution and confirmed start commands with singular version-1 JSON outcomes and literal arguments. New admissions SHALL require checks_done and refuse a daemon pause or failed eligibility read before launch.
 
 #### Scenario: Parse and dispatch safely
 - **WHEN** valid status, resolve and start argv or invalid identifiers, timestamps, flags and paths are supplied
 - **THEN** valid commands retain argument boundaries and return one validated document; malformed syntax exits 2 before state mutation, read success and accepted replay exit 0, and admission refusal exits 1 with its reason
-- **THEN** existing canonical and alias CLI behavior remains unchanged and no client can supply executable, cwd or arbitrary command options
+- **THEN** existing canonical and alias CLI behavior remains unchanged, neither registers nor forwards the gateway, and no client can supply executable, cwd or arbitrary command options
 
 #### Scenario: Pause blocks only new work
 - **WHEN** the daemon pause file exists before a new admission or worker startup, or a fresh eligibility read fails
 - **THEN** new execution refuses with a retained reason, while read-only status and matching UUID replay remain available
 - **THEN** a worker already past startup may complete while paused, and reading its result does not deliver or launch anything
+
+### Requirement: Operator execution isolation
+
+Factory SHALL invoke the standalone gateway directly, which alone launches the plugin worker script. Shared job control SHALL inspect and control landing records without importing or launching either entry point or landing. The existing daemon/supervisor dependency checker and assertions SHALL remain unchanged.
+
+#### Scenario: Shared controls cannot execute landing
+- **WHEN** the unchanged dependency checker traverses daemon and supervisor modules, and jobs list, stop, release or daemon status observes landing evidence
+- **THEN** the control-only record helper is reachable but the gateway and landing module are not; shared code neither imports nor launches the plugin worker
+- **THEN** literal script identity used in process verification grants no execution authority, and command spies observe only permitted inspection/control operations
+- **THEN** no lazy/computed imports, reflective dispatch, renamed landing implementation or checker exclusions conceal an execution dependency
+
+#### Scenario: Plugin starts the isolated entry point
+- **WHEN** a confirmed plugin submission uses trusted host settings with spaces in paths
+- **THEN** the gateway executor invokes configured uv with literal `run --no-sync python -m nightshift.factory_land` argv and configured cwd, and only accepted admission launches the fixed plugin worker script through the current interpreter
+- **THEN** ordinary Factory status/act still use their existing canonical CLI executor, and missing or inconsistent worker installations fail without redirecting execution
 
 ### Requirement: Durable detached launch
 

@@ -44,7 +44,7 @@ The plugin SHALL expose separate landing read and submit RPCs using validated di
 #### Scenario: Submission is bounded and replayable
 - **WHEN** a confirmed request, a forged new offer, an unknown change, an altered UUID payload or an uncertain submission retry reaches the server
 - **THEN** only a matching new displayed offer proceeds to fresh admission, durable matching UUIDs return their existing outcome even after the run changes or the server restarts, and invalid requests cannot launch work
-- **THEN** the server uses argv without a shell, a 60-second gateway limit and a 2 MiB buffer; the detached land process is not bound to the RPC lifetime
+- **THEN** the server calls the standalone gateway with argv without a shell, a 60-second gateway limit and a 2 MiB buffer; it never forwards landing through the canonical CLI, and the detached land process is not bound to the RPC lifetime
 
 #### Scenario: Independent caches retain good data
 - **WHEN** run or landing status fails after loading, or a pre-submission read completes after a newer outcome
