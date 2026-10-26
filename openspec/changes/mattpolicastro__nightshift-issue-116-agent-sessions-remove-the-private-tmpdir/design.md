@@ -2,211 +2,178 @@
 
 `specloop/agents/codex.py:run()` creates
 `call.transcript.parent / f"{call.transcript.stem}.tmp"` with
-`mkdir(exist_ok=True)` and passes it through `base_env(..., TMPDIR=str(tmp))`.
-All Codex roles use this path, including drafting outside an admitted run.
-There is no teardown today. The issue reports 546 abandoned directories and
-approximately 44 GB recovered on 2026-10-26.
+`mkdir(exist_ok=True)`, calls `_home()`, builds the environment and argv, and
+calls `spawn()`. Scratch currently survives every completed attempt.
 
-`specloop/agents/__init__.py:spawn()` launches a new POSIX session and returns
-`(code, timeout_reason)`. It waits for the direct child, sends SIGTERM on wall
-or idle timeout, and escalates after ten seconds only if that child remains.
-A leader can exit while a child in the same group still uses scratch; simply
-placing `rmtree` after `spawn()` is insufficient.
+`specloop/agents/__init__.py:spawn()` starts a new session, waits for the
+direct child and uses `killpg` on wall/idle timeout. Its handling stays
+exactly as it is. The cleanup boundary is `codex.run()` finalization, not a
+new guarantee of process-group quiescence. Review explicitly accepts a
+descendant racing cleanup after its leader exits.
 
-`Call` has no run/event sink, and `Run.event()` requires run ownership and
-state context. Inferring a run directory from a transcript would be wrong for
-drafts. Existing provider tests replace `spawn(argv, env, call, stdin=None)`
-and compare the original `Call`; preserve that interface.
-
-The root README, adapter modules, repository `CLAUDE.md` and relevant existing
-specifications were consulted. This checkout has no repository `AGENTS.md`.
-The provider-fallback, host-paths, agent-test-rules, background-job-control and
-specloop-documentation contracts remain in force. This adds scratch disposal;
-it does not change provider results, daemon stopping or retained evidence.
+The root README, engine guide, limitations, adapter code and relevant
+`openspec/specs/` contracts were consulted. No applicable `AGENTS.md` exists
+in this checkout or its ancestors. Repository `CLAUDE.md` also describes
+engine constraints. Existing `agent-test-rules`, `provider-fallback`,
+`host-paths` and `specloop-documentation` requirements remain unchanged.
+Python 3.12+ is required; review confirms symlink-resistant `rmtree` on the
+host's macOS Python 3.12 and 3.14.
 
 ## Goals / Non-Goals
 
-Goals are prompt disposal after a Codex session's group stops, permission-tolerant
-and symlink-safe removal, observable failures without outcome changes, and
-deterministic tests needing neither Codex credentials nor a live service.
+Goals: remove newly completed sessions' scratch, including after setup errors;
+handle ordinary read-only entries; preserve symlink targets, evidence and
+attempt outcomes; verify behavior offline with small tests.
 
-Non-goals are changing sandbox arguments or environment permissions, deleting
-evidence or verification trees, adding cleanup to Claude, sweeping old runs,
-tracking descendants that leave the session's process group, changing daemon
-stop behavior, or recovering after the harness/host is forcibly terminated.
+Non-goals: process inspection or additional termination, changing shared
+runner interfaces, sandbox permissions or Claude behavior, cleaning historical
+directories, deleting evidence or verify builds, and recovering from harness
+SIGKILL or host failure. There is no new cleanup sidecar or run-event API.
 
 ## Decisions
 
-### Preserve creation and the public adapter interface
+### Finalize entirely in the Codex adapter
 
-Add `session_tmpdir(call: Call) -> Path` in `specloop/agents/__init__.py` for
-the existing lexical sibling path. `codex.run()` uses it with the same
-`mkdir(exist_ok=True)` and `TMPDIR` value. Do not resolve the scratch path to
-its target, broaden creation permissions, change `argv()`, or change `Call`,
-`Result` or `spawn()` signatures. The directory remains available throughout
-the process lifetime, for both write and read sessions as currently configured.
+Keep the existing lexical temp path, `mkdir(exist_ok=True)`, `TMPDIR`, `_home`,
+`argv`, `Call`, `Result` and `spawn` interfaces. Start a `try` before temp
+directory creation and keep `_home()`, environment/argv construction,
+`spawn()` and the existing result interpretation inside it. A `finally` calls
+a small private cleanup helper in `specloop/agents/codex.py`. Handle an absent
+temp path as already cleaned. Do not return or raise from the finalizer for
+cleanup errors.
 
-The actual cleanup owner is `spawn()`'s finalization path, where the process
-handle is available. Enable the new finalization only for
-`call.profile.adapter == "codex"`. Derive the deletion target from
-`session_tmpdir(call)`, never from arbitrary environment entries or a glob.
-Default Claude behavior stays unchanged. No caller edits outside the allowed
-files are needed.
+Keeping result interpretation inside the `try` matters: the current adapter
+classifies failures from transcript and stderr text. Compute the original
+`Result` before finalization appends a diagnostic, so cleanup text mentioning
+quota or authentication cannot alter disposition or detail. A setup, spawn
+or parsing exception still propagates unchanged after cleanup. In particular,
+`_home()` raising after `mkdir` must not leak scratch.
 
-### Establish group quiescence before removal
+Success, provider error, invalid output, wall/idle timeout and signal exit use
+the same finalizer. It does not inspect groups, run `ps`, signal descendants
+or wait for group quiescence. A `spawn()` exception also triggers cleanup
+without adding process management responsibilities to the adapter.
 
-Add a private group-finalization helper in `specloop/agents/__init__.py`.
-Wrap the Codex process lifecycle, including stdin writes, in `try/finally`.
-Preserve the original return tuple or raised exception independently of
-finalization. A failed `Popen` means no group was started and scratch can be
-removed immediately; Python exceptions after process creation require group
-termination before removal.
+### Use the standard library for removal
 
-Track the PGID created by `start_new_session=True` (the child's PID). After
-leader completion, inspect that group for executing members, rather than
-using the leader's exit as proof. Use bounded `/bin/ps -axo pid=,pgid=,stat=`
-inspection, excluding zombie rows; malformed, empty or failed inspection is
-unconfirmed, never proof of exit. Refuse signalling PGID 0, 1 or the harness's
-own group. Only the group created for this invocation is eligible.
+Implement a private `_remove_session_tmpdir(tmp: Path) -> None` using
+`shutil.rmtree(tmp, onexc=...)`; `onexc` is available at the Python 3.12 minimum.
+Assert `shutil.rmtree.avoids_symlink_attacks is True` in a test. Use the standard
+implementation rather than a custom recursive walker. If safe removal is
+unavailable, report a non-fatal cleanup failure instead of selecting a
+symlink-following fallback.
 
-If members remain after normal exit, error, timeout or an externally killed
-agent, send SIGTERM and allow the existing ten-second grace period for the
-whole group; escalate to SIGKILL if members still execute even when the
-leader has exited. Reap the direct child. Allow one further second to confirm
-that no executing members remain, with inspection subprocess timeouts capped
-by the remaining deadline. Do not start a second ten-second grace period
-after the timeout path has already used it. Treat process-disappearance
-races as success after confirmation. If signalling/inspection fails or the
-group remains unconfirmed, retain scratch and record a cleanup failure;
-never delete while the group might still use it or replace the original
-result. These are adapter cleanup bounds, separate from daemon job-stop bounds.
+On a permission failure, the callback adds only `stat.S_IWUSR` to the
+containing directory and retries the failed operation once. Other errors,
+unsafe repairs and failed retries propagate to the cleanup-failure boundary.
+Do not recursively chmod files: POSIX unlink needs a writable parent, not a
+writable file. Preserve other permission bits. Restrict repair to real
+directories within scratch; never chmod a symlink target or the attempt parent.
+Use non-following directory access for permission repair (for example, an
+opened directory descriptor and `os.fchmod`), and retain non-following behavior
+on retry. Do not replace `rmtree`'s safe traversal with a path-following callback.
 
-### Confine permission repair and deletion
+Nested and dangling symlinks are removed as links. If the scratch root itself
+has become a symlink, allow `rmtree` to refuse it and report failure; never
+resolve it and delete the target. A missing scratch root is a no-op. The only
+deletion target is this session's exact path, never a glob. Neighboring evidence
+and verify trees stay intact.
 
-Add `_remove_session_tmpdir(tmp: Path) -> None` in
-`specloop/agents/__init__.py`. It removes only the named session directory;
-absence is a successful no-op. Open the trusted attempt parent once and use
-descriptor-relative, non-following operations for its scratch entry and
-descendants. A symlink at the root or anywhere below it is unlinked as a
-link, including dangling links. Never recursively visit its target.
+### Append diagnostics after determining the original outcome
 
-Use `O_DIRECTORY | O_NOFOLLOW` when opening directories, verify opened
-identity against the non-following stat, and use `fchmod` on that opened
-directory to add `stat.S_IWUSR` when needed before removing entries. Retain
-other permission bits. Read-only files can be unlinked through their writable
-parent on POSIX; do not chmod file targets or hard-linked file contents.
-Do not use shell `rm`, recursive path-based chmod, or a symlink-following
-permission-retry callback. If a safe operation or identity check is unavailable,
-fail cleanup instead of falling back to unsafe traversal. An entry swapped
-to a symlink during traversal must be unlinked or refused, never followed.
+On cleanup failure, append a JSON line to
+`call.transcript.with_suffix(".stderr")`, creating it if setup failed before
+`spawn()` opened it. Preserve existing bytes and ensure the event starts on a
+separate line. Use event name `session_tmpdir_cleanup_failed` and fields
+`tmpdir` (the lexical path), `error_type`, and `errno` (or null). This is the
+issue's recorded event; no run ledger or sidecar is needed. Success creates
+no event.
 
-### Record failure separately from attempt evidence
+Catch diagnostic-write errors as well as removal errors. Neither may change
+any original `Result` field or mask an exception already propagating. If the
+stderr sink is unwritable, durable recording cannot be guaranteed; preserving
+the original outcome still takes precedence. Do not claim that an event was
+saved then. Do not truncate provider diagnostics or modify stdout transcripts,
+output JSON, seals, receipts or reviews.
 
-Add a private best-effort event writer in `specloop/agents/__init__.py`.
-Append one JSON object per failed cleanup to
-`call.transcript.parent / f"session-cleanup.{call.transcript.stem}.jsonl"`:
+### Focused offline tests and acceptance
 
-`{"at": <epoch-seconds>, "event": "session_tmpdir_cleanup_failed", "tmpdir": <lexical-path>, "phase": "group_exit" | "remove", "error_type": <exception-class>, "errno": <number-or-null>}`
-
-The `session-cleanup.` prefix keeps new diagnostics outside protected `review*`
-names even for review sessions. Keep diagnostics structural: do not include prompt, environment, file contents
-or provider messages. Open this new sidecar without following a symlink;
-never append to the provider transcript, stderr, run ledger, outputs or review
-files. It works for both draft and admitted-run sessions without locating a
-`Run`. Successful cleanup, including an already absent path, creates no event.
-
-Catch cleanup exceptions at the finalizer boundary. If event persistence also
-fails, issue a best-effort standard Python logger warning carrying the same
-event name and structural fields, containing logger failures too. The original
-outcome always wins: no changed disposition, output, session, usage, detail,
-timeout reason, retry counters or raised exception. Complete disk/log failure
-cannot guarantee a durable event; do not turn that limitation into an attempt
-failure or claim the event was saved.
-
-### Validation and documentation
-
-Use new tests under `tests/`, plus the explicitly authorized recorder migration
-below, preserving every existing assertion. Test
-filesystem confinement with outside sentinels (bytes and modes), read-only
-nested directories/files, missing paths, root/nested/dangling symlinks and an
-injected replacement race. Test group ordering with process doubles and a
-short local Python subprocess tree whose leader exits while a child ignores
-SIGTERM; use readiness handshakes and bounded waits, with unconditional test
-teardown. No live Codex invocation or host credentials are needed.
-
-`tests/test_host_paths.py:test_agents_and_quota_process_environments` currently
-records every `subprocess.Popen` in one `launches` list, then assumes index 0
-is the agent and index 1 is `codex app-server`. Its direct `agents.spawn()`
-call uses a Codex profile, so finalization will insert `/bin/ps` before the
-quota call even though this fixture creates no session TMPDIR. Explicitly
-authorize changing this test's recorder setup and `launch` wrapper in task
-1.3, alongside the lifecycle integration that invalidates that assumption.
-
-Keep `launches` for non-inspection commands and add a separate `inspections`
-list. Classify only exact argv `['/bin/ps', '-axo', 'pid=,pgid=,stat=']` as
-inspection; record all other commands in `launches`, so unexpected launches
-remain visible. Forward every call unchanged to the saved real `Popen`.
-Add assertions that inspections occurred and that `launches` contains exactly
-the agent `['path-probe']` followed by `['codex', 'app-server']`; do not depend
-on the number of inspections. Preserve all existing assertion statements and
-scenario markers unchanged, including both exact launch environments, child
-environment values, inherited-variable/credential exclusions, `spawn()`'s
-return tuple, quota argv and the complete initialize/initialized/rateLimits
-request sequence. Do not bypass finalization, change the profile to Claude,
-stub quota replies, or loosen equality checks to make the test pass. This is
-a fixture migration preserving the host-paths and agent-test-rules contracts,
-not a change to either contract; no MODIFIED or REMOVED delta is needed.
-
-Exercise `codex.run()` through the real shared `spawn()` using a substituted
-Python argv. Include the four required test names:
+Put implementation tests in new `tests/test_session_tmpdir.py`, using isolated
+homes, filesystem fixtures and a substituted local Python command or `spawn`
+double. No Codex binary, credentials or service is needed. Parameterize related
+cases to keep code and tests together within about 300 changed lines. Include
+the required names:
 
 - `test_session_tmpdir_removed_after_success`
 - `test_session_tmpdir_removed_after_timeout` (wall and idle)
 - `test_session_tmpdir_removal_never_follows_symlinks`
 - `test_session_tmpdir_removal_failure_does_not_fail_attempt`
 
-Also cover nonzero provider exits, invalid/missing output, externally killed
-agents, spawn/stdin exceptions, unconfirmed group exit and event-write failure.
-Compare original result fields and exceptions; preserve evidence and a sibling
-verify-directory sentinel. Use scenario markers for the delta IDs. Final
-implementation acceptance includes
-`uv run pytest tests/test_host_paths.py tests/test_session_group_exit.py tests/test_session_tmpdir_removal.py tests/test_session_tmpdir_lifecycle.py`
-with real inspection launches in the migrated fixture, then `uv run pytest`, plus
-`uv run python scripts/check_types.py` without changing the frozen baseline.
+Also cover nested read-only directories/files, absent scratch, and setup
+raising after creation (at least `_home()`, with environment/argv and spawn
+seams in a shared parameterized test). The symlink test asserts the stdlib
+safety property and includes dangling and escaping links with outside sentinel
+bytes and modes unchanged; a root link is refused safely. Check writable
+scratch during the call, deletion before return/exception, unchanged
+evidence/verify sentinels, and original result fields for nonzero, signal and
+invalid-output cases. Inject persistent removal failure, including `ENOTEMPTY`
+as the deterministic descendant-race case, and stderr-write failure. Verify
+preserved provider stderr and parsed event fields, comparing complete original
+results/exceptions, including errors with quota/authentication terms. Do not
+introduce live descendant-tree management tests.
 
-Update only the run-state discussion in `docs/specloop/README.md` and a focused
-open-gap entry in `KNOWN-LIMITATIONS.md`. Explain disposable session scratch,
-the failure sidecar, unchanged retained evidence/verify directories, old
-leftovers and crash limits. Cite issue #116 without inventing an implementation
-PR. No new CLI examples or prose-matching tests are needed.
+Preserve every existing assertion and existing test file; no host-path fixture
+migration is needed. Add scenario markers for the delta IDs. Run focused tests,
+then `uv run pytest` and `uv run python scripts/check_types.py` for implementation
+acceptance, without modifying the type baseline.
 
-Human checklist for the implementation PR, not implementing-agent tasks:
+### Documentation placement and structural validation
 
-- After the first build using this change, inspect one finished real Codex
-  attempt directory. Record its path and outcome, confirm that session's
-  `<stem>.tmp` is absent, and verify transcripts, outputs, seals, receipts and
-  reviews remain. Inspect any cleanup-failure sidecar. CI cannot establish
-  this live-host result; keep it pending until observed.
-- Review the two documentation edits for readability and verify the issue link.
+Update the run-state passage in `docs/specloop/README.md` and add one focused
+entry under `KNOWN-LIMITATIONS.md`'s Open gaps. Describe disposable Codex
+scratch, diagnostics in session stderr, retained evidence/verify builds,
+accepted descendant races, historical leftovers and harness/host crash limits.
+Cite [issue #116](https://github.com/mattpolicastro/nightshift/issues/116)
+until an implementation PR is known. Add no CLI examples or artifact table.
+
+Use physical-line placement: the guide's start is the unique line beginning
+`**Run state** lives in `, and its end is the unique following line exactly
+`The guarded migration uses these build-state mappings:`. For limitations,
+use the unique exact `## Open gaps` line, stopping at the next column-zero
+`## ` line. Missing, duplicated or reversed boundaries block the edit/check;
+do not infer headings from fences, HTML or indentation. Apply these rules
+literally even if a boundary appears inside an example.
+
+New structural checks in `tests/test_session_tmpdir_docs.py` use those slices
+and physical-line inline links of the form `[label](target)` with no whitespace
+or nested parentheses in the target. Refuse malformed or ambiguous link syntax
+rather than guessing. Check local link destinations exist and issue/PR URL
+forms agree with their labels; run existing structural link and command checks
+as regression coverage. Do not require prose phrases. Meaning and readability
+remain review work.
+
+Human checklist for the implementation PR (not implementing-agent tasks):
+
+- After the first build running this change, inspect one finished real Codex
+  attempt directory, record its path/outcome and confirm its `<stem>.tmp` is
+  absent. Check session stderr for cleanup failures and confirm transcripts,
+  outputs, seals, receipts, reviews and verify builds were retained. CI does
+  not establish this host result; leave it pending until observed.
+- Review the two documentation edits for readability and the live issue link.
 
 ## Risks / Trade-offs
 
-Process-group inspection adds bounded teardown work, and terminating straggling
-group members is necessary before disposing their scratch. Zombie processes
-cannot write, so they do not block cleanup. Detached descendants are outside
-the group contract. An unconfirmed group or filesystem failure leaves a
-directory and a diagnostic instead of risking deletion during active use.
+A descendant may continue using scratch after the leader exits. Removal may
+race it, fail, or be followed by recreation; there is no quiescence guarantee.
+A removal error is recorded without changing the attempt outcome. No additional
+process-group machinery is added to avoid this accepted race.
 
-Descriptor-based removal is more involved than plain `rmtree`, but prevents
-permission repair from following a symlink to retained evidence or another
-tree. Unsupported safe operations must leave scratch behind. Ordinary
-read-only entries are supported; immutable flags and ownership/access errors
-can still prevent removal.
+Read-only entries with otherwise sufficient access are supported; immutable
+flags, ownership restrictions or inaccessible directories can still prevent
+cleanup. Symlink-resistant stdlib traversal does not justify following links
+in permission repair. Unsafe repair must fail non-fatally.
 
-Per-session failure events are discoverable beside transcripts but are not
-aggregated into run-level events. That avoids widening the public interfaces
-or modifying evidence. Storage failure can defeat both persistence and logging.
-
-SIGKILL of the harness, power loss and old completed attempts can still leave
-scratch. This change adds no startup sweep or background janitor. Existing
-evidence and verify storage will continue to grow under their current policies.
+Harness SIGKILL, host failure and previously finished attempts can leave
+scratch. Cleanup failure plus an unwritable stderr sink can leave no durable
+diagnostic. Evidence and verify build storage continue under current policies;
+this is not general run retention management.

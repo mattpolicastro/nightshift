@@ -1,101 +1,80 @@
 ## Purpose
 
-Dispose of each Codex session's private temporary directory after its process
-group ends, without changing attempt outcomes or retained evidence.
+Dispose of Codex session scratch at adapter finalization while preserving
+attempt outcomes, symlink targets and retained evidence.
 
 ## ADDED Requirements
 
 ### Requirement: Session scratch lifetime
 
-The Codex adapter SHALL continue creating
-`<transcript-parent>/<transcript-stem>.tmp` per session with the existing
-creation behavior and `TMPDIR` environment value. It SHALL remove that exact
-path after the session process group stops executing, whether the agent
-succeeds, fails, times out or is killed while the harness remains able to
-finalize. It SHALL preserve sandbox flags and all existing result fields and
-classification priorities.
+The Codex adapter SHALL preserve per-session creation of
+`<transcript-parent>/<transcript-stem>.tmp`, its writable `TMPDIR` value and
+existing sandbox flags. It SHALL finalize that directory with `try`/`finally`
+covering creation, setup, spawning and result interpretation. Finalization
+SHALL attempt removal after normal completion or an exception, without
+changing shared `spawn()` handling or Claude behavior.
 
 #### Scenario: Successful session
-- **WHEN** a Codex session writes scratch and valid final output and its process group exits successfully
-- **THEN** the original private TMPDIR is available during execution and absent before the adapter returns the unchanged successful result
+- **WHEN** a Codex session writes scratch and valid output and `spawn()` returns success
+- **THEN** the existing private TMPDIR is writable during execution and absent before the adapter returns the original successful result
 
 #### Scenario: Failed or killed session
-- **WHEN** a session ends with a nonzero provider exit, invalid or missing final output, or an externally killed agent process group
-- **THEN** its private TMPDIR is removed and the existing disposition, output, session, detail and usage semantics remain unchanged
+- **WHEN** `spawn()` returns a nonzero or signal exit, or final output is invalid or missing
+- **THEN** finalization removes scratch and preserves the existing disposition, output, session, detail and usage
 
 #### Scenario: Timed out session
-- **WHEN** a session reaches its wall or idle timeout
-- **THEN** the group is terminated before its private TMPDIR is removed and the result retains its existing infra disposition and wall or idle timeout detail
+- **WHEN** the existing shared runner returns after handling a wall or idle timeout
+- **THEN** finalization removes scratch and preserves the infra result and timeout detail without changing timeout or group-kill handling
 
-### Requirement: Process group cleanup ordering
-
-Cleanup SHALL remove scratch only after confirming that the spawned Codex
-process group has no executing members and reaping its direct child. It SHALL
-terminate remaining group members within bounded grace and confirmation
-periods, preserving the original result or exception. Unconfirmed group exit
-SHALL retain scratch and record a cleanup failure.
-Process inspection SHALL preserve existing agent and quota environment,
-executable-selection and quota-protocol contracts.
-
-#### Scenario: Leader exits before descendant
-- **WHEN** the leader exits but a descendant in the same group remains and ignores SIGTERM
-- **THEN** finalization sends SIGTERM, allows ten seconds of grace, then escalates to SIGKILL with one further second for confirmation, without repeating grace already used by timeout handling
-- **THEN** it reaps the direct child and removes scratch only after no executing group members remain; zombie rows do not prevent confirmation
-- **THEN** the original leader result is preserved, no unrelated group is signalled, and Claude and daemon job-control behavior remain unchanged
-
-#### Scenario: Startup or communication raises
-- **WHEN** spawning fails before a child exists or Python raises while communicating with an already spawned child
-- **THEN** scratch is removed immediately if no group started, otherwise only after terminating and confirming the spawned group, and the original exception propagates
-
-#### Scenario: Group exit is unconfirmed
-- **WHEN** process inspection, signalling or bounded confirmation cannot establish that the group has stopped executing
-- **THEN** scratch remains, a group-exit cleanup-failure event is attempted, and the original attempt result or exception is preserved
-
-#### Scenario: Inspection preserves host command boundaries
-- **WHEN** a Codex-profile agent spawn performs process inspection before a subsequent quota read with a configured tool directory
-- **THEN** agent and quota launches retain their exact sanitized environments, respective PATH suffixes, child environment values and inherited-variable/credential exclusions
-- **THEN** the agent return tuple, quota `codex app-server` argv and complete initialize/initialized/rateLimits request sequence remain unchanged, with inspection launches recorded separately by the regression fixture and every existing assertion preserved
+#### Scenario: Setup or spawn raises
+- **WHEN** `_home()`, environment or argv construction, or `spawn()` raises after the private directory exists
+- **THEN** finalization attempts removal and the original exception propagates unchanged even if cleanup also fails
 
 ### Requirement: Confined scratch removal
 
-Removal SHALL target only the session's private TMPDIR, tolerate read-only
-entries by adding owner-write permission where needed, and treat an absent
-target as success. It SHALL never follow symlinks during traversal, permission
-repair or deletion, and SHALL preserve external targets, attempt evidence and
-verify build directories. Unsafe operations SHALL fail cleanup safely.
+Cleanup SHALL use symlink-resistant `shutil.rmtree` for the exact session
+directory and SHALL treat an absent root as already cleaned. Its permission
+callback SHALL add only owner-write permission to the containing directory
+within scratch and retry once; remaining errors SHALL be non-fatal cleanup
+failures. Traversal, permission repair and retries SHALL NOT follow symlinks
+out of scratch. Other sessions, evidence and verify builds SHALL be preserved.
 
-#### Scenario: Read only scratch
-- **WHEN** scratch contains read-only nested directories and files
-- **THEN** cleanup adds owner-write permission to directories where needed inside scratch and removes the complete private directory
-- **THEN** it preserves other permission bits during repair and unlinks read-only files through their parent without changing hard-linked file contents or permissions
+#### Scenario: Read only entries
+- **WHEN** scratch contains read-only nested directories and files with otherwise sufficient access for removal
+- **THEN** cleanup adds `u+w` to containing directories as needed, preserves other permission bits and removes scratch without chmodding file targets
+- **THEN** a failed retry is reported without an unbounded retry loop
 
 #### Scenario: Symlinks stay confined
-- **WHEN** the root or a nested scratch entry is a symlink, dangling symlink, or is replaced by a symlink during traversal
-- **THEN** cleanup unlinks the link or safely reports failure without following it, and outside sentinel contents and permissions remain unchanged
-- **THEN** uncertain entry identity or unavailable non-following operations cause a cleanup failure without falling back to unsafe traversal or permission repair
+- **WHEN** scratch contains dangling and escaping symlinks, or its root has become a symlink
+- **THEN** nested links are removed without following targets, a root link is safely refused, and outside sentinel contents and permissions remain unchanged
+- **THEN** tests assert `shutil.rmtree.avoids_symlink_attacks is True`, and unsafe permission repair is refused
 
 #### Scenario: Other artifacts survive
-- **WHEN** scratch is removed beside transcripts, schema and output JSON, seals, receipts, review files, another session's scratch and a verify build directory
-- **THEN** all those neighboring artifacts remain unchanged and only the selected session's scratch is removed
+- **WHEN** cleanup removes scratch beside transcripts, schema/output JSON, seals, receipts, reviews, another session's scratch and a verify build directory
+- **THEN** those artifacts remain unchanged, except for an appended session-stderr diagnostic if cleanup fails
 
 #### Scenario: Scratch is already absent
-- **WHEN** the selected scratch path is absent at cleanup time
-- **THEN** cleanup succeeds without creating a failure event or changing the attempt outcome
+- **WHEN** scratch is absent when finalization runs
+- **THEN** cleanup succeeds without a failure event or outcome change
 
-### Requirement: Non fatal cleanup events
+### Requirement: Non fatal cleanup diagnostics
 
-A cleanup failure SHALL attempt to append a structured
-`session_tmpdir_cleanup_failed` event to `session-cleanup.<transcript-stem>.jsonl`
-beside the transcript without following symlinks or modifying existing attempt
-evidence. Cleanup, event-write and fallback-logging failures SHALL NOT change
-the original attempt outcome or mask its exception.
+A removal failure SHALL append a `session_tmpdir_cleanup_failed` JSON event
+to session stderr after original result classification or during exception
+unwinding. Cleanup and diagnostic-write failures SHALL preserve original
+results and exceptions. No new process inspection, descendant termination
+or PGID ownership handling SHALL be introduced.
 
 #### Scenario: Removal fails
-- **WHEN** scratch removal raises a filesystem error after a successful, failed or timed-out session
-- **THEN** a removal-failure event is persisted outside scratch and every original result field remains unchanged
-- **THEN** the event contains an epoch-seconds timestamp, lexical TMPDIR path, failure phase (`remove` or `group_exit`), exception class and errno or null, without prompt, environment, file contents or provider messages
+- **WHEN** removal fails after a successful, failed or timed-out session, or during exception unwinding
+- **THEN** a separate JSON line records the cleanup failure in session stderr and the original result or exception is preserved
+- **THEN** existing stderr bytes remain intact and the event identifies the lexical scratch path, exception type and errno or null
+- **THEN** cleanup diagnostics cannot affect provider classification or result detail, including when failure text contains quota or authentication terms
 
-#### Scenario: Event sink fails
-- **WHEN** a cleanup failure occurs and its event sidecar cannot safely be written
-- **THEN** a fallback warning is attempted without modifying transcript or stderr, and neither event-writing nor logging failures change the original result or exception
-- **THEN** an event-file symlink is never followed, and failure to persist the event is not reported as successful persistence
+#### Scenario: Descendant races cleanup
+- **WHEN** a descendant remains after the leader exits and a race causes removal to fail
+- **THEN** that failure is recorded non-fatally with no new process inspection, waiting or descendant signalling
+
+#### Scenario: Diagnostic write fails
+- **WHEN** removal fails and appending its stderr event also raises
+- **THEN** the original result or exception is still preserved and no successful durable recording is claimed
