@@ -40,7 +40,8 @@ def test_specific_asks():
     gate = messages.for_pause("m", "phase_gate", key="section:2").text()
     assert gate.splitlines()[0].startswith("🟡 *Review section 2 on the branch*")
     publish = messages.for_pause("m", "ready_to_publish", done=21).text()
-    assert "all 21 tasks landed" in publish and "`nightshift publish m`" in publish
+    assert publish.splitlines()[0] == "🟡 *Publish: all 21 tasks landed and passed the final checks*  (m)"
+    assert "`nightshift publish m`" in publish
     assert messages.for_pause("m", "secret", label="1.1").text().startswith("🔴")
     checks = messages.for_pause("m", "human_checks", pr="https://x/pull/5").text()
     assert checks.splitlines()[-1] == "https://x/pull/5"
