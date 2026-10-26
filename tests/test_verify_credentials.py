@@ -134,7 +134,10 @@ def test_credential_sandbox_probes(credentials, old_only, tmp_path):
         assert result.returncode != 0 and result.stdout == "", (path, result)
     assert run("/bin/cat", c["src"] / "file").stdout == "source"
     assert run("/usr/bin/touch", c["src"] / "new-file").returncode != 0
-    assert run("/bin/chmod", "u+w", c["src"]).returncode != 0
+    # BSD chmod skips the call when the mode would not change, so request a real change.
+    mode = c["src"].stat().st_mode & 0o7777
+    assert run("/bin/chmod", format(mode ^ 0o020, "o"), c["src"]).returncode != 0
+    assert c["src"].stat().st_mode & 0o7777 == mode
     assert run("/usr/bin/touch", c["build"] / "output").returncode == 0
     if c["prepare"]:
         # Rebuild with a narrow allowlist to check preparation's home restriction.

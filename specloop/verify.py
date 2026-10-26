@@ -46,7 +46,7 @@ def _real_path(path: Path, links: frozenset[Path] = frozenset()) -> Path:
     if path.name == "..":
         return parent.parent
     try:
-        mode = path.lstat().st_mode
+        mode = os.lstat(path).st_mode
     except FileNotFoundError:
         return path
     if not stat.S_ISLNK(mode):

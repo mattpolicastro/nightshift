@@ -6,7 +6,7 @@ import pytest
 
 from merge_readiness_fixtures import local_run
 from nightshift.specloop_intake import _readiness_evidence
-from specloop import state
+from specloop import state, state_locks
 
 
 @pytest.mark.scenario("merge-readiness/local-evidence-assessment/measured-sections-pass")
@@ -66,7 +66,8 @@ def test_no_mutable_lines_need_no_measurement(local_run, monkeypatch, summary, p
     allowed = {env.run.dir / name for name in ("state.json", "manifest.toml", "events.jsonl")}
     # Lazy selection checks directory identity in both roots, without reading
     # additional evidence or scanning attempts.
-    allowed_probes = allowed | {env.run.dir, state.legacy_root() / "runs" / env.run.dir.name}
+    allowed_probes = allowed | {env.run.dir, state.legacy_root() / "runs" / env.run.dir.name,
+                                state_locks.journal_path()}
     original_open, original_stat = Path.open, Path.stat
 
     def guarded_open(path, *args, **kwargs):
