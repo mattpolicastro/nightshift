@@ -17,13 +17,15 @@ from test_land import (
     expect_update_request, invoke, invoke_ci, merge_command, merge_commit,
     no_live_processes, scripted_runner, status_rows,
 )
+from doc_commands import argv_cases, parse_command, physical_commands
+from specloop import cli as build_cli
 
 
 @pytest.fixture
 def without_console_script(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", str(tmp_path))
-    assert shutil.which("specloop") is None
-    assert import_module("specloop.cli") is not None
+    assert shutil.which("nightshift") is None
+    assert import_module("nightshift.cli") is not None
 
     def forbidden_lookup(*args, **kwargs):
         pytest.fail("landing must not look up a console script")
@@ -33,8 +35,10 @@ def without_console_script(monkeypatch, tmp_path):
 
 @pytest.mark.scenario("reviewed-pr-landing/discovery-through-the-interpreter/console-script-absent")
 @pytest.mark.scenario("reviewed-pr-landing/finish-through-the-interpreter/eligible-finish-uses-the-current-interpreter")
+@pytest.mark.scenario("nightshift-cli/canonical-internal-callers/calls-retain-request-identity")
+@pytest.mark.scenario("reviewed-pr-landing/landing-interpreter-prerequisites/operator-prepares-the-environment")
 @pytest.mark.parametrize("kind", ["direct", "finish", "done"])
-def test_land_runs_specloop_through_its_interpreter(
+def test_land_runs_nightshift_through_its_interpreter(
     config_path, scripted_runner, without_console_script, capsys, kind,
 ):
     clock = FakeClock()
@@ -53,7 +57,7 @@ def test_land_runs_specloop_through_its_interpreter(
                     if argv[0] != "gh"]
     status_calls = [(argv, options) for argv, options in module_calls if "status" in argv]
     assert len(status_calls) == (4 if kind == "finish" else 3)
-    assert all(argv == [sys.executable, "-m", "specloop.cli", "status", "--json"]
+    assert all(argv == [sys.executable, "-m", "nightshift.cli", "status", "--json"]
                for argv, _ in status_calls)
     assert [options["timeout"] for _, options in status_calls] == (
         [30, 30, 30, 7] if kind == "finish" else [30, 30, 7]
@@ -63,7 +67,7 @@ def test_land_runs_specloop_through_its_interpreter(
     assert len(finish_calls) == (1 if kind == "finish" else 0)
     if finish_calls:
         assert finish_calls == [(
-            [sys.executable, "-m", "specloop.cli", "finish", RUN["change"]],
+            [sys.executable, "-m", "nightshift.cli", "finish", RUN["change"]],
             {"capture_output": True, "text": True, "check": False, "timeout": 300},
         )]
 
@@ -71,8 +75,8 @@ def test_land_runs_specloop_through_its_interpreter(
 @pytest.mark.scenario("reviewed-pr-landing/discovery-through-the-interpreter/module-invocation-fails")
 @pytest.mark.parametrize("refresh", [False, True])
 @pytest.mark.parametrize("response, reason", [
-    (subprocess.CompletedProcess(STATUS, 1, "", "No module named specloop.cli"),
-     "No module named specloop.cli (exit 1)"),
+    (subprocess.CompletedProcess(STATUS, 1, "", "No module named nightshift.cli"),
+     "No module named nightshift.cli (exit 1)"),
     (subprocess.CompletedProcess(STATUS, 2, '{"version": 1, "runs": []}', "status failed"),
      "status failed (exit 2)"),
     (subprocess.CompletedProcess(STATUS, 0, "{broken", ""), "malformed JSON response"),
@@ -96,10 +100,10 @@ def test_land_refuses_interpreter_discovery_failure(
 
 @pytest.mark.scenario("reviewed-pr-landing/finish-through-the-interpreter/eligible-finish-uses-the-current-interpreter")
 @pytest.mark.parametrize("failure, reason", [
-    ("module", "No module named specloop.cli (exit 1)"),
+    ("module", "No module named nightshift.cli (exit 1)"),
     ("exit", "push failed (exit 2)"),
     ("timeout", "command timed out after 300s"),
-    ("discovery", "run discovery: No module named specloop.cli"),
+    ("discovery", "run discovery: No module named nightshift.cli"),
     ("missing", "run identity changed"),
     ("replacement", "run identity changed"),
     ("paused", "expected the same run done"),
@@ -111,7 +115,7 @@ def test_land_refuses_interpreter_finish_failure(
     expect_initial_run(scripted_runner, PR, RUN)
     expect_before_finish(scripted_runner, PR)
     response = {
-        "module": subprocess.CompletedProcess(FINISH, 1, "", "No module named specloop.cli"),
+        "module": subprocess.CompletedProcess(FINISH, 1, "", "No module named nightshift.cli"),
         "exit": subprocess.CompletedProcess(FINISH, 2, "", "push failed"),
         "timeout": subprocess.TimeoutExpired(FINISH, 300),
     }.get(failure, subprocess.CompletedProcess(FINISH, 0, "Finished", ""))
@@ -119,7 +123,7 @@ def test_land_refuses_interpreter_finish_failure(
     if failure in {"discovery", "missing", "replacement", "paused", "head"}:
         done = {**RUN, "status": "done", "pause": None, "head": FINISHED_HEAD}
         refreshed = {
-            "discovery": subprocess.CompletedProcess(STATUS, 1, "", "No module named specloop.cli"),
+            "discovery": subprocess.CompletedProcess(STATUS, 1, "", "No module named nightshift.cli"),
             "missing": status_rows(),
             "replacement": status_rows({**done, "change": "another-change"}),
             "paused": status_rows(RUN),
@@ -139,18 +143,15 @@ def test_land_refuses_interpreter_finish_failure(
 @pytest.mark.scenario("reviewed-pr-landing/landing-interpreter-prerequisites/operator-prepares-the-environment")
 def test_landing_documents_interpreter_prerequisites():
     guide = (Path(__file__).resolve().parents[1] / "docs" / "landing.md").read_text()
-    prerequisites = " ".join(
-        guide.split("## Prerequisites and flags\n", 1)[1].split("| Argument |", 1)[0].split()
-    )
-    assert "`uv` and `gh` available on PATH" in prerequisites
-    assert "interpreter running `nightshift.land` must be able to import `specloop.cli`" in prerequisites
-    assert "`specloop` console script need not be on PATH" in prerequisites
-    assert "virtual-environment activation is not required" in prerequisites
-    assert "exactly one case-insensitive enrollment for the repository" in prerequisites
-    assert "Authenticate `gh` as the operator with permission" in prerequisites
-    assert "read and edit the PR and issue comments, update the branch, and merge" in prerequisites
-    assert "repository's protection rules" in prerequisites
-    assert "`-m specloop.cli status --json` can read the applicable runs" in prerequisites
+    # Prerequisite wording belongs to human review; executable examples use
+    # the same argv/handler contract as the interpreter regressions above.
+    commands = [command for _, command in physical_commands(guide)
+                if command.startswith("python -m nightshift.cli ")]
+    assert [argv for command in commands for argv in argv_cases(command)] == [
+        ["nightshift", "status", "--json"], ["nightshift", "finish", "example-change"]]
+    for command in commands:
+        args, = parse_command(command)
+        assert args.handler is build_cli.dispatch
 
 
 PARSER_ERROR = "unexpected end of JSON input"

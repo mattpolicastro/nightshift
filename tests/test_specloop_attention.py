@@ -5,6 +5,7 @@ import pytest
 
 from nightshift import cli, outcomes, specloop_attention
 from nightshift.config import Config
+from test_specloop_client import ALIAS_NOTICE
 
 
 PR = "https://github.com/example/repo/pull/7"
@@ -30,7 +31,7 @@ def run_record(change="add-gate", status="paused", reason="stuck", pr=PR,
 
 def status_result(runs):
     return subprocess.CompletedProcess(
-        [], 0, json.dumps({"version": 1, "supervisor": {"state": "running"}, "runs": runs}), ""
+        [], 0, json.dumps({"version": 1, "supervisor": {"state": "running"}, "runs": runs}), ALIAS_NOTICE
     )
 
 
@@ -53,6 +54,7 @@ def status(monkeypatch):
 
 
 @pytest.mark.scenario("attention/specloop-pauses-listed/stuck-run-listed")
+@pytest.mark.scenario("nightshift-cli/alias-routed-daemon-callers/daemon-calls-parse-json-despite-notice")
 def test_stuck_run_in_text_and_json_beside_worker_tasks(status, monkeypatch, capsys):
     outcomes.record("example/repo", 8, state="needs_decision", reason="Review this")
     monkeypatch.setattr(outcomes, "_read_github", lambda *args: '{"state":"OPEN","labels":[]}')
@@ -327,6 +329,7 @@ def test_cached_entries_and_recovery(status, monkeypatch, capsys, recovered_runs
 
 
 @pytest.mark.scenario("attention/stale-tolerance/unreadable-status-marked-stale")
+@pytest.mark.scenario("nightshift-cli/alias-routed-daemon-callers/daemon-calls-parse-json-despite-notice")
 @pytest.mark.parametrize("failure", [
     subprocess.CompletedProcess([], 1, "", "status unavailable"),
     subprocess.CompletedProcess([], 0, "not json", ""),

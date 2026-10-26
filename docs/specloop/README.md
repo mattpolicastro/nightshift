@@ -1,7 +1,7 @@
 # specloop — Nightshift's build engine
 
 Nightshift turns approved OpenSpec changes into reviewed, verified pull requests.
-specloop is the sole/default engine: it takes an admitted change through
+The sole/default engine, specloop, takes an admitted change through
 its `tasks.md` one task at a time, and the daemon is its GitHub front end. For the
 JSON contract see [command-json.md](command-json.md); for dependency setup see
 [prepare.md](prepare.md).
@@ -140,13 +140,13 @@ recomputed on restart or tip advance; later IDs stay eligible. No manual
 initialization is needed. With no receipt, eligible historical feedback is
 available ([PR #61](https://github.com/mattpolicastro/nightshift/pull/61)).
 
-The separate `specloop serve` supervisor executes admitted tasks and prepares
+The separate `nightshift serve` supervisor executes admitted tasks and prepares
 the current base before `ready_to_publish`. The daemon then attempts
 [publication](#publication-and-base-recovery) to the same branch and PR,
 commenting the remaining human checks and hosted CI reminder after success.
 A human reviews, checks and merges; merging closes the linked issue.
 
-`specloop status --json` isolates unreadable runs: version-1 JSON still
+`nightshift status --json` isolates unreadable runs: version-1 JSON still
 includes healthy runs and exits 0. Each unreadable run has a non-actionable
 `status_error` row with a bounded diagnostic and compatibility placeholders
 (`paused`, zero tasks, empty head/PR). It offers no actions and does not persist
@@ -178,11 +178,18 @@ use a frozen lockfile for reproducible fetching. See the
 
 Worker retirement ([issue #16](https://github.com/mattpolicastro/nightshift/issues/16))
 preserves attention, outcomes, transcripts and safe leftover-work recovery.
-The `nightshift` front door and `specloop` supervisor keep separate CLIs/jobs,
-and `~/.nightshift` and `~/.specloop` stay in place. CLI/package merging and
-state relocation belong to [issue #40](https://github.com/mattpolicastro/nightshift/issues/40).
-There is no automatic host migration, interrupted-worker restart or rollback
-of remote effects. `[daemon].worktree_root` remains compatibility-only.
+The canonical `nightshift` CLI and build state root `~/.nightshift` implement
+[issue #40](https://github.com/mattpolicastro/nightshift/issues/40). Daemon and
+supervisor remain independent jobs. The `specloop` CLI/module alias lasts one
+release, printing its rename notice to stderr; internal packages, enrollment
+values and trusted manifest paths retain their names.
+
+With all writers quiescent and the supervisor stopped, use `nightshift migrate`
+before restart. It refuses locked runs, live supervisors and conflicting paths;
+interrupted migration resumes from its journal. Supervisor startup also attempts
+migration before scheduling. Legacy reads and compatibility links remain for one
+release. This does not restart interrupted workers or roll back remote effects.
+`[daemon].worktree_root` remains compatibility-only.
 
 Direct Python prerequisites are Python 3.12+, `uv`, `gh`, git and scoped GitHub
 access with preflight negative-control/alert checks; providers and verification
@@ -208,6 +215,11 @@ tools, credential isolation and preflight guards. See
 - [ ] Inspect installed plists and loaded jobs: ProgramArguments, WorkingDirectory,
   environments and wrapper targets for both daemon and supervisor. Record whether
   legacy prerequisites exist; complete and validate separate service work if needed.
+- [ ] Arrange a quiet window across every repository, stop all writers and the
+  supervisor, prevent KeepAlive restart and back up both state roots. Migrate and
+  inspect identities, drafts, receipts/jobs, Git references and credential links
+  before restart. Follow the [deployment procedure](../deploy.md); daemon pause
+  alone does not stop builds. Keep unperformed host checks pending.
 - [ ] Inspect external scripts, aliases, cron/launchd and Paseo calls for retired
   `task.run`, probes, worker status/model output and configuration assumptions.
 - [ ] Verify the front door and independent supervisor with intended config/provider
@@ -219,8 +231,16 @@ tools, credential isolation and preflight guards. See
 These checks are pending operator work, not performed validation. See
 [deferred cleanup](../../KNOWN-LIMITATIONS.md#retirement-follow-ups) and
 [pause, job control and supervisor boundaries](#pause-stop-and-the-supervisor).
+Frozen `CLAUDE.md` worker instructions and `pyproject.toml` metadata, historical
+worker documents with removed-source references and resolved type-baseline
+entries remain deferred cleanup outside this change.
 
 ## Operations
+
+`nightshift daemon run` polls intake and delivery; `nightshift run <change>`
+drives one build. Use `nightshift daemon pause` / `nightshift daemon resume`
+for intake and delivery, and `nightshift pause <change>` /
+`nightshift resume <change>` for the independent build.
 
 ### Enrollment recovery
 
@@ -258,13 +278,13 @@ eligible admitted publication/build revisions and other repositories continue.
 
 ### Pause, stop and the supervisor
 
-`nightshift status` reads local active attempts before repository network calls.
+`nightshift daemon status` reads local active attempts before repository network calls.
 Rows show full job ID, stage, repository/item, command, execution state, elapsed
 seconds and remaining time or `OVERDUE by Ns`. Starting/legacy jobs without
 timing report unavailable. Full history, including failed jobs, is in
 `nightshift jobs --all`.
 These rows are separate from daemon liveness and independent
-`specloop status` run state ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+`nightshift status` run state ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
 Worker working counts, claim/phase/transcript lines and the off-subscription
 model report are retired. Other status output and exits, including liveness,
 alerts, queue lists/counts, contradiction and inventory diagnostics, are unchanged.
@@ -285,10 +305,10 @@ affect elapsed/deadline calculations. Follow stop/inspection/release below for
 hung work. A late completed result can be delivered after resolving the human
 hold under normal eligibility ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
 
-`nightshift pause` creates `~/.nightshift/pause`, holding new daemon launches
+`nightshift daemon pause` creates `~/.nightshift/pause`, holding new daemon launches
 and completion delivery, including publication. In-flight drafting, admission
 and revision jobs can finish locally; an already-dispatched external operation
-may finish too. `nightshift resume` removes the pause and delivers eligible
+may finish too. `nightshift daemon resume` removes the pause and delivers eligible
 retained results without rerunning the job.
 
 `nightshift jobs` lists local active (including starting/overdue), stopping,
@@ -395,7 +415,7 @@ evidence or restoring incomplete backups loses the keyed guarantee. See the
 [remaining crash and retention limits](../../KNOWN-LIMITATIONS.md#open-gaps).
 
 Admission can finish while paused and commit runnable state. The independent
-`specloop serve` supervisor can start or continue that build while the daemon
+`nightshift serve` supervisor can start or continue that build while the daemon
 withholds delivery. Neither daemon pause nor job stop cancels admitted runs.
 Control the supervisor and active run processes separately; unloading its
 launchd job alone does not prove detached run processes exited.
@@ -427,7 +447,7 @@ Totals sum category observations, not unique human actions: a question during
 spec revision counts in both categories; a pause and its resume count separately.
 
 Coverage is observed local history in `~/.nightshift` receipts/retained jobs
-and `~/.specloop/runs` event logs. Missing or overwritten history can undercount.
+and `~/.nightshift/runs` event logs. Missing or overwritten history can undercount.
 Draft-date filtering uses approximate filesystem timestamps from the earliest
 retained proposal request, falling back to proposal receipts. Unknown draft
 dates are excluded with a diagnostic when `--since` is used. The merge boundary
@@ -458,17 +478,17 @@ branch. Trusted `prepare` and `verify` steps check the integrated head before
 final coverage and acceptance checks permit `ready_to_publish`. Pending
 integration verification still runs when the base is already incorporated.
 
-`specloop publish <change>` refetches once with a 20-second limit. If the base
+`nightshift publish <change>` refetches once with a 20-second limit. If the base
 moved or integration verification is outstanding, it saves `running` state
 with no pause and returns a retryable error; nothing is published. Publish
-does not merge or verify inline. `specloop serve` drives preparation; without
-it, run `specloop run <change>`. Retry publication after the driver restores
+does not merge or verify inline. `nightshift serve` drives preparation; without
+it, run `nightshift run <change>`. Retry publication after the driver restores
 `ready_to_publish`; the daemon retries on a later poll. A successful publish
 updates the recorded branch and PR and pauses at `human_checks`. Complete the
-human checks and hosted CI review before `specloop finish <change>` archives
+human checks and hosted CI review before `nightshift finish <change>` archives
 the change and marks the PR ready. A human merges it.
 
-Inspect `specloop status <change>` for the pause detail. Base preparation can
+Inspect `nightshift status <change>` for the pause detail. Base preparation can
 stop at three distinct pauses:
 
 - **`base_conflict`:** the run head stays unchanged. The detail names the
@@ -479,12 +499,12 @@ stop at three distinct pauses:
   checks, `receipts.json` and step logs in `final/base-sync/attempt-*/`.
 - **`base_fetch`:** the driver cannot fetch the configured base. Inspect the
   fetch diagnostic and repair access to the source origin or the missing base
-  branch, then run `specloop resume <change>` to fetch and prepare again.
+  branch, then run `nightshift resume <change>` to fetch and prepare again.
 
 For conflicts or drift, bring the run branch from its `repo.git` into the
 source checkout's configured branch before committing a repair. Keep the
 current run head in its ancestry; resolve conflicts against the configured
-base or fix the failed checks. `specloop resume <change>` imports a repair
+base or fix the failed checks. `nightshift resume <change>` imports a repair
 that fast-forwards the run head and restarts the driver. It re-verifies even
 if the base has not moved or a manual merge already incorporated it. Resuming
 without a repair retries the checks; it does not accept a failure. Old
@@ -492,15 +512,15 @@ receipts remain available, and publication waits for readiness.
 
 A fetch failure during **publish** instead leaves readiness and saved checks
 intact and returns a retryable error. Restore base access and retry
-`specloop publish <change>`; the daemon can retry on a later poll. This does
+`nightshift publish <change>`; the daemon can retry on a later poll. This does
 not create a driver `base_fetch` pause or permit a push using a stale base.
 
-## Paseo Factory section and `specloop act`
+## Paseo Factory section and `nightshift act`
 
 The Nightshift plugin now includes a **Factory** section for specloop runs,
 with paused runs first, change, status, tasks done/total and PR links. Paused
 rows use the same action headline and explanation as Slack, and offer exactly
-the verbs listed in `specloop status --json`. Resume has an optional note
+the verbs listed in `nightshift status --json`. Resume has an optional note
 field (up to 2,000 characters); Accept is available for `stuck` and
 `needs_human`, Publish for `ready_to_publish`, Finish for `human_checks`, and
 Abort at every pause. Worker task rows remain read-only.
@@ -512,9 +532,9 @@ marks the PR ready for review; it does not merge. Cancel sends nothing.
 The page shows each action's result and refreshes the list.
 
 ```sh
-uv run specloop status --json
-uv run specloop act <change> <verb> [--note TEXT] --json
-uv run specloop act example-change resume --note "Use the revised acceptance criteria" --json
+uv run nightshift status --json
+uv run nightshift act <change> <verb> [--note TEXT] --json
+uv run nightshift act example-change resume --note "Use the revised acceptance criteria" --json
 ```
 
 The verbs are `resume`, `accept`, `publish`, `finish` and `abort`. `act`
@@ -522,7 +542,7 @@ reloads the run under its lock and checks the current pause; unknown changes,
 unavailable verbs, notes over 2,000 characters and busy locks are refused.
 Its version-1 JSON outcome contains `version`, `outcome` (`done` or `refused`),
 `verb` and `detail`, with exit status 0 for done and 1 for refused. Resume and
-Accept behave as with `--no-run`; the separate `specloop serve` supervisor
+Accept behave as with `--no-run`; the separate `nightshift serve` supervisor
 continues execution. Direct CLI calls do not prompt: interfaces must obtain
 confirmation before invoking Publish or Finish.
 
@@ -608,19 +628,19 @@ Treat the agent gate as a net, not a proof, until it has been measured on
 seeded integration defects.
 
 ```sh
-uv run specloop admit <repo-manifest.toml> --change <change> --branch spec/<change> [--pr <url>]
-uv run specloop serve                 # supervisor: drives every running change
-uv run specloop run <change>          # or drive one by hand until the next pause
-uv run specloop status [<change>]
-uv run specloop pause <change>        # stop at the next task boundary (now, if nothing drives it)
-uv run specloop resume <change> [--note "..."]
-uv run specloop accept <change> [task]
-uv run specloop waive <change> <task> <text>
-uv run specloop publish <change>      # push to the recorded PR, or open a draft PR
-uv run specloop revise <change> --feedback <file> --round-id <key>  # retain key and input on retry
-uv run specloop finish <change>       # archive the change, mark the PR ready
-uv run specloop propose <manifest> <change> --idea "..." [--source doc]   # draft a change
-uv run specloop drill <change>        # seeded defects through the review gate
+uv run nightshift admit <repo-manifest.toml> --change <change> --branch spec/<change> [--pr <url>]
+uv run nightshift serve                 # supervisor: drives every running change
+uv run nightshift run <change>          # or drive one by hand until the next pause
+uv run nightshift status [<change>]
+uv run nightshift pause <change>        # stop at the next task boundary (now, if nothing drives it)
+uv run nightshift resume <change> [--note "..."]
+uv run nightshift accept <change> [task]
+uv run nightshift waive <change> <task> <text>
+uv run nightshift publish <change>      # push to the recorded PR, or open a draft PR
+uv run nightshift revise <change> --feedback <file> --round-id <key>  # retain key and input on retry
+uv run nightshift finish <change>       # archive the change, mark the PR ready
+uv run nightshift propose <manifest> <change> --idea "Add a gate" [--source doc]   # draft a change
+uv run nightshift drill <change>        # seeded defects through the review gate
 ```
 
 **`propose`** has an agent draft the OpenSpec change. The harness then:
@@ -952,10 +972,22 @@ Spike S1 probed, from the harness itself, that each session can write only its
 workspace and has no network. The claude adapter with `qwen3-coder-next` on the
 a local inference box is proven. The codex adapter against a local backend is untested.
 
-**Run state** lives in `~/.specloop/runs/<change>/`:
+**Run state** lives in `~/.nightshift/runs/<change>/`:
 - `state.json` and `events.jsonl`;
 - a bare `repo.git` that the harness owns and commits into;
 - per-attempt transcripts, seal, receipts and review decisions;
 - `followups.md`, the non-blocking review findings.
+
+The guarded migration uses these build-state mappings:
+
+| Legacy build state | Canonical build state |
+| --- | --- |
+| `~/.specloop/runs/<change>` | `~/.nightshift/runs/<change>` |
+| `~/.specloop/proposals/<change>` | `~/.nightshift/drafts/<change>` |
+| `~/.specloop/homes/<entry>` | `~/.nightshift/homes/<entry>` |
+
+Daemon receipts at `~/.nightshift/proposals/<owner__repo>/<number>.json` and
+job evidence at `~/.nightshift/proposals/<owner__repo>/<number>.jobs/` are
+unchanged and never disposable drafts.
 
 The source repository's checkouts are never written to.

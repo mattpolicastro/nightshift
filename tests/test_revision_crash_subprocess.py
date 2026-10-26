@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from nightshift import specloop_job as jobs
-from specloop import seal, tasks
+from specloop import migrate, seal, state, tasks
 from specloop.state import Run
 from test_revision_feedback_consumption import read, receipt_path
 from test_revision_feedback_recovery import restart, tick
@@ -27,14 +27,20 @@ SOURCE = Path(__file__).resolve().parents[1]
 PROVENANCE = """
 import os, sys
 from pathlib import Path
-from specloop import cli, revise, state
+from specloop import cli, migrate, revise, state
 from nightshift import specloop_job as jobs
 root = Path(os.environ['CANDIDATE_SOURCE'])
-for module in (cli, revise, state, jobs):
+for module in (cli, migrate, revise, state, jobs):
     assert Path(module.__file__).resolve() == root.joinpath(*module.__name__.split('.')).with_suffix('.py')
 assert Path(sys.executable) == Path(os.environ['CANDIDATE_PYTHON'])
-assert state.ROOT.resolve() == Path(os.environ['HOME']) / '.specloop'
-assert state.Run.for_change(os.environ['CHANGE']).dir.resolve() == Path(os.environ['RUN_DIR'])
+assert state.ROOT is None
+assert state.state_root() == Path(os.environ['NIGHTSHIFT_STATE_ROOT'])
+assert state.legacy_root() == Path(os.environ['NIGHTSHIFT_LEGACY_STATE_ROOT'])
+assert Path.home() == Path(os.environ['HOME'])
+run = state.Run.for_change(os.environ['CHANGE'], require_existing=True)
+resolved_root = (state.state_root() if (state.legacy_root() / migrate.MARKER).exists()
+                 else state.legacy_root())
+assert run.dir == resolved_root / 'runs' / os.environ['CHANGE']
 """
 CRASH = PROVENANCE + """
 from specloop import seal
@@ -80,7 +86,11 @@ def process_case(build_setup, tmp_path, monkeypatch, request):
     monkeypatch.setattr(fixture, 'BRANCH', BRANCH)
     admitted, _ = request.getfixturevalue('revision_run')
     home = tmp_path / 'child-home'
-    directory = home / '.specloop' / 'runs' / CHANGE
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('NIGHTSHIFT_STATE_ROOT', str(home / '.nightshift'))
+    monkeypatch.setenv('NIGHTSHIFT_LEGACY_STATE_ROOT', str(home / '.specloop'))
+    monkeypatch.setattr(state, 'ROOT', None)
+    directory = state.legacy_root() / 'runs' / CHANGE
     directory.parent.mkdir(parents=True)
     shutil.move(str(admitted.dir), directory)
     sentinel = tmp_path / 'bin'
@@ -91,10 +101,10 @@ def process_case(build_setup, tmp_path, monkeypatch, request):
     executable.chmod(0o755)
     crash = tmp_path / 'crash.py'
     crash.write_text(CRASH)
-    env = {**os.environ, 'HOME': str(home), 'PYTHONPATH': str(SOURCE),
+    env = {**os.environ, 'PYTHONPATH': str(SOURCE),
            'PATH': str(sentinel) + os.pathsep + os.environ['PATH'],
            'CANDIDATE_SOURCE': str(SOURCE), 'CANDIDATE_PYTHON': sys.executable,
-           'CHANGE': CHANGE, 'RUN_DIR': str(directory), 'CRASH_SCRIPT': str(crash)}
+           'CHANGE': CHANGE, 'CRASH_SCRIPT': str(crash)}
     assert shutil.which('specloop', path=env['PATH']) == str(executable)
     monkeypatch.setattr(jobs, '_children', {})
     launched = []
@@ -118,8 +128,30 @@ def process_case(build_setup, tmp_path, monkeypatch, request):
         return subprocess.run([sys.executable, '-m', 'specloop.cli', *args, '--json'],
                               cwd=SOURCE, env=env, capture_output=True, text=True, timeout=30)
 
-    yield SimpleNamespace(run=Run(directory), repo=directory / 'repo.git', poll=poll,
-                          cli=cli, launched=launched, gh=build_setup[1])
+    def relocate():
+        old = case.run.dir
+        identity, lock_inode = old.stat().st_ino, (old / 'lock').stat().st_ino
+        before = {p.relative_to(old): data for p, data in run_snapshot(case).items()}
+        # Exercise public activation while retaining both provenance probes.
+        result = subprocess.run(
+            [sys.executable, '-c', PROVENANCE +
+             '\nfrom nightshift.cli import main\nassert main(["migrate"]) == 0\n' + PROVENANCE],
+            cwd=SOURCE, env=env, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        case.run = Run.for_change(CHANGE, require_existing=True)
+        case.repo = case.run.dir / 'repo.git'
+        assert case.run.dir == state.runs_dir() / CHANGE and case.run.dir != old
+        assert old.is_symlink() and old.readlink() == case.run.dir
+        assert case.run.dir.stat().st_ino == identity
+        assert (case.run.dir / 'lock').stat().st_ino == lock_inode
+        assert {p.relative_to(case.run.dir): data for p, data in run_snapshot(case).items()} == before
+        assert json.loads((state.legacy_root() / migrate.MARKER).read_text())['completed'] is True
+
+    run = Run.for_change(CHANGE, require_existing=True)
+    assert run.dir == directory
+    case = SimpleNamespace(run=run, repo=run.dir / 'repo.git', poll=poll,
+                           cli=cli, relocate=relocate, launched=launched, gh=build_setup[1])
+    yield case
     assert not hit.exists(), 'PATH specloop was executed instead of the candidate'
 
 
@@ -144,6 +176,7 @@ def assert_round(case, commit, blocks, count=1):
 @pytest.mark.scenario('specloop-interface/idempotent-revision-recovery/later-control-state-takes-precedence')
 @pytest.mark.scenario('background-job-control/revision-attempt-provenance/crashed-attempt-detaches-normally')
 @pytest.mark.scenario('pr-revision/stable-build-round-identity/ordinary-retry-keeps-the-snapshot')
+@pytest.mark.scenario('state-migration/revision-fixture-migration/revision-recovery-survives-relocation')
 @pytest.mark.parametrize('expired', [False, True])
 @pytest.mark.parametrize('boundary,later', [('prepared', None), ('ref', None), ('completed', None),
     ('ref', 'paused'), ('ref', 'aborted'), ('completed', 'done'), ('ref', 'event_only')])
@@ -185,6 +218,10 @@ def test_revise_retry_after_commit_does_not_duplicate_round(
         seal.git(c.repo, 'update-ref', f'refs/heads/{BRANCH}', head, record['commit'])
     state_before = (c.run.dir / 'state.json').read_bytes()
     history = snapshot(old)
+    c.relocate()
+    assert journal(c) == record
+    assert (c.run.dir / 'state.json').read_bytes() == state_before
+    assert snapshot(old) == history
     with monkeypatch.context() as patch:
         patch.setattr(jobs.time, 'time', lambda: request['deadline_at'] + (1 if expired else -1))
         with pytest.raises(RuntimeError, match='exited without a result'):

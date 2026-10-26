@@ -21,6 +21,7 @@ with its trusted verify commands, is never drafted here.
 import json
 import re
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -148,10 +149,11 @@ def in_flight(source: Path, change: str) -> dict[str, list[str]]:
     """Files the tasks of other unfinished runs on this repository name: path -> changes."""
     planned: dict[str, list[str]] = {}
     root = Path(source).expanduser().resolve()
-    for d in sorted(state.runs_dir().glob("*")):
-        if d.name == change or not (d / "state.json").exists():
+    for d in state.iter_run_dirs():
+        if d.name == change:
             continue
         try:
+            d = state.run_dir(d.name)
             if state.Run(d).state.status not in ("running", "paused"):
                 continue
             m = manifest.load(d / "manifest.toml")
@@ -252,9 +254,33 @@ def start_commit(source: Path, base: str, from_branch: str | None = None) -> str
             continue
     raise RuntimeError(f"base {base!r} is not a commit in {source}")
 
+
+def _check_draft_output(change: str, out: Path) -> None:
+    """Refuse unsafe replacement before Git or deletion touches a workspace."""
+    if not state.SAFE_CHANGE.fullmatch(change or "") or change in (".", ".."):
+        raise ValueError(f"unsafe change name {change!r}")
+    # Inspect the parent first: never follow it into daemon evidence.
+    for path in (out.parent, out):
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISDIR(mode):
+            raise ValueError(f"unsafe draft path {path}: expected a directory, not a symlink or other file")
+    # Explicit output directories remain useful for isolated callers/tests.
+    if out != state.proposals_dir() / change:
+        return
+    legacy = state.legacy_root() / "proposals" / change
+    if legacy.is_symlink() and out.is_dir() and legacy.resolve() == out.resolve():
+        return  # Completed compatibility link; retain it across replacement.
+    if legacy.is_symlink() or legacy.exists():
+        raise ValueError(f"legacy draft workspace {legacy}: run nightshift migrate before re-drafting")
+
+
 def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m: Manifest, out: Path,
           rounds: int = 4, agent=None, *, branch: str | None = None,
           from_branch: str | None = None) -> Draft:
+    _check_draft_output(change, out)
     agent = agent or agents.run
     start = start_commit(source, base, from_branch)
     shutil.rmtree(out, ignore_errors=True)

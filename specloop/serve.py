@@ -1,6 +1,6 @@
-"""`specloop serve`: drive every running change, unattended.
+"""`nightshift serve`: drive every running change, unattended.
 
-Each change runs as its own `specloop run` subprocess, so a crash is
+Each change runs as its own `nightshift run` subprocess, so a crash is
 contained and every driver picks up the current code. At most
 `SPECLOOP_SERVE_PARALLEL` (default 2) are driven at once; a change a human is
 driving (its lock is held) is left alone. Timed pauses are lifted when due:
@@ -9,7 +9,7 @@ usage limits always (the window has reset), infra pauses at most twice per task
 human.
 
 Same liveness contract as the nightshift daemon: a heartbeat written every
-poll and removed on a clean exit, so `specloop status` can tell running from
+poll and removed on a clean exit, so `nightshift status` can tell running from
 wedged from dead. Drivers are children the loop polls, not calls it waits on,
 so the heartbeat stays fresh while a task takes an hour.
 
@@ -26,14 +26,15 @@ import sys
 import time
 from pathlib import Path
 
-from specloop import messages, state
+from specloop import messages, migrate, state
 from specloop.state import Run
+from specloop.state_locks import MigrationBusy, ServeLock, SupervisorBusy, serve_lock, writer
 
 AUTO_RESUME = {"usage_limit": None, "infra": 2}  # reason -> max lifts per task (None: unlimited)
 
 
 def heartbeat_path() -> Path:
-    return state.ROOT / "serve.json"
+    return state.heartbeat_path()
 
 
 def parallel() -> int:
@@ -53,7 +54,7 @@ def beat(started: float, driving: list[str] = (), poll: float = 60) -> None:
 
 
 def liveness() -> str:
-    p = heartbeat_path()
+    p = state.heartbeat_path(existing=True)
     if not p.exists():
         return "not running"
     hb = json.loads(p.read_text())
@@ -89,12 +90,17 @@ def lift_due(run: Run, now: float, notify) -> bool:
 
 
 def runs() -> list[Run]:
-    found = [Run(d) for d in state.runs_dir().glob("*") if (d / "state.json").exists()]
+    found = []
+    for directory in state.iter_run_dirs():
+        try:
+            found.append(Run(directory, require_existing=True))
+        except Exception as e:
+            print(f"{directory.name}: could not read run: {e}", file=sys.stderr)
     return sorted(found, key=lambda r: r.state.created)
 
 
 class Drivers:
-    """The `specloop run` children this supervisor started, by change."""
+    """The `nightshift run` children this supervisor started, by change."""
 
     def __init__(self):
         self.procs: dict = {}
@@ -110,11 +116,12 @@ class Drivers:
         return sorted(self.procs)
 
 
+@writer()
 def pass_once(notify, spawn=None, drivers: Drivers | None = None, limit: int = 1) -> list[str]:
     """One sweep: lift due pauses everywhere, start a driver for each running
     change nobody is driving, up to `limit` alive at once. Returns the changes
     it started. A `spawn` that returns None is treated as having finished."""
-    spawn = spawn or (lambda change: subprocess.Popen([sys.executable, "-m", "specloop.cli", "run", change]))
+    spawn = spawn or (lambda change: subprocess.Popen([sys.executable, "-m", "nightshift.cli", "run", change]))
     drivers = drivers if drivers is not None else Drivers()
     drivers.reap()
     started = []
@@ -136,26 +143,41 @@ def pass_once(notify, spawn=None, drivers: Drivers | None = None, limit: int = 1
 
 
 def serve(poll: float, notify, once: bool = False) -> int:
+    try:
+        with serve_lock() as owned:
+            return _serve_owned(poll, notify, once, owned)
+    except (SupervisorBusy, MigrationBusy) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+def _serve_owned(poll: float, notify, once: bool, owned: ServeLock) -> int:
+    if migrate.migrate(owned) != 0:
+        return 1
     started = time.time()
-    previous = heartbeat_path()
-    if previous.exists():
-        hb = json.loads(previous.read_text())
-        try:
-            os.kill(hb["pid"], 0)
-            print(f"specloop serve already running as pid {hb['pid']}", file=sys.stderr)
-            return 1
-        except ProcessLookupError:
-            notify(messages.Message(messages.ACTION, "supervisor", "Check the log: the specloop supervisor crashed",
-                                    f"pid {hb['pid']} exited without cleaning up; it has restarted.",
-                                    "tail -50 ~/.logs/specloop.log"))
+    for pid in owned.dead_pids:
+        notify(messages.Message(messages.ACTION, "supervisor", "Check the log: the specloop supervisor crashed",
+                                f"pid {pid} exited without cleaning up; it has restarted.",
+                                "tail -50 ~/.logs/specloop.log"))
 
     stopping = []
-    signal.signal(signal.SIGTERM, lambda *_: stopping.append(1))
+    previous_handler = signal.signal(signal.SIGTERM, lambda *_: stopping.append(1))
     drivers, limit = Drivers(), parallel()
+    dead_legacy = [hb for hb in owned.dead_heartbeats if hb.path != heartbeat_path()]
     try:
         while not stopping:
             pass_once(notify, drivers=drivers, limit=limit)
             beat(started, drivers.alive(), poll)
+            # Only successful canonical publication supersedes old crash evidence.
+            # Preserve a legacy heartbeat that changed since acquisition.
+            for hb in dead_legacy:
+                try:
+                    contents = hb.path.read_text()
+                except FileNotFoundError:
+                    continue
+                if contents == hb.contents:
+                    hb.path.unlink()
+            dead_legacy.clear()
             if once:
                 for proc in drivers.procs.values():
                     proc.wait()
@@ -165,5 +187,8 @@ def serve(poll: float, notify, once: bool = False) -> int:
                     break
                 time.sleep(1)
     finally:
-        heartbeat_path().unlink(missing_ok=True)
+        try:
+            heartbeat_path().unlink(missing_ok=True)
+        finally:
+            signal.signal(signal.SIGTERM, previous_handler)
     return 0

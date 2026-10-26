@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from nightshift.cli import main
+
 from specloop import agents, cli, critic, manifest, openspec, propose, state
 
 
@@ -108,7 +110,7 @@ def invoke_cli(env, monkeypatch, capfd):
         monkeypatch.setattr(propose, "draft", draft)
         monkeypatch.setattr(agents, "run", agent)
         refs = git(env.source, "show-ref")
-        code = cli.main(["propose", "unused.toml", "--change", CHANGE,
+        code = main(["propose", "unused.toml", "--change", CHANGE,
                          "--branch", f"spec/{CHANGE}", "--idea", "Define sign", "--json"])
         captured = capfd.readouterr()
         d, = drafts  # Do not mistake a caught exception for a domain rejection.

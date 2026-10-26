@@ -1,10 +1,13 @@
 import json
+import shlex
 import subprocess
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+
+from nightshift.cli import build_parser, main
 
 from specloop import cli, messages, seal, serve, state, tasks
 from specloop.state import Run
@@ -85,6 +88,93 @@ run = ["true"]
     return make
 
 
+@pytest.mark.scenario("state-migration/read-only-fallback/mixed-roots-remain-visible")
+def test_status_unions_roots_read_only(admitted, home, capsys):
+    from test_state_roots import tree_snapshot
+
+    canonical, _ = admitted("a-canonical", github="example/one")
+    old, _ = admitted("z-legacy", github="example/two")
+    legacy = state.legacy_root() / "runs"
+    legacy.mkdir(parents=True)
+    old.dir.rename(legacy / old.dir.name)
+    (legacy / canonical.dir.name).symlink_to(canonical.dir, target_is_directory=True)
+    before = tree_snapshot(home, state.legacy_root())
+    assert main(["status", "--json"]) == 0
+    entries = json.loads(capsys.readouterr().out)["runs"]
+    assert [entry["change"] for entry in entries] == ["a-canonical", "z-legacy"]
+    assert all("error" not in entry for entry in entries)
+    for entry in entries:
+        assert main(["status", entry["change"], "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["runs"] == [entry]
+    assert Run.for_change("z-legacy").dir == legacy / "z-legacy"
+    assert tree_snapshot(home, state.legacy_root()) == before
+
+
+@pytest.mark.scenario("state-migration/read-only-fallback/conflicting-roots-remain-visible")
+def test_conflict_and_corrupt_runs_preserve_healthy_reads(admitted, home, capsys):
+    from test_state_roots import tree_snapshot
+
+    healthy, _ = admitted("healthy")
+    conflict, _ = admitted("conflict")
+    corrupt, _ = admitted("corrupt")
+    (corrupt.dir / "state.json").write_text("{")
+    legacy = state.legacy_root() / "runs/conflict"
+    legacy.mkdir(parents=True)
+    (legacy / "state.json").write_text('{"change":"conflict","status":"done"}')
+    before = tree_snapshot(home, state.legacy_root())
+    assert main(["status", "--json"]) == 0
+    entries = json.loads(capsys.readouterr().out)["runs"]
+    assert [entry["change"] for entry in entries] == ["conflict", "corrupt", "healthy"]
+    assert "conflicting run directories" in entries[0]["error"]
+    assert "JSONDecodeError" in entries[1]["error"]
+    assert "error" not in entries[2]
+    assert main(["status", "conflict", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["runs"] == [entries[0]]
+    assert main(["status"]) == 0
+    assert "conflicting run directories" in capsys.readouterr().out
+    assert [run.dir for run in serve.runs()] == [healthy.dir]
+    assert "conflicting run directories" in capsys.readouterr().err
+    with pytest.raises(ValueError, match="conflicting run directories"):
+        Run.for_change("conflict")
+    for write in (conflict.save, lambda: conflict.event("test")):
+        with pytest.raises(ValueError, match="conflicting run directories"):
+            write()
+    with pytest.raises(ValueError, match="conflicting run directories"):
+        with conflict.lock():
+            pytest.fail("conflicting writer acquired a lock")
+    assert tree_snapshot(home, state.legacy_root()) == before
+
+
+@pytest.mark.scenario("state-migration/read-only-fallback/conflicting-roots-remain-visible")
+def test_unreadable_run_remains_visible(admitted, monkeypatch, capsys):
+    healthy, _ = admitted("healthy")
+    unreadable, _ = admitted("unreadable")
+    original_stat = Path.stat
+
+    def stat(path, *args, **kwargs):
+        if path == unreadable.dir / "state.json":
+            raise PermissionError("state metadata denied")
+        return original_stat(path, *args, **kwargs)
+
+    original_read = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path == unreadable.dir / "state.json":
+            raise PermissionError("state contents denied")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(Path, "read_text", read)
+    for argv in (["status", "--json"], ["status", "unreadable", "--json"]):
+        assert main(argv) == 0
+        entries = json.loads(capsys.readouterr().out)["runs"]
+        assert entries[-1]["change"] == "unreadable"
+        assert "PermissionError" in entries[-1]["error"]
+    assert [run.dir for run in serve.runs()] == [healthy.dir]
+    assert "state contents denied" in capsys.readouterr().err
+
+
+@pytest.mark.scenario("nightshift-cli/canonical-build-commands/canonical-tests-retain-output-contracts")
 @pytest.mark.scenario("specloop-interface/status-json/paused-run-reported")
 @pytest.mark.parametrize("named", [False, True])
 def test_paused_run_reported(admitted, capsys, named):
@@ -97,7 +187,7 @@ def test_paused_run_reported(admitted, capsys, named):
     run.pause("stuck", key, detail)
     (run.dir / "followups.md").write_text("A non-blocking finding\n")
 
-    assert cli.main(["status", "--json", *(["paused-change"] if named else [])]) == 0
+    assert main(["status", "--json", *(["paused-change"] if named else [])]) == 0
     output = capsys.readouterr()
     assert output.err == ""
     assert json.loads(output.out) == {
@@ -129,7 +219,7 @@ def test_paused_run_reported(admitted, capsys, named):
                 "kind": "action",
                 "headline": "Decide how to unstick task 1.2 (3 attempts failed)",
                 "why": "Last finding: Failed twice:",
-                "command": 'specloop resume paused-change --note "…"   or   specloop accept paused-change',
+                "command": 'nightshift resume paused-change --note "…"   or   nightshift accept paused-change',
                 "actions": ["resume", "accept", "abort"],
                 "pause_id": f"stuck:{key}",
             },
@@ -147,7 +237,7 @@ def test_infrastructure_resume_budget(admitted, capsys, named, resume_at, consum
     run.state.task(key).auto_resumes = consumed
     run.pause("infra", key, "Worker unavailable", resume_at=resume_at)
 
-    assert cli.main(["status", "--json", *(["infra"] if named else [])]) == 0
+    assert main(["status", "--json", *(["infra"] if named else [])]) == 0
     pause = json.loads(capsys.readouterr().out)["runs"][0]["pause"]
     assert pause == {
         "reason": "infra", "task": key, "detail": "Worker unavailable",
@@ -165,7 +255,7 @@ def test_resume_budget_uses_supervisor_policy(admitted, monkeypatch, capsys, nam
     run.pause("infra", key, resume_at=1)
     monkeypatch.setitem(serve.AUTO_RESUME, "infra", 5)
 
-    assert cli.main(["status", "--json", *(["infra"] if named else [])]) == 0
+    assert main(["status", "--json", *(["infra"] if named else [])]) == 0
     assert json.loads(capsys.readouterr().out)["runs"][0]["pause"]["auto_resumes_remaining"] == 4
 
 
@@ -185,7 +275,7 @@ def test_unlimited_scheduled_recovery(admitted, capsys, named, resume_at, reason
         run.state.task(tasks.parse(TASKS)[0].key).auto_resumes = 3
     run.pause(reason, key, resume_at=resume_at)
 
-    assert cli.main(["status", "--json", *(["unlimited"] if named else [])]) == 0
+    assert main(["status", "--json", *(["unlimited"] if named else [])]) == 0
     assert json.loads(capsys.readouterr().out)["runs"][0]["pause"]["auto_resumes_remaining"] is None
 
 
@@ -209,7 +299,7 @@ def test_no_automatic_recovery(admitted, capsys, named, has_task, reason, resume
         del persisted["pause"]["resume_at"]
         (run.dir / "state.json").write_text(json.dumps(persisted))
 
-    assert cli.main(["status", "--json", *(["human"] if named else [])]) == 0
+    assert main(["status", "--json", *(["human"] if named else [])]) == 0
     assert json.loads(capsys.readouterr().out)["runs"][0]["pause"]["auto_resumes_remaining"] == 0
 
 
@@ -254,7 +344,7 @@ def test_resume_allowance_status_is_read_only(admitted, monkeypatch, capsys, nam
     monkeypatch.setattr(state.RunState, "task", no_mutation)
 
     for names in ([[change] for change in runs] if named else [[]]):
-        assert cli.main(["status", "--json", *names]) == 0
+        assert main(["status", "--json", *names]) == 0
         output = capsys.readouterr()
         assert output.err == ""
         document = json.loads(output.out)
@@ -293,7 +383,7 @@ def test_gate_action_described(admitted, capsys, named):
         "gate-change", "phase_gate", key="section:1", detail="section 1 is complete"
     )
 
-    assert cli.main(["status", "--json", *(["gate-change"] if named else [])]) == 0
+    assert main(["status", "--json", *(["gate-change"] if named else [])]) == 0
     entry = json.loads(capsys.readouterr().out)["runs"][0]
     assert entry["action"] == {
         "kind": slack_message.kind,
@@ -306,7 +396,10 @@ def test_gate_action_described(admitted, capsys, named):
     assert entry["action"]["headline"] == "Review section 1 on the branch"
 
 
+@pytest.mark.scenario("run-actions/canonical-command-hints/messages-and-status-agree")
 @pytest.mark.parametrize("reason, verbs", [
+    ("phase_gate", ["resume", "abort"]),
+    ("seal", ["resume", "abort"]),
     ("gate_evidence", ["resume", "abort"]),
     ("coverage", ["resume", "abort"]),
     ("infra", ["resume", "abort"]),
@@ -338,7 +431,7 @@ def test_pause_action_matches_message_and_allowed_verbs(admitted, capsys, reason
         done=1, pr=run.state.pr, resume_at=1800000000,
     )
 
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     action = json.loads(capsys.readouterr().out)["runs"][0]["action"]
     assert action == {
         "kind": slack_message.kind,
@@ -348,13 +441,25 @@ def test_pause_action_matches_message_and_allowed_verbs(admitted, capsys, reason
         "actions": verbs,
         "pause_id": f"{reason}:{key}",
     }
+    if reason in ("requested", "usage_limit"):
+        assert action["kind"] == messages.FYI and action["command"] == ""
+    else:
+        for suggestion in action["command"].split("   or   "):
+            executable, *argv = shlex.split(suggestion)
+            assert executable == "nightshift"
+            args = build_parser().parse_args(argv)
+            assert args.handler is cli.dispatch and args.change == "paused-change"
+            assert args.cmd == "status" or args.cmd in verbs
+            if args.cmd == "resume":
+                assert args.note == ("…" if reason in ("stuck", "blocked", "needs_human") else "")
+                assert args.no_run is False
     assert (run.dir / "state.json").read_bytes() == before
 
 
 @pytest.mark.scenario("specloop-interface/status-json/unknown-change")
 @pytest.mark.scenario("specloop-interface/isolated-run-status-failures/unknown-changes-and-document-failures")
 def test_unknown_change(home, capsys):
-    assert cli.main(["status", "never-admitted", "--json"]) == 1
+    assert main(["status", "never-admitted", "--json"]) == 1
     output = capsys.readouterr()
     document = json.loads(output.out)
     assert document["version"] == 1
@@ -366,7 +471,7 @@ def test_unknown_change(home, capsys):
 
 @pytest.mark.scenario("specloop-interface/isolated-run-status-failures/unknown-changes-and-document-failures")
 def test_empty_status(home, capsys):
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
         "version": 1, "supervisor": {"state": "not running"}, "runs": [],
     }
@@ -377,7 +482,7 @@ def test_multiple_runs_and_change_filter(admitted, monkeypatch, capsys):
     admitted("z")
     admitted("a")
     monkeypatch.setattr(serve, "liveness", lambda: "running (pid 123, last poll 0s ago)")
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     document = json.loads(capsys.readouterr().out)
     assert document["supervisor"]["state"] == "running (pid 123, last poll 0s ago)"
     assert [run["change"] for run in document["runs"]] == ["a", "z"]
@@ -386,12 +491,12 @@ def test_multiple_runs_and_change_filter(admitted, monkeypatch, capsys):
         assert run["pause"] is None
         assert "action" not in run
         assert run["pr"] == ""
-    assert cli.main(["status", "z", "--json"]) == 0
+    assert main(["status", "z", "--json"]) == 0
     assert [run["change"] for run in json.loads(capsys.readouterr().out)["runs"]] == ["z"]
 
 
 def status_document(capsys, *names, code=0):
-    assert cli.main(["status", "--json", *names]) == code
+    assert main(["status", "--json", *names]) == code
     output = capsys.readouterr()
     assert output.err == ""
     # json.loads rejects trailing prose and a second JSON document.
@@ -410,7 +515,7 @@ def assert_status_error(entry, change, error_class, since=None):
     error = entry["error"]
     assert error.startswith(f"{error_class}:")
     assert 0 < len(error) <= 500
-    detail = "Run status could not be read. Inspect specloop status --json for details."
+    detail = "Run status could not be read. Inspect nightshift status --json for details."
     assert entry == {
         "change": change,
         "status": "paused",
@@ -423,6 +528,11 @@ def assert_status_error(entry, change, error_class, since=None):
                     "task": None, "detail": detail, "recent": [], "github": ""},
         "error": error,
     }
+    suggestion = entry["context"]["detail"].split("Inspect ", 1)[1].split(" for details.", 1)[0]
+    executable, *argv = shlex.split(suggestion)
+    assert executable == "nightshift"
+    args = build_parser().parse_args(argv)
+    assert args.handler is cli.dispatch and args.cmd == "status" and args.json is True
     assert "action" not in entry
 
 
@@ -751,7 +861,7 @@ def test_status_propagates_control_flow_exceptions(admitted, monkeypatch, capsys
 
     monkeypatch.setattr(Run, "_load", interrupted)
     with pytest.raises(type(error)) as caught:
-        cli.main(["status", "--json", *(["broken"] if named else [])])
+        main(["status", "--json", *(["broken"] if named else [])])
     assert caught.value is error
     output = capsys.readouterr()
     assert output.out == output.err == ""
@@ -780,7 +890,7 @@ def test_finished_run_reports_archived_tasks(admitted, tmp_path, capsys, status)
     run.save()
     admitted("other")
 
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     entries = json.loads(capsys.readouterr().out)["runs"]
     assert [e["change"] for e in entries] == ["finished", "other"]
     entry = entries[0]
@@ -797,7 +907,7 @@ def test_finished_run_reports_archived_tasks(admitted, tmp_path, capsys, status)
 
 
 def test_text_status_is_unchanged(home, capsys):
-    assert cli.main(["status", "never-admitted"]) == 0
+    assert main(["status", "never-admitted"]) == 0
     assert capsys.readouterr().out == (
         "supervisor: not running\n"
         "never-admitted: no such change (not admitted, or admission was refused)\n"
@@ -817,7 +927,7 @@ def test_paused_run_context_comes_from_branch(admitted, tmp_path, capsys, named)
     (change_dir / "proposal.md").write_text("## Why\n\nWrong summary.\n")
     (change_dir / "tasks.md").write_text(TASKS.replace("Stuck task", "Wrong task"))
 
-    assert cli.main(["status", "--json", *(["context"] if named else [])]) == 0
+    assert main(["status", "--json", *(["context"] if named else [])]) == 0
     output = capsys.readouterr()
     assert output.err == ""
     context = json.loads(output.out)["runs"][0]["context"]
@@ -844,7 +954,7 @@ def test_context_recent_events(admitted, capsys):
     for i, (kind, data) in enumerate(events):
         run.event(kind, at=1800000000 + i, **data)
 
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     recent = json.loads(capsys.readouterr().out)["runs"][0]["context"]["recent"]
     assert [e["text"] for e in recent] == [
         "task 1.2 attempt 1 failed", "task 1.1 landed", "section 1 gate review: FAIL",
@@ -856,7 +966,7 @@ def test_context_recent_events(admitted, capsys):
     ]
     run.event("gate_reviewed", at=1800000007, section=1, output={"verdict": "PASS"})
     run.event("resumed", at=1800000008)
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     recent = json.loads(capsys.readouterr().out)["runs"][0]["context"]["recent"]
     assert len(recent) == 5
     assert [e["text"] for e in recent[:2]] == ["resumed", "section 1 gate review: PASS"]
@@ -873,7 +983,7 @@ def test_context_github_requires_pr_and_manifest_repository(admitted, capsys, re
         run, _ = admitted(change, github=github)
         run.state.pr = pr
         run.save()
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     links = {r["change"]: r["context"]["github"] for r in json.loads(capsys.readouterr().out)["runs"]}
     assert links == {
         "published": "https://github.com/owner/repo/tree/spec/published/openspec/changes/published",
@@ -889,7 +999,7 @@ def test_context_github_normalizes_explicit_manifest_host(admitted, capsys, host
     run.state.pr = f"https://{host}/Example/Repo/pull/7"
     run.save()
 
-    assert cli.main(["status", "--json", "published"]) == 0
+    assert main(["status", "--json", "published"]) == 0
     context = json.loads(capsys.readouterr().out)["runs"][0]["context"]
     assert context["github"] == (
         "https://github.com/Example/Repo/tree/spec/published/openspec/changes/published"
@@ -909,7 +1019,7 @@ def test_recent_failure_keeps_historical_label_after_task_rewrite(admitted, caps
     run.event("attempt_failed", task=second.key, attempt=1)
     run.event("arbitrated", task=second.key, output={"decision": "retry"})
 
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     before = json.loads(capsys.readouterr().out)["runs"][0]["context"]["recent"]
     assert [e["text"] for e in before] == [
         "arbiter ruled retry on task 1.2", "task 1.2 attempt 1 failed", "task 1.1 landed",
@@ -933,7 +1043,7 @@ def test_recent_failure_keeps_historical_label_after_task_rewrite(admitted, caps
     current = tasks.parse(text)[1]
     run.event("implement", task=current.key, label=current.label, session=3, attempt=2)
 
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     entry = json.loads(capsys.readouterr().out)["runs"][0]
     assert entry["head"] == rewritten
     assert entry["context"]["task"]["label"] == next_label
@@ -953,7 +1063,7 @@ def test_review_without_structured_output_preserves_context(admitted, capsys, ki
     run.state.pr = "https://github.com/owner/repo/pull/7"
     run.save()
 
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     before = json.loads(capsys.readouterr().out)["runs"][0]["context"]
     assert before["summary"] == "The page needs links."
     assert before["repo"] == str(cli._manifest(run).repo)
@@ -963,7 +1073,7 @@ def test_review_without_structured_output_preserves_context(admitted, capsys, ki
 
     # Infrastructure failures can emit reviews without a structured result.
     run.event(kind, section=1, task=second.key, disposition="timeout", **output_fields)
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     output = capsys.readouterr()
     assert output.err == ""
     assert json.loads(output.out)["runs"][0]["context"] == before
@@ -973,7 +1083,7 @@ def test_review_without_structured_output_preserves_context(admitted, capsys, ki
 def test_missing_proposal_does_not_break_context(admitted, capsys):
     admitted("missing-proposal")
     admitted("healthy", proposal="## Why\n\nThe page needs links.\n")
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     output = capsys.readouterr()
     assert output.err == ""
     contexts = {r["change"]: r["context"] for r in json.loads(output.out)["runs"]}
@@ -998,7 +1108,7 @@ def test_context_failure_is_isolated_to_one_run(admitted, monkeypatch, capsys, f
             return real_git(repo, *args)
 
         monkeypatch.setattr(cli, "git", fail_proposal)
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     output = capsys.readouterr()
     assert output.err == ""
     entries = {r["change"]: r for r in json.loads(output.out)["runs"]}
@@ -1023,7 +1133,7 @@ def test_context_failure_is_isolated_to_one_run(admitted, monkeypatch, capsys, f
 ])
 def test_context_summary_paragraph_and_limit(admitted, capsys, proposal, expected):
     admitted("summary", proposal=proposal)
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["runs"][0]["context"]["summary"] == expected
 
 
@@ -1036,7 +1146,7 @@ def test_context_task_fallback_and_detail_limit(admitted, capsys, status):
     run.pause("phase_gate", "section:1", "First line\n" + "d" * 1600)
     run.state.status = status
     run.save()
-    assert cli.main(["status", "--json"]) == 0
+    assert main(["status", "--json"]) == 0
     context = json.loads(capsys.readouterr().out)["runs"][0]["context"]
     assert context["task"] == (None if status == "done" else {
         "label": "1.2", "section": "Core", "text": "x" * 300,

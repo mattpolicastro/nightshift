@@ -1,8 +1,11 @@
 import json
 import os
+import sys
 import time
 
 import pytest
+
+from nightshift.cli import main
 
 from specloop import cli, serve, state
 from specloop.state import Pause, Run, TaskState
@@ -21,6 +24,25 @@ def make(change, status="running", pause=None, tasks=None):
         run.state.tasks[key] = ts
     run.save()
     return run
+
+
+@pytest.mark.scenario("state-migration/read-only-fallback/supervisor-discovers-both-roots")
+def test_discovery_unions_roots_without_writes(home):
+    from test_state_roots import tree_snapshot
+
+    canonical = make("a-canonical", "paused", Pause("infra", resume_at=1))
+    canonical.state.created = 20
+    canonical.save()
+    (state.runs_dir() / ".DS_Store").write_bytes(b"directory metadata")
+    legacy_parent = state.legacy_root() / "runs"
+    legacy_parent.mkdir(parents=True)
+    (legacy_parent / canonical.dir.name).symlink_to(canonical.dir, target_is_directory=True)
+    legacy = Run(legacy_parent / "z-legacy")
+    legacy.state.created = 10
+    legacy.save()
+    before = tree_snapshot(home, state.legacy_root())
+    assert [run.dir for run in serve.runs()] == [legacy.dir, canonical.dir]
+    assert tree_snapshot(home, state.legacy_root()) == before
 
 
 def test_lock_is_exclusive(home):
@@ -85,7 +107,7 @@ def test_pass_preserves_action_after_loading_due_pause(home, monkeypatch, capfd,
     def act_after_snapshot():
         snapshot = original_runs()
         # The action completes after discovery loaded the supervisor's snapshot.
-        assert cli.main(["act", "c", verb, "--note", "Keep this guidance", "--json"]) == 0
+        assert main(["act", "c", verb, "--note", "Keep this guidance", "--json"]) == 0
         assert json.loads(capfd.readouterr().out)["outcome"] == "done"
         for name in ("state.json", "events.jsonl"):
             saved[name] = (run.dir / name).read_bytes()
@@ -166,6 +188,30 @@ class FakeProc:
 
     def poll(self):
         return self.code
+
+
+@pytest.mark.scenario("nightshift-cli/canonical-internal-callers/calls-retain-request-identity")
+def test_default_driver_uses_current_interpreter(home, monkeypatch):
+    change = "owner__sample-issue-7-add-a-gate"
+    make(change)
+    proc, calls = FakeProc(), []
+
+    def popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        with Run.for_change(change).lock() as mine:
+            assert mine, "the child must be able to acquire its run lock"
+        return proc
+
+    monkeypatch.setattr(serve.subprocess, "Popen", popen)
+    drivers = serve.Drivers()
+    assert serve.pass_once(lambda t: None, drivers=drivers) == [change]
+    assert calls == [([sys.executable, "-m", "nightshift.cli", "run", change], {})]
+    assert drivers.alive() == [change]
+    assert serve.pass_once(lambda t: None, drivers=drivers) == []
+    assert len(calls) == 1
+    proc.code = 0
+    drivers.reap()
+    assert drivers.alive() == []
 
 
 def test_drivers_are_polled_not_waited_on(home):

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from nightshift import deploy
+from test_specloop_client import ALIAS_NOTICE
 
 
 def _stat(path):
@@ -21,6 +22,39 @@ COUNTS = "git rev-list --left-right --count HEAD...@{upstream}"
 STALE = (1, "", "Would install 1 package\n + mypy==2.4.0\nThe environment is outdated; run `uv sync`")
 SERVICE_STATUS = "uv run --no-sync specloop status --json"
 CURRENT_START = "Mon Jan  1 00:00:00 2024"
+
+
+@pytest.mark.scenario("state-migration/all-state-consumers-agree/reports-and-deploy-see-both-roots")
+@pytest.mark.parametrize("mode", ["legacy", "canonical", "malformed", "busy", "mismatch", "error", "running"])
+def test_resolver_supervisor_probe_preserves_restart_guards(recording, mode):
+    from specloop import state
+    from test_state_roots import tree_snapshot
+
+    r = recording
+    canonical, legacy = state.state_root(), state.legacy_root()
+    legacy.mkdir()
+    (legacy / "serve.json").write_text(json.dumps(dict(pid=201, driving=[])))
+    if mode != "legacy":
+        (canonical / "serve.json").write_text("{" if mode == "malformed" else json.dumps(
+            dict(pid=999 if mode == "mismatch" else 201, driving=["other-repo"] if mode == "busy" else [])))
+    rows = [{"status": "paused", "error": "unavailable"}] if mode == "error" else [
+        {"status": "running" if mode == "running" else "paused"}]
+    r.replies[SERVICE_STATUS] = json.dumps(dict(version=1, supervisor=dict(
+        state="running (pid 201, last poll 2s ago)"), runs=rows))
+    r.replies["git log -1 --format=%ct HEAD -- specloop/"] = "1800000000"
+    context = deploy.Context(cwd=r.context.cwd, env=r.context.env)
+    assert context.daemon_state == canonical
+    before = tree_snapshot(canonical, legacy)
+    assert deploy.process_probe(context, r.runner, "supervisor", activity=True) == (
+        201, True, mode in {"legacy", "canonical"})
+    if mode not in {"legacy", "canonical"}:
+        assert deploy.service(context, r.runner, "supervisor", "label", apply=True, force=False)
+        assert not any(call.startswith("launchctl") for call in r.calls)
+    # An explicit root is isolated even when default heartbeat evidence conflicts.
+    context.supervisor_state = legacy
+    assert deploy.process_probe(context, r.runner, "supervisor", activity=True)[2] == (
+        mode not in {"error", "running"})
+    assert tree_snapshot(canonical, legacy) == before
 
 
 @pytest.fixture
@@ -59,6 +93,11 @@ def recording(tmp_path):
             replies["git rev-parse HEAD"] = "after"
         if key == "uv sync --frozen":
             (tmp_path / ".venv").mkdir(exist_ok=True)
+        if key == SERVICE_STATUS:
+            assert argv == ["uv", "run", "--no-sync", "specloop", "status", "--json"]
+            assert timeout <= 30
+            code, stdout, stderr = value if isinstance(value, tuple) else (0, value, "")
+            return subprocess.CompletedProcess(argv, code, stdout, ALIAS_NOTICE + stderr)
         return subprocess.CompletedProcess(argv, *(value if isinstance(value, tuple) else (0, value, "")))
 
     return SimpleNamespace(context=context, replies=replies, calls=calls, runner=runner,
@@ -768,6 +807,7 @@ def test_daemon_restart_waits_for_background_jobs(restarting, state, capsys):
 
 
 @pytest.mark.scenario("deployment-drift/guarded-service-restart/driving-supervisor-defers-restart")
+@pytest.mark.scenario("nightshift-cli/alias-routed-daemon-callers/daemon-calls-parse-json-despite-notice")
 @pytest.mark.scenario("deployment-drift/guarded-service-restart/fresh-idle-or-forced-restart")
 @pytest.mark.scenario("deployment-drift/bounded-restart-confirmation/first-wait-confirms-replacement")
 @pytest.mark.scenario("deployment-drift/bounded-restart-confirmation/second-wait-or-final-failure")

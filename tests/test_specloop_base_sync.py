@@ -8,7 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from nightshift.cli import main
+
 from specloop import cli, loop, manifest, seal, serve, state
+from test_specloop_messages import parse_build_hint
 
 
 def sh(cwd, *args):
@@ -705,7 +708,7 @@ def publish_without_preparing(monkeypatch, command, code):
         for name in ("prepare_publish", "_merge_publish_base", "_merge_commits", "run", "finals"):
             guard.setattr(loop, name, forbidden)
         guard.setattr(loop.verify, "run_steps", forbidden)
-        assert cli.main(command) == code
+        assert main(command) == code
 
 
 @pytest.mark.scenario("publish-base-sync/fetch-current-base/publish-fetches-again")
@@ -848,6 +851,7 @@ def test_pending_verification_schedules_preparation(publish_env, monkeypatch, ca
 
 
 @pytest.mark.scenario("publish-base-sync/driver-preparation-handoff/moved-base-schedules-preparation")
+@pytest.mark.scenario("run-actions/canonical-command-hints/messages-and-status-agree")
 @pytest.mark.parametrize("mode", ["plain", "act"])
 def test_scheduling_output_and_independent_stop(publish_env, monkeypatch, capfd, mode):
     env, ctx = publish_env, publish_env.ctx
@@ -866,7 +870,10 @@ def test_scheduling_output_and_independent_stop(publish_env, monkeypatch, capfd,
         assert output.out == ""
         explanation = output.err
     assert "scheduled" in explanation and "nothing was published" in explanation
-    assert "readiness" in explanation and "specloop run c" in explanation
+    assert "readiness" in explanation and "nightshift run c" in explanation
+    hints = [parse_build_hint(command) for command in explanation.split("`")[1::2]]
+    assert [hint.cmd for hint in hints] == ["serve", "run", "publish"]
+    assert all(hint.change == "c" for hint in hints[1:])
     ctx.run.reload()
     assert ctx.run.state.status == "running" and ctx.run.state.pause is None
     assert ctx.run.pause_requested() and env.operations == [("fetch", 20)]

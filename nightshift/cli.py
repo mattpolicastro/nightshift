@@ -1,4 +1,4 @@
-"""nightshift status|pause|resume|jobs|run|reconcile|digest"""
+"""Canonical build commands and explicit daemon controls."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import shlex
 import sys
 import time
 from pathlib import Path
+
+from specloop import cli as build_cli
 
 from . import outcomes, config, daemon, preflight, queue, specloop_attention, specloop_job
 
@@ -132,37 +134,90 @@ def _active_jobs() -> None:
         print(f"unreadable job: {error}", file=sys.stderr)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="nightshift")
-    parser.add_argument(
-        "command",
-        nargs="?",
-        default="status",
-        choices=["status", "pause", "resume", "jobs", "run", "reconcile", "preflight", "digest", "attention"],
-    )
-    parser.add_argument("action", nargs="?", help="jobs: compact, stop or release")
-    parser.add_argument("job_id", nargs="?", help="jobs stop/release: exact full job ID")
-    parser.add_argument("--all", action="store_true", help="jobs: include historical attempts")
-    parser.add_argument("--json", action="store_true", help="attention: machine-readable tasks and specloop pauses")
-    parser.add_argument("--offline", action="store_true", help="attention: use cached records without GitHub or specloop")
-    parser.add_argument("--once", action="store_true", help="one task, then exit")
-    parser.add_argument(
-        "--deep",
-        action="store_true",
-        help="preflight: accepted for compatibility; worker probes are retired",
-    )
-    parser.add_argument("--config", type=Path, default=None)
-    args = parser.parse_intermixed_args(argv)
-    if args.all and (args.command != "jobs" or args.action is not None or args.job_id is not None):
-        parser.error("--all is only valid for jobs listing")
-    if args.command == "jobs":
-        if not (args.action is None and args.job_id is None
-                or args.action == "compact" and args.job_id is None
-                or args.action in ("stop", "release") and args.job_id is not None):
-            parser.error("expected 'jobs [--all]', 'jobs compact', 'jobs stop <id>' or 'jobs release <id>'")
-    elif args.action is not None or args.job_id is not None:
-        parser.error(f"{args.command} does not accept positional arguments")
+def _front_options(parser, *, json_option=True):
+    # Suppressed defaults preserve options supplied before a subcommand.
+    parser.add_argument("--config", type=Path, default=argparse.SUPPRESS)
+    for flag, help_text in (
+        ("all", "jobs: include historical attempts"),
+        # mutation-equivalent: 'or' -> 'and' only rewords help; --offline parsing and execution are unchanged.
+        ("offline", "attention: use cached records without GitHub or specloop"),
+        ("once", "one task, then exit"),
+        ("deep", "preflight: accepted for compatibility; worker probes are retired"),
+    ):
+        parser.add_argument(f"--{flag}", action="store_true", default=argparse.SUPPRESS, help=help_text)
+    if json_option:
+        parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
 
+
+def build_parser(*, json_errors=False):
+    """Construct the public parser without credentials, state reads or dispatch."""
+    class Parser(build_cli.argument_parser_class(json_errors)):
+        def parse_args(self, args=None, namespace=None):
+            argv = list(sys.argv[1:] if args is None else args)
+            parsed = super().parse_args(argv or ["status"], namespace)
+            # The frozen service wrapper uses bare run; other build operands
+            # remain required, and a named run cannot take daemon options.
+            if parsed.cmd == "run" and parsed.change is None:
+                parsed.handler, parsed.command = _daemon_command, "run"
+            if parsed.handler is build_cli.dispatch:
+                if any(hasattr(parsed, name) for name in ("config", "all", "offline", "deep")) or (
+                    parsed.cmd != "serve" and hasattr(parsed, "once")
+                ):
+                    self.error("daemon-only options require 'nightshift daemon'")
+            else:
+                if getattr(parsed, "all", False) and (
+                    parsed.command != "jobs" or parsed.action is not None or parsed.job_id is not None
+                ):
+                    self.error("--all is only valid for jobs listing")
+                if parsed.command == "jobs" and not (
+                    parsed.action is None and parsed.job_id is None
+                    or parsed.action == "compact" and parsed.job_id is None
+                    or parsed.action in ("stop", "release") and parsed.job_id is not None
+                ):
+                    self.error("expected 'jobs [--all]', 'jobs compact', 'jobs stop <id>' or 'jobs release <id>'")
+            return parsed
+
+    parser = Parser(prog="nightshift")
+    _front_options(parser, json_option=False)
+    parser.set_defaults(handler=build_cli.dispatch)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    run = build_cli.add_build_parsers(sub, optional_run=True)
+    _front_options(run, json_option=False)
+    group = sub.add_parser("daemon", help="daemon run/status/pause/resume")
+    _front_options(group)
+    group.set_defaults(handler=_daemon_command, command="status")
+    controls = group.add_subparsers(dest="daemon_command")
+    for command in ("run", "status", "pause", "resume"):
+        control = controls.add_parser(command)
+        _front_options(control)
+        control.set_defaults(command=command)
+    for command in ("jobs", "attention", "preflight", "reconcile", "digest"):
+        front = sub.add_parser(command)
+        _front_options(front)
+        front.set_defaults(handler=_daemon_command, command=command)
+        if command == "jobs":
+            front.add_argument("action", nargs="?", help="compact, stop or release")
+            front.add_argument("job_id", nargs="?", help="exact full job ID")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    option_end = argv.index("--") if "--" in argv else len(argv)
+    parser = build_parser(json_errors="--json" in argv[:option_end])
+    try:
+        args = parser.parse_args(argv)
+    except build_cli.ParseError as exc:
+        print(json.dumps({"version": 1, "error": str(exc)}))
+        return 2
+    return args.handler(args)
+
+
+def _daemon_command(args) -> int:
+    for name, default in (("config", None), ("all", False), ("json", False),
+                          ("offline", False), ("once", False), ("deep", False)):
+        if not hasattr(args, name):
+            setattr(args, name, default)
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )

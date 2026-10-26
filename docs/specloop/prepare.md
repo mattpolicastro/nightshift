@@ -56,8 +56,9 @@ The prepare sandbox allows network access and writes inside the build directory.
 Because prepare steps run candidate-controlled code (package lifecycle scripts)
 with network, reads under `$HOME` are an allowlist: this verification's own
 directory, the paths in `[vars]`, and `[sandbox] prepare_read`. Reads of the
-user's `.codex`, `.claude`, `.specloop/homes`, `.ssh`, `.config`, `.aws`, and
-`Library/Keychains` directories, plus `[sandbox].deny_read`, stay denied even
+user's `.codex*`, `.claude`, `.nightshift/homes`, `.specloop/homes`, `.ssh`,
+`.config`, `.aws`, and `Library/Keychains` directories, plus `[sandbox].deny_read`,
+stay denied in preparation and offline verification, even
 inside an allowed path. Every step's process group is killed when the step
 ends, so nothing a prepare step starts keeps network into the verify steps.
 Use `deny_read` for any additional credential locations. Preparation does not
@@ -72,3 +73,18 @@ and mutation-baseline extracts. Each mutant reruns preparation in a fresh build
 directory so copied or generated source includes that mutation. Its logs and
 receipts are kept under `mutant-<number>/`; a failed prepare step makes that
 mutant invalid rather than counting it as caught by tests.
+
+Both modes also deny resolved agent-home and authentication symlink targets,
+including every manifest profile's auth target, even unused profiles. These
+built-in denials do not depend on manifest deny lists or preparation allowlists.
+
+For this repository, trusted preparation copies `plugins/nightshift/` into a
+separate plugin build directory and installs its locked dependencies there with
+`npm ci --ignore-scripts --no-audit --no-fund`. Verification runs offline from
+the build directory against read-only extracted source, with scenario reporting,
+Python/plugin tests, plugin typechecking, the type baseline and negative control.
+Local `uv run pytest`, plugin `npm test` and `npm run typecheck` supplement those
+harness gates; local results are not acceptance receipts. Record actual sandbox
+probe execution or skips separately from generated-profile tests. Host rollout
+and credential/bootstrap inspection remain human checks in the
+[deployment checklist](../deploy.md#human-host-checklist).

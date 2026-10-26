@@ -174,7 +174,7 @@ test('paseo-runs-page/human-pause-waiting-time/waiting-text-preserves-the-existi
   baseline.find('Resume note for human-pause')!.props.onChangeText('Please retry carefully.');
   await press('Details for human-pause');
   assert.equal(page.find('Details for human-pause')!.props.accessibilityState.expanded, true);
-  assert.ok(page.text().includes('More detail (run on the Paseo host)specloop status human-pause --events 20'));
+  assert.ok(page.text().includes('More detail (run on the Paseo host)nightshift status human-pause --events 20'));
   for (const verb of ['publish', 'finish', 'abort']) {
     await press(`${verb[0].toUpperCase()}${verb.slice(1)} human-pause`);
     const message = verb === 'abort' ? 'Abort human-pause? This cannot be undone.'

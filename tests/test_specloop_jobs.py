@@ -54,6 +54,7 @@ def wrappers(tmp_path, monkeypatch):
     executable.write_text(f"#!{sys.executable}\n" + '''
 import json, sys, time
 from pathlib import Path
+print("specloop has been renamed to nightshift; use nightshift instead.", file=sys.stderr)
 checkpoint = Path(sys.argv[2])
 checkpoint.touch()
 deadline = time.monotonic() + 15
@@ -90,6 +91,7 @@ print(json.dumps({"version": 1, "outcome": "needs_input", "questions": ["Which?"
 
 @pytest.mark.scenario("background-job-control/local-job-inventory/list-jobs-after-daemon-restart")
 @pytest.mark.scenario("background-job-control/durable-command-timing/timing-survives-restart")
+@pytest.mark.scenario("nightshift-cli/alias-routed-daemon-callers/daemon-calls-parse-json-despite-notice")
 @pytest.mark.parametrize("revision_command", ["revise", "propose"])
 def test_restart_inventory_all_stages_history_and_order(tmp_path, monkeypatch, wrappers, revision_command):
     root = tmp_path / "state"

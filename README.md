@@ -66,7 +66,7 @@ system that cannot refuse is a system that will confidently do the wrong thing.
 ## How a specloop change flows
 
 For an enrolled specloop repository, the daemon drives the specloop CLI;
-the separate `specloop serve` supervisor executes admitted tasks.
+the separate `nightshift serve` supervisor executes admitted tasks.
 
 | Label | Where and stage | Effect |
 | --- | --- | --- |
@@ -99,7 +99,7 @@ Long issue threads go into durable UTF-8 files passed with `--idea-file`,
 keeping idea text out of argv
 ([issue #12](https://github.com/mattpolicastro/nightshift/issues/12),
 [PR #35](https://github.com/mattpolicastro/nightshift/pull/35)).
-`specloop status --json` preserves healthy runs alongside non-actionable
+`nightshift status --json` preserves healthy runs alongside non-actionable
 `status_error` rows in version-1 JSON with exit 0. Top-level failures exit 1;
 per-run errors refresh alongside healthy attention entries, while a failed
 top-level status read retains a `STALE` snapshot. See the
@@ -136,7 +136,7 @@ The harness seals, verifies and independently reviews each task. Before
 `ready_to_publish`, the driver fetches the configured base, merges it when
 needed and runs trusted preparation and verification. Publish refetches once
 with a 20-second limit; a moved base or pending integration checks return the
-run to `running` with no pause and a retryable error. `specloop serve` drives
+run to `running` with no pause and a retryable error. `nightshift serve` drives
 preparation, then the daemon retries publication to the **same branch and PR**.
 It comments the remaining human checks and hosted CI reminder after success.
 Review the code and complete those checks before merging; merging closes the
@@ -214,7 +214,7 @@ block). Template `run.change` and `run.branch` are optional because intake
 supplies both per change. The template also defines provider
 profiles and roles, allowed and frozen paths, and trusted verification commands.
 Admission saves the effective manifest with the run. Omission of `engine` selects
-specloop too; explicit `worker` fails configuration loading. Worker `verify`,
+the same engine too; explicit `worker` fails configuration loading. Worker `verify`,
 model/endpoint tables, concurrency, task caps and phase budgets are inert, with
 sorted key-only ignored-setting notes. They do not configure manifests or
 providers. See [manifest templates and CLI outcomes](docs/specloop/command-json.md).
@@ -243,18 +243,18 @@ and `agent:working` becomes `needs-human`. Recovery does not resume or delete th
 work, and runs even when the enrollment manifest is unhealthy.
 
 Make `specloop` available on the daemon's PATH and run the separate supervisor
-(`uv run specloop serve`, or its existing launchd job) to drive admitted runs.
+(`uv run nightshift serve`, or its existing launchd job) to drive admitted runs.
 For an alternate layout, use the [host path setup](#host-path-setup); the
 bundled service wrappers retain fixed bootstrap paths.
 Worker quotas and endpoint/model settings do not provide specloop quota pacing;
-specloop uses its manifest's provider profiles.
+the build engine uses its manifest's provider profiles.
 
 The daemon's kill switch is `~/.nightshift/pause`: it holds new work and
 completion delivery. Running drafting, admission and revision jobs may finish
 locally. Use `nightshift jobs` and `nightshift jobs stop <id>` to select and
 terminate a tracked background job. An admission that has already committed
 runnable state may still start or continue building under the independent
-`specloop serve` supervisor. See [pause and job control](#pause-and-job-control)
+`nightshift serve` supervisor. See [pause and job control](#pause-and-job-control)
 for these boundaries and recovery guidance
 ([issue #8](https://github.com/mattpolicastro/nightshift/issues/8),
 [PR #28](https://github.com/mattpolicastro/nightshift/pull/28)).
@@ -270,7 +270,7 @@ remains the implementation acceptance command.
 ### Build timing report
 
 Read-only build timing and recorded profile outcomes come from local
-`~/.specloop/runs/*/events.jsonl` history; no external services are required:
+`~/.nightshift/runs/*/events.jsonl` history; no external services are required:
 
 ```sh
 uv run python -m nightshift.timings
@@ -347,8 +347,8 @@ providers using [enrollment](#enroll-a-repository), then run directly:
 uv sync
 cp config.example.toml config.toml   # edit repositories, manifests and alerting
 uv run nightshift preflight
-uv run nightshift run --once         # one poll; detached jobs may still be running
-uv run specloop serve                # independent supervisor, in another terminal
+uv run nightshift daemon run --once         # one poll; detached jobs may still be running
+uv run nightshift serve                # independent supervisor, in another terminal
 ```
 
 Python preflight checks scoped `GH_TOKEN`, enrolled-repository reachability,
@@ -396,22 +396,42 @@ Modules are under `nightshift/`; directory paths are repository-relative.
 
 ## Usage
 
+`nightshift status` (also the no-argument default) reports build runs;
+`nightshift run <change>`, `nightshift pause <change>` and
+`nightshift resume <change>` control a build. Daemon controls use
+`nightshift daemon run`, `nightshift daemon status`, `nightshift daemon pause`
+and `nightshift daemon resume`. The daemon and supervisor remain independent.
+The frozen daemon wrapper's bare `nightshift run` is the sole implicit daemon
+exception; the frozen supervisor uses `specloop serve`, a one-release alias
+that prints a rename notice to stderr while preserving machine stdout.
+
+Build state now uses `~/.nightshift`: legacy `~/.specloop/runs/<change>` maps
+to `~/.nightshift/runs/<change>`, `~/.specloop/proposals/<change>` to
+`~/.nightshift/drafts/<change>`, and `~/.specloop/homes/<entry>` to
+`~/.nightshift/homes/<entry>`. Daemon receipts and job evidence remain at
+`~/.nightshift/proposals/<owner__repo>/<number>.json` and
+`~/.nightshift/proposals/<owner__repo>/<number>.jobs/`.
+Use `nightshift migrate` with all writers quiescent and the supervisor stopped;
+guarded relocation retains compatibility links and legacy reads for one release.
+See the [human rollout checklist](docs/specloop/README.md#retirement-rollout)
+for [issue #40](https://github.com/mattpolicastro/nightshift/issues/40).
+
 ```sh
 uv sync
 uv run nightshift attention   # PRs awaiting merge and decisions needing you
 uv run nightshift attention --offline  # cached outcomes, no GitHub calls
 uv run nightshift attention --json     # versioned output for a display adapter
-uv run nightshift status      # what's running now, queue depth, blocked, alerting
+uv run nightshift daemon status      # what's running now, queue depth, blocked, alerting
 uv run nightshift preflight   # is it safe to leave alone tonight?
 uv run nightshift reconcile   # safe leftover-claim recovery; never resume workers
-uv run nightshift run --once  # one poll; does not wait for detached jobs
-uv run nightshift pause       # hold new work and completion delivery
+uv run nightshift daemon run --once  # one poll; does not wait for detached jobs
+uv run nightshift daemon pause       # hold new work and completion delivery
 uv run nightshift jobs        # active, stopped, pending and diagnostic rows
 uv run nightshift jobs --all  # full history, including delivered and failed jobs
 uv run nightshift jobs compact  # explicit local cleanup of matching delivered history
 uv run nightshift jobs stop <id>  # replace <id> with the full ID from jobs
 uv run nightshift jobs release <id>  # after confirmed stop and inspection
-uv run nightshift resume      # resume eligible delivery; stopped jobs stay held
+uv run nightshift daemon resume      # resume eligible delivery; stopped jobs stay held
 ```
 
 Copy `config.example.toml` to `config.toml` (gitignored) before running the
@@ -432,7 +452,7 @@ For a **direct CLI** supervisor invocation, substitute your actual paths:
 
 ```sh
 cd "/alternate/nightshift"
-NIGHTSHIFT_BIN_DIR="/alternate/tools" "/alternate/tools/uv" run --no-sync specloop serve
+NIGHTSHIFT_BIN_DIR="/alternate/tools" "/alternate/tools/uv" run --no-sync nightshift serve
 ```
 
 This explicitly selects the checkout and executable: `NIGHTSHIFT_CHECKOUT`
@@ -471,16 +491,16 @@ Leading `~/` expands. Relative roots now resolve beside the selected config
 file, instead of the daemon's working directory; set the old location's
 absolute path before restart if you need to retain it. Absolute paths and
 existing worktrees stay in place; loading neither creates nor migrates them.
-It enables no worker execution and does not relocate specloop run state.
+It enables no worker execution and does not relocate nightshift run state.
 Second-install macOS and actual Paseo host validation remain pending.
 
 ### Pause and job control
 
-`nightshift status` shows local active background jobs before repository network
+`nightshift daemon status` shows local active background jobs before repository network
 queries: full job ID, stage, repository/item, command, execution state, elapsed
 seconds and time remaining or `OVERDUE by Ns`. Starting/legacy attempts without
 timing say unavailable. These rows are separate from daemon liveness and
-independent `specloop status` run state; `nightshift jobs --all` includes history.
+independent `nightshift status` run state; `nightshift jobs --all` includes history.
 
 Reporting deadlines are **propose 3600 seconds, admit 300 seconds, revise 1800
 seconds**, including startup; spec re-drafting uses propose's budget. Persisted
@@ -492,7 +512,7 @@ affect timing. Use the stop, inspection and release procedure below. If the
 job finishes late, resolving `needs-human` under normal eligibility allows
 delivery of that result ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
 
-`nightshift pause` creates `~/.nightshift/pause`; `nightshift resume` removes
+`nightshift daemon pause` creates `~/.nightshift/pause`; `nightshift daemon resume` removes
 it. Pause prevents new daemon launches and completion-delivery operations,
 including pushes, PR creation, comments, label changes and publication.
 An already-running job can finish and write its local result while paused;
@@ -603,7 +623,7 @@ and parent intake receipt, the local checkout and committed specloop
 admission/run state, and remote refs, PRs,
 comments and labels. Admission can commit runnable state before returning a
 result. Nightshift pause or job termination leaves that state intact, and the
-independent `specloop serve` supervisor may start or continue the build even
+independent `nightshift serve` supervisor may start or continue the build even
 while Nightshift withholds delivery. Control that supervisor and its active
 run processes separately if they must stop; unloading a supervisor alone is
 not proof that detached run processes exited. Job control does not cancel
@@ -659,8 +679,8 @@ It also lists specloop runs paused for a human decision, with the change,
 pause reason and PR link. Running and finished runs are omitted. JSON output
 has a `specloop` list beside historical worker `tasks`; retirement preserves it.
 
-The command reads GitHub and `specloop status --json`. Failed checks retain
-the last known outcome, print `STALE` with the last successful check time,
+The command reads GitHub and `specloop status --json` through the one-release
+alias. Failed checks retain the last known outcome, print `STALE` with the last successful check time,
 and return exit code 1.
 `--offline` skips those checks and explicitly displays cached data. A successful
 check returns 0, even when tasks need attention.
@@ -691,11 +711,11 @@ finish, abort); see the plugin README.
 
 ### Watching it work
 
-`nightshift status` reports daemon liveness, alerts, active background jobs and
+`nightshift daemon status` reports daemon liveness, alerts, active background jobs and
 repository ready/blocked counts and lists, including contradiction diagnostics.
 Worker working counts, claim/phase/transcript lines and the off-subscription
 model report are removed; other status behavior and exit codes are unchanged.
-Use `nightshift jobs --all` for job history and `specloop status` for independent
+Use `nightshift jobs --all` for job history and `nightshift status` for independent
 run state. Timing and inventory details are in [job control](#pause-and-job-control).
 `tail -f ~/.logs/nightshift.log` follows daemon activity; it is not agent reasoning.
 
@@ -734,7 +754,7 @@ and these startup checks before using the bundled daemon:
 - [ ] **Enroll a throwaway repo first.** `config.example.toml` ships pointing
       at a sandbox; promoting a repo you care about is a deliberate edit, and
       worth leaving a week.
-- [ ] **Confirm the pause file works** — `nightshift pause`, then check the log
+- [ ] **Confirm the pause file works** — `nightshift daemon pause`, then check the log
       shows it holding new launches and completion delivery.
 - [ ] **Review manifest provider quotas and costs.** Retired worker caps and
       model settings cannot pace specloop builds.
@@ -759,7 +779,7 @@ tail -f ~/.logs/nightshift.log
 To unload the daemon while holding later delivery:
 
 ```sh
-uv run nightshift pause
+uv run nightshift daemon pause
 launchctl unload ~/Library/LaunchAgents/com.mattpolicastro.nightshift.plist
 # From another terminal, inventory and stop each selected surviving job:
 uv run nightshift jobs
@@ -769,7 +789,7 @@ uv run nightshift jobs
 
 Unloading stops the daemon service, not its detached drafting, admission or
 revision jobs, and does not revoke committed admission or stop independent
-specloop builds. Keep pause in place until inspection is complete; reloading
+admitted builds. Keep pause in place until inspection is complete; reloading
 the daemon does not clear pause or stopped-job holds.
 
 `bin/nightshift-daemon` still refuses missing env-file/OAuth/GH_TOKEN or any
@@ -844,7 +864,7 @@ blocked-by: #9, #12
 ```
 
 An open or unreadable blocker defers new drafting, leaving its trigger intact.
-Existing work can still be collected and delivered under normal eligibility rules. `nightshift status` lists blocked issues separately with what they are
+Existing work can still be collected and delivered under normal eligibility rules. `nightshift daemon status` lists blocked issues separately with what they are
 waiting on — a queue full of blocked work otherwise looks exactly like an idle
 daemon.
 

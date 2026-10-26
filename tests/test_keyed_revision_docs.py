@@ -6,8 +6,8 @@ import shlex
 
 import pytest
 
-from specloop import cli, seal
-from nightshift import specloop_intake
+from specloop import seal
+from nightshift import cli, specloop_intake
 from test_revise_idempotency import ctx, snapshot  # noqa: F401
 from test_specloop_command_json import revision_run, template  # noqa: F401
 from test_specloop_documentation_integrity import ROOT
@@ -19,11 +19,13 @@ from test_specloop_documentation_integrity import ROOT
 @pytest.mark.scenario(
     "specloop-documentation/keyed-revision-recovery-guidance/recovery-limits-remain-reviewable"
 )
+@pytest.mark.scenario(
+    "specloop-documentation/unified-command-guidance/executable-examples-retain-regression-coverage"
+)
 @pytest.mark.parametrize("status", ["running", "paused", "aborted", "done"])
 def test_documented_keyed_command_and_result(ctx, tmp_path, capfd, status):
     document = (ROOT / "docs/specloop/command-json.md").read_text()
-    command, = [line for block in re.findall(r"```sh\n(.*?)```", document, re.S)
-                for line in block.splitlines() if line.startswith("specloop revise ")]
+    command, = [line for line in document.splitlines() if line.startswith("nightshift revise ")]
     argv = shlex.split(command)[1:]
     assert argv[1] == ctx.m.change
     feedback = tmp_path / argv[argv.index("--feedback") + 1]

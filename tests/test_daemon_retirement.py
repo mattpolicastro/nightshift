@@ -204,7 +204,9 @@ from specloop import state
 assert daemon.STATE_DIR == Path.home() / ".nightshift"
 assert outcomes.DB_PATH == daemon.STATE_DIR / "outcomes.sqlite3"
 assert queue.CLAIM_DIR == daemon.STATE_DIR / "claims"
-assert state.ROOT == Path.home() / ".specloop"
+assert state.ROOT is None
+assert state.state_root() == Path.home() / ".nightshift"
+assert state.legacy_root() == Path.home() / ".specloop"
 for module, names in {
     "nightshift.cli": ("_elapsed", "_progress_of"),
     "nightshift.preflight": ("_endpoint_checks", "_one_endpoint", "_default_prober",
@@ -222,10 +224,12 @@ for module, names in {
 
 @pytest.mark.scenario("worker-retirement/service-prerequisites-match-the-surviving-engine/codex-enrollment-needs-no-worker-login")
 @pytest.mark.scenario("worker-retirement/retired-configuration-is-inert/old-knobs-cannot-control-builds")
+@pytest.mark.scenario("nightshift-cli/explicit-daemon-controls/daemon-controls-retain-boundaries")
 @pytest.mark.scenario("worker-retirement/sole-execution-engine/pause-and-one-shot-retain-control-boundaries")
 @pytest.mark.real_trust
 @pytest.mark.parametrize("legacy", [False, True])
-def test_python_preflight_then_one_shot_dispatch(tmp_path, monkeypatch, capsys, caplog, legacy):
+@pytest.mark.parametrize("run_command", [["run"], ["daemon", "run"]])
+def test_python_preflight_then_one_shot_dispatch(tmp_path, monkeypatch, capsys, caplog, legacy, run_command):
     # Failure permutations live in test_preflight (task 1.8); here a successful
     # preflight is followed by real CLI/daemon dispatch using the same enrollment.
     manifest = tmp_path / "repository.toml"
@@ -278,7 +282,7 @@ manifest = "repository.toml"
     output = capsys.readouterr()
     assert "worker probes are retired" in output.out and output.out.endswith("\nready\n")
     assert [args[3] for args in probes] == ["owner/sample", "owner/private"]
-    assert cli.main(["run", "--once", "--config", str(selected)]) == 0
+    assert cli.main([*run_command, "--once", "--config", str(selected)]) == 0
     assert capsys.readouterr().out == "poll complete\n"
     assert [args[:2] for args in commands.calls] == [["specloop", "propose"], ["git", "-C"]]
     assert gh.labels == set() and len(gh.prs) == 1
@@ -294,7 +298,7 @@ manifest = "repository.toml"
 
 
 @pytest.mark.scenario("worker-retirement/retired-configuration-is-inert/worker-rejection-takes-precedence")
-@pytest.mark.parametrize("command", [["run", "--once"], ["preflight", "--deep"], ["attention", "--json"]])
+@pytest.mark.parametrize("command", [["daemon", "run", "--once"], ["preflight", "--deep"], ["attention", "--json"]])
 @pytest.mark.parametrize("manifest", ["", 'manifest = 42\n'])
 def test_worker_cli_refuses_before_any_child(tmp_path, monkeypatch, capsys, caplog, command, manifest):
     selected = tmp_path / "config.toml"
@@ -341,7 +345,7 @@ def test_one_shot_recovery_then_public_attention(tmp_path, monkeypatch, capsys, 
     for target, name in ((subprocess, "run"), (subprocess, "Popen"), (queue, "claim"),
                          (queue, "reconcile"), (vcs, "remove_worktree")):
         monkeypatch.setattr(target, name, forbidden)
-    assert cli.main(["run", "--once", "--config", str(selected)]) == 0
+    assert cli.main(["daemon", "run", "--once", "--config", str(selected)]) == 0
     assert capsys.readouterr().out == "poll complete\n"
     assert labels(pipeline, 1) == {"keep-me", {
         "surviving": "needs-human", "missing": "agent:ready", "unreadable": "agent:working",
@@ -409,7 +413,9 @@ def test_bundled_service_roles_read_only():
     from specloop import state
 
     assert daemon.STATE_DIR == Path.home() / ".nightshift"
-    assert state.ROOT == Path.home() / ".specloop"
+    assert state.ROOT is None
+    assert state.state_root() == Path.home() / ".nightshift"
+    assert state.legacy_root() == Path.home() / ".specloop"
     root = Path(__file__).resolve().parents[1]
     home = "/Users/YOUR_USERNAME"
     for service, wrapper, target, keepalive, process_type in (
@@ -428,6 +434,15 @@ def test_bundled_service_roles_read_only():
         lines = [shlex.split(line, comments=True) for line in (root / "bin" / wrapper).read_text().splitlines()]
         assert [line for line in lines if line[:1] == ["exec"]] == [["exec", "/opt/homebrew/bin/uv", "run", *target]]
         assert ["cd", "$HOME/Projects/nightshift"] in lines
+        # Parse the frozen argv without executing a wrapper or touching launchd.
+        argv = target[1:] if service == "nightshift" else target[2:]
+        parsed = cli.build_parser().parse_args(argv)
+        if service == "nightshift":
+            explicit = cli.build_parser().parse_args(["daemon", "run"])
+            assert parsed.handler is explicit.handler is cli._daemon_command
+            assert parsed.command == explicit.command == "run"
+        else:
+            assert parsed.handler is cli.build_cli.dispatch and parsed.cmd == "serve"
         if service == "nightshift":
             assert ['ENV_FILE=$HOME/.config/nightshift/env'] in lines
             assert ["if", "[", "!", "-f", "$ENV_FILE", "];", "then"] in lines
@@ -436,3 +451,32 @@ def test_bundled_service_roles_read_only():
             assert ["for", "bin", "in", "gh", "claude", "pnpm", "node", "git", "swift;", "do"] in lines
             for token in ("CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN"):
                 assert ["if", "[", "-z", "${" + token + ":-}", "];", "then"] in lines
+
+
+@pytest.mark.scenario("worker-retirement/service-prerequisites-match-the-surviving-engine/services-retain-independent-roles")
+def test_alias_supervisor_uses_canonical_state_and_legacy_fallback(monkeypatch, capsys):
+    from specloop import cli as build, serve, state
+
+    canonical = state.Run.for_change("canonical")
+    canonical.save()
+    legacy = state.Run(state.legacy_root() / "runs" / "legacy")
+    legacy.save()
+    expected = [canonical.dir, legacy.dir]
+
+    def supervisor(poll, notify, *, once):
+        assert poll == 60 and once is True
+        assert serve.heartbeat_path() == state.state_root() / "serve.json"
+        assert [run.dir for run in serve.runs()] == expected
+        return 0
+
+    def forbidden(*a, **kw):
+        pytest.fail("alias routing must not install or restart a service")
+
+    monkeypatch.setattr(serve, "serve", supervisor)
+    monkeypatch.setattr(build, "load_env", lambda *a: {})
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    assert build.main(["serve", "--once"]) == 0
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "specloop has been renamed to nightshift; use nightshift instead.\n"

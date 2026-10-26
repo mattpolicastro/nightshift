@@ -53,7 +53,7 @@ Both plugin execution adapters and the attention installation check SHALL use se
 #### Scenario: Checkout comes from configuration
 - **WHEN** attention, Factory status and an allowed Factory action execute with a nondefault checkout and uv path
 - **THEN** their production execFile calls receive the configured executable and exact cwd, and attention checks installation under that checkout
-- **THEN** existing command arguments are retained; attention uses `<bin>:/usr/bin:/bin:/usr/sbin:/sbin` and Factory uses `<node>:<bin>:/usr/bin:/bin:/usr/sbin:/sbin` with the configured directories
+- **THEN** Factory uses nightshift in place of specloop, retaining all other command arguments; attention uses `<bin>:/usr/bin:/bin:/usr/sbin:/sbin` and Factory uses `<node>:<bin>:/usr/bin:/bin:/usr/sbin:/sbin` with the configured directories
 - **THEN** existing timeouts, output limits, caches and child cleanup remain unchanged
 
 #### Scenario: RPC cannot select host commands

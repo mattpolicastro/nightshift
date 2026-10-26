@@ -5,6 +5,8 @@ from dataclasses import replace
 
 import pytest
 
+from nightshift.cli import main
+
 from specloop import agents, cli, loop, manifest, openspec, quota, seal, state
 from specloop.state import Run
 
@@ -172,7 +174,7 @@ def test_stuck_pauses_and_resume_with_note_continues(env, monkeypatch):
     key = run.state.pause.task
     b = Script(write("hello"), verdict("PASS"), write("world"), verdict("PASS"))
     monkeypatch.setattr(cli, "_ctx", lambda r: ctx_for(r, m, b))
-    assert cli.main(["resume", "c", "--note", "write ok"]) == 0
+    assert main(["resume", "c", "--note", "write ok"]) == 0
     assert "write ok" in (b.calls[0].cwd.parent / "context" / "feedback.md").read_text()
     assert Run.for_change("c").state.tasks[key].status == "passed"
 
@@ -182,7 +184,7 @@ def test_resume_past_the_gate_finishes(env, monkeypatch):
     a = Script(write("hello"), verdict("PASS"), write("world"), verdict("PASS"), write("docs"), verdict("PASS"))
     loop.run(ctx_for(run, m, a))
     monkeypatch.setattr(cli, "_ctx", lambda r: ctx_for(r, m, a))
-    cli.main(["resume", "c"])
+    main(["resume", "c"])
     st = Run.for_change("c").state
     assert st.pause.reason == "ready_to_publish" and "- [x] 2.1" in branch_tasks(run)
 
@@ -345,20 +347,20 @@ def test_publish_then_finish(env, monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_remote", lambda ctx: str(github))
     monkeypatch.setattr(cli, "_gh", gh)
     monkeypatch.setattr(openspec, "archive", archive)
-    assert cli.main(["publish", "c"]) == 0
+    assert main(["publish", "c"]) == 0
     st = Run.for_change("c").state
     assert st.pause.reason == "human_checks" and st.pr.endswith("/pull/7")
     assert sh(github, "git", "rev-parse", "spec/c") == sh(run.dir / "repo.git", "git", "rev-parse", "spec/c")
     assert calls[0][:2] == ("api", "repos/o/r/pulls")
     assert calls[1][:2] == ("pr", "create") and "--draft" in calls[1]
-    assert cli.main(["finish", "c"]) == 0
+    assert main(["finish", "c"]) == 0
     assert Run.for_change("c").state.status == "done"
     assert "archived.md" in sh(github, "git", "ls-tree", "-r", "--name-only", "spec/c")
     assert calls[-1][:2] == ("pr", "ready")
 
 
 def test_publish_refuses_before_ready(env):
-    assert cli.main(["publish", "c"]) == 1
+    assert main(["publish", "c"]) == 1
 
 
 def with_chain(m):
@@ -477,7 +479,7 @@ def test_feasibility_review_gates_admission(env, monkeypatch, tmp_path, capsys, 
         return agents.Result("ok", {"contradictions": contradictions, "risks": ["task 1.2 is vague"]})
 
     monkeypatch.setattr(agents, "run", fake)
-    assert cli.main(["admit", str(admission_manifest(tmp_path, src))]) == code
+    assert main(["admit", str(admission_manifest(tmp_path, src))]) == code
     out = capsys.readouterr()
     assert seen and seen[0].access == "read" and "impossible as written" in seen[0].prompt
     assert "risk: task 1.2 is vague" in out.out

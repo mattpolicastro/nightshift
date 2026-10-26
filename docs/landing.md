@@ -18,8 +18,8 @@ if you also pass `--repo`, it must agree with that URL.
 ## Prerequisites and flags
 
 Use a working Nightshift checkout with `uv` and `gh` available on PATH. The
-interpreter running `nightshift.land` must be able to import `specloop.cli`;
-the `specloop` console script need not be on PATH, and virtual-environment
+interpreter running `nightshift.land` must be able to import `nightshift.cli`;
+the `nightshift` console script need not be on PATH, and virtual-environment
 activation is not required. The selected configuration must contain exactly one
 case-insensitive enrollment for the repository. Omit `engine` or set
 `engine = "specloop"`, and configure a trusted manifest. Explicit
@@ -28,7 +28,7 @@ retired; migrate to specloop with a trusted manifest before landing.
 Authenticate `gh` as the operator
 with permission to read and edit the PR and issue comments, update the branch,
 and merge under the repository's protection rules. Run in the environment where
-that interpreter's `-m specloop.cli status --json` can read the applicable runs.
+that interpreter's `-m nightshift.cli status --json` can read the applicable runs.
 Only open PRs targeting an existing `main` are eligible.
 
 | Argument | Meaning |
@@ -40,7 +40,7 @@ Only open PRs targeting an existing `main` are eligible.
 | `--timeout SECONDS` | Positive finite CI/update budget, including fractional seconds; default 1800 seconds (30 minutes). |
 | `--help` | Show usage without performing external operations. |
 
-The daemon, intake helpers, and `specloop serve` supervisor never invoke this
+The daemon, intake helpers, and `nightshift serve` supervisor never invoke this
 command. Run only one landing invocation per PR at a time; there is no lock or
 server-enforced uniqueness for concurrent operators. Invoking the command is
 your decision to land the current reviewed head. It does not perform human
@@ -49,7 +49,7 @@ checks or grant review approval.
 ## Check sources and attestation
 
 The PR body is always checked. A front-door PR is identified by a matching
-canonical PR URL in version-1 `python -m specloop.cli status --json`, for omitted
+canonical PR URL in version-1 `python -m nightshift.cli status --json`, for omitted
 or explicit specloop enrollment, independently of labels or branch names.
 For that PR, `land` also reads every issue-comment
 page and selects the newest trusted publication for the matching change, ordered
@@ -99,8 +99,8 @@ is not atomic and can overwrite a concurrent edit in its residual write window.
 ## Finish, CI, and merge
 
 A matching run must be paused at `human_checks` or already `done`. Landing
-refreshes eligibility and invokes `specloop finish <change>` only for the former,
-then requires the same run to be `done` with its reported finished head matching
+refreshes eligibility and invokes `python -m nightshift.cli finish <change>` only
+for the former, then requires the same run to be `done` with its reported finished head matching
 the remote PR. An initially done run skips finish. A direct PR skips finish and
 must already be ready for review; a front-door draft can become ready through
 finish. Running, aborted, and other paused states refuse before any mutation.

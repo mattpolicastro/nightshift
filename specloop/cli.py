@@ -1,4 +1,4 @@
-"""specloop admit | run | status | act | resume | revise | accept | waive | abort | publish | finish"""
+"""nightshift admit | run | status | act | resume | revise | accept | waive | abort | publish | finish"""
 
 import argparse
 import contextlib
@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,7 +19,8 @@ from urllib.parse import quote
 
 from specloop import feasibility, loop, manifest, messages, openspec, tasks, verify
 from specloop.seal import git
-from specloop.state import SAFE_CHANGE, Busy, Run, TaskState, runs_dir
+from specloop.state import SAFE_CHANGE, Busy, Run, TaskState, iter_run_dirs, proposals_dir, run_dir
+from specloop.state_locks import MigrationBusy, writer
 
 DEFAULT_ENV = Path.home() / ".config" / "specloop" / "env"
 
@@ -202,7 +204,7 @@ def _admit_locked(args, run: Run, m: manifest.Manifest, text: str, roles: dict) 
     run.event("admitted", head=head, implement=m.roles["implement"].name, review=m.roles["review"].name)
     _outcome(args, outcome="admitted")
     print(f"admitted {m.change} at {head[:12]} ({m.roles['implement'].name} implements, "
-          f"{m.roles['review'].name} reviews). Next: specloop run {m.change}")
+          f"{m.roles['review'].name} reviews). Next: nightshift run {m.change}")
     return 0
 
 
@@ -244,8 +246,8 @@ def _locked_command(args, command) -> int:
     run = Run.for_change(args.change)
     with run.lock() as mine:
         if not mine:
-            reason = (f"{args.change} is being driven elsewhere (e.g. specloop serve); retry later, "
-                      f"or `specloop pause {args.change}` first")
+            reason = (f"{args.change} is being driven elsewhere (e.g. nightshift serve); retry later, "
+                      f"or `nightshift pause {args.change}` first")
             if getattr(args, "json", False) and hasattr(args, "document"):
                 # A held lock is retryable, not a refusal a front end should escalate.
                 args.document = {"version": 1, "error": reason}
@@ -375,7 +377,7 @@ def _waive(args, run: Run) -> int:
     run.state.task(args.task).waived.append(args.text)
     run.save()
     run.event("waived", task=args.task, text=args.text)
-    print(f"waived findings matching {args.text!r} for task {args.task}; `specloop resume {args.change}` to continue")
+    print(f"waived findings matching {args.text!r} for task {args.task}; `nightshift resume {args.change}` to continue")
     return 0
 
 
@@ -511,7 +513,7 @@ def _publish(args, run: Run) -> int:
         # Keep transport/check failures retryable, even with a pending intent.
         # No successful freshness result means readiness and checks stay intact.
         reason = (f"Could not check publication base refs/heads/{ctx.m.pr_base}: {exc}; "
-                  f"nothing was published. Retry `specloop publish {args.change}` "
+                  f"nothing was published. Retry `nightshift publish {args.change}` "
                   "when the current base can be checked.")
     else:
         reason = ""
@@ -519,8 +521,8 @@ def _publish(args, run: Run) -> int:
             st.status, st.pause = "running", None
             run.save()
             reason = ("Base preparation was scheduled; nothing was published. Retry publication after "
-                      "the driver restores readiness. Without `specloop serve`, run "
-                      f"`specloop run {args.change}`, then retry `specloop publish {args.change}`.")
+                      "the driver restores readiness. Without `nightshift serve`, run "
+                      f"`nightshift run {args.change}`, then retry `nightshift publish {args.change}`.")
             run.event("publish_preparation_scheduled", base=base, head=head, reason=reason)
     if reason:
         if getattr(args, "json", False) and hasattr(args, "document"):
@@ -541,7 +543,7 @@ def _publish(args, run: Run) -> int:
     st.pr = url
     run.event("published", pr=url, head=ctx.head())
     ctx.pause("human_checks", detail=f"{url}\nHosted CI runs on the PR. Make the PR's human checks, then "
-              f"`specloop finish {args.change}`.")
+              f"`nightshift finish {args.change}`.")
     _outcome(args, outcome="published", pr=url)
     return 0
 
@@ -664,7 +666,7 @@ def propose(args) -> int:
         _outcome(args, problems=["give --idea or --idea-file"])
         print("give --idea or --idea-file", file=sys.stderr)
         return 1
-    out = runs_dir().parent / "proposals" / m.change
+    out = proposals_dir() / m.change
     d = drafting.draft(m.repo, args.base, m.change, idea, args.source or [], m, out,
                        branch=m.branch, from_branch=args.from_branch)
     _outcome(args, commit=d.commit, questions=d.questions, contradictions=d.contradictions,
@@ -675,7 +677,8 @@ def propose(args) -> int:
         notify(messages.Message(messages.ACTION, m.change,
                                 f"Answer {len(d.questions)} question(s) so the draft can continue",
                                 messages.first_line(d.questions[0]),
-                                f"specloop propose {args.manifest} {m.change} --idea-file <idea + answers>"))
+                                shlex.join(["nightshift", "propose", args.manifest, "--change", m.change,
+                                            "--branch", m.branch, "--idea-file", "<idea + answers>"])))
         return 2
     if d.problems:
         print("draft rejected after its rounds:\n" + "\n".join(f"  - {p}" for p in d.problems), file=sys.stderr)
@@ -690,7 +693,8 @@ def propose(args) -> int:
     notify(messages.Message(messages.ACTION, m.change, "Review the drafted change, then admit it",
                             f"draft ready on {published_ref} in {m.repo} ({d.commit[:12]}); "
                             f"review openspec/changes/{m.change}/ there",
-                            f"specloop admit --head {d.commit}"))
+                            shlex.join(["nightshift", "admit", args.manifest, "--change", m.change,
+                                        "--branch", m.branch, "--head", d.commit])))
     _outcome(args, outcome="drafted", branch=published_ref)
     return 0
 
@@ -714,7 +718,7 @@ def drill_cmd(args) -> int:
     else:
         ctx.notify(messages.Message(messages.ACTION, args.change,
                                     f"Look at the review gate: it missed {scored - caught} of {scored} seeded defects",
-                                    "", f"specloop drill {args.change}"))
+                                    "", f"nightshift drill {args.change}"))
     return 0 if caught == scored else 1
 
 
@@ -903,13 +907,17 @@ def _status_entry(name: str) -> dict:
 
 def _status_error_entry(name: str, error: Exception) -> dict:
     summary = "Run status could not be read."
-    detail = f"{summary} Inspect specloop status --json for details."
+    detail = f"{summary} Inspect nightshift status --json for details."
+    try:
+        since = _pause_since(run_dir(name, check_conflict=False))
+    except (OSError, ValueError):
+        since = None
     # Compatibility placeholders only: never persist this pause or offer actions.
     return {
         "change": name,
         "status": "paused",
         "pause": {"reason": "status_error", "task": "", "detail": detail,
-                  "auto_resumes_remaining": 0, "since": _pause_since(runs_dir() / name)},
+                  "auto_resumes_remaining": 0, "since": since},
         "tasks": {"done": 0, "total": 0},
         "head": "",
         "pr": "",
@@ -928,11 +936,15 @@ def _status_json(change: str | None) -> int:
             # check is a per-run read failure, not an unknown named change.
             if not SAFE_CHANGE.fullmatch(change) or change in (".", ".."):
                 raise ValueError(f"unsafe change name {change!r}: use letters, digits, '.', '_' or '-'")
-            if not (runs_dir() / change / "state.json").exists():
+            try:
+                (run_dir(change, check_conflict=False) / "state.json").stat()
+            except FileNotFoundError:
                 raise ValueError(f"{change}: no such change (not admitted, or admission was refused)")
+            except OSError:
+                pass  # Collection reports unreadable state as a per-run error.
             names = [change]
         else:
-            names = sorted(p.name for p in runs_dir().glob("*") if (p / "state.json").exists())
+            names = [p.name for p in iter_run_dirs()]
         entries = []
         for name in names:
             try:
@@ -953,10 +965,14 @@ def status(args) -> int:
 
     if args.json:
         return _status_json(args.change)
-    names = [args.change] if args.change else sorted(p.name for p in runs_dir().glob("*") if (p / "state.json").exists())
+    names = [args.change] if args.change else [p.name for p in iter_run_dirs()]
     print(f"supervisor: {serve.liveness()}")
     for name in names:
-        run = Run.for_change(name)
+        try:
+            run = Run.for_change(name)
+        except Exception as e:
+            print(f"{name}: could not read run: {e}")
+            continue
         if not (run.dir / "state.json").exists():
             print(f"{name}: no such change (not admitted, or admission was refused)")
             continue
@@ -969,12 +985,13 @@ def status(args) -> int:
             for line in st.pause.detail.splitlines()[:12]:
                 print(f"    {line}")
         try:
-            ctx = _ctx(run)
-            head = ctx.head()
-            task_path = _tasks_path(ctx.repo, head, ctx.m.change)
-            all_tasks = tasks.parse(git(ctx.repo, "show", f"{head}:{task_path}").decode())
+            m = _manifest(run)
+            repo = run.dir / "repo.git"
+            head = git(repo, "rev-parse", f"refs/heads/{m.branch}").decode().strip()
+            task_path = _tasks_path(repo, head, m.change)
+            all_tasks = tasks.parse(git(repo, "show", f"{head}:{task_path}").decode())
             done = sum(t.done for t in all_tasks)
-            print(f"  tasks: {done}/{len(all_tasks)} done on {ctx.m.branch} @ {ctx.head()[:12]}")
+            print(f"  tasks: {done}/{len(all_tasks)} done on {m.branch} @ {head[:12]}")
             nxt = next((t for t in all_tasks if not t.done), None)
             if nxt:
                 ts = st.tasks.get(nxt.key)
@@ -994,23 +1011,28 @@ def status(args) -> int:
     return 0
 
 
-def main(argv=None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    option_end = argv.index("--") if "--" in argv else len(argv)
-    json_errors = "--json" in argv[:option_end]
+class ParseError(Exception):
+    """An argument error requested as a version-1 JSON document."""
 
-    class ParseError(Exception):
-        pass
 
+def argument_parser_class(json_errors=False):
     class ArgumentParser(argparse.ArgumentParser):
         def error(self, message):
             if json_errors:
                 raise ParseError(message)
             super().error(message)
 
-    # argparse uses the parent's class for subparsers, sharing this error mode.
-    ap = ArgumentParser(prog="specloop")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    return ArgumentParser
+
+
+def migrate_cmd(args) -> int:
+    from specloop.migrate import migrate
+
+    return migrate()
+
+
+def add_build_parsers(sub, *, optional_run=False):
+    """Register build syntax without loading configuration or run state."""
     a = sub.add_parser("admit")
     a.add_argument("manifest")
     a.add_argument("--implement")
@@ -1022,7 +1044,7 @@ def main(argv=None) -> int:
     a.add_argument("--pr", default="", help="adopt an existing PR URL for publish to reuse")
     a.add_argument("--json", action="store_true", help="print one version-1 outcome document")
     r = sub.add_parser("run")
-    r.add_argument("change")
+    r.add_argument("change", **({"nargs": "?"} if optional_run else {}))
     s = sub.add_parser("status")
     s.add_argument("change", nargs="?")
     s.add_argument("--events", type=int, default=6)
@@ -1077,16 +1099,47 @@ def main(argv=None) -> int:
     sv = sub.add_parser("serve")
     sv.add_argument("--poll", type=float, default=60)
     sv.add_argument("--once", action="store_true")
-    try:
-        args = ap.parse_args(argv)
-    except ParseError as e:
-        print(json.dumps({"version": 1, "error": str(e)}))
-        return 2
+    sub.add_parser("migrate", help="relocate legacy state without scheduling runs")
+    return r
+
+
+def build_parser(*, prog="specloop", json_errors=False):
+    ap = argument_parser_class(json_errors)(prog=prog)
+    add_build_parsers(ap.add_subparsers(dest="cmd", required=True))
+    return ap
+
+
+def main(argv=None) -> int:
+    """One-release compatibility entry point; handlers remain in this module."""
+    from nightshift.cli import main as canonical_main
+
+    print("specloop has been renamed to nightshift; use nightshift instead.", file=sys.stderr)
+    return canonical_main(argv)
+
+
+def dispatch(args) -> int:
+    """Execute a parsed build command with its existing output contract."""
     command = {"admit": admit, "run": run_cmd, "status": status, "act": act, "resume": resume, "revise": revise,
             "accept": accept, "waive": waive, "abort": abort, "publish": publish, "finish": finish,
-            "serve": serve_cmd, "propose": propose, "drill": drill_cmd, "pause": pause_cmd}[args.cmd]
+            "serve": serve_cmd, "migrate": migrate_cmd, "propose": propose, "drill": drill_cmd, "pause": pause_cmd}[args.cmd]
+    def execute():
+        if args.cmd in ("status", "serve", "migrate"):
+            return command(args)
+        # Own coordination before handlers resolve any run, draft or agent home.
+        with writer():
+            return command(args)
+
     if args.cmd not in ("admit", "propose", "revise", "publish") or not args.json:
-        return command(args)
+        try:
+            return execute()
+        except MigrationBusy as exc:
+            if getattr(args, "json", False):
+                document = ({"version": 1, "outcome": "refused", "verb": args.verb, "detail": str(exc)}
+                            if args.cmd == "act" else {"version": 1, "error": str(exc)})
+                print(json.dumps(document))
+            else:
+                print(str(exc), file=sys.stderr)
+            return 1
     if args.cmd == "propose":
         args.document = {"version": 1, "outcome": "rejected", "branch": "", "commit": "",
                          "questions": [], "contradictions": [], "risks": [], "problems": []}
@@ -1097,7 +1150,7 @@ def main(argv=None) -> int:
     # Notifications and progress remain visible without contaminating stdout.
     with _diagnostics_to_stderr():
         try:
-            code = command(args)
+            code = execute()
         except Exception as e:
             if args.cmd == "publish" or isinstance(e, Busy):
                 # An interrupted push is retryable, not a domain refusal that

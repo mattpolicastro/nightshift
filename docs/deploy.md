@@ -5,7 +5,7 @@ Run from the intended live checkout on the macOS host, with its launchd services
 ```sh
 export NIGHTSHIFT_PLUGIN_DIR='/absolute/path/to/deployed/nightshift'
 uv run --no-sync python -m nightshift.deploy          # check
-uv run --no-sync python -m nightshift.deploy --apply  # repair
+uv run --no-sync python -m nightshift.deploy --apply  # repair after migration/holds below
 ```
 
 `uv run python -m nightshift.deploy` is supported, but the outer uv may synchronize before the command can observe dependency drift. Prefer `--no-sync` in both modes to preserve observation and repair order. If `.venv` is absent, use an available Python 3.12+ from the checkout: `python3 -m nightshift.deploy` (or add `--apply`). The module needs no third-party dependencies; uv must still be available for environment probes and repair.
@@ -26,6 +26,47 @@ uv run --no-sync python -m nightshift.deploy --apply  # repair
 Without either plugin path setting, the command prints `plugin check skipped: no plugin directory configured` and skips plugin checking, deployment, and reload; this alone does not fail. Use a dedicated destination outside the checkout, neither a symlink nor an ancestor of the checkout.
 
 Exit **0** means all configured components are current/completed; **1** means drift, inconclusive observation, refusal, failure, or pending work; **2** means invalid arguments, before repair effects. Check reports independently observable results without repairs or control-state writes. Both modes fetch the upstream remote, which can update Git metadata.
+
+## Migration before apply or restart
+
+For the CLI/state upgrade, first follow the human checklist below. Keep daemon
+intake/delivery paused, stop all independent writers, and stop the supervisor
+with launchd KeepAlive disabled before checkout sync. With the new code available
+and the supervisor still stopped, migrate and inspect without scheduler work:
+
+```sh
+uv run --no-sync nightshift migrate
+uv run --no-sync nightshift status --json
+uv run --no-sync nightshift daemon status
+```
+
+Resolve migration refusals before proceeding. Inspect all repositories, revisions,
+Git/worktree references, permissions, credential links and the completion marker.
+Legacy build `proposals/<change>` now lives in `drafts/<change>`; daemon receipts
+and jobs remain under `proposals/<owner__repo>`. Keep due pauses unchanged during
+inspection. Preserve original evidence in the backup, then replace each automatic
+recovery pause with a requested hold while the supervisor is still stopped:
+
+```sh
+uv run --no-sync nightshift resume <change> --no-run
+uv run --no-sync nightshift pause <change>
+uv run --no-sync nightshift status <change> --json
+```
+
+Confirm each requested hold has no recovery deadline before allowing supervisor
+startup. Apply/restart while holds and daemon pause remain in place, retaining
+pause across daemon reload. Restore the intended service configuration and start
+the supervisor only after inspection and holds; confirm code/dispatch and
+heartbeats, then explicitly resume selected work:
+
+```sh
+uv run --no-sync nightshift resume <change> --no-run
+uv run --no-sync nightshift daemon resume
+```
+
+Apply does not perform migration or set holds. An unavailable service needs manual
+start after these checks; automatic startup migration is only a fallback. For
+later applies/restarts, retain the same quiet-window, inspection and hold ordering.
 
 ## Repair order and restart guards
 
@@ -78,7 +119,33 @@ A successful unchanged second apply prints `Nothing to do.` and exits 0: no pull
 
 ## Human host checklist
 
-- After merge, run apply in the live checkout with the plugin path configured during a quiet window.
-- Confirm the daemon heartbeat advances, the supervisor is live with expected runs, and deferred restarts complete when retried idle. Observe actual launchd restart/fallback behavior; CI cannot prove host timing or service health.
-- Open the Factory page on the real Paseo host and confirm current runs and controls load. CI cannot prove plugin reload or host presentation.
-- Run apply again; confirm `Nothing to do.`, unchanged service PIDs, and no new rollback copies. Record live results in the PR checklist.
+- Schedule a shared quiet window across every repository, including Phreak and
+  Compact Mixer. Use `nightshift daemon pause` and pause every run at a task
+  boundary with `nightshift pause <change>`. Verify detached drafting, revision,
+  admission and home users have stopped, including other sessions. Back up both
+  state roots and record repository/run identities; daemon pause alone is insufficient.
+- Stop the supervisor before checkout sync and prevent launchd KeepAlive restart
+  during migration/inspection. Inspect the unchanged wrapper diff and inventory,
+  actual service configuration, bootstrap paths, env-file and credential/tool guards.
+  Confirm daemon startup uses `nightshift daemon run` or frozen `nightshift run`,
+  and the installed alias supports frozen `specloop serve`. Wrapper modernization
+  is a follow-up, not a prerequisite edit.
+- With new code available, perform the stopped-supervisor migrate/inspect/hold
+  sequence above across all repositories. Resolve refusals; inspect drafts, daemon
+  receipts/jobs, revisions, references and credentials before enabling startup.
+- Follow the [disposable unload/reload procedure](validation.md#manual-host-checks).
+  Retain daemon pause through reload, verify requested holds without deadlines,
+  and run apply with the configured plugin path while still paused. Manually
+  start unavailable services only after these migration checks; confirm intended
+  code/dispatch and advancing heartbeats, then explicitly resume selected runs
+  and intake. Observe actual launchd restart/fallback behavior and retry deferred
+  restarts while idle.
+- Check the [landing prerequisites](landing.md#prerequisites-and-flags): interpreter
+  imports and applicable run environment, `uv`/`gh` on PATH, operator authentication
+  and repository permissions, and exactly one case-insensitive specloop enrollment.
+  Confirm omitted/explicit specloop enrollment; migrate retired worker enrollment.
+- Open Factory on the actual Paseo host; check current runs and controls for every
+  repository. Run apply again and confirm `Nothing to do.`, unchanged service PIDs
+  and no new rollback copies. Review readability/live references. Record actual
+  sandbox probes separately from generated profiles and leave unperformed host
+  checks pending in the publish receipt; CI cannot establish these host results.

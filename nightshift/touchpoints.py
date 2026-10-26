@@ -10,6 +10,8 @@ import stat
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 
+from specloop import state
+
 
 def _safe_change(value: object) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", value) or value in (".", ".."):
@@ -144,7 +146,7 @@ class _Reader:
                                     yield record
 
 
-def collect_history(nightshift_root: Path, runs_root: Path) -> dict:
+def collect_history(nightshift_root: Path | None = None, runs_root: Path | None = None) -> dict:
     """Return identity rows, normalized records and uniquely attributable log paths.
 
     Records retain their source number (issue for proposals, PR otherwise), job
@@ -152,7 +154,7 @@ def collect_history(nightshift_root: Path, runs_root: Path) -> dict:
     event replay happens here; events_path is None for ambiguous run identities.
     """
     reader, rows = _Reader(), {}
-    records = list(reader.records(nightshift_root))
+    records = list(reader.records(nightshift_root if nightshift_root is not None else state.state_root()))
     for record in records:
         try:
             repo, change = record["repo"], record["change"]
@@ -186,7 +188,13 @@ def collect_history(nightshift_root: Path, runs_root: Path) -> dict:
     for row in rows.values():
         by_change.setdefault(row["change"], []).append(row)
     for change, matches in by_change.items():
-        path = runs_root / change / "events.jsonl"
+        path = (runs_root if runs_root is not None else state.runs_dir()) / change / "events.jsonl"
+        try:
+            if runs_root is None:
+                path = state.run_dir(change) / "events.jsonl"
+        except (OSError, ValueError) as exc:
+            reader.error(path, exc)
+            continue
         if len(matches) > 1:
             reader.error(path, ValueError("ambiguous run name belongs to multiple rows; events not read"))
         else:
@@ -285,7 +293,7 @@ def _intake_counts(row, reader):
     row.update(counts=counts, build_commits=build_commits)
 
 
-def collect_intake(nightshift_root: Path, runs_root: Path) -> dict:
+def collect_intake(nightshift_root: Path | None = None, runs_root: Path | None = None) -> dict:
     """Aggregate observed intake rounds, preserving history for later event replay.
 
     Each row retains successful build_commits so event accounting can add only
@@ -406,7 +414,7 @@ def _event_counts(row, reader):
     counts["total"] = sum(counts[field] for field in _SCALAR_COUNTS)
 
 
-def collect_events(nightshift_root: Path, runs_root: Path) -> dict:
+def collect_events(nightshift_root: Path | None = None, runs_root: Path | None = None) -> dict:
     """Add append-order event accounting to intake history, preserving provenance."""
     history = collect_intake(nightshift_root, runs_root)
     reader = _Reader()
@@ -417,7 +425,7 @@ def collect_events(nightshift_root: Path, runs_root: Path) -> dict:
     return history
 
 
-def collect_report(nightshift_root: Path, runs_root: Path, *, since: date | None = None) -> dict:
+def collect_report(nightshift_root: Path | None = None, runs_root: Path | None = None, *, since: date | None = None) -> dict:
     """Select whole changes by estimated initial draft time and return a JSON document.
 
     Events are never cut off at a lifecycle marker or filtered by event date.
@@ -538,8 +546,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--since", type=_since_date, metavar="YYYY-MM-DD",
                         help="include changes drafted on or after this date (UTC, approximate)")
     args = parser.parse_args(argv)
-    home = Path.home()
-    report = collect_report(home / ".nightshift", home / ".specloop" / "runs", since=args.since)
+    report = collect_report(since=args.since)
     print(json.dumps(report, indent=2) if args.json else render_table(report))
     return 1 if report["errors"] else 0
 

@@ -68,15 +68,15 @@ The Python CLI and preflight SHALL operate without worker-only prerequisites whi
 
 #### Scenario: Services retain independent roles
 - **WHEN** bundled launchd jobs and wrappers are inspected read-only
-- **THEN** the daemon still invokes `nightshift run` and the independent supervisor still invokes `specloop serve`, with existing labels, bootstrap paths, state locations and lifecycle policy
-- **THEN** no live service is installed, unloaded or restarted by retirement code
+- **THEN** the daemon still invokes `nightshift run` and the independent supervisor still invokes `specloop serve`, with existing labels, bootstrap paths and lifecycle policy; bare nightshift run dispatches to the same daemon function as nightshift daemon run, and the alias supervisor uses canonical state with legacy fallback
+- **THEN** no live service is installed, unloaded or restarted by CLI rename or state migration code
 - **THEN** wrappers, plists and their comments remain unchanged; any service adaptation is separate operator work, with host readiness checked before rollout
 
 ### Requirement: Client command boundaries remain stable
 
-Paseo attention SHALL retain its `nightshift attention --json` command, installation check and historical data projection. Factory actions and specloop notification commands SHALL retain the existing `specloop` commands. Host path resolution, argv boundaries, allowed-action validation, caches, redaction and child cleanup SHALL remain unchanged.
+Paseo attention SHALL retain its `nightshift attention --json` command, installation check and historical data projection. Factory actions and new notification commands SHALL use canonical `nightshift` commands; the one-release specloop alias SHALL preserve existing callers. Host path resolution, argv boundaries, allowed-action validation, caches, redaction and child cleanup SHALL remain unchanged.
 
 #### Scenario: Existing clients use surviving commands
 - **WHEN** attention, Factory status or an allowed action runs and a specloop pause notification is rendered
 - **THEN** their argv or suggested command resolves to the existing surviving CLI, with the same JSON and action contract and no worker invocation
-- **THEN** no package rename, CLI merge, RPC migration or state move is required
+- **THEN** CLI and state names follow the rename while internal packages, RPC fields, historical data and worker-retirement safeguards remain compatible

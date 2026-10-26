@@ -8,7 +8,7 @@ Compare build speed and recorded profile outcomes using local run event logs.
 ### Requirement: Read only collection
 
 The report SHALL read local run `events.jsonl` files with an overridable runs
-root, defaulting to `~/.specloop/runs`, without writing run state or requiring
+root, defaulting to resolver discovery in `~/.nightshift/runs` with unmigrated `~/.specloop/runs` fallback and compatibility-link deduplication, without writing run state or requiring
 external services. It SHALL skip malformed lines and skip an unreadable run
 with one diagnostic line, continuing with readable runs.
 

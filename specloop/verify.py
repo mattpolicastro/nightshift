@@ -18,15 +18,74 @@ import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from nightshift.host_paths import tool_path
+from specloop.agents import homes_dir
 from specloop.manifest import Manifest, Step
 
-CREDENTIAL_DIRS = (".codex", ".claude", ".specloop/homes", ".ssh", ".config", ".aws", "Library/Keychains")
+CREDENTIAL_DIRS = (".codex", ".claude", ".specloop/homes", ".nightshift/homes",
+                   ".ssh", ".config", ".aws", "Library/Keychains")
+
+
+def _real_path(path: Path, links: frozenset[Path] = frozenset()) -> Path:
+    """Resolve using metadata only; missing paths are OK, loops/errors are not.
+
+    Path.resolve(strict=False) can suppress permission and loop errors on
+    supported Python versions. Credential discovery must fail closed instead.
+    """
+    path = path.absolute()
+    if path == path.parent:
+        return path
+    parent = _real_path(path.parent, links)
+    path = parent / path.name
+    if path.name == "..":
+        return parent.parent
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return path
+    if not stat.S_ISLNK(mode):
+        return path
+    if path in links or len(links) >= 40:
+        raise ValueError(f"credential path symlink loop: {path}")
+    return _real_path(parent / os.readlink(path), links | {path})
+
+
+def _directories(root: Path, prefix: str = "") -> list[Path]:
+    try:
+        children = list(root.iterdir())
+    except FileNotFoundError:
+        return []
+    result = []
+    for child in children:
+        if not child.name.startswith(prefix):
+            continue
+        resolved = _real_path(child)
+        try:
+            if stat.S_ISDIR(resolved.stat().st_mode):
+                result.append(child)
+        except FileNotFoundError:
+            pass
+    return result
+
+
+def _credential_denials(m: Manifest) -> set[str]:
+    home = Path.home()
+    agent_roots = {home / ".specloop/homes", home / ".nightshift/homes", homes_dir()}
+    codex_homes = {home / ".codex", *_directories(home, ".codex")}
+    paths = {home / p for p in CREDENTIAL_DIRS} | agent_roots | codex_homes
+    paths.update(p / "auth.json" for p in codex_homes)
+    for root in agent_roots:
+        paths.update(p / "auth.json" for p in _directories(root))
+    # Also support manifests constructed directly rather than through parse().
+    profiles = [*m.roles.values(), *(p for chain in m.chains.values() for p in chain)]
+    paths.update(Path(p).expanduser() for p in (*m.auth_targets, *(p.auth for p in profiles)) if p)
+    return {str(p) for path in paths for p in (path.absolute(), _real_path(path))}
 
 
 @dataclass
@@ -49,9 +108,7 @@ def profile(build: Path, m: Manifest, *, prepare: bool = False, home: Path | Non
         return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
     writable = " ".join(f"(literal {q(p)}) (subpath {q(p)})" for p in (() if prepare else m.writable))
-    denied = set(m.deny_read)
-    if prepare:
-        denied.update(str(Path.home() / p) for p in CREDENTIAL_DIRS)
+    denied = set(m.deny_read) | _credential_denials(m)
     deny = " ".join(f"(subpath {q(p)})" for p in sorted(denied))
     reads = ""
     if prepare:

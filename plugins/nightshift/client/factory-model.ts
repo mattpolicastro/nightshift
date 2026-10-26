@@ -25,7 +25,7 @@ export function matchWorkspace<T extends WorkspaceMatchFields>(repo: string, wor
 
 export function factoryMoreCommand(change: FactoryRun['change']): string {
   // Changes come from the validated run schema's shell-safe identifier.
-  return `specloop status ${change} --events 20`;
+  return `nightshift status ${change} --events 20`;
 }
 
 export function factoryDetails(run: FactoryRun) {

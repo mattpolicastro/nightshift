@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from nightshift.cli import main
+
 from specloop import cli, state, tasks
 from specloop.state import Run
 from test_specloop_status_json import (
@@ -270,7 +272,7 @@ def test_text_status_does_not_look_up_pause_since(admitted, monkeypatch, capsys,
         pytest.fail("text status must not look up pause.since")
 
     monkeypatch.setattr(cli, "_pause_since", no_lookup)
-    assert cli.main(["status", *(["paused"] if named else [])]) == 0
+    assert main(["status", *(["paused"] if named else [])]) == 0
     output = capsys.readouterr()
     key = tasks.parse(TASKS)[1].key
     assert output.err == ""
@@ -303,7 +305,7 @@ def test_pause_lookup_propagates_interrupts(admitted, monkeypatch, capsys, named
 
     monkeypatch.setattr(Path, "read_text", interrupted)
     with pytest.raises(type(error)) as caught:
-        cli.main(["status", "--json", *(["paused"] if named else [])])
+        main(["status", "--json", *(["paused"] if named else [])])
     assert caught.value is error
     output = capsys.readouterr()
     assert output.out == output.err == ""
