@@ -11,6 +11,7 @@ import pytest
 
 from nightshift import config
 from nightshift.host_paths import host_path, tool_path
+from doc_commands import parse_command
 from test_specloop_documentation_integrity import LINK, heading_ids
 
 
@@ -47,6 +48,9 @@ def test_settings_and_inheritance_are_documented():
 @pytest.mark.scenario(
     "specloop-documentation/host-portability-guidance/operator-configures-an-alternate-layout"
 )
+@pytest.mark.scenario(
+    "specloop-documentation/unified-command-guidance/executable-examples-retain-regression-coverage"
+)
 def test_alternate_layout_examples_resolve_without_launching_services(tmp_path, monkeypatch):
     # Parse the published shell examples as literal argv; never execute a service.
     plugin = read("plugins/nightshift/README.md")
@@ -65,7 +69,7 @@ def test_alternate_layout_examples_resolve_without_launching_services(tmp_path, 
     assert shlex.split(cd) == ["cd", env["NIGHTSHIFT_CHECKOUT"]]
     assert shlex.split(invocation) == [
         f"NIGHTSHIFT_BIN_DIR={env['NIGHTSHIFT_BIN_DIR']}", env["NIGHTSHIFT_UV"],
-        "run", "--no-sync", "specloop", "serve",
+        "run", "--no-sync", "nightshift", "serve",
     ]
     for snippet in (exports, direct):
         subprocess.run(["/bin/sh", "-n"], input=snippet, text=True, check=True)
@@ -144,5 +148,14 @@ def test_fixed_bootstrap_commands_and_guarded_rollout_are_explicit():
     ):
         wrapper = read(f"bin/{name}")
         assert f"exec {command}" in wrapper and f"`{command}`" in limits
+        invocation, = [shlex.split(line)[1:] for line in wrapper.splitlines()
+                       if line.startswith("exec ")]
+        assert invocation == shlex.split(command)
+        # Parse the actual frozen argv after removing only its uv run prefix.
+        argv = invocation[2:]
+        if argv[:1] == ["--no-sync"]:
+            argv = argv[1:]
+        parsed, = parse_command(shlex.join(argv))
+        assert parsed.cmd == ("run" if name == "nightshift-daemon" else "serve")
         assert f'export PATH="{path}"' in wrapper and f"`{path}`" in limits
         assert 'cd "$HOME/Projects/nightshift"' in wrapper

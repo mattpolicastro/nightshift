@@ -1,5 +1,22 @@
 # Command outcomes and repository templates
 
+Use `nightshift status` for builds and `nightshift daemon status` for daemon
+liveness/jobs. `nightshift run <change>`, `nightshift pause <change>` and
+`nightshift resume <change>` control builds; `nightshift daemon run`,
+`nightshift daemon pause` and `nightshift daemon resume` control the independent
+daemon. Bare `nightshift run` remains its frozen wrapper's compatibility form.
+The `specloop` CLI/module is a one-release alias with a stderr rename notice;
+daemon subprocess callers still use it. The operator examples below use the
+canonical dispatcher with unchanged JSON schemas and enrollment values.
+
+With the supervisor stopped and all writers quiescent, `nightshift migrate`
+maps legacy `~/.specloop/runs/<change>` to `~/.nightshift/runs/<change>`,
+`~/.specloop/proposals/<change>` to `~/.nightshift/drafts/<change>` and
+`~/.specloop/homes/<entry>` to `~/.nightshift/homes/<entry>`.
+Daemon receipts `~/.nightshift/proposals/<owner__repo>/<number>.json` and
+`~/.nightshift/proposals/<owner__repo>/<number>.jobs/` remain unchanged. See the
+[guarded rollout and compatibility boundaries](README.md#retirement-rollout).
+
 `propose`, `admit`, `revise`, and `publish` accept `--json`. Each prints exactly one
 JSON document to stdout with `"version": 1`; progress, notifications, and
 inherited child-process output (including Git hooks) go to stderr. Without
@@ -27,11 +44,10 @@ was made available in the source repository.
 Use one manifest for a repository and override its `[run]` values:
 
 ```sh
-specloop propose repo.toml --change issue-7-y --branch spec/issue-7-y \
-  --idea-file idea.md --json
+nightshift propose repo.toml --change issue-7-y --branch spec/issue-7-y --idea-file idea.md --json
 # After human spec approval:
-specloop admit repo.toml --change issue-7-y --branch spec/issue-7-y --json
-specloop publish issue-7-y --json
+nightshift admit repo.toml --change issue-7-y --branch spec/issue-7-y --json
+nightshift publish issue-7-y --json
 ```
 
 Each omitted override inherits the manifest's value. Admission stores the
@@ -43,8 +59,7 @@ To revise an existing spec, include the original idea and new feedback in the
 idea file and start from its local branch (or fetched ref):
 
 ```sh
-specloop propose repo.toml --change issue-7-y --branch spec/issue-7-y \
-  --from-branch spec/issue-7-y --idea-file revised-idea.md --json
+nightshift propose repo.toml --change issue-7-y --branch spec/issue-7-y --from-branch spec/issue-7-y --idea-file revised-idea.md --json
 ```
 
 `--from-branch` overrides the drafting starting point (`--base`) so the revised
@@ -69,9 +84,8 @@ records the URL in run state. When the run reaches `ready_to_publish`,
 `publish` pushes the branch and reports that same URL without creating a PR:
 
 ```sh
-specloop admit repo.toml --change issue-7-y --branch spec/issue-7-y \
-  --pr https://github.com/example/repo/pull/42 --json
-specloop publish issue-7-y --json
+nightshift admit repo.toml --change issue-7-y --branch spec/issue-7-y --pr https://github.com/example/repo/pull/42 --json
+nightshift publish issue-7-y --json
 ```
 
 Without `--pr`, publication continues to create a draft PR.
@@ -94,14 +108,14 @@ tip is unchanged and the previous label-write response was lost.
 
 Drafting and admission run in background subprocesses. The daemon records each
 job in its proposal or admission receipt under `~/.nightshift`, then harvests
-the result on a later poll. Worker claims, worker completion handling, and the
-heartbeat continue while these agent sessions run. Job locks and saved results
+the result on a later poll. The daemon heartbeat and independent build supervisor
+continue while these agent sessions run. Job locks and saved results
 let a restarted daemon resume polling and delivery without launching the same
 session again. Failed jobs are reported through repository health before retry.
 
 The daemon publishes its admitted runs when they pause `ready_to_publish`,
-using `specloop publish <change> --json` and the recorded PR. It comments the
-remaining human checks and the hosted CI reminder on that PR. Publication
+using `specloop publish <change> --json` through the one-release alias and the
+recorded PR. It comments the remaining human checks and the hosted CI reminder on that PR. Publication
 receipts preserve the checks before the run transitions to `human_checks`, so
 an interrupted notification can be retried without publishing again. Comments
 use a hidden marker; lost create responses are reconciled before retrying,
@@ -123,7 +137,7 @@ Queue a review round for an admitted change with an optional run-local key
 ([issue #7](https://github.com/mattpolicastro/nightshift/issues/7)):
 
 ```sh
-specloop revise issue-7-y --feedback feedback.md --round-id review:1 --json
+nightshift revise issue-7-y --feedback feedback.md --round-id review:1 --json
 ```
 
 Keep that key and the saved feedback for retries. Keys are 1–128 ASCII
@@ -166,7 +180,8 @@ The task quotes the entire block as a JSON string, preserving file/line
 references and escaping newlines so embedded checklists remain one task.
 Empty files and files containing only whitespace or separators are refused.
 For a new round, the harness commits tasks.md to its run branch and leaves
-the run running for `serve` or `specloop run`, preserving the recorded PR.
+the run running for `nightshift serve` or `nightshift run <change>`, preserving
+the recorded PR.
 
 For comments containing `---` lines, use `--feedback-format json` with a
 feedback file containing a JSON array of strings, one complete comment per

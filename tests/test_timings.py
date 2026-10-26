@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -273,11 +274,13 @@ def test_readme_timing_guidance_beside_touchpoints():
     assert "uv run python -m nightshift.touchpoints" in touchpoints
     assert "`--since YYYY-MM-DD` and `--json`" in touchpoints
     assert "remains the implementation acceptance command." in touchpoints
+    state_paths = re.findall(r"(?<!`)`(~\/\.[^`\n]+/runs/\*/events\.jsonl)`(?!`)", guidance)
+    assert state_paths == ["~/.nightshift/runs/*/events.jsonl"]
     text = " ".join(guidance.split())
     for required in (
         "uv run python -m nightshift.timings",
         "--since YYYY-MM-DD", "--change NAME", "--json",
-        "Read-only", "~/.specloop/runs/*/events.jsonl", "no external services",
+        "Read-only", "no external services",
         "whole runs first admitted on or after midnight UTC",
         "runs without admission are excluded", "exact change name",
         "combines with `--since`", "JSON instead of the text table",

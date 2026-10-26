@@ -20,6 +20,7 @@ def test_enrollment_examples_load_and_reject_worker(path, tmp_path):
     example = "\n".join(lines) + "\n"
     row, = tomllib.loads(example)["repos"]
     assert set(row) == {"name", "engine", "manifest", "base"}
+    assert row["engine"] == config.Repo(row["name"]).engine
     selected = tmp_path / "config.toml"
     for engine in ('engine = "specloop"\n', ""):
         selected.write_text(example.replace('engine = "specloop"\n', engine))
@@ -53,8 +54,7 @@ def test_retirement_references_and_layout(path):
     targets = {target for _, target in LINK.findall((ROOT / path).read_text())}
     assert f"{REPOSITORY}/issues/16" in targets
     assert f"{REPOSITORY}/pull/16" not in targets
-    if path != "README.md":
-        assert f"{REPOSITORY}/issues/40" in targets
+    assert f"{REPOSITORY}/issues/40" in targets
     for line in (ROOT / "README.md").read_text().splitlines():
         if line.startswith("| `") and " | " in line:
             for name in re.findall(r"`([^`]+\.py)`", line.split(" | ")[0]):
