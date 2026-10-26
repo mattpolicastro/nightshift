@@ -71,6 +71,14 @@ def run_dir(change: str, *, check_conflict: bool = True) -> Path:
     if not SAFE_CHANGE.fullmatch(change or "") or change in (".", ".."):
         raise ValueError(f"unsafe change name {change!r}")
     canonical, legacy = runs_dir() / change, legacy_root() / "runs" / change
+    from specloop.migrate import Refusal, resolve_recorded
+
+    try:
+        recorded = resolve_recorded(f"runs/{change}")
+    except Refusal as exc:
+        raise ValueError(str(exc)) from exc
+    if recorded is not None:
+        return recorded
     if _present(canonical):
         if check_conflict and _present(legacy) and not canonical.samefile(legacy):
             raise ValueError(f"{change}: conflicting run directories: {canonical} and {legacy}")

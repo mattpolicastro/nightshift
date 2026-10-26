@@ -2,7 +2,7 @@
 
 The yielded intent is JSON-serializable. A relocation caller must persist it
 before its first mutation and stay inside preflight to retain every lock.
-Completion/marker recovery and CLI/startup activation are separate callers.
+Completion is explicit; CLI/startup activation belongs to separate callers.
 """
 
 from contextlib import ExitStack, contextmanager
@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 import tempfile
 
 from specloop import state
@@ -54,9 +55,9 @@ def _matches(path, entry):
         key: entry[key] for key in ("device", "inode")}
 
 
-def _intent(source, destination):
+def _intent(source, destination, path=None):
     identity = {"version": 1, "source_root": str(source), "destination_root": str(destination)}
-    path = journal_path()
+    path = journal_path() if path is None else path
     if _metadata(path) is None:
         return {**identity, "entries": []}
     if not stat.S_ISREG(path.lstat().st_mode):
@@ -70,15 +71,74 @@ def _intent(source, destination):
         for entry in intent["entries"]:
             src, dst = Path(entry["source"]), Path(entry["destination"])
             if (len(src.parts) != 2 or src.parts[0] not in MAPPING or
-                    src.name in (".", "..") or str(src) != entry["source"] or
+                    src.name in (".", "..") or "\0" in str(src) or str(src) != entry["source"] or
                     dst != Path(MAPPING[src.parts[0]]) / src.name or
                     str(dst) != entry["destination"] or str(src) in seen or
                     any(type(entry[k]) is not int or entry[k] < 0 for k in ("device", "inode"))):
                 raise ValueError("invalid entry identity")
             seen.add(str(src))
+            if entry["phase"] not in ("intent", "planned", "rewritten", "moved", "linked"):
+                raise ValueError("invalid phase")
+            if not isinstance(entry["symlinks"], list):
+                raise ValueError("invalid symlink plan")
+            links = set()
+            for link in entry["symlinks"]:
+                relative = Path(link["path"])
+                if (relative.is_absolute() or not relative.parts or ".." in relative.parts or
+                        str(relative) != link["path"] or link["path"] in links or
+                        not isinstance(link["original"], str) or not link["original"] or
+                        os.path.isabs(link["original"]) or not os.path.isabs(link["destination"]) or
+                        any("\0" in link[k] for k in ("path", "original", "destination"))):
+                    raise ValueError("invalid symlink plan")
+                links.add(link["path"])
+            if entry["phase"] == "intent" and entry["symlinks"]:
+                raise ValueError("unplanned symlinks")
         return intent
-    except (ValueError, TypeError, KeyError) as exc:
+    except (ValueError, TypeError, KeyError, RecursionError) as exc:
         raise Refusal(f"Invalid migration journal: {path}") from exc
+
+
+def _completed(source, destination):
+    path = source / MARKER
+    if _metadata(path) is None:
+        return False
+    marker = _intent(source, destination, path)
+    if marker.get("completed") is not True or any(e["phase"] != "linked" for e in marker["entries"]):
+        raise Refusal(f"Invalid migration marker: {path}")
+    if _metadata(journal_path()) is not None:
+        intent = _intent(source, destination)
+        if marker != {**intent, "completed": True}:
+            raise Refusal(f"Migration marker/journal mismatch: {path}")
+        journal_path().unlink()  # Interrupted after publication; no entry rescan.
+    return True
+
+
+def _location(source, destination, entry):
+    src, dst = source / entry["source"], destination / entry["destination"]
+    linked = src.is_symlink() and os.readlink(src) == str(dst)
+    if _matches(src, entry) and _metadata(dst) is None:
+        if entry["phase"] not in ("moved", "linked"):
+            return src
+    elif _matches(dst, entry) and (_metadata(src) is None or linked):
+        if entry["phase"] in ("rewritten", "moved", "linked") and (linked or entry["phase"] != "linked"):
+            return dst
+        if linked and entry["phase"] == "intent":
+            return dst  # An already complete compatibility link discovered at preflight.
+    raise Refusal(f"Conflicting migration phase/identity: {src} -> {dst}")
+
+
+def resolve_recorded(relative):
+    """Read-only identity resolution, including a rename without its old link."""
+    if _metadata(journal_path()) is None:
+        return None
+    source, destination = state.legacy_root().resolve(), state.state_root().resolve()
+    intent = _intent(source, destination)
+    for entry in intent["entries"]:
+        if entry["source"] == relative:
+            for root, rel in ((source, entry["source"]), (destination, entry["destination"])):
+                _directory(root / Path(rel).parent)
+            return _location(source, destination, entry)
+    return None
 
 
 @contextmanager
@@ -87,6 +147,7 @@ def preflight(owned=None):
 
     Only stable global lock files may be created. No intent, entry, per-run
     lock, destination directory or success marker is written by preflight.
+    Yield None for valid completion, clearing only a matching leftover journal.
     """
     source, destination = state.legacy_root(), state.state_root()
     for root in (source, destination):
@@ -96,13 +157,17 @@ def preflight(owned=None):
         raise Refusal(f"Overlapping migration roots: {source} and {destination}")
     try:
         with serve_lock(owned), coordination(exclusive=True), ExitStack() as locks:
+            if _completed(source, destination):
+                yield None
+                return
+            recovering = _metadata(journal_path()) is not None
             intent = _intent(source, destination)
             recorded = {entry["source"]: entry for entry in intent["entries"]}
             candidates = dict(recorded)
             for old, new in MAPPING.items():
                 _directory(source / old)
                 _directory(destination / new)
-                if (source / old).exists():
+                if not recovering and (source / old).exists():
                     for path in (source / old).iterdir():
                         candidates.setdefault(f"{old}/{path.name}", {
                             "source": f"{old}/{path.name}", "destination": f"{new}/{path.name}",
@@ -152,9 +217,9 @@ def preflight(owned=None):
         raise Refusal(f"Cannot inspect migration evidence: {exc}") from exc
 
 
-def _save(intent):
-    """Publish journal transitions atomically; never follow an existing temp link."""
-    path = journal_path()
+def _save(intent, path=None):
+    """Publish a journal or marker atomically, without following a temp link."""
+    path = journal_path() if path is None else path
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as handle:
         temporary = Path(handle.name)
@@ -232,6 +297,15 @@ def relocate(intent):
     """
     source, destination = Path(intent["source_root"]), Path(intent["destination_root"])
     try:
+        # Check every recorded transition before rewriting any entry.
+        for entry in intent["entries"]:
+            actual = _location(source, destination, entry)
+            for link in entry["symlinks"]:
+                path = actual / link["path"]
+                allowed = (link["original"], link["destination"]) if entry["phase"] == "planned" else (link["destination"],)
+                if (not path.parent.resolve().is_relative_to(actual) or
+                        not path.is_symlink() or os.readlink(path) not in allowed):
+                    raise Refusal(f"Conflicting migration symlink: {path}")
         for entry in intent["entries"]:
             if entry["phase"] == "intent":
                 src, dst = source / entry["source"], destination / entry["destination"]
@@ -245,6 +319,8 @@ def relocate(intent):
         _save(intent)
         for entry in intent["entries"]:
             src, dst = source / entry["source"], destination / entry["destination"]
+            if entry["phase"] == "linked":
+                continue
             actual = src if _matches(src, entry) else dst
             if not _matches(actual, entry):
                 raise Refusal(f"Conflicting migration identity: {actual}")
@@ -265,15 +341,17 @@ def relocate(intent):
                         replacement = Path(temporary) / "link"
                         replacement.symlink_to(link["destination"])
                         replacement.replace(path)
-            entry["phase"] = "rewritten"
-            _save(intent)
+            if entry["phase"] == "planned":
+                entry["phase"] = "rewritten"
+                _save(intent)
             if actual == src:
                 if _metadata(dst) is not None:
                     raise Refusal(f"Migration destination already exists: {dst}")
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 src.rename(dst)  # EXDEV is a refusal, never a copy/delete fallback.
-            entry["phase"] = "moved"
-            _save(intent)
+            if entry["phase"] == "rewritten":
+                entry["phase"] = "moved"
+                _save(intent)
             if _metadata(src) is None:
                 src.symlink_to(dst, target_is_directory=dst.is_dir())
             elif not src.is_symlink() or os.readlink(src) != str(dst):
@@ -284,3 +362,19 @@ def relocate(intent):
         if isinstance(exc, Refusal):
             raise
         raise Refusal(f"Cannot relocate migration evidence: {exc}") from exc
+
+
+def migrate(owned=None):
+    """Complete or resume migration only; return a command-compatible status."""
+    from specloop.state_locks import MigrationBusy, SupervisorBusy
+
+    try:
+        with preflight(owned) as intent:
+            if intent is not None:
+                relocate(intent)
+                _save({**intent, "completed": True}, Path(intent["source_root"]) / MARKER)
+                journal_path().unlink()
+        return 0
+    except (Refusal, MigrationBusy, SupervisorBusy) as exc:
+        print(f"Migration refused: {exc}", file=sys.stderr)
+        return 1
