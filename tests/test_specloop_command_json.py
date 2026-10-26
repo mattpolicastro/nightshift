@@ -118,8 +118,10 @@ def daemon_draft_evidence(change):
         "state-migration/separate-draft-namespace/generated-names-cannot-collide-with-another-repository")),
 ])
 @pytest.mark.scenario("state-migration/separate-draft-namespace/unsafe-draft-replacement-refuses")
+@pytest.mark.scenario("state-migration/destination-preserving-relocation/legacy-drafts-move-outside-daemon-proposals")
 def test_cli_draft_replacement_preserves_daemon_evidence(template, monkeypatch, capfd, generated):
     from nightshift import specloop_intake, specloop_job as jobs
+    from specloop import migrate, state_locks
     from test_specloop_propose import draft_evidence_snapshot
 
     path, repo = template
@@ -150,11 +152,20 @@ def test_cli_draft_replacement_preserves_daemon_evidence(template, monkeypatch, 
     monkeypatch.setattr(agents, "run", agent)
     monkeypatch.setattr(cli, "notifier", lambda secrets: lambda message: None)
     for iteration, entry in enumerate((main, cli.main, main, cli.main)):
-        # Exercise both names before and with an already completed legacy link.
-        # Real migration and its marker are covered by tasks 2.6/2.10.
+        # Exercise both names before and after relocating a legacy workspace.
         if iteration == 2:
             legacy.parent.mkdir(parents=True)
-            legacy.symlink_to(out, target_is_directory=True)
+            out.rename(legacy)
+            workspace = draft_evidence_snapshot(legacy)
+            with migrate.preflight() as intent:
+                migrate.relocate(intent)
+                assert draft_evidence_snapshot(out) == workspace
+                assert legacy.readlink() == out
+                assert draft_evidence_snapshot(evidence) == before
+                assert jobs.list_jobs(state.state_root(), include_delivery=True) == inventory
+                # Stand in for journal retirement by the completion caller;
+                # marker publication/no-op recovery belongs to task 2.7.
+                state_locks.journal_path().unlink()
             legacy_link = draft_evidence_snapshot(legacy)
         assert entry(["propose", str(path), change, "--idea", "Add a gate", "--json"]) == 0
         output = capfd.readouterr()

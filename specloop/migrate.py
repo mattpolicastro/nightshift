@@ -1,15 +1,17 @@
-"""Internal migration staging: identity and read-only preflight, before relocation.
+"""Internal migration preflight and destination-preserving entry relocation.
 
 The yielded intent is JSON-serializable. A relocation caller must persist it
 before its first mutation and stay inside preflight to retain every lock.
-There is deliberately no CLI/startup activation or relocation in this stage.
+Completion/marker recovery and CLI/startup activation are separate callers.
 """
 
 from contextlib import ExitStack, contextmanager
 import fcntl
 import json
+import os
 from pathlib import Path
 import stat
+import tempfile
 
 from specloop import state
 from specloop.state_locks import coordination, journal_path, serve_lock
@@ -130,7 +132,7 @@ def preflight(owned=None):
             for relative, entry in sorted(candidates.items()):
                 src, dst = source / relative, destination / entry["destination"]
                 src_info, dst_info = _metadata(src), _metadata(dst)
-                linked = src.is_symlink() and src.readlink() == dst and dst_info is not None
+                linked = src.is_symlink() and os.readlink(src) == str(dst) and dst_info is not None
                 if src.is_symlink() and not linked:
                     raise Refusal(f"Unsupported legacy symlink: {src}")
                 if relative in recorded:
@@ -148,3 +150,137 @@ def preflight(owned=None):
             yield {**intent, "entries": entries}
     except (OSError, UnicodeError) as exc:
         raise Refusal(f"Cannot inspect migration evidence: {exc}") from exc
+
+
+def _save(intent):
+    """Publish journal transitions atomically; never follow an existing temp link."""
+    path = journal_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            json.dump(intent, handle)
+            handle.flush()
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def _original_destination(parent, target):
+    """Resolve existing prefixes, retaining raw directory-traversal suffixes."""
+    destination = str(parent)
+    components = target.split("/")
+    for index, component in enumerate(components):
+        destination += "/" + component
+        try:
+            # pathlib drops trailing '/' and '/.' before probing. Check the
+            # raw spelling first so regular-file/ remains ENOTDIR, not readable.
+            os.stat(destination)
+            if component not in ("", "."):
+                destination = str(Path(destination).resolve(strict=True))
+        except (FileNotFoundError, NotADirectoryError):
+            # missing/../file (or regular-file/../file) cannot be traversed.
+            # Non-strict resolution would remove that obstruction and could
+            # make a dangling credential link open an unrelated existing file.
+            return "/".join([destination, *components[index + 1:]])
+    return destination
+
+
+def _symlink_plan(entry):
+    """Inspect metadata only, including dangling links; never walk linked homes."""
+    plan = []
+    if stat.S_ISREG(entry.lstat().st_mode):
+        return plan
+
+    def unreadable(error):
+        raise error
+
+    for parent, directories, files in os.walk(entry, followlinks=False, onerror=unreadable):
+        for name in sorted(directories + files):
+            path = Path(parent) / name
+            if not path.is_symlink():
+                continue
+            original = os.readlink(path)
+            if os.path.isabs(original):
+                continue
+            # Classify the link's path, not its final referent: an external
+            # alias may point back inside, but its relative spelling still
+            # breaks when this entry moves. Internal aliases move together.
+            prefix = path.parent
+            for component in original.split("/"):
+                prefix = prefix / component
+                if component == "..":
+                    # '..' acts on the directory reached through intermediate
+                    # links, not on their lexical depth (alias -> '.' may occur
+                    # repeatedly). Resolve metadata before deciding it escapes.
+                    prefix = prefix.resolve(strict=False)
+                if not prefix.is_relative_to(entry):
+                    break  # Do not normalize away an escape and later reentry.
+            else:
+                continue
+            destination = _original_destination(path.parent, original)
+            plan.append({"path": str(path.relative_to(entry)), "original": original,
+                         "destination": destination})
+    return plan
+
+
+def relocate(intent):
+    """Relocate a yielded preflight plan while its caller retains every lock.
+
+    Leave the journal for the completion caller. No marker or activation occurs
+    here. All symlink plans are persisted before the first entry is changed.
+    """
+    source, destination = Path(intent["source_root"]), Path(intent["destination_root"])
+    try:
+        for entry in intent["entries"]:
+            if entry["phase"] == "intent":
+                src, dst = source / entry["source"], destination / entry["destination"]
+                if _matches(src, entry):
+                    entry["symlinks"] = _symlink_plan(src)
+                    entry["phase"] = "planned"
+                elif src.is_symlink() and os.readlink(src) == str(dst) and _matches(dst, entry):
+                    entry["phase"] = "linked"
+                else:
+                    raise Refusal(f"Missing symlink plan for moved entry: {src} -> {dst}")
+        _save(intent)
+        for entry in intent["entries"]:
+            src, dst = source / entry["source"], destination / entry["destination"]
+            actual = src if _matches(src, entry) else dst
+            if not _matches(actual, entry):
+                raise Refusal(f"Conflicting migration identity: {actual}")
+            for link in entry["symlinks"]:
+                relative = Path(link["path"])
+                if (relative.is_absolute() or ".." in relative.parts or not relative.parts or
+                        not Path(link["destination"]).is_absolute()):
+                    raise Refusal(f"Invalid symlink plan for {actual}")
+                path = actual / relative
+                if not path.parent.resolve().is_relative_to(actual):
+                    raise Refusal(f"Symlink parent escapes entry: {path}")
+                if not path.is_symlink() or os.readlink(path) not in (link["original"], link["destination"]):
+                    raise Refusal(f"Conflicting migration symlink: {path}")
+                if os.readlink(path) == link["original"]:
+                    # A same-filesystem temporary link keeps the old link readable
+                    # until replacement; no credential target is ever opened.
+                    with tempfile.TemporaryDirectory(dir=destination) as temporary:
+                        replacement = Path(temporary) / "link"
+                        replacement.symlink_to(link["destination"])
+                        replacement.replace(path)
+            entry["phase"] = "rewritten"
+            _save(intent)
+            if actual == src:
+                if _metadata(dst) is not None:
+                    raise Refusal(f"Migration destination already exists: {dst}")
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                src.rename(dst)  # EXDEV is a refusal, never a copy/delete fallback.
+            entry["phase"] = "moved"
+            _save(intent)
+            if _metadata(src) is None:
+                src.symlink_to(dst, target_is_directory=dst.is_dir())
+            elif not src.is_symlink() or os.readlink(src) != str(dst):
+                raise Refusal(f"Conflicting legacy compatibility link: {src}")
+            entry["phase"] = "linked"
+            _save(intent)
+    except (OSError, UnicodeError, RuntimeError) as exc:
+        if isinstance(exc, Refusal):
+            raise
+        raise Refusal(f"Cannot relocate migration evidence: {exc}") from exc
