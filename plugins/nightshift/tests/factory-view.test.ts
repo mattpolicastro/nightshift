@@ -143,12 +143,12 @@ test('Factory Details starts collapsed, renders context and links, and shares a 
   assert.equal(page.calls.lists, 0);
   assert.deepEqual(page.calls.hosts, []);
   assert.ok(!page.text().includes(run.context!.summary));
-  assert.ok(!page.text().includes('specloop status'));
+  assert.ok(!page.text().includes('nightshift status'));
   await page.press('Details for factory-context');
   assert.equal(page.find('Details for factory-context')?.props.accessibilityState.expanded, true);
   for (const value of [run.context!.summary, run.context!.repo, run.context!.branch,
     '2.2 · Paseo plugin · Add Details.', run.context!.detail,
-    'specloop status factory-context --events 20', ...run.context!.recent.map(event => `${new Date(event.at).toLocaleString()} · ${event.text}`)]) {
+    'nightshift status factory-context --events 20', ...run.context!.recent.map(event => `${new Date(event.at).toLocaleString()} · ${event.text}`)]) {
     assert.ok(page.text().includes(value), `Missing ${value}`);
   }
   assert.ok(page.text().indexOf('task 2.2 attempt 1 failed') < page.text().indexOf('task 1.1 landed'));
@@ -159,7 +159,7 @@ test('Factory Details starts collapsed, renders context and links, and shares a 
   await page.press('Open change factory-context on GitHub');
   assert.deepEqual(page.calls.links, [run.context!.github]);
   await page.press('Details for factory-context');
-  assert.ok(!page.text().includes('specloop status'));
+  assert.ok(!page.text().includes('nightshift status'));
   await page.press('Details for factory-context');
   await page.press('Details for second-change');
   assert.equal(page.calls.lists, 1);
@@ -183,7 +183,7 @@ test('Factory Details hides workspace navigation on missing methods, lookup fail
     await page.press('Details for factory-context');
     assert.equal(page.find('Open factory-context in Paseo'), undefined);
     assert.ok(page.text().includes(run.context!.summary));
-    assert.ok(page.text().includes('specloop status factory-context --events 20'));
+    assert.ok(page.text().includes('nightshift status factory-context --events 20'));
     if ('navigation' in options) assert.deepEqual(page.calls.hosts, []);
   }
 });
@@ -194,7 +194,7 @@ test('Factory Details works with absent or empty context and no unpublished chan
     t.after(page.dispose);
     await page.settle();
     await page.press('Details for factory-context');
-    assert.ok(page.text().includes('specloop status factory-context --events 20'));
+    assert.ok(page.text().includes('nightshift status factory-context --events 20'));
     assert.equal(page.find('Open change factory-context on GitHub'), undefined);
     assert.equal(page.find('Open factory-context in Paseo'), undefined);
     for (const absent of ['Summary', 'Repository', 'Branch', 'Pause detail', 'Recent events']) {
@@ -288,7 +288,7 @@ test('finished runs are folded under a collapsed toggle', async t => {
     for (const value of ['Summary', 'Repository', 'Branch', 'Task', 'Pause detail', 'Recent events',
       run.context!.summary, run.context!.repo, run.context!.branch, '2.2 · Paseo plugin · Add Details.',
       run.context!.detail, ...run.context!.recent.map(event => `${new Date(event.at).toLocaleString()} · ${event.text}`),
-      'More detail (run on the Paseo host)', 'specloop status factory-context --events 20']) {
+      'More detail (run on the Paseo host)', 'nightshift status factory-context --events 20']) {
       assert.ok(hasText(page, value), `Missing ${value}`);
     }
     assert.ok(page.text().indexOf('task 2.2 attempt 1 failed') < page.text().indexOf('task 1.1 landed'));

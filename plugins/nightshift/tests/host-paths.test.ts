@@ -36,7 +36,7 @@ function host(t: TestContext, env: NodeJS.ProcessEnv = {}) {
   const calls: { file: string; args: string[]; options: childProcess.ExecFileOptions }[] = [];
   const checks: string[] = [], killed: string[] = [];
   const realExists = fs.existsSync;
-  const state = { missing: false, failure: false, code: 0, hold: false, realCheckout: false };
+  const state = { missing: false, failure: false, timedOut: false, code: 0, hold: false, realCheckout: false };
   const pending: (() => void)[] = [];
   const exists = mock.method(fs, 'existsSync', (path: fs.PathLike) => {
     checks.push(String(path));
@@ -51,7 +51,8 @@ function host(t: TestContext, env: NodeJS.ProcessEnv = {}) {
       ? { version: 1, offline: args.includes('--offline'), tasks: [task], stale: [] }
       : args.includes('status') ? { version: 1, runs: [run] }
         : { version: 1, outcome: state.code ? 'refused' : 'done', verb: 'resume', detail: `${home}/result`, internal: '/private/diagnostic' };
-    const error = state.failure ? Object.assign(new Error('/private/launch-error'), { code: 'ENOENT' })
+    const error = state.timedOut ? Object.assign(new Error('/private/timeout'), { killed: true, code: 1 })
+      : state.failure ? Object.assign(new Error('/private/launch-error'), { code: 'ENOENT' })
       : state.code ? Object.assign(new Error('/private/stderr'), { code: state.code }) : null;
     const finish = () => callback(error, JSON.stringify(output), '/private/stderr');
     if (state.hold) pending.push(finish); else queueMicrotask(finish);
@@ -73,8 +74,8 @@ async function commands(h: ReturnType<typeof host>, uv: string, cwd: string, bin
   await h.actOnFactoryRun({ change: 'gate', verb: 'resume' });
   assert.deepEqual(h.calls.map(call => call.args), [
     ['run', '--no-sync', 'nightshift', 'attention', '--json', '--offline'],
-    ['run', '--no-sync', 'specloop', 'status', '--json'],
-    ['run', '--no-sync', 'specloop', 'act', 'gate', 'resume', '--json'],
+    ['run', '--no-sync', 'nightshift', 'status', '--json'],
+    ['run', '--no-sync', 'nightshift', 'act', 'gate', 'resume', '--json'],
   ]);
   h.calls.forEach((call, i) => {
     assert.equal(call.file, uv); assert.equal(call.options.cwd, cwd);
@@ -88,6 +89,27 @@ async function commands(h: ReturnType<typeof host>, uv: string, cwd: string, bin
 
 test('host-paths/trusted-host-path-settings/unconfigured-host-retains-defaults', async t => {
   await commands(host(t), '/opt/homebrew/bin/uv', `${home}/Projects/nightshift`, '/opt/homebrew/bin', `${home}/n/bin`);
+});
+
+test('worker-retirement/client-command-boundaries-remain-stable/existing-clients-use-surviving-commands', async t => {
+  const h = host(t);
+  await commands(h, '/opt/homebrew/bin/uv', `${home}/Projects/nightshift`, '/opt/homebrew/bin', `${home}/n/bin`);
+  const attention = await h.readAttention({ refresh: false });
+  assert.deepEqual(attention.tasks, [{
+    key: 'owner/repo#1', repo: 'owner/repo', issue: 1, title: 'Issue #1', summary: '',
+    state: 'needs_decision', url: task.issue_url, checkedAt: null, stale: false,
+  }]);
+  const snapshot = await h.readFactoryRuns();
+  // Historical display commands remain data; only new invocations are renamed.
+  assert.deepEqual(snapshot.runs, [{
+    change: run.change, status: run.status, tasks: run.tasks, pr: run.pr,
+    action: { ...run.action, why: '~/work' },
+  }]);
+  assert.deepEqual(await h.actOnFactoryRun({ change: 'gate', verb: 'resume', expect: 'action:gate' }), {
+    version: 1, outcome: 'done', verb: 'resume', detail: '~/result',
+  });
+  assert.deepEqual(h.calls.at(-1)?.args,
+    ['run', '--no-sync', 'nightshift', 'act', 'gate', 'resume', '--expect=action:gate', '--json']);
 });
 
 test('host-paths/trusted-host-path-settings/explicit-settings-override-defaults', async t => {
@@ -175,11 +197,13 @@ test('host-paths/plugin-host-command-configuration/rpc-cannot-select-host-comman
     assert.equal((await h.actOnFactoryRun({ ...input, ...extra })).outcome, 'refused');
   }
   assert.equal(h.calls.length, before);
+  await assert.rejects(h.actOnFactoryRun({ change: '--help', verb: 'resume', ...extra }), /Invalid/);
+  assert.equal(h.calls.length, before);
   const note = '$(touch nope); `whoami` && echo "$HOME"\n--json';
   assert.deepEqual(await h.actOnFactoryRun({ change: 'gate', verb: 'resume', note, ...extra }), {
     version: 1, outcome: 'done', verb: 'resume', detail: '~/result',
   });
-  assert.deepEqual(h.calls.at(-1)?.args, ['run', '--no-sync', 'specloop', 'act', 'gate', 'resume', `--note=${note}`, '--json']);
+  assert.deepEqual(h.calls.at(-1)?.args, ['run', '--no-sync', 'nightshift', 'act', 'gate', 'resume', `--note=${note}`, '--json']);
   for (const call of h.calls) {
     assert.equal(call.file, '/opt/homebrew/bin/uv');
     assert.equal(call.options.cwd, `${home}/Projects/nightshift`);
@@ -188,11 +212,13 @@ test('host-paths/plugin-host-command-configuration/rpc-cannot-select-host-comman
 });
 
 test('host-paths/plugin-host-command-configuration/configuration-failures-preserve-plugin-errors', async t => {
-  for (const mode of ['invalid', 'missing checkout', 'missing executable']) await t.test(mode, async t => {
+  for (const mode of ['invalid', 'missing checkout', 'missing executable', 'timeout']) await t.test(mode, async t => {
     const h = host(t);
     const fail = (enabled: boolean) => {
       if (mode === 'invalid') {
         if (enabled) process.env.NIGHTSHIFT_CHECKOUT = 'private-invalid'; else delete process.env.NIGHTSHIFT_CHECKOUT;
+      } else if (mode === 'timeout') {
+        h.state.timedOut = enabled;
       } else {
         process.env.NIGHTSHIFT_CHECKOUT = '/absent/checkout'; process.env.NIGHTSHIFT_UV = '/absent/uv';
         h.state.missing = enabled && mode === 'missing checkout'; h.state.failure = enabled;
@@ -218,16 +244,24 @@ test('host-paths/plugin-host-command-configuration/configuration-failures-preser
     assert.deepEqual(await h.actOnFactoryRun({ change: 'gate', verb: 'resume' }), {
       version: 1, outcome: 'refused', verb: 'resume', detail: '~/result',
     });
+    h.dispose(); h.disposeFactory();
+    assert.deepEqual(h.killed, [], 'failed and completed children are removed');
   });
 });
 
 test('configured adapters terminate pending children and remove completed children', async t => {
-  const h = host(t, { NIGHTSHIFT_CHECKOUT: '/checkout' });
+  const h = host(t, { NIGHTSHIFT_CHECKOUT: '/checkout', NIGHTSHIFT_UV: '/tools/uv' });
   await h.readFactoryRuns(); h.tick(); h.state.hold = true;
   const attention = h.readAttention({ refresh: true });
   const factory = assert.rejects(h.readFactoryRuns(), /stopped/);
+  const action = h.actOnFactoryRun({ change: 'gate', verb: 'resume' });
   h.dispose(); h.disposeFactory();
-  assert.deepEqual(h.killed, ['SIGTERM', 'SIGTERM']);
+  assert.deepEqual(h.killed, ['SIGTERM', 'SIGTERM', 'SIGTERM']);
   h.pending.forEach(finish => finish());
-  await attention; await factory;
+  await attention; await factory; await action;
+  const before = h.calls.length;
+  await assert.rejects(h.readAttention({ refresh: true }), /stopped/);
+  await assert.rejects(h.readFactoryRuns(), /stopped/);
+  await assert.rejects(h.actOnFactoryRun({ change: 'gate', verb: 'resume' }), /stopped/);
+  assert.equal(h.calls.length, before);
 });

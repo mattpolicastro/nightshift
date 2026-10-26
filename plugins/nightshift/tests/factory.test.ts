@@ -118,6 +118,7 @@ test('run-context/details-in-the-factory-section/context-redacted-and-links-chec
     ['http://github.com/owner/repo', ''], ['https://github.com.evil.test/owner/repo', ''],
     ['https://github.com@evil.test/owner/repo', ''], ['https://user:pass@github.com/owner/repo', ''],
     ['https://example.com/owner/repo', ''], ['//github.com/owner/repo', ''],
+    ['https://github.com:8443/owner/repo', ''],
   ]) {
     const service = createFactory(async () => status([{ ...run, context: { ...context, task: null, recent: [], github } }]), () => 0, home);
     const projected = (await service.read()).runs[0].context!;
@@ -155,6 +156,7 @@ test('paseo-runs-page/server-checks-before-acting/unknown-change-refused', async
   assert.equal(calls.length, 0);
   await factory.read();
   assert.equal((await factory.act({ change: 'unknown', verb: 'resume' })).outcome, 'refused');
+  assert.equal((await factory.act({ change: 'unknown', verb: 'resume', note: '$(touch nope)' })).outcome, 'refused');
   assert.equal((await factory.act({ change: run.change, verb: 'publish' })).outcome, 'refused');
   assert.deepEqual(calls, [['status', '--json']]);
 });
@@ -185,7 +187,7 @@ test('paseo-runs-page/server-checks-before-acting/argv-not-shell', async () => {
       assert.equal(call.options.shell, false);
       assert.equal(call.options.timeout, 330_000);
       assert.ok(String(call.options.env?.PATH).split(':')[0].endsWith('/n/bin'), 'finish needs npx from ~/n/bin');
-      assert.deepEqual(call.args, ['run', '--no-sync', 'specloop', 'act', run.change, 'resume', `--note=${note}`, '--json']);
+      assert.deepEqual(call.args, ['run', '--no-sync', 'nightshift', 'act', run.change, 'resume', `--note=${note}`, '--json']);
     }
   } finally {
     disposeFactory(); stub.mock.restore(); syncBuiltinESMExports();

@@ -158,7 +158,7 @@ function assertDetails(page: StylePage, run: FactoryRun, expanded: boolean) {
   assert.equal(toggle.props.accessibilityState.expanded, expanded);
   assert.equal(page.text(toggle.children), `Details ${expanded ? '▴' : '▾'}`);
   const card = parentOf(page, toggle);
-  const command = `specloop status ${run.change} --events 20`;
+  const command = `nightshift status ${run.change} --events 20`;
   if (!expanded) {
     assert.equal(page.text(card.children).includes(command), false);
     return;

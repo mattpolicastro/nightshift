@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { FactoryActInput, FactoryRun } from '../shared/factory';
-import { orderFactoryRuns, factoryButtons, decideFactoryAction, matchWorkspace, factoryMoreCommand } from '../client/factory-model';
+import { orderFactoryRuns, factoryButtons, decideFactoryAction, matchWorkspace, factoryMoreCommand, factoryDetails } from '../client/factory-model';
 import { groupFactoryRuns } from '../client/factory-model';
 
 test('run-context/details-in-the-factory-section/workspace-matched-for-open-in-paseo', () => {
@@ -22,6 +22,7 @@ test('run-context/details-in-the-factory-section/workspace-matched-for-open-in-p
   assert.equal(matchWorkspace('~/Projects/other', workspaces), null);
   assert.equal(matchWorkspace('~/Projects/night', workspaces), null);
   assert.equal(matchWorkspace(repo, [unknownActivity]), unknownActivity);
+  assert.equal(matchWorkspace(repo, [{ ...older, activityAt: 'invalid' }, active]), active);
   assert.equal(matchWorkspace(repo, [older, { ...older, id: 'tied' }]), older);
   assert.deepEqual(workspaces, [archiving, unknownActivity, older, active]);
 
@@ -37,8 +38,9 @@ test('run-context/details-in-the-factory-section/workspace-matched-for-open-in-p
 });
 
 test('run-context/details-in-the-factory-section/more-command-offered', () => {
-  assert.equal(factoryMoreCommand('factory-context'), 'specloop status factory-context --events 20');
-  assert.equal(factoryMoreCommand('another.change_2'), 'specloop status another.change_2 --events 20');
+  assert.equal(factoryMoreCommand('factory-context'), 'nightshift status factory-context --events 20');
+  assert.equal(factoryMoreCommand('another.change_2'), 'nightshift status another.change_2 --events 20');
+  assert.equal(factoryDetails(paused('factory-context')).command, 'nightshift status factory-context --events 20');
 });
 
 function paused(change: string, actions: FactoryActInput['verb'][] = ['resume', 'abort']): FactoryRun {

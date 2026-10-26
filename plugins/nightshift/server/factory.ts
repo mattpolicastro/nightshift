@@ -147,9 +147,9 @@ export function factoryPath() {
 const children = new Set<ChildProcess>();
 const execute: FactoryExecute = args => new Promise((resolve, reject) => {
   const { cwd, uv, path } = resolveHostPaths('factory');
-  const child = execFile(uv, ['run', '--no-sync', 'specloop', ...args], {
+  const child = execFile(uv, ['run', '--no-sync', 'nightshift', ...args], {
     cwd, shell: false,
-    // act may push (publish, finish): specloop allows 300 s for a push.
+    // act may push (publish, finish): nightshift allows 300 s for a push.
     timeout: args[0] === 'act' ? 330_000 : 60_000, maxBuffer: 2 * 1024 * 1024,
     // ~/n/bin: finish archives the change through OpenSpec's npx, which lives there.
     env: { ...process.env, PATH: path },
