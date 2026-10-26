@@ -9,6 +9,7 @@ from specloop import agents, cli, loop, messages, serve
 from specloop.manifest import Profile
 from specloop.state import Run
 from test_provider_retry_accounting import A, B, TASK, context, restart
+from test_specloop_messages import parse_build_hint
 
 
 @pytest.fixture
@@ -70,6 +71,7 @@ def test_infra_exhaustion_moves_role_to_next_profile(setup, limit, role):
 
 
 @pytest.mark.scenario("provider-fallback/compatible-all-blocked-pauses/single-profile-retains-infra-pause")
+@pytest.mark.scenario("run-actions/canonical-command-hints/messages-and-status-agree")
 @pytest.mark.parametrize("disposition", ["infra", "unavailable"])
 def test_single_profile_chain_still_pauses_on_infra(setup, disposition):
     ctx, now, notices = setup
@@ -87,7 +89,10 @@ def test_single_profile_chain_still_pauses_on_infra(setup, disposition):
         assert pause.resume_at == now[0] + 900
         assert ts.infra == (2 if disposition == "infra" else 0) and ts.attempts == 2
         assert notices[-1].kind == messages.ACTION
-        assert notices[-1].command == "specloop resume c"
+        assert notices[-1].command == "nightshift resume c"
+        hint = parse_build_hint(notices[-1].command)
+        assert hint.cmd == "resume" and hint.change == "c" and hint.note == ""
+        assert hint.no_run is False
         assert not serve.lift_due(ctx.run, pause.resume_at - 1, notices.append)
         now[0] = pause.resume_at
         assert serve.lift_due(ctx.run, now[0], notices.append) == (cycle < 2)

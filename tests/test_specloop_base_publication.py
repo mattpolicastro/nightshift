@@ -14,6 +14,7 @@ from nightshift import queue, specloop_intake
 from nightshift.config import Repo
 from specloop import cli, loop, serve, state
 from test_specloop_approval import ApprovalGh
+from test_specloop_messages import parse_build_hint
 from test_specloop_base_sync import (
     advance_base, base_env, controlled_verify, forbid_publication,
     publish_without_preparing, sh,
@@ -624,6 +625,7 @@ def retry_explanation(output, mode):
 
 
 @pytest.mark.scenario("publish-base-sync/fetch-current-base/publish-fetch-fails-retryably")
+@pytest.mark.scenario("run-actions/canonical-command-hints/messages-and-status-agree")
 @pytest.mark.scenario("specloop-documentation/publication-guidance/base-preparation-pauses")
 @pytest.mark.parametrize("failure", ["timeout", "transport", "missing-base", "os-error"])
 @pytest.mark.parametrize("mode", ["json", "plain", "act"])
@@ -651,7 +653,9 @@ def test_publish_fetch_failure_retains_readiness(publication, monkeypatch, capfd
     diagnostic = {"timeout": "timed out after 20s", "transport": "transport unavailable",
                   "missing-base": "couldn't find remote ref", "os-error": "transport could not start"}
     assert diagnostic[failure] in explanation and "refs/heads/release/stable" in explanation
-    assert "Retry `specloop publish c`" in explanation and "nothing was published" in explanation
+    assert "Retry `nightshift publish c`" in explanation and "nothing was published" in explanation
+    hint = parse_build_hint(explanation.split("`", 2)[1])
+    assert hint.cmd == "publish" and hint.change == "c"
     assert len(attempts) == 1
     assert (run.dir / "state.json").read_bytes() == before
     assert (run.dir / "events.jsonl").read_bytes() == events

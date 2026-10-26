@@ -1,6 +1,6 @@
-"""`specloop serve`: drive every running change, unattended.
+"""`nightshift serve`: drive every running change, unattended.
 
-Each change runs as its own `specloop run` subprocess, so a crash is
+Each change runs as its own `nightshift run` subprocess, so a crash is
 contained and every driver picks up the current code. At most
 `SPECLOOP_SERVE_PARALLEL` (default 2) are driven at once; a change a human is
 driving (its lock is held) is left alone. Timed pauses are lifted when due:
@@ -9,7 +9,7 @@ usage limits always (the window has reset), infra pauses at most twice per task
 human.
 
 Same liveness contract as the nightshift daemon: a heartbeat written every
-poll and removed on a clean exit, so `specloop status` can tell running from
+poll and removed on a clean exit, so `nightshift status` can tell running from
 wedged from dead. Drivers are children the loop polls, not calls it waits on,
 so the heartbeat stays fresh while a task takes an hour.
 
@@ -100,7 +100,7 @@ def runs() -> list[Run]:
 
 
 class Drivers:
-    """The `specloop run` children this supervisor started, by change."""
+    """The `nightshift run` children this supervisor started, by change."""
 
     def __init__(self):
         self.procs: dict = {}

@@ -1,4 +1,4 @@
-"""specloop admit | run | status | act | resume | revise | accept | waive | abort | publish | finish"""
+"""nightshift admit | run | status | act | resume | revise | accept | waive | abort | publish | finish"""
 
 import argparse
 import contextlib
@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -203,7 +204,7 @@ def _admit_locked(args, run: Run, m: manifest.Manifest, text: str, roles: dict) 
     run.event("admitted", head=head, implement=m.roles["implement"].name, review=m.roles["review"].name)
     _outcome(args, outcome="admitted")
     print(f"admitted {m.change} at {head[:12]} ({m.roles['implement'].name} implements, "
-          f"{m.roles['review'].name} reviews). Next: specloop run {m.change}")
+          f"{m.roles['review'].name} reviews). Next: nightshift run {m.change}")
     return 0
 
 
@@ -245,8 +246,8 @@ def _locked_command(args, command) -> int:
     run = Run.for_change(args.change)
     with run.lock() as mine:
         if not mine:
-            reason = (f"{args.change} is being driven elsewhere (e.g. specloop serve); retry later, "
-                      f"or `specloop pause {args.change}` first")
+            reason = (f"{args.change} is being driven elsewhere (e.g. nightshift serve); retry later, "
+                      f"or `nightshift pause {args.change}` first")
             if getattr(args, "json", False) and hasattr(args, "document"):
                 # A held lock is retryable, not a refusal a front end should escalate.
                 args.document = {"version": 1, "error": reason}
@@ -376,7 +377,7 @@ def _waive(args, run: Run) -> int:
     run.state.task(args.task).waived.append(args.text)
     run.save()
     run.event("waived", task=args.task, text=args.text)
-    print(f"waived findings matching {args.text!r} for task {args.task}; `specloop resume {args.change}` to continue")
+    print(f"waived findings matching {args.text!r} for task {args.task}; `nightshift resume {args.change}` to continue")
     return 0
 
 
@@ -512,7 +513,7 @@ def _publish(args, run: Run) -> int:
         # Keep transport/check failures retryable, even with a pending intent.
         # No successful freshness result means readiness and checks stay intact.
         reason = (f"Could not check publication base refs/heads/{ctx.m.pr_base}: {exc}; "
-                  f"nothing was published. Retry `specloop publish {args.change}` "
+                  f"nothing was published. Retry `nightshift publish {args.change}` "
                   "when the current base can be checked.")
     else:
         reason = ""
@@ -520,8 +521,8 @@ def _publish(args, run: Run) -> int:
             st.status, st.pause = "running", None
             run.save()
             reason = ("Base preparation was scheduled; nothing was published. Retry publication after "
-                      "the driver restores readiness. Without `specloop serve`, run "
-                      f"`specloop run {args.change}`, then retry `specloop publish {args.change}`.")
+                      "the driver restores readiness. Without `nightshift serve`, run "
+                      f"`nightshift run {args.change}`, then retry `nightshift publish {args.change}`.")
             run.event("publish_preparation_scheduled", base=base, head=head, reason=reason)
     if reason:
         if getattr(args, "json", False) and hasattr(args, "document"):
@@ -542,7 +543,7 @@ def _publish(args, run: Run) -> int:
     st.pr = url
     run.event("published", pr=url, head=ctx.head())
     ctx.pause("human_checks", detail=f"{url}\nHosted CI runs on the PR. Make the PR's human checks, then "
-              f"`specloop finish {args.change}`.")
+              f"`nightshift finish {args.change}`.")
     _outcome(args, outcome="published", pr=url)
     return 0
 
@@ -676,7 +677,8 @@ def propose(args) -> int:
         notify(messages.Message(messages.ACTION, m.change,
                                 f"Answer {len(d.questions)} question(s) so the draft can continue",
                                 messages.first_line(d.questions[0]),
-                                f"specloop propose {args.manifest} {m.change} --idea-file <idea + answers>"))
+                                shlex.join(["nightshift", "propose", args.manifest, "--change", m.change,
+                                            "--branch", m.branch, "--idea-file", "<idea + answers>"])))
         return 2
     if d.problems:
         print("draft rejected after its rounds:\n" + "\n".join(f"  - {p}" for p in d.problems), file=sys.stderr)
@@ -691,7 +693,8 @@ def propose(args) -> int:
     notify(messages.Message(messages.ACTION, m.change, "Review the drafted change, then admit it",
                             f"draft ready on {published_ref} in {m.repo} ({d.commit[:12]}); "
                             f"review openspec/changes/{m.change}/ there",
-                            f"specloop admit --head {d.commit}"))
+                            shlex.join(["nightshift", "admit", args.manifest, "--change", m.change,
+                                        "--branch", m.branch, "--head", d.commit])))
     _outcome(args, outcome="drafted", branch=published_ref)
     return 0
 
@@ -715,7 +718,7 @@ def drill_cmd(args) -> int:
     else:
         ctx.notify(messages.Message(messages.ACTION, args.change,
                                     f"Look at the review gate: it missed {scored - caught} of {scored} seeded defects",
-                                    "", f"specloop drill {args.change}"))
+                                    "", f"nightshift drill {args.change}"))
     return 0 if caught == scored else 1
 
 
@@ -904,7 +907,7 @@ def _status_entry(name: str) -> dict:
 
 def _status_error_entry(name: str, error: Exception) -> dict:
     summary = "Run status could not be read."
-    detail = f"{summary} Inspect specloop status --json for details."
+    detail = f"{summary} Inspect nightshift status --json for details."
     try:
         since = _pause_since(run_dir(name, check_conflict=False))
     except (OSError, ValueError):

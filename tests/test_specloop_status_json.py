@@ -1,4 +1,5 @@
 import json
+import shlex
 import subprocess
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -6,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from nightshift.cli import main
+from nightshift.cli import build_parser, main
 
 from specloop import cli, messages, seal, serve, state, tasks
 from specloop.state import Run
@@ -218,7 +219,7 @@ def test_paused_run_reported(admitted, capsys, named):
                 "kind": "action",
                 "headline": "Decide how to unstick task 1.2 (3 attempts failed)",
                 "why": "Last finding: Failed twice:",
-                "command": 'specloop resume paused-change --note "…"   or   specloop accept paused-change',
+                "command": 'nightshift resume paused-change --note "…"   or   nightshift accept paused-change',
                 "actions": ["resume", "accept", "abort"],
                 "pause_id": f"stuck:{key}",
             },
@@ -395,7 +396,10 @@ def test_gate_action_described(admitted, capsys, named):
     assert entry["action"]["headline"] == "Review section 1 on the branch"
 
 
+@pytest.mark.scenario("run-actions/canonical-command-hints/messages-and-status-agree")
 @pytest.mark.parametrize("reason, verbs", [
+    ("phase_gate", ["resume", "abort"]),
+    ("seal", ["resume", "abort"]),
     ("gate_evidence", ["resume", "abort"]),
     ("coverage", ["resume", "abort"]),
     ("infra", ["resume", "abort"]),
@@ -437,6 +441,18 @@ def test_pause_action_matches_message_and_allowed_verbs(admitted, capsys, reason
         "actions": verbs,
         "pause_id": f"{reason}:{key}",
     }
+    if reason in ("requested", "usage_limit"):
+        assert action["kind"] == messages.FYI and action["command"] == ""
+    else:
+        for suggestion in action["command"].split("   or   "):
+            executable, *argv = shlex.split(suggestion)
+            assert executable == "nightshift"
+            args = build_parser().parse_args(argv)
+            assert args.handler is cli.dispatch and args.change == "paused-change"
+            assert args.cmd == "status" or args.cmd in verbs
+            if args.cmd == "resume":
+                assert args.note == ("…" if reason in ("stuck", "blocked", "needs_human") else "")
+                assert args.no_run is False
     assert (run.dir / "state.json").read_bytes() == before
 
 
@@ -499,7 +515,7 @@ def assert_status_error(entry, change, error_class, since=None):
     error = entry["error"]
     assert error.startswith(f"{error_class}:")
     assert 0 < len(error) <= 500
-    detail = "Run status could not be read. Inspect specloop status --json for details."
+    detail = "Run status could not be read. Inspect nightshift status --json for details."
     assert entry == {
         "change": change,
         "status": "paused",
@@ -512,6 +528,11 @@ def assert_status_error(entry, change, error_class, since=None):
                     "task": None, "detail": detail, "recent": [], "github": ""},
         "error": error,
     }
+    suggestion = entry["context"]["detail"].split("Inspect ", 1)[1].split(" for details.", 1)[0]
+    executable, *argv = shlex.split(suggestion)
+    assert executable == "nightshift"
+    args = build_parser().parse_args(argv)
+    assert args.handler is cli.dispatch and args.cmd == "status" and args.json is True
     assert "action" not in entry
 
 

@@ -9,6 +9,7 @@ from nightshift.cli import main
 
 from specloop import agents, cli, critic, openspec, seal, state, tasks
 from specloop.state import Run
+from test_specloop_messages import parse_build_hint
 
 
 CHANGE = "issue-7-y"
@@ -241,13 +242,17 @@ def test_refused_admission_as_json(template, monkeypatch, capfd):
 
 
 @pytest.mark.scenario("specloop-interface/manifest-templates/template-admission")
+@pytest.mark.scenario("run-actions/canonical-command-hints/messages-and-status-agree")
 def test_template_admission(template, monkeypatch, capfd):
     path, repo = template
     original = path.read_text()
     review(monkeypatch)
     assert main(admission(path, "--json")) == 0
     head = git(repo, "rev-parse", BRANCH)
-    assert json.loads(capfd.readouterr().out) == {
+    output = capfd.readouterr()
+    hint = parse_build_hint(output.err.split("Next: ", 1)[1].splitlines()[0])
+    assert hint.cmd == "run" and hint.change == CHANGE
+    assert json.loads(output.out) == {
         "version": 1, "outcome": "admitted", "head": head, "reasons": [], "risks": [RISK],
     }
     run = Run.for_change(CHANGE)
@@ -711,6 +716,7 @@ def test_propose_publication_failure_retains_rejected_outcome(template, tmp_path
 
 @pytest.mark.parametrize("json_mode", [True, False])
 @pytest.mark.parametrize("hook_exit", [0, 1])
+@pytest.mark.scenario("run-actions/canonical-command-hints/messages-and-status-agree")
 def test_publish_json(template, monkeypatch, capfd, tmp_path, json_mode, hook_exit):
     path, _ = template
     assert main(admission(path, "--skip-feasibility", "--json")) == 0
@@ -769,6 +775,8 @@ def test_publish_json(template, monkeypatch, capfd, tmp_path, json_mode, hook_ex
     assert git(remote, "rev-parse", BRANCH) == git(run.dir / "repo.git", "rev-parse", BRANCH)
     saved = Run.for_change(CHANGE).state
     assert saved.pr.endswith("/pull/7") and saved.pause.reason == "human_checks"
+    hint = parse_build_hint(saved.pause.detail.split("`")[1])
+    assert hint.cmd == "finish" and hint.change == CHANGE
 
 
 @pytest.mark.parametrize("command,detail", [
