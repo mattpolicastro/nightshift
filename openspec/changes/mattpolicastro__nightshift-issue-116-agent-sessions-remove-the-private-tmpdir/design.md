@@ -125,13 +125,37 @@ failure or claim the event was saved.
 
 ### Validation and documentation
 
-Use new tests under `tests/`, preserving every existing assertion. Test
+Use new tests under `tests/`, plus the explicitly authorized recorder migration
+below, preserving every existing assertion. Test
 filesystem confinement with outside sentinels (bytes and modes), read-only
 nested directories/files, missing paths, root/nested/dangling symlinks and an
 injected replacement race. Test group ordering with process doubles and a
 short local Python subprocess tree whose leader exits while a child ignores
 SIGTERM; use readiness handshakes and bounded waits, with unconditional test
 teardown. No live Codex invocation or host credentials are needed.
+
+`tests/test_host_paths.py:test_agents_and_quota_process_environments` currently
+records every `subprocess.Popen` in one `launches` list, then assumes index 0
+is the agent and index 1 is `codex app-server`. Its direct `agents.spawn()`
+call uses a Codex profile, so finalization will insert `/bin/ps` before the
+quota call even though this fixture creates no session TMPDIR. Explicitly
+authorize changing this test's recorder setup and `launch` wrapper in task
+1.3, alongside the lifecycle integration that invalidates that assumption.
+
+Keep `launches` for non-inspection commands and add a separate `inspections`
+list. Classify only exact argv `['/bin/ps', '-axo', 'pid=,pgid=,stat=']` as
+inspection; record all other commands in `launches`, so unexpected launches
+remain visible. Forward every call unchanged to the saved real `Popen`.
+Add assertions that inspections occurred and that `launches` contains exactly
+the agent `['path-probe']` followed by `['codex', 'app-server']`; do not depend
+on the number of inspections. Preserve all existing assertion statements and
+scenario markers unchanged, including both exact launch environments, child
+environment values, inherited-variable/credential exclusions, `spawn()`'s
+return tuple, quota argv and the complete initialize/initialized/rateLimits
+request sequence. Do not bypass finalization, change the profile to Claude,
+stub quota replies, or loosen equality checks to make the test pass. This is
+a fixture migration preserving the host-paths and agent-test-rules contracts,
+not a change to either contract; no MODIFIED or REMOVED delta is needed.
 
 Exercise `codex.run()` through the real shared `spawn()` using a substituted
 Python argv. Include the four required test names:
@@ -145,7 +169,9 @@ Also cover nonzero provider exits, invalid/missing output, externally killed
 agents, spawn/stdin exceptions, unconfirmed group exit and event-write failure.
 Compare original result fields and exceptions; preserve evidence and a sibling
 verify-directory sentinel. Use scenario markers for the delta IDs. Final
-implementation acceptance is `uv run pytest`, plus
+implementation acceptance includes
+`uv run pytest tests/test_host_paths.py tests/test_session_group_exit.py tests/test_session_tmpdir_removal.py tests/test_session_tmpdir_lifecycle.py`
+with real inspection launches in the migrated fixture, then `uv run pytest`, plus
 `uv run python scripts/check_types.py` without changing the frozen baseline.
 
 Update only the run-state discussion in `docs/specloop/README.md` and a focused

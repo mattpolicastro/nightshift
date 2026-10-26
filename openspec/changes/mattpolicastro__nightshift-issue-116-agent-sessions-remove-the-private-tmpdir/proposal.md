@@ -17,10 +17,18 @@ attempt evidence.
   the original result or exception even when cleanup or event writing fails.
 - Add local subprocess and filesystem regression tests, and document scratch
   lifetime and the pending first-build host check.
+- Migrate the subprocess recorder in
+  `tests/test_host_paths.py:test_agents_and_quota_process_environments` to
+  distinguish process-inspection launches while preserving every existing
+  environment, argv and quota-protocol assertion.
 
 Implementation scope is `specloop/agents/codex.py`,
-`specloop/agents/__init__.py`, new files under `tests/`,
-`docs/specloop/README.md` and `KNOWN-LIMITATIONS.md`.
+`specloop/agents/__init__.py`, new files under `tests/`, the narrow recorder
+migration in `tests/test_host_paths.py` described above,
+`docs/specloop/README.md` and `KNOWN-LIMITATIONS.md`. The existing-test exception
+is necessary because Codex finalization adds `/bin/ps` launches between the
+agent and quota launches; it does not authorize weakening any assertion or
+editing other pre-existing tests.
 
 Explicitly out of scope: sandbox flags, existing attempt evidence (including
 transcripts, `*.out.json`, `seal.json`, receipts and `review*`), verify build

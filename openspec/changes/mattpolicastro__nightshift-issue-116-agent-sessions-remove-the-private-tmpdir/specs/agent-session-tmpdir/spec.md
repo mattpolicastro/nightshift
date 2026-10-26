@@ -34,6 +34,8 @@ process group has no executing members and reaping its direct child. It SHALL
 terminate remaining group members within bounded grace and confirmation
 periods, preserving the original result or exception. Unconfirmed group exit
 SHALL retain scratch and record a cleanup failure.
+Process inspection SHALL preserve existing agent and quota environment,
+executable-selection and quota-protocol contracts.
 
 #### Scenario: Leader exits before descendant
 - **WHEN** the leader exits but a descendant in the same group remains and ignores SIGTERM
@@ -48,6 +50,11 @@ SHALL retain scratch and record a cleanup failure.
 #### Scenario: Group exit is unconfirmed
 - **WHEN** process inspection, signalling or bounded confirmation cannot establish that the group has stopped executing
 - **THEN** scratch remains, a group-exit cleanup-failure event is attempted, and the original attempt result or exception is preserved
+
+#### Scenario: Inspection preserves host command boundaries
+- **WHEN** a Codex-profile agent spawn performs process inspection before a subsequent quota read with a configured tool directory
+- **THEN** agent and quota launches retain their exact sanitized environments, respective PATH suffixes, child environment values and inherited-variable/credential exclusions
+- **THEN** the agent return tuple, quota `codex app-server` argv and complete initialize/initialized/rateLimits request sequence remain unchanged, with inspection launches recorded separately by the regression fixture and every existing assertion preserved
 
 ### Requirement: Confined scratch removal
 
