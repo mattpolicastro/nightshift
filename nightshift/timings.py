@@ -8,6 +8,8 @@ from datetime import date, datetime, time, timezone
 from pathlib import Path
 from statistics import median
 
+from specloop import state
+
 
 # Phase, start kinds, end kind, and whether the pairing requires a task key.
 PAIRS = (
@@ -61,20 +63,29 @@ def _change_summary(name: str, events: list[dict]) -> dict:
                 publication_wait_hours=_hours(published, finished))
 
 
-def collect_report(runs_root: Path, *, since: date | None = None, change: str | None = None) -> dict:
+def collect_report(runs_root: Path | None = None, *, since: date | None = None, change: str | None = None) -> dict:
     """Pool readable runs in name order, retaining one diagnostic per failed read."""
     samples: dict[str, list[float]] = {phase: [] for phase, *_ in PAIRS}
     changes, errors = [], []
     profiles: dict[str, dict] = {}
     cutoff = datetime.combine(since, time.min, timezone.utc).timestamp() if since is not None else None
-    directories = sorted(runs_root.iterdir()) if runs_root.exists() else []
-    for directory in directories:
-        if not directory.is_dir() or (change is not None and directory.name != change):
+    # History can outlive state.json. Keep event-only directories discoverable.
+    roots = (runs_root,) if runs_root is not None else (state.legacy_root() / "runs", state.runs_dir())
+    directories = {directory.name: directory for root in roots for directory in root.glob("*")}
+    for directory in sorted(directories.values(), key=lambda directory: directory.name):
+        if change is not None and directory.name != change:
             continue
         path = directory / "events.jsonl"
         try:
+            if runs_root is None:
+                directory = state.run_dir(directory.name)
+                path = directory / "events.jsonl"
+            # Resolve first: a non-directory in either root can conflict with
+            # readable history in the other root and must not hide that error.
+            if not directory.is_dir():
+                continue
             events = _read_events(path)
-        except (OSError, UnicodeError) as exc:
+        except (OSError, ValueError) as exc:
             errors.append(f"{path}: {exc}")
             continue
         if cutoff is not None:
@@ -160,8 +171,7 @@ def main(argv: list[str] | None = None, *, runs_root: Path | None = None) -> int
     parser.add_argument("--change", metavar="NAME", help="select an exact change name")
     parser.add_argument("--json", action="store_true", help="emit one JSON report")
     args = parser.parse_args(argv)
-    root = runs_root if runs_root is not None else Path.home() / ".specloop" / "runs"
-    report = collect_report(root, since=args.since, change=args.change)
+    report = collect_report(runs_root, since=args.since, change=args.change)
     for error in report["errors"]:
         print(error, file=sys.stderr)
     print(json.dumps(report, indent=2) if args.json else render_table(report))

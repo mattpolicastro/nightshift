@@ -149,10 +149,11 @@ def in_flight(source: Path, change: str) -> dict[str, list[str]]:
     """Files the tasks of other unfinished runs on this repository name: path -> changes."""
     planned: dict[str, list[str]] = {}
     root = Path(source).expanduser().resolve()
-    for d in sorted(state.runs_dir().glob("*")):
-        if d.name == change or not (d / "state.json").exists():
+    for d in state.iter_run_dirs():
+        if d.name == change:
             continue
         try:
+            d = state.run_dir(d.name)
             if state.Run(d).state.status not in ("running", "paused"):
                 continue
             m = manifest.load(d / "manifest.toml")

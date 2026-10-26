@@ -699,6 +699,8 @@ def test_draft_attempt_date_survives_without_success_or_current_receipt(tmp_path
 @pytest.mark.scenario("specloop-documentation/operations-guidance/touchpoints-describe-observed-history")
 def test_touchpoints_json_document(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("NIGHTSHIFT_STATE_ROOT", str(tmp_path / ".nightshift"))
+    monkeypatch.setenv("NIGHTSHIFT_LEGACY_STATE_ROOT", str(tmp_path / ".specloop"))
     nightshift_root, runs = tmp_path / ".nightshift", tmp_path / ".specloop/runs"
     fixtures = [("z/r", 8, "aborted"), ("a/r", 10, "active"), ("a/r", 2, "finished")]
     for repo, issue, state in fixtures:
@@ -812,7 +814,9 @@ def test_empty_report_has_all_zero_totals(tmp_path):
 
 def module_cli(home, *args):
     repo = Path(__file__).resolve().parents[1]
-    env = dict(os.environ, HOME=str(home), PYTHONPATH=str(repo), PYTHONDONTWRITEBYTECODE="1")
+    env = dict(os.environ, HOME=str(home), PYTHONPATH=str(repo), PYTHONDONTWRITEBYTECODE="1",
+               NIGHTSHIFT_STATE_ROOT=str(home / ".nightshift"),
+               NIGHTSHIFT_LEGACY_STATE_ROOT=str(home / ".specloop"))
     return subprocess.run([sys.executable, "-m", "nightshift.touchpoints", *args],
                           cwd=repo, env=env, capture_output=True, text=True, timeout=30)
 
@@ -848,6 +852,8 @@ def test_empty_history_module_entry_point(tmp_path, existing_roots, args):
                                    "20261021", "2026-W43-3", "2026-1-01", "2026-10-21T00:00:00", ""])
 def test_invalid_date_is_rejected_before_collection(tmp_path, monkeypatch, capsys, value):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("NIGHTSHIFT_STATE_ROOT", str(tmp_path / ".nightshift"))
+    monkeypatch.setenv("NIGHTSHIFT_LEGACY_STATE_ROOT", str(tmp_path / ".specloop"))
     def forbidden(*args, **kwargs):
         pytest.fail("invalid arguments must not collect local records")
     monkeypatch.setattr(touchpoints, "collect_report", forbidden)
@@ -886,6 +892,8 @@ def test_since_module_entry_point_and_unknown_date_exit(tmp_path):
 @pytest.mark.parametrize("args,code", [(["--help"], 0), (["--unknown"], 2), (["--since"], 2)])
 def test_argparse_help_and_usage_do_not_collect(tmp_path, monkeypatch, capsys, args, code):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("NIGHTSHIFT_STATE_ROOT", str(tmp_path / ".nightshift"))
+    monkeypatch.setenv("NIGHTSHIFT_LEGACY_STATE_ROOT", str(tmp_path / ".specloop"))
     def forbidden(*args, **kwargs):
         pytest.fail("help and invalid arguments must not collect records")
     monkeypatch.setattr(touchpoints, "collect_report", forbidden)
@@ -941,7 +949,7 @@ def test_unreadable_records_are_reported_not_fatal(tmp_path, monkeypatch, capsys
     denied_request, denied_result = base / "request_denied/request.json", base / "result_denied/result.json"
     bad_head = base / "bad_head/request.json"
     put(state, "admissions/o__r/29.json", dict(change="r-issue-12-missing", result=dict(outcome="admitted")))
-    missing = runs / "r-issue-12-missing/events.jsonl"
+    missing = state / "runs/r-issue-12-missing/events.jsonl"
     put(state, "proposals/o__r/13.json", dict(change="r-issue-13-denied", result=dict(outcome="drafted")))
     denied_events = put(runs, "r-issue-13-denied/events.jsonl", dict(event="human_accept", at=1))
     events = put(runs, f"{change}/events.jsonl", {})
@@ -963,6 +971,8 @@ def test_unreadable_records_are_reported_not_fatal(tmp_path, monkeypatch, capsys
 
     with monkeypatch.context() as patch:
         patch.setenv("HOME", str(tmp_path))
+        patch.setenv("NIGHTSHIFT_STATE_ROOT", str(tmp_path / ".nightshift"))
+        patch.setenv("NIGHTSHIFT_LEGACY_STATE_ROOT", str(tmp_path / ".specloop"))
         patch.setattr(Path, "open", guarded)
         assert main(["--json"]) == 1
         encoded = capsys.readouterr()
@@ -1179,7 +1189,9 @@ finally:
     assert not violations, violations
 """
     repo = Path(__file__).resolve().parents[1]
-    env = dict(os.environ, HOME=str(home), PYTHONPATH=str(repo), PYTHONDONTWRITEBYTECODE="1")
+    env = dict(os.environ, HOME=str(home), PYTHONPATH=str(repo), PYTHONDONTWRITEBYTECODE="1",
+               NIGHTSHIFT_STATE_ROOT=str(home / ".nightshift"),
+               NIGHTSHIFT_LEGACY_STATE_ROOT=str(home / ".specloop"))
     return subprocess.run(
         [sys.executable, "-B", "-c", script, json.dumps([str(path) for path in denied]), *args],
         cwd=repo, env=env, capture_output=True, text=True, timeout=30,
@@ -1262,7 +1274,12 @@ def test_offline_module_preserves_multi_change_history(tmp_path):
         dated_put(state, f"proposals/o__r/{issue}.json",
                   dict(change=f"r-issue-{issue}-feature", result=dict(outcome="needs_input")),
                   "2026-10-21T00:00:00+00:00")
-        path = put(tmp_path, f".specloop/runs/r-issue-{issue}-feature/events.jsonl", {})
+        run_root = ".nightshift" if issue == 2 else ".specloop"
+        path = put(tmp_path, f"{run_root}/runs/r-issue-{issue}-feature/events.jsonl", {})
+        if issue == 2:
+            link = tmp_path / ".specloop/runs" / path.parent.name
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(path.parent, target_is_directory=True)
         events = [dict(event="pause", at=1, reason="requested"), dict(event="resumed", at=2)]
         if issue == 10:
             events += [dict(event="human_accept", at=3), dict(event="revised", at=4, commit="abc")]
@@ -1298,6 +1315,7 @@ def test_offline_empty_module_never_creates_state(tmp_path, existing_roots):
         for kind in ("proposals", "admissions", "revisions"):
             (tmp_path / ".nightshift" / kind).mkdir(parents=True)
         (tmp_path / ".specloop/runs").mkdir(parents=True)
+        (tmp_path / ".nightshift/runs").mkdir()
     report = assert_offline_output_pair(tmp_path)
     assert report["changes"] == report["errors"] == []
     assert report["totals"] == dict(changes=0, drafter_questions=0, spec_revisions=0,
@@ -1328,7 +1346,7 @@ def test_offline_partial_module_preserves_damaged_history(tmp_path):
     denied = (denied_receipt, denied_request, denied_result, denied_events)
     put(state, "admissions/o__r/29.json",
         dict(change="r-issue-12-missing", result=dict(outcome="admitted")))
-    missing = runs / "r-issue-12-missing/events.jsonl"
+    missing = state / "runs/r-issue-12-missing/events.jsonl"
     events = put(runs, "r-issue-8-feature/events.jsonl", {})
     events.write_bytes(b'{"event":"human_accept","at":1}\nBAD\n'
                        b'{"event":"human_accept","at":2}\n'

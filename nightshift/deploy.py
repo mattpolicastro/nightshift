@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from nightshift.specloop_job import list_jobs
+from specloop import state
 
 FAILURES = (RuntimeError, OSError, ValueError, subprocess.SubprocessError)
 
@@ -33,8 +34,8 @@ class Context:
     env: dict[str, str] = field(default_factory=lambda: dict(os.environ))
     head: str = ""
     changed: bool = field(default=False, init=False)
-    daemon_state: Path = field(default_factory=lambda: Path.home() / ".nightshift")
-    supervisor_state: Path = field(default_factory=lambda: Path.home() / ".specloop")
+    daemon_state: Path = field(default_factory=state.state_root)
+    supervisor_state: Path | None = None
     uid: int = field(default_factory=os.getuid)
     monotonic: Callable = time.monotonic
     sleep: Callable = time.sleep
@@ -295,10 +296,10 @@ def process_probe(context, runner, service, *, activity=False, deadline=None):
         status = read_object(run(["uv", "run", "--no-sync", "specloop", "status", "--json"],
                                  env=uv_environment(context)))
         supervisor = status.get("supervisor")
-        state = supervisor.get("state") if isinstance(supervisor, dict) else None
+        supervisor_status = supervisor.get("state") if isinstance(supervisor, dict) else None
         match = re.fullmatch(r"(?:running \(pid ([1-9]\d*), last poll \d+s ago(?:, driving (.+))?\)|"
                              r"WEDGED \(pid ([1-9]\d*) alive, but no poll for \d+s\))",
-                             state if isinstance(state, str) else "")
+                             supervisor_status if isinstance(supervisor_status, str) else "")
         if type(status.get("version")) is not int or status["version"] != 1 or not match:
             raise ValueError(f"unsupported supervisor status: {status}")
         pid = int(match[1] or match[3])
@@ -306,7 +307,9 @@ def process_probe(context, runner, service, *, activity=False, deadline=None):
             driving = match[2]
             idle = driving == "nothing"
             try:
-                heartbeat = read_object((context.supervisor_state / "serve.json").read_text())
+                path = (context.supervisor_state / "serve.json" if context.supervisor_state is not None
+                        else state.heartbeat_path(existing=True))
+                heartbeat = read_object(path.read_text())
                 idle = (type(heartbeat.get("pid")) is int and heartbeat["pid"] == pid and heartbeat.get("driving") == []
                         and driving in (None, "nothing"))
             except FileNotFoundError:
