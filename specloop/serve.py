@@ -28,6 +28,7 @@ from pathlib import Path
 
 from specloop import messages, state
 from specloop.state import Run
+from specloop.state_locks import ServeLock, SupervisorBusy, serve_lock
 
 AUTO_RESUME = {"usage_limit": None, "infra": 2}  # reason -> max lifts per task (None: unlimited)
 
@@ -141,26 +142,40 @@ def pass_once(notify, spawn=None, drivers: Drivers | None = None, limit: int = 1
 
 
 def serve(poll: float, notify, once: bool = False) -> int:
+    try:
+        with serve_lock() as owned:
+            return _serve_owned(poll, notify, once, owned)
+    except SupervisorBusy as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+def _serve_owned(poll: float, notify, once: bool, owned: ServeLock) -> int:
+    # Future startup migration can borrow owned before any scheduling begins.
     started = time.time()
-    previous = state.heartbeat_path(existing=True)
-    if previous.exists():
-        hb = json.loads(previous.read_text())
-        try:
-            os.kill(hb["pid"], 0)
-            print(f"specloop serve already running as pid {hb['pid']}", file=sys.stderr)
-            return 1
-        except ProcessLookupError:
-            notify(messages.Message(messages.ACTION, "supervisor", "Check the log: the specloop supervisor crashed",
-                                    f"pid {hb['pid']} exited without cleaning up; it has restarted.",
-                                    "tail -50 ~/.logs/specloop.log"))
+    for pid in owned.dead_pids:
+        notify(messages.Message(messages.ACTION, "supervisor", "Check the log: the specloop supervisor crashed",
+                                f"pid {pid} exited without cleaning up; it has restarted.",
+                                "tail -50 ~/.logs/specloop.log"))
 
     stopping = []
-    signal.signal(signal.SIGTERM, lambda *_: stopping.append(1))
+    previous_handler = signal.signal(signal.SIGTERM, lambda *_: stopping.append(1))
     drivers, limit = Drivers(), parallel()
+    dead_legacy = [hb for hb in owned.dead_heartbeats if hb.path != heartbeat_path()]
     try:
         while not stopping:
             pass_once(notify, drivers=drivers, limit=limit)
             beat(started, drivers.alive(), poll)
+            # Only successful canonical publication supersedes old crash evidence.
+            # Preserve a legacy heartbeat that changed since acquisition.
+            for hb in dead_legacy:
+                try:
+                    contents = hb.path.read_text()
+                except FileNotFoundError:
+                    continue
+                if contents == hb.contents:
+                    hb.path.unlink()
+            dead_legacy.clear()
             if once:
                 for proc in drivers.procs.values():
                     proc.wait()
@@ -170,5 +185,8 @@ def serve(poll: float, notify, once: bool = False) -> int:
                     break
                 time.sleep(1)
     finally:
-        heartbeat_path().unlink(missing_ok=True)
+        try:
+            heartbeat_path().unlink(missing_ok=True)
+        finally:
+            signal.signal(signal.SIGTERM, previous_handler)
     return 0

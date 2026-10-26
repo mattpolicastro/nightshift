@@ -48,9 +48,14 @@ def homes_dir() -> Path:
     return state_root() / "homes"
 
 
+def heartbeat_paths() -> tuple[Path, ...]:
+    """Canonical first; exclusion must inspect both, even when both exist."""
+    return tuple(dict.fromkeys((state_root() / "serve.json", legacy_root() / "serve.json")))
+
+
 def heartbeat_path(*, existing: bool = False) -> Path:
-    canonical = state_root() / "serve.json"
-    legacy = legacy_root() / "serve.json"
+    paths = heartbeat_paths()
+    canonical, legacy = paths[0], paths[-1]
     return legacy if existing and not canonical.exists() and legacy.exists() else canonical
 
 
