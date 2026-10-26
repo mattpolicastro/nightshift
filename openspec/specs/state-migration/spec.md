@@ -106,6 +106,10 @@ Migration SHALL resume proven journaled transitions after process interruption, 
 - **WHEN** migration completes and is invoked again, including after a late legacy artifact appears
 - **THEN** test_state_migrates_once_and_leaves_a_marker verifies the versioned marker and an unchanged second snapshot with no second move
 
+#### Scenario: Completed migration does not wait for writers
+- **WHEN** the completion marker is valid, no journal remains, and a writer (such as a drafting job) holds shared state ownership
+- **THEN** supervisor startup and the migrate command treat migration as complete without exclusive coordination, while an incomplete migration still refuses until writers stop
+
 #### Scenario: Interrupted transitions resume
 - **WHEN** fresh processes restart after exits around link rewrite, entry rename, compatibility-link creation and marker publication
 - **THEN** recovery finishes only the recorded identity once, retains evidence and readable paths, and never duplicates an entry

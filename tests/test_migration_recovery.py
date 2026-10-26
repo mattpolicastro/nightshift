@@ -84,6 +84,30 @@ def test_state_migrates_once_and_leaves_a_marker(tmp_path, roots, monkeypatch, e
         pass  # Completion also releases the pending-journal write barrier.
 
 
+@pytest.mark.scenario("state-migration/journaled-completion/completed-migration-does-not-wait-for-writers")
+def test_completed_migration_does_not_wait_for_writers(tmp_path, monkeypatch):
+    source, destination = tmp_path / "legacy", tmp_path / "canonical"
+    monkeypatch.setenv("NIGHTSHIFT_LEGACY_STATE_ROOT", str(source))
+    monkeypatch.setenv("NIGHTSHIFT_STATE_ROOT", str(destination))
+    (source / "runs/example").mkdir(parents=True)
+    assert migrate.migrate() == 0
+    assert (source / migrate.MARKER).exists()
+    with state_locks.writer():
+        # A drafting job holds shared ownership; supervisor startup and the
+        # migrate command must still treat the completed migration as a no-op.
+        assert migrate.migrate() == 0
+        with state_locks.serve_lock() as owned:
+            assert migrate.migrate(owned) == 0
+    # With no marker yet, an active writer still blocks real migration work.
+    fresh_source, fresh_destination = tmp_path / "legacy2", tmp_path / "canonical2"
+    monkeypatch.setenv("NIGHTSHIFT_LEGACY_STATE_ROOT", str(fresh_source))
+    monkeypatch.setenv("NIGHTSHIFT_STATE_ROOT", str(fresh_destination))
+    (fresh_source / "runs/other").mkdir(parents=True)
+    with state_locks.writer():
+        assert migrate.migrate() == 1
+    assert not (fresh_source / migrate.MARKER).exists()
+
+
 @pytest.mark.scenario("state-migration/journaled-completion/state-migrates-once-and-leaves-a-marker")
 def test_migration_creates_missing_destination_ancestors(tmp_path, monkeypatch):
     source = state.legacy_root()

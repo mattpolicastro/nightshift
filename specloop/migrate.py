@@ -156,6 +156,14 @@ def preflight(owned=None):
     if source == destination or source in destination.parents or destination in source.parents:
         raise Refusal(f"Overlapping migration roots: {source} and {destination}")
     try:
+        # A published marker is final, so with no leftover journal to clear,
+        # completion needs only the serve lock. Taking exclusive coordination
+        # here would make every restart wait for unrelated writers.
+        with serve_lock(owned):
+            done = _metadata(journal_path()) is None and _completed(source, destination)
+        if done:
+            yield None
+            return
         with serve_lock(owned), coordination(exclusive=True), ExitStack() as locks:
             if _completed(source, destination):
                 yield None
