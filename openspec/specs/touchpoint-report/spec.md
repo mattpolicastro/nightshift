@@ -10,7 +10,7 @@ intake history and run events, with deterministic output and explicit gaps.
 
 The system SHALL expose `python -m nightshift.touchpoints` using only local
 records under `~/.nightshift/{proposals,admissions,revisions}` and
-`~/.specloop/runs`. It SHALL perform no state writes, subprocess commands,
+resolver-discovered `~/.nightshift/runs` with unmigrated `~/.specloop/runs` fallback and compatibility-link deduplication. It SHALL perform no state writes, subprocess commands,
 credential reads or network calls. Missing roots SHALL represent empty history.
 
 #### Scenario: Offline read leaves state unchanged

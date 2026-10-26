@@ -42,4 +42,4 @@ and an Open in Paseo button when a Paseo workspace for the run's repository exis
 
 #### Scenario: More command offered
 - **WHEN** Details is shown for change factory-context
-- **THEN** it offers the command `specloop status factory-context --events 20`
+- **THEN** it offers the command `nightshift status factory-context --events 20`

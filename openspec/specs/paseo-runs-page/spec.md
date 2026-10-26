@@ -24,17 +24,17 @@ for resume, and SHALL ask for confirmation before publish, finish or abort.
 - **THEN** nothing is sent until the confirmation is accepted
 
 ### Requirement: Server checks before acting
-The plugin server SHALL run `specloop act` with an argument array, only for a
+The plugin server SHALL run `nightshift act` with an argument array, only for a
 change present in the last good status and a verb in its action list, and SHALL
 pass only display fields to the client.
 
 #### Scenario: Unknown change refused
 - **WHEN** the client asks to act on a change not in the last status
-- **THEN** the server refuses without running specloop
+- **THEN** the server refuses without running nightshift
 
 #### Scenario: Argv not shell
 - **WHEN** a note contains shell metacharacters
-- **THEN** it reaches specloop as one literal argument
+- **THEN** it reaches nightshift as one literal argument
 
 ### Requirement: Stale tolerance
 When a status read fails, the page SHALL keep the last good list, marked stale.
