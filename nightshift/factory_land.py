@@ -1,20 +1,24 @@
-"""Private Factory landing admission and retained display records.
+"""Private, confirmed Factory landing and detached execution evidence.
 
-This module is deliberately not registered with either canonical CLI. Execution
-is an injected boundary: reads never launch, repair, acknowledge or prune work.
-The worker lifecycle and confirmed land runner build on these records separately.
+Deliberately absent from both canonical CLIs and background job control.
 """
 
 from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Mapping
+import ctypes
 from dataclasses import asdict, dataclass
+import errno
+import fcntl
 import json
+import locale
 import math
 import os
 from pathlib import Path
 import re
+import selectors
+import signal
 import subprocess
 import sys
 import tempfile
@@ -25,6 +29,7 @@ import uuid
 from specloop.state import SAFE_CHANGE, state_root
 
 from . import land
+from .host_paths import host_path, tool_path
 
 
 MAX_LIMIT = 20
@@ -269,7 +274,7 @@ def _read_record(path: Path, *, optional: bool = False) -> dict[str, Any] | None
         with path.open("rb") as stream:
             raw = stream.read(RECORD_LIMIT + 1)
     except FileNotFoundError:
-        if optional:
+        if optional and not path.is_symlink():
             return None
         raise ValueError(f"missing {path.name}") from None
     if len(raw) > RECORD_LIMIT:
@@ -341,19 +346,278 @@ def start_attempt(offer: Offer, *, launch: Callable[[str], Any], root: Path | No
     return {"version": 1, "attempt_id": attempt_id, "accepted": True}
 
 
+def load_attempt(attempt_id: str, root: Path) -> tuple[Path, Offer]:
+    if not _ATTEMPT.fullmatch(attempt_id):
+        raise ValueError("invalid attempt ID")
+    matches = list((root / "landings").glob(f"*/*/attempts/{attempt_id}"))
+    if len(matches) != 1:
+        raise Refusal("expected one retained landing request")
+    directory = matches[0]
+    request = _read_record(directory / "request.json")
+    assert request is not None
+    offer = Offer.parse(request.get("offer", {}))
+    if (request.get("attempt_id") != attempt_id or request.get("checks_done") is not True
+            or not _timestamp(request.get("created_at"))
+            or directory != attempt_directory(root, offer, attempt_id)):
+        raise Refusal("invalid retained landing request")
+    return directory, offer
+
+
+def launch_worker(attempt_id: str, *, root: Path | None = None) -> None:
+    root = root if root is not None else state_root()
+    directory, _ = load_attempt(attempt_id, root)
+    bin_dir = host_path("NIGHTSHIFT_BIN_DIR", "/opt/homebrew/bin")
+    argv = [host_path("NIGHTSHIFT_UV", f"{bin_dir}/uv"), "run", "--no-sync", "python",
+            "-m", "nightshift.factory_land", "worker", attempt_id]
+    env = {**os.environ, "PATH": host_path("NIGHTSHIFT_NODE_BIN", "~/n/bin") + ":" + tool_path(),
+           "NIGHTSHIFT_STATE_ROOT": str(root), "PYTHONUNBUFFERED": "1"}
+    with (directory / "output.log").open("ab", buffering=0) as output:
+        subprocess.Popen(argv, cwd=host_path("NIGHTSHIFT_CHECKOUT", "~/Projects/nightshift"),
+                         env=env, stdin=subprocess.DEVNULL, stdout=output,
+                         stderr=subprocess.STDOUT, start_new_session=True, close_fds=True)
+
+
+def read_start_identity(pid: int) -> str:
+    """Read the kernel birth time without creating a pre-record subprocess."""
+    if sys.platform == "darwin":
+        class BSDInfo(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_uint32) for name in (
+                "flags", "status", "xstatus", "pid", "ppid", "uid", "gid", "ruid",
+                "rgid", "svuid", "svgid", "reserved")
+            ] + [("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32)] + [
+                (name, ctypes.c_uint32) for name in (
+                    "nfiles", "pgid", "jobc", "tdev", "tpgid", "nice")
+            ] + [("start_seconds", ctypes.c_uint64), ("start_microseconds", ctypes.c_uint64)]
+        info = BSDInfo()
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        result = libproc.proc_pidinfo(pid, 3, ctypes.c_uint64(0), ctypes.byref(info), ctypes.sizeof(info))
+        if result != ctypes.sizeof(info):
+            error = ctypes.get_errno()
+            raise OSError(error or errno.EIO, "worker birth identity could not be read")
+        return f"darwin:{info.start_seconds}:{info.start_microseconds}"
+    if sys.platform.startswith("linux"):
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return f"linux:{int(fields[19])}"
+    raise Refusal("worker birth identity is unsupported on this platform")
+
+
+def process_identity() -> dict[str, Any]:
+    pid = os.getpid()
+    identity = read_start_identity(pid)
+    pgid, sid = os.getpgrp(), os.getsid(0)
+    if pgid <= 1 or sid != pgid:
+        raise Refusal("worker must run in its own detached session")
+    return {"version": 1, "pid": pid, "pgid": pgid, "sid": sid,
+            "start_identity": identity, "started_at": time.time()}
+
+
+def _safe_group(process: dict[str, Any]) -> int:
+    pid, pgid, sid = (process.get(key) for key in ("pid", "pgid", "sid"))
+    if (any(type(value) is not int or not 1 < value <= 2**31 - 1 for value in (pid, pgid, sid))
+            or sid != pgid or pgid in (os.getpgrp(), os.getpgid(os.getppid()))
+            or not isinstance(process.get("start_identity"), str)
+            or not process["start_identity"].strip()
+            or not _timestamp(process.get("started_at"))):
+        raise Refusal("unsafe or corrupt prior process identity")
+    return cast(int, pgid)
+
+
+def exclude_prior_groups(directory: Path) -> None:
+    """Called only under the PR flock. Only kernel ESRCH proves drainage."""
+    for prior in directory.parent.iterdir():
+        if prior == directory:
+            continue
+        try:
+            if not prior.is_dir() or not _ATTEMPT.fullmatch(prior.name):
+                raise Refusal("corrupt prior attempt directory")
+            process = _read_record(prior / "process.json", optional=True)
+            if process is None:
+                # Publication is the permission boundary for child creation.
+                if (prior / "drained.json").exists():
+                    raise Refusal("drainage observation has no process identity")
+                continue
+            pgid = _safe_group(process)
+            drained = _read_record(prior / "drained.json", optional=True)
+            if drained is not None:
+                if (drained.get("process") != process or drained.get("drained") is not True
+                        or not _timestamp(drained.get("observed_at"))):
+                    raise Refusal("corrupt prior drainage observation")
+                continue
+            try:
+                os.killpg(pgid, 0)
+            except OSError as exc:
+                if exc.errno != errno.ESRCH:
+                    raise Refusal(f"prior group {pgid} absence cannot be proved: {exc}") from exc
+            else:
+                raise Refusal(f"prior group {pgid} still exists; wait for drainage or inspect descendants")
+            write_record(prior / "drained.json", {
+                "version": 1, "drained": True, "process": process, "observed_at": time.time(),
+            })
+        except (OSError, ValueError, TypeError, RecursionError) as exc:
+            raise Refusal(f"prior attempt {prior.name}: {exc}") from exc
+
+
+class _WorkerStopped(BaseException):
+    pass
+
+
+def run_worker(attempt_id: str, *, root: Path | None = None,
+               read_status: Callable[[str], Any] = read_run_status,
+               remote_head: Callable[[str], str] = read_remote_head,
+               pause_file: Path | None = None) -> int:
+    root = root if root is not None else state_root()
+    directory, offer = load_attempt(attempt_id, root)
+
+    def stopped(signum: int, frame: Any) -> None:
+        raise _WorkerStopped()
+
+    previous = signal.signal(signal.SIGTERM, stopped)
+    try:
+        # Never remove the stable lock or hand its descriptor to descendants.
+        with (directory.parent.parent / "lock").open("a+b") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                record_result(directory, "refused", "another landing worker holds the PR lock")
+                return 1
+            try:
+                if ((directory / "process.json").exists() or (directory / "result.json").exists()):
+                    return 1  # A request is never replayed, even after failure.
+                exclude_prior_groups(directory)
+                # The durable record precedes identity-read and invocation children.
+                write_record(directory / "process.json", process_identity())
+                record_progress(directory, "validating")
+                validate_offer(offer, read_status=read_status, remote_head=remote_head, pause_file=pause_file)
+                with (directory / "output.log").open("ab", buffering=0) as output:
+                    child = subprocess.Popen(
+                        [sys.executable, "-m", "nightshift.factory_land", "invoke", attempt_id],
+                        stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+                        env={**os.environ, "NIGHTSHIFT_STATE_ROOT": str(root), "PYTHONUNBUFFERED": "1"},
+                        close_fds=True)
+                    code = child.wait()
+                # Capture a bounded tail, while leaving the complete log intact.
+                with (directory / "output.log").open("rb") as tail:
+                    tail.seek(0, os.SEEK_END)
+                    tail.seek(max(0, tail.tell() - DETAIL_LIMIT))
+                    detail = tail.read(DETAIL_LIMIT).decode("utf-8", errors="replace").strip()
+                progress = _read_record(directory / "progress.json")
+                assert progress is not None
+                record_result(directory, "succeeded" if code == 0 else "failed",
+                              "merge confirmed" if code == 0 else detail or f"invocation exited {code}",
+                              phase=progress["phase"], exit_code=code)
+                return 0 if code == 0 else 1
+            except Refusal as exc:
+                record_result(directory, "refused", str(exc))
+                return 1
+            except _WorkerStopped:
+                record_result(directory, "stopped", "worker received SIGTERM; inspect any surviving descendants")
+                return 1
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                record_result(directory, "failed", f"worker failed: {exc}")
+                return 1
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _run_logged(argv: list[str], output: Path, *, capture_output: bool, text: bool,
+                check: bool, timeout: float) -> subprocess.CompletedProcess[str]:
+    """Tee raw pipes to retained output while preserving land's text responses.
+
+    There is no extra process/session or inherited lock. On TERM, drain bytes
+    already written by the command before exiting, including a command which
+    flushed a diagnostic immediately before signalling its invocation parent.
+    Surviving descendants remain covered by the recorded group exclusion.
+    """
+    if not capture_output or not text or check:
+        raise ValueError("unsupported landing runner capture options")
+    interrupted = False
+
+    def stopped(signum: int, frame: Any) -> None:
+        nonlocal interrupted
+        interrupted = True
+
+    previous = signal.signal(signal.SIGTERM, stopped)
+    child = None
+    buffers = [bytearray(), bytearray()]
+    try:
+        with output.open("ab", buffering=0) as log, selectors.DefaultSelector() as selector:
+            child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     close_fds=True)
+            assert child.stdout is not None and child.stderr is not None
+            for index, pipe in enumerate((child.stdout, child.stderr)):
+                os.set_blocking(pipe.fileno(), False)
+                selector.register(pipe, selectors.EVENT_READ, index)
+            deadline = time.monotonic() + timeout
+
+            def drain(events: Any) -> None:
+                for key, _ in events:
+                    data = os.read(key.fd, 65536)
+                    if data:
+                        log.write(data)
+                        buffers[key.data].extend(data)
+                    else:
+                        selector.unregister(key.fileobj)
+
+            while selector.get_map() or child.poll() is None:
+                if interrupted or time.monotonic() >= deadline:
+                    if not interrupted:
+                        child.kill()
+                        child.wait()
+                    # Do not wait for resistant descendants holding the pipes.
+                    while events := selector.select(0):
+                        drain(events)
+                    os.fsync(log.fileno())
+                    if interrupted:
+                        raise SystemExit(128 + signal.SIGTERM)
+                    raise subprocess.TimeoutExpired(argv, timeout, output=bytes(buffers[0]),
+                                                    stderr=bytes(buffers[1]))
+                drain(selector.select(max(0, min(.1, deadline - time.monotonic()))))
+            os.fsync(log.fileno())
+            # Match subprocess.run(text=True), including universal newlines;
+            # the log retains the original bytes, without decoding or clipping.
+            if interrupted:
+                raise SystemExit(128 + signal.SIGTERM)
+            encoding = "utf-8" if sys.flags.utf8_mode else locale.getencoding()
+            stdout, stderr = (bytes(data).decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
+                              for data in buffers)
+            return subprocess.CompletedProcess(argv, child.wait(), stdout, stderr)
+    finally:
+        if child is not None:
+            for stream in (child.stdout, child.stderr):
+                if stream is not None:
+                    stream.close()
+        signal.signal(signal.SIGTERM, previous)
+
+
+def run_invocation(attempt_id: str, *, root: Path | None = None) -> int:
+    directory, offer = load_attempt(attempt_id, root if root is not None else state_root())
+    process = _read_record(directory / "process.json")
+    if (process is None or process.get("pgid") != os.getpgrp()
+            or process.get("sid") != os.getsid(0) or process.get("pid") != os.getppid()):
+        raise Refusal("invocation is outside its recorded worker group")
+
+    def logged(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        phase = ("finishing" if "finish" in argv else "merging" if "merge" in argv
+                 else "checking CI" if "checks" in argv or "update-branch" in argv
+                 else "recording checks" if "--method" in argv else None)
+        if phase is not None:
+            record_progress(directory, phase)
+        return _run_logged(argv, directory / "output.log", **kwargs)
+
+    return invoke_confirmed(offer, runner=logged)
+
+
 def worker_alive(process: dict[str, Any]) -> bool:
     """Display-only identity check; this is never authority to signal or retry."""
     pid, identity = process.get("pid"), process.get("start_identity")
-    if type(pid) is not int or pid <= 1 or not isinstance(identity, str) or not identity.strip():
+    if (type(pid) is not int or not 1 < pid <= 2**31 - 1
+            or not isinstance(identity, str) or not identity.strip()):
         raise ValueError("invalid worker identity")
-    result = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "lstart="],
-                            capture_output=True, text=True, timeout=5, check=False,
-                            env={**os.environ, "LC_ALL": "C"})
-    if result.returncode == 1 and not result.stdout.strip():
+    try:
+        current = read_start_identity(pid)
+    except (ProcessLookupError, FileNotFoundError):
         return False
-    if result.returncode:
-        raise ValueError("worker identity could not be inspected")
-    return result.stdout.strip() == identity
+    return current == identity
 
 
 _READ_ERRORS = (OSError, ValueError, TypeError, RecursionError, subprocess.SubprocessError)
@@ -515,6 +779,9 @@ def parser() -> argparse.ArgumentParser:
     status.add_argument("--limit", type=int, choices=range(1, MAX_LIMIT + 1), default=MAX_LIMIT)
     for mode in (start, status):
         mode.add_argument("--json", action="store_true", required=True)
+    for name in ("worker", "invoke"):
+        mode = modes.add_parser(name, allow_abbrev=False)
+        mode.add_argument("attempt_id")
     return result
 
 
@@ -522,6 +789,12 @@ def main(argv: list[str] | None = None, *, launch: Callable[[str], Any] | None =
          **dependencies: Any) -> int:
     arguments = parser()
     args = arguments.parse_args(argv)
+    if args.mode in ("worker", "invoke"):
+        try:
+            return (run_worker if args.mode == "worker" else run_invocation)(args.attempt_id, **dependencies)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            print(f"factory landing: {exc}", file=sys.stderr)
+            return 1
     if args.mode == "status":
         response = landing_status(args.change, limit=args.limit, **dependencies)
     else:
@@ -530,11 +803,7 @@ def main(argv: list[str] | None = None, *, launch: Callable[[str], Any] | None =
         except ValueError as exc:
             arguments.error(str(exc))
         if launch is None:
-            # Fail closed until the detached lifecycle is supplied. Never claim
-            # execution merely because this transport parsed a confirmation.
-            def unavailable(attempt_id: str) -> None:
-                raise ValueError("detached worker launcher is unavailable")
-            launch = unavailable
+            launch = lambda attempt_id: launch_worker(attempt_id, root=dependencies.get("root"))
         response = start_attempt(offer, launch=launch, **dependencies)
     print(json.dumps(response, ensure_ascii=True, allow_nan=False))
     return 1 if response.get("accepted") is False else 0
