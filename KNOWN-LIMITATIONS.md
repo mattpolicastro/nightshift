@@ -74,6 +74,8 @@ None of these follow-ups establishes live validation or a completed host rollout
   already committed. Inspect committed effects before release. The legacy/
   unkeyed crash risk, unproven keyed machine-crash durability and independent
   admitted builds above still apply.
+  These are intake holds; Factory landing has separate worker-held locks and
+  verified Stop, with no receipt release. See [Factory landing](#factory-landing).
 - **Background jobs:**
   - Persisted reporting deadlines are propose 3600 seconds, admit 300 seconds
     and revise 1800 seconds. A live overdue attempt gets `needs-human` on the
@@ -83,6 +85,8 @@ None of these follow-ups establishes live validation or a completed host rollout
     `nightshift daemon status` shows active timing/`OVERDUE`; legacy timing is unavailable.
     Use `nightshift jobs --all` for history and the recovery instructions above
     ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
+    This escalation applies to intake jobs. Factory landing's 2400-second overdue
+    indication is display-only; it causes no escalation, termination or retry.
   - Default `nightshift jobs` shows active (including starting/overdue),
     stopping, stopped, finished-undelivered and diagnostic rows. Ordinary failed
     and finished-delivered history is hidden with a count; `nightshift jobs --all`
@@ -90,6 +94,8 @@ None of these follow-ups establishes live validation or a completed host rollout
     JSON `delivered: true`, otherwise `finished (delivery pending)`. This item-level
     label can reflect a successor receipt; it does not establish deletion identity
     ([issue #103](https://github.com/mattpolicastro/nightshift/issues/103)).
+    This inventory/delivery rule excludes Factory landing: it has separate
+    records, independent status/Stop and no delivery, hold or release receipts.
   - Delivered attempts lose logs and safely owned idea payloads; minimal
     requests redact idea arguments while retaining original mtimes for
     touchpoint history. Results, control metadata and directories remain.
@@ -98,6 +104,10 @@ None of these follow-ups establishes live validation or a completed host rollout
     ([issue #9](https://github.com/mattpolicastro/nightshift/issues/9)).
     Automatic interrupted cleanup waits for a later eligible, authorized,
     unpaused visit.
+    Factory landing logs/results instead persist until manually pruned; reads
+    never acknowledge them and jobs compact does not touch them. Preserve
+    undrained-group evidence. Neither bounded landing display nor intake log
+    cleanup promises bounded disk use or bounded metadata enumeration cost.
     After final-trigger removal, closure or authorization denial, residual
     artifacts can remain indefinitely; a cleanup journal grants no authorization.
     Do not rearm solely for cleanup, because normal new work may follow.
@@ -157,6 +167,54 @@ None of these follow-ups establishes live validation or a completed host rollout
     do not reread labels. Recovery journals cannot guarantee exactly-once
     effects within an ambiguous request, especially if a human rearms during
     a retry. Surviving worker work requires inspection, not automatic resumption.
+
+## Factory landing
+
+Factory's separate Land confirmation freezes change, PR, pause ID, published
+head and pause timestamp; Finish still only archives, pushes and marks ready.
+Private plugin transport starts a detached worker and preserves canonical
+CLI/daemon/supervisor isolation. Status and Stop are independent of ordinary
+Factory actions and remain available during daemon pause. Progress and retained
+refusals/results appear in the originating row or above the list when hidden.
+The worker holds per-PR flock for its lifetime; descendants do not inherit its
+descriptor. There is no manual release, intake inventory, escalation or receipt.
+Independent terminal landing does not take the Factory lock.
+
+Newest 20 attempts plus total and separate current progress bound display only.
+Full logs and small records persist until manual pruning. Preserve process/group
+evidence until drainage is proved regardless of outcome or age; status reads
+neither acknowledge nor repair it. Storage and metadata enumeration can grow.
+See [evidence artifacts](plugins/nightshift/README.md#landing-evidence).
+
+Terminal and Factory landing reconcile ambiguous attestation creates within one
+invocation, sending at most one POST. A fresh invocation can see no marker and
+create one before an earlier POST commits late. A valid acknowledgement need not
+trigger another lookup or detect duplicates; a subsequent lookup refuses
+`duplicate marker matches; resolve duplicates before retrying`. Local drainage
+does not settle remote requests. There is no retained-create guard or guarantee
+of cross-invocation uniqueness; all other landing gates remain unchanged.
+
+Finish checks the validated PR head after locked reload and before archive,
+push or ready side effects. A mismatching or unreadable local head refuses even
+if the earlier landing identity check passed. Existing repository/task checks,
+archive/base-update successor validation and head-conditioned merge remain.
+The unpushed local archive exception below requires an explicit operator step;
+landing neither substitutes that archive head nor automatically bypasses its guard.
+
+| Recovery case | Inspect and resolve | Next step |
+| --- | --- | --- |
+| `lost-response` | Submission may have started despite a lost response. Refresh status and inspect retained evidence. | Observe the existing attempt without automatic resubmission. |
+| `stopped` | Verified Stop requests group SIGTERM, with no SIGKILL escalation, rollback or guaranteed termination. Inspect effects and resistant descendants. | Wait for termination; a fresh confirmation independently verifies drainage under flock, without manual release. |
+| `worker-death` | Worker-only death releases flock while descendants can survive. Stop explicitly refuses missing/unverifiable worker identity. Inspect effects, then wait for descendants or terminate them manually. | A fresh attempt independently proves group absence under flock; only ESRCH from the safe kernel probe proves drainage. A free lock, unchanged head or terminal result is insufficient; zombie or unverifiable groups still block. |
+| `duplicate-markers` | Inspect prior effects and delete one duplicate comment after the late-POST exception above. | Resolve outstanding attempts, then Land if eligible or `uv run python -m nightshift.land <url> --checks-done`; the unique trusted remaining comment is updated through existing gates. |
+| `revised-head` | Locked finish refuses before archiving. Inspect `nightshift status <change> --events 20`, the revised head and human checks. | Review the new published head before confirming a fresh Factory offer or retrying terminal landing. |
+| `unpushed-archive` | Local archive A exists after a failed push, remote remains H and the run is still at human_checks. Guarded landing passes H and refuses A; Factory can refuse the offer mismatch earlier. Once attempts stop, inspect prior local/remote effects, A's archive/tasks, remote refs and failed push. | Explicit direct Finish without --expect-head: Factory Finish, `nightshift finish <change>` or `nightshift act <change> finish --json` reuses A, pushes and marks done without rearchiving. Review the remote head, then `uv run python -m nightshift.land <url> --checks-done` on the done run, skipping finish and repeating fresh gates. No automatic bypass or run reset. |
+| `pushed-archive-ready-failure` | Archive push succeeded but ready/state completion failed; inspect the archive/tasks and matching local/remote A. | Equal heads still permit guarded recovery; existing ordinary Finish/act recovery remains available. |
+| `done-run` | Finish completed before a later landing refusal; inspect the current remote head and prior effects. Factory no longer offers Land. | For an open PR, `uv run python -m nightshift.land <url> --checks-done` skips finish and repeats all remaining gates; do not reset done. |
+
+See the [landing recovery guide](docs/landing.md#recovering-from-a-refusal).
+Desktop/native phone confirmation, progress and retained-notice behavior and
+real-host Stop/evidence inspection remain human checks, not fixture evidence.
 
 ## Other known gaps
 

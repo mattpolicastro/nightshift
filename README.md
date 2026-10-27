@@ -637,6 +637,22 @@ removes only the matching receipt's `job` reference, retaining every other
 field and all attempt evidence. The historical attempt remains `stopped`;
 its result is never delivered, even if it arrived after stop intent.
 
+These receipt, inventory, escalation and release rules apply to intake jobs.
+Factory landing keeps separate attempt records: a detached worker holds a per-PR
+flock until exit, without delivery receipts or a manual release operation.
+Landing status and verified Stop remain available independently of ordinary
+Factory actions and while the daemon is paused. Overdue is display-only;
+jobs inventory, escalation and compaction do not apply. Worker death may release
+the lock while descendants survive; Stop explicitly refuses without verifiable
+worker identity. After inspecting effects, wait for those descendants or terminate
+them manually. A fresh attempt independently verifies group drainage under flock;
+lock availability, unchanged head or terminal outcome alone cannot authorize it.
+Independent terminal landing does not take the Factory lock. Follow the keyed
+[landing recovery cases](docs/landing.md#recovering-from-a-refusal) rather than
+using intake release. Landing logs/results persist until manual pruning, preserving
+undrained-group records; newest-20 history plus total and separate current progress
+bound display, not storage. Reads do not acknowledge evidence.
+
 | Release outcome | Output | Exit |
 | --- | --- | --- |
 | Matching confirmed stop detached | `<id>: released` | 0 |
@@ -707,7 +723,15 @@ agent sessions or change task execution.
 
 The page's **Factory** section lists specloop runs, those waiting on you first, with
 one button per action that fits each pause (resume with a note, accept, publish,
-finish, abort); see the plugin README.
+finish, abort), plus separate **Land** at a verifiable `human_checks` pause.
+Finish archives, pushes and marks ready without merging. Land invokes existing
+landing through an explicit confirmation that human checks were performed.
+The dialog freezes change, PR, pause ID, published head and pause timestamp;
+changes invalidate it instead of silently rebinding. Private plugin transport
+starts background work independently of ordinary actions, retaining progress,
+results and refusals in the row or above the list when hidden. It adds no public
+CLI/daemon landing path. See [Factory confirmation](plugins/nightshift/README.md#confirmed-landing)
+and [landing recovery](docs/landing.md#recovering-from-a-refusal).
 
 ### Watching it work
 

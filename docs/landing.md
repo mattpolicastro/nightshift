@@ -41,8 +41,11 @@ Only open PRs targeting an existing `main` are eligible.
 | `--help` | Show usage without performing external operations. |
 
 The daemon, intake helpers, and `nightshift serve` supervisor never invoke this
-command. Run only one landing invocation per PR at a time; there is no lock or
-server-enforced uniqueness for concurrent operators. Invoking the command is
+command. Factory also offers a separate explicitly confirmed
+[Land control](../plugins/nightshift/README.md#confirmed-landing), using this same
+flow. Its private worker holds a per-PR flock, but independent terminal invocations
+do not take that lock. Run only one landing invocation per PR at a time;
+there is no server-enforced uniqueness for concurrent operators. Invoking the command is
 your decision to land the current reviewed head. It does not perform human
 checks or grant review approval.
 
@@ -87,10 +90,23 @@ through `land`. It is an operator assertion, not automated evidence that the
 checks were performed. Finish's archive commit and a validated branch update
 can advance the head without rewriting that original attestation.
 
-A sequential retry at the same head updates the marked comment, including when
-all boxes were already ticked. A different head gets a new marker. All comment
-pages are searched before creation. An ambiguous create is reconciled by marker
-and never blindly posted twice; duplicate or untrusted marker matches refuse.
+A sequential retry at the same head updates a unique trusted marked comment,
+including when all boxes were already ticked. A different head gets a new marker.
+All comment pages are searched before creation. Within one invocation, an
+ambiguous create is reconciled by marker with at most one POST; failure to
+reconcile refuses that invocation. Duplicate or untrusted marker matches refuse.
+
+Terminal and Factory landing share a late-POST exception: after an ambiguous POST
+and unsuccessful reconciliation, a fresh invocation may see no marker and create
+one before the earlier request commits remotely. Its valid acknowledgement need
+not trigger another lookup or detect duplicates. A subsequent marker lookup
+refuses `duplicate marker matches; resolve duplicates before retrying`.
+Local process-group drainage cannot establish completion of a request already
+accepted by GitHub. There is no cross-invocation uniqueness guarantee or retained
+create guard. Inspect prior effects and delete one duplicate comment, then use
+Land again if eligible or terminal land after resolving outstanding attempts;
+see the `duplicate-markers` recovery case below. All other landing gates remain.
+
 Sources already complete are not edited again. Prose, existing ticks, markers,
 and line endings are preserved. Source edits and attestation are separate API
 operations: completed writes survive failures. Full-body/comment read-modify-write
@@ -99,13 +115,32 @@ is not atomic and can overwrite a concurrent edit in its residual write window.
 ## Finish, CI, and merge
 
 A matching run must be paused at `human_checks` or already `done`. Landing
-refreshes eligibility and invokes `python -m nightshift.cli finish <change>` only
-for the former, then requires the same run to be `done` with its reported finished head matching
+refreshes eligibility and invokes finish with the validated PR head in
+`--expect-head` only for the former. After reloading under the existing run lock,
+finish reads the local branch head and refuses an unreadable or mismatching head
+before archiving, pushing or marking ready. A revision republished between
+landing's identity check and finish therefore requires reviewing the new head
+before retrying. Existing repository and unfinished-task checks still apply.
+Landing then requires the same run to be `done` with its reported finished head matching
 the remote PR. An initially done run skips finish. A direct PR skips finish and
 must already be ready for review; a front-door draft can become ready through
 finish. Running, aborted, and other paused states refuse before any mutation.
 Unreadable or ambiguous discovery, including any status error row, refuses
 instead of treating the PR as direct.
+
+The optional guard is also available to direct callers. This parser example uses
+an illustrative full SHA; substitute the actual reviewed head before execution:
+
+```sh
+nightshift finish <change> --expect-head 0123456789abcdef0123456789abcdef01234567
+```
+
+Ordinary direct Finish and act finish omit the optional guard. Use that recovery
+path only after inspection when a local archive exists but its push failed; the
+keyed recovery cases below distinguish this from a pushed archive with a ready
+failure. Landing never substitutes the local head or automatically drops the
+guard. Finish's archive successor and any base-update successor still undergo
+landing's existing validation before the final head-conditioned merge.
 
 CI and branch-update observation share one monotonic timeout across at most
 three rounds, **including the initial round**. The budget starts after finish
@@ -161,13 +196,29 @@ Failures identify the stage and reason on stderr, for example
 `land: unticked human checks remain:` followed by source references and items.
 Inspect the named check, run state, head change, API error, or protection rule.
 A refusal stops later mutations; previous successful writes are not rolled back.
-Resolve the cause, review any new head and checks, then rerun the same landing command
-while the PR remains open. Do not reset a done run: landing repeats the human
-check, CI, base and merge gates and skips finish. A partial finish still paused
-at `human_checks` uses specloop's existing finish recovery.
+Before retrying, resolve outstanding attempts and inspect local and remote effects.
+Use the applicable case below; a local archive whose push failed needs explicit
+direct Finish before terminal landing. Do not reset the run or bypass the guard
+automatically. All retries retain the human-check, finish, CI, base and merge gates.
 
-This applies after CI failure or timeout, an accepted branch update, or merge
-failure. The current remote head may differ from the done run's saved head;
+| Recovery case | Inspect and resolve | Next step |
+| --- | --- | --- |
+| `lost-response` | Refresh Factory status and inspect retained attempt evidence; submission may already have started. | Observe the existing attempt; do not automatically resubmit. |
+| `stopped` | Stop verifies worker PID/start time/group and requests SIGTERM without rollback, SIGKILL escalation or guaranteed termination. Inspect local/remote effects and any resistant descendants. | Wait for termination; a fresh confirmation must independently verify prior group drainage under flock. There is no intake hold or manual lock release. |
+| `worker-death` | The worker alone can die and release flock while children survive. Stop explicitly refuses a missing or unverifiable worker, even with surviving descendants. Wait for them or manually terminate them after inspection. | A fresh attempt must independently prove group absence under flock; only ESRCH from the safe kernel probe proves drainage. A free lock, unchanged head or terminal result is insufficient, including zombies or unverifiable groups. |
+| `duplicate-markers` | A late POST can duplicate another invocation's marker even after local groups drain; a valid acknowledgement need not detect it, but a subsequent lookup refuses. Inspect effects and delete one duplicate comment. | After resolving outstanding attempts, Land again if eligible or use `uv run python -m nightshift.land <url> --checks-done`; the remaining unique trusted marker is updated through all existing gates. |
+| `revised-head` | Locked finish refuses a changed or unreadable local head before archive/push/ready. Inspect with `nightshift status <change> --events 20` and review the newly published head and checks. | Refresh and confirm the new Factory offer, or deliberately retry terminal landing; existing finish protections and successor-head validation remain. |
+| `unpushed-archive` | Finish created local archive A but its push failed; remote remains H and the run remains at human_checks. Guarded landing passes H and refuses A; Factory may refuse the local/remote offer mismatch earlier. After all attempts stop, inspect prior local/remote effects, the failed push, A's archive/tasks and remote refs. | Explicit direct Finish without --expect-head: use Factory Finish, `python -m nightshift.cli finish <change>` or `nightshift act <change> finish --json`. Recovery reuses A without rearchiving, pushes and marks done. Review the remote head, then `uv run python -m nightshift.land <url> --checks-done` on the done run; it skips finish and repeats fresh landing gates. |
+| `pushed-archive-ready-failure` | The archive push already succeeded and only ready/state completion failed; inspect matching local and remote A and the existing archive/tasks. | Matching heads permit guarded landing recovery; ordinary direct Finish/act recovery also remains available. No reset or automatic guard bypass is needed. |
+| `done-run` | Finish succeeded before a later refusal; inspect remote head, checks, CI, update or merge effects. Factory offers no Land for done. | For an open PR, `uv run python -m nightshift.land <url> --checks-done` skips finish and repeats human-check, CI, base and merge gates. Never reset done. |
+
+Factory's lock does not coordinate terminal invocations. Its worker does not pass
+the lock descriptor to descendants, and status cannot clear exclusion evidence.
+Do not prune undrained-group records, even for a terminal result or an attempt
+older than the newest 20. See [persistent evidence](../plugins/nightshift/README.md#landing-evidence).
+
+Done-run continuation applies after CI failure or timeout, an accepted branch
+update, or merge failure. The current remote head may differ from the done run's saved head;
 the new invocation authorizes that reviewed remote head and still requires
 fresh gates. Prior green CI is never a durable bypass. For incomplete checkbox
 edits or attestation, rerun with `--checks-done` after resolving the reported
@@ -201,3 +252,6 @@ observed the first real landing:
   URL without a deploy hint.
 - [ ] Record the live outcome and any GitHub permission or protection restrictions
   in the operator's review record. A green unit suite does not complete these checks.
+- [ ] Review Factory Land on desktop and native phone: confirmation/Cancel, stale
+  identity, touch targets/wrapping, foreground refresh and retained notices in
+  visible, folded and absent rows. Inspect real-host Stop and persistent evidence.
