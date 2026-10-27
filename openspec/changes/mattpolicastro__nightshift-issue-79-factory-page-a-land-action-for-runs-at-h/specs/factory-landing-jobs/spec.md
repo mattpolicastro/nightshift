@@ -38,44 +38,31 @@ A Land offer SHALL bind change, canonical PR, pause_id, published head and pause
 
 ### Requirement: Confirmed landing handoff
 
-The worker SHALL supply the confirmed identity to unchanged nightshift.land through its injectable runner, use checks-done and preserve land as the sole merge path. It SHALL NOT duplicate landing gates or silently adopt an unrelated head.
+The worker SHALL supply the confirmed identity to nightshift.land through its injectable runner, use checks-done and preserve land as the sole merge path. It SHALL NOT duplicate landing gates or silently adopt an unrelated head.
 
 #### Scenario: Head changes at handoff
 - **WHEN** PR or pause changes between preflight and the actual initial responses consumed by land, or before a pre-finish mutation
 - **THEN** the adapter refuses stale confirmation before that mutation rather than authorizing the newly discovered head or pause
 
 #### Scenario: Landing gates and head pin remain authoritative
-- **WHEN** unchanged land executes through the adapter and finish or a validated base update advances the head
+- **WHEN** land executes through the adapter and finish or a validated base update advances the head
 - **THEN** existing checklist, attestation, finish, CI, provenance and protection gates decide the outcome and merge uses --match-head-commit with land's verified successor head
-- **THEN** land.py and existing landing assertions stay unchanged and unknown pre-finish mutation command shapes refuse
+- **THEN** land's only implementation change passes the validated PR head to finish, all existing gate assertions remain, and unknown pre-finish mutation command shapes refuse
 
-### Requirement: Retained attestation create evidence
+### Requirement: Terminal attestation behavior
 
-The Factory adapter SHALL persist create intent before delegating an attestation POST and retain it across attempts. An unresolved create SHALL prevent further mutations until reconciled through land's existing selectors; empty lookup SHALL NOT authorize another create. The adapter SHALL leave land.py unchanged.
-
-#### Scenario: Delayed create blocks a valid second acknowledgement
-- **WHEN** a first POST times out without a visible marker and a second confirmed attempt sees none, with the fake service configured to acknowledge a second POST validly
-- **THEN** the second attempt refuses before any mutation, finish or merge, and the service receives no second POST
-- **THEN** the same refusal occurs with an incomplete acknowledgement configured; safety does not depend on the second response shape
-- **WHEN** the first POST commits late and a fresh eligible attempt is confirmed
-- **THEN** existing paginated lookup and trusted-marker selection reconcile its ID, land reuses that marker and lands with exactly one create
-
-#### Scenario: Create evidence survives interruption
-- **WHEN** execution dies after a remote create but before recording its response, or unresolved evidence is older than the newest 20 attempts
-- **THEN** subsequent execution reconciles the retained intent before any mutation and refuses absent, unreadable, ambiguous or untrusted matches
-- **THEN** neither a terminal result, a changed head, elapsed time nor a new confirmation clears unresolved evidence
-- **WHEN** intent cannot be persisted before POST
-- **THEN** no POST is sent and the attempt retains a persistence refusal
-
-#### Scenario: Missing recorded marker cannot be recreated
-- **WHEN** a prior create is known or was reconciled but the marker disappears before land would issue a POST for the same key
-- **THEN** the adapter refuses that POST and requests inspection instead of replacing the marker or fabricating an acknowledgement
+Factory SHALL delegate attestation to land's existing within-invocation reconciliation and duplicate-marker refusal. It SHALL NOT persist create intent, unresolved-key evidence or a cross-attempt POST guard.
 
 #### Scenario: Late attestation duplicate recovery
-- **WHEN** reconciliation of retained unresolved intent finds two trusted matching markers, including duplicates from earlier unguarded invocations
-- **THEN** unchanged land selection refuses with `duplicate marker matches; resolve duplicates before retrying` and the Factory adapter sends no mutation
-- **WHEN** one duplicate comment is removed and a fresh eligible attempt is confirmed
-- **THEN** the adapter reconciles the remaining marker and unchanged land lands without another POST
+- **WHEN** an earlier POST commits late after another invocation created the same marker and a subsequent Factory attempt reads both comments
+- **THEN** land refuses with `duplicate marker matches; resolve duplicates before retrying`, the row retains that reason, and this attempt neither finishes nor merges
+- **WHEN** one duplicate comment is deleted and a fresh eligible attempt is confirmed
+- **THEN** land updates the remaining marker and lands through its existing gates without another create
+
+#### Scenario: No cross attempt create restriction
+- **WHEN** a prior invocation failed before sending its POST or could not reconcile a lost response, and a fresh eligible invocation finds no marker
+- **THEN** Factory adds no historical-create restriction; land's unchanged attestation logic alone decides whether to POST or refuse
+- **THEN** a valid POST acknowledgement need not trigger another lookup, and all head, finish, CI and merge gates still apply
 
 ### Requirement: Detached lifetime lock
 
@@ -90,7 +77,7 @@ Each attempt SHALL retain a log and small records and execute detached. The work
 - **WHEN** another confirmation targets the same canonical PR while the first worker runs
 - **THEN** the contender records a lock refusal and cannot invoke land
 - **WHEN** the first worker exits and another explicit confirmation is made
-- **THEN** the lock is available without release and prior-group drainage, retained-create reconciliation, fresh identity and land's gates decide the new attempt, with no replay or automatic retry
+- **THEN** the lock is available without release and prior-group drainage, fresh identity and land's gates decide the new attempt, with no replay or automatic retry
 
 ### Requirement: Prior execution exclusion
 
@@ -100,7 +87,7 @@ Before launching an invocation child, the worker SHALL persist its process ident
 - **WHEN** only the worker dies while its invocation child waits before a GitHub write and all five confirmation fields remain unchanged
 - **THEN** a new worker may acquire flock but refuses before invoking land or making mutations while the earlier group has an executing member
 - **WHEN** the earlier tree exits and a fresh confirmation is submitted
-- **THEN** the worker verifies drainage under flock before permitting execution, retaining all other admission and reconciliation gates
+- **THEN** the worker verifies drainage under flock before permitting execution, retaining all other admission and landing gates
 
 #### Scenario: Exclusion evidence fails closed
 - **WHEN** a prior attempt has a terminal result but a surviving child, or the group contains only zombies, its existence probe fails or its identity record is corrupt
@@ -138,4 +125,4 @@ Status SHALL return newest N attempts (default/max 20), total count and separate
 #### Scenario: Progress and refusal survive reads
 - **WHEN** an attempt progresses, succeeds, refuses or loses its worker before writing a result
 - **THEN** status retains phase/outcome/reason or an explicit interruption diagnostic without inferring success, creating an uncertain hold or retrying
-- **THEN** overdue is display-only after 2400 seconds, damaged records do not erase healthy results and evidence remains until manual pruning, preserving unresolved-create and undrained-group records
+- **THEN** overdue is display-only after 2400 seconds, damaged records do not erase healthy results and evidence remains until manual pruning, preserving undrained-group records

@@ -5,19 +5,18 @@ Factory is where an operator sees a run waiting at `human_checks`, often from a 
 ## What Changes
 
 - Add separate Land only at a verifiable `human_checks` pause, preserving existing status verbs and accessibility. Bind confirmation to change, PR, `pause_id`, published head and pause `since`; revalidate admission and worker startup.
-- Invoke unchanged `nightshift.land` with `--checks-done` through its injectable runner, bound to the confirmed identity. Landing remains the sole merge path and retains its head-conditioned merge and existing gates.
-- Add private plugin transport and detached worker in `nightshift/factory_land.py`. Keep a log and small JSON records per attempt; hold one per-PR flock for the worker's lifetime. Stop verifies worker PID/start time before SIGTERM to its process group.
-- Retain attestation-create intent before sending a POST. Reconcile an unresolved create through existing landing selectors before another attempt can mutate; an empty lookup never authorizes a second POST for that key.
-- Under the worker's lock, verify that every earlier recorded execution group has drained before invoking land. Worker death alone cannot authorize overlapping mutations; missing ownership still makes Stop refuse.
+- Invoke `nightshift.land` with `--checks-done` through its injectable runner, bound to the confirmed identity. Preserve its attestation behavior, including within-invocation reconciliation and duplicate-marker refusal/recovery. Add no persisted create intent, unresolved-key evidence or cross-attempt POST guard.
+- Add optional `finish --expect-head SHA` in `specloop/cli.py`: compare the run branch head after locked reload and before archiving or other finish side effects. Refuse a mismatch or unreadable head without archiving. The sole change to `nightshift/land.py` passes its validated PR head on every finish call, protecting Factory and terminal invocations while preserving validated successor-head handling.
+- Add private plugin transport and detached worker in `nightshift/factory_land.py`. Keep logs and small records per attempt; hold a per-PR flock for the worker's lifetime. Before invoking land, prove earlier recorded execution groups drained with `os.killpg(pgid, 0)`; only `ESRCH` proves absence. Stop verifies worker PID/start time before SIGTERM to its group.
 - Read newest 20 attempts plus total and separate current progress; retain results and refusal reasons in the originating row or above the list when hidden.
 - Preserve existing assertions and migrate both rendered RPC harnesses. Python tests belong under root `tests/`; plugin TypeScript tests under `plugins/nightshift/tests/`.
-- Update the plugin README, engine guide, main README, `KNOWN-LIMITATIONS.md` and `docs/landing.md`, including duplicate-marker refusal/recovery and the worker-death limitation. Test structure rather than prose wording.
+- Update the plugin README, engine guide, main README, `KNOWN-LIMITATIONS.md` and `docs/landing.md`, including duplicate-comment recovery and worker-death limitations. Describe the private transport in prose without new command examples or documentation-parser routing.
 
-Implementation scope is `plugins/nightshift/`, new `nightshift/factory_land.py`, root `tests/` and those five documents. Seven tasks group implementation and its tests by concern; the extra task isolates durable attestation reconciliation from process control.
+Implementation scope is `plugins/nightshift/`, new `nightshift/factory_land.py`, the narrow finish changes in `specloop/cli.py` and `nightshift/land.py`, root `tests/` and those five documents. Seven sessions use the approved split of the previous worker task: the locked finish handoff and its tests land before process-control integration. There is no attestation-reconciliation task.
 
-Out of scope: changes to `nightshift/land.py`; duplicated checklist parsing, attestation selection, finish, CI, update or merge gates; autonomous landing; canonical CLI registration or new act verbs; background-job-control inventory, compaction, ownership or escalation adapters; request-UUID replay; intake hold receipts, release commands or an uncertain outcome state; inherited lock descriptors; automatic retries/pruning; changes to CI, trusted manifests or read-only verification source. Matt reviews desktop and phone behavior after deploy.
+The reviewed private-worker design supersedes the original proposal to integrate with `nightshift jobs`: landing uses separate records, a worker-held lock and verified Stop, without intake holds, release or escalation adapters. Existing job-control behavior remains intact.
 
-The final critic feedback supersedes the earlier acceptance of blind cross-attempt POST retries and admission while orphaned landing children survive. The two guards use the planned attempt records and private adapter, preserving the simplified execution boundary and the existing reviewed-pr-landing requirements.
+Out of scope: other changes to land's gates or attestation logic; cross-attempt create guards; duplicated checklist parsing, attestation selection, CI, update or merge logic; autonomous landing; canonical CLI registration of landing or new act verbs; request-UUID replay; inherited lock descriptors; automatic retries/pruning; changes to CI, trusted manifests or read-only verification source. Matt reviews desktop and phone behavior after deploy.
 
 ## Capabilities
 
@@ -28,6 +27,8 @@ The final critic feedback supersedes the earlier acceptance of blind cross-attem
 ### Modified Capabilities
 
 - `paseo-runs-page`: separate-Land exception to status-only verbs, confirmation, independent RPC state and retained notices.
-- `specloop-documentation`: focused workflow, recovery and evidence guidance with structural checks.
+- `run-actions`: extend finish preconditions with an optional head guard under the existing run lock, retaining repository and unfinished-task protections.
+- `reviewed-pr-landing`: pass the validated pre-finish PR head to finish; retain all other landing gates, attestation requirements and successor-head validation.
+- `specloop-documentation`: focused workflow, duplicate recovery and evidence guidance with structural checks.
 
-Remove the previous draft's background-job-control delta: landing no longer participates in that system. Existing `background-job-control`, `reviewed-pr-landing`, `run-actions`, `specloop-interface`, `factory-finished-runs`, `nightshift-cli`, `host-paths` and `verify-preparation` contracts remain unchanged.
+Existing `background-job-control`, `specloop-interface`, `factory-finished-runs`, `nightshift-cli`, `host-paths` and `verify-preparation` contracts remain in force. The new optional finish argument uses the existing shared build parser; no command dispatch or JSON schema migration is required.

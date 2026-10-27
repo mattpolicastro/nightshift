@@ -30,23 +30,27 @@ Operator guidance SHALL distinguish bounded landing display history from complet
 
 #### Scenario: Operator interprets landing history
 - **WHEN** the reader checks landing storage and progress guidance
-- **THEN** it describes newest 20 plus total and separate current progress, persistent logs/results, no read acknowledgement and manual pruning that preserves unresolved-create and undrained-group evidence
+- **THEN** it describes newest 20 plus total and separate current progress, persistent logs/results, no read acknowledgement and manual pruning that preserves undrained-group evidence
 - **THEN** KNOWN-LIMITATIONS.md qualifies delivered-log cleanup without promising bounded disk use or applying jobs compact to landing
 
 ### Requirement: Delayed attestation recovery guidance
 
-The landing guide and KNOWN-LIMITATIONS.md SHALL distinguish Factory's retained create guard from standalone landing's delayed-POST limitation, replacing the unconditional never-posted-twice promise. They SHALL explain reconciliation and duplicate recovery without recommending a bypass.
-
-#### Scenario: Operator encounters unresolved create evidence
-- **WHEN** Factory refuses because an earlier attestation POST remains unresolved
-- **THEN** guidance says an empty lookup cannot prove non-creation, another confirmation cannot authorize another POST, and a late unique trusted marker permits reconciliation
-- **THEN** it describes investigation when no marker appears, preserving local evidence, and forbids recommending standalone land or evidence deletion to bypass the refusal
+The landing guide and KNOWN-LIMITATIONS.md SHALL document the shared Factory/terminal late-POST duplicate exception and deletion recovery, replacing the unconditional never-posted-twice promise. They SHALL describe within-invocation reconciliation without a retained-create guard.
 
 #### Scenario: Operator resolves duplicate markers
-- **WHEN** a timed-out POST commits after a later attempt creates an identical marker
-- **THEN** docs/landing.md and KNOWN-LIMITATIONS.md explain that a valid acknowledgement can let an unguarded standalone invocation continue, while a later marker lookup refuses `duplicate marker matches; resolve duplicates before retrying`
-- **THEN** recovery requires inspecting effects and deleting one duplicate before Land again if eligible or standalone land after outstanding attempts are resolved
-- **THEN** neither describes the duplicate as harmless, guarantees immediate duplicate detection, suggests changing land.py or promises Factory repeats the unresolved POST
+- **WHEN** a timed-out POST commits after another invocation creates an identical marker
+- **THEN** docs/landing.md and KNOWN-LIMITATIONS.md explain that a valid acknowledgement need not detect duplicates immediately, while a subsequent marker lookup refuses `duplicate marker matches; resolve duplicates before retrying`
+- **THEN** recovery requires inspecting effects and deleting one duplicate before Land again if eligible or terminal land after outstanding attempts are resolved
+- **THEN** neither promises cross-attempt deduplication nor suggests a retained-create guard, and the other landing gates remain unchanged
+
+### Requirement: Guarded finish guidance
+
+The landing guide SHALL explain the locked expected-head precondition used by land's finish call and distinguish it from validated successor-head handling.
+
+#### Scenario: Operator encounters a revised head
+- **WHEN** revision republishes between landing's identity check and finish
+- **THEN** guidance explains refusal before archiving, reviewing the new head before retrying and preservation of existing finish and merge gates
+- **THEN** private Factory transport is described in prose without executable examples or new unified-command documentation routing
 
 ### Requirement: Landing documentation structure
 
