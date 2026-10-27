@@ -45,12 +45,17 @@ The landing guide and KNOWN-LIMITATIONS.md SHALL document the shared Factory/ter
 
 ### Requirement: Guarded finish guidance
 
-The landing guide SHALL explain the locked expected-head precondition used by land's finish call and distinguish it from validated successor-head handling.
+The landing guide and KNOWN-LIMITATIONS.md SHALL explain the locked expected-head precondition and the failed-push recovery migration to inspected direct Finish, distinguishing it from validated successor-head handling.
 
 #### Scenario: Operator encounters a revised head
 - **WHEN** revision republishes between landing's identity check and finish
 - **THEN** guidance explains refusal before archiving, reviewing the new head before retrying and preservation of existing finish and merge gates
 - **THEN** private Factory transport is described in prose without executable examples or new unified-command documentation routing
+
+#### Scenario: Operator recovers an unpushed archive
+- **WHEN** a finish push failed after creating local archive commit A while the remote remains H and the run remains at human_checks
+- **THEN** docs/landing.md and KNOWN-LIMITATIONS.md identify guarded landing's mismatch refusal and replace blanket rerun advice with inspection of prior effects, local archive/tasks and remote refs, followed by explicit direct Finish without --expect-head and terminal landing after the run is done
+- **THEN** guidance distinguishes an already-pushed archive with a ready failure, preserves ordinary finish/act recovery, and promises neither automatic guard bypass nor run reset
 
 ### Requirement: Landing documentation structure
 
