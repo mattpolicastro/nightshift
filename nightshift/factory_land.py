@@ -38,6 +38,8 @@ RECORD_LIMIT = 256 * 1024
 OUTPUT_LIMIT = 1024 * 1024
 START_ALLOWANCE = 60
 OVERDUE_SECONDS = 2400
+STOP_RECOVERY = ("Wait for descendants to finish or manually kill them after inspection; "
+                 "a fresh attempt must prove group drainage.")
 _SHA = re.compile(r"[a-fA-F0-9]{40}")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
 _ATTEMPT = re.compile(r"[a-f0-9]{32}")
@@ -394,9 +396,13 @@ def read_start_identity(pid: int) -> str:
         if result != ctypes.sizeof(info):
             error = ctypes.get_errno()
             raise OSError(error or errno.EIO, "worker birth identity could not be read")
+        if info.status == 5:  # SZOMB: a dead worker cannot authorize Stop.
+            raise ProcessLookupError(errno.ESRCH, "worker has exited")
         return f"darwin:{info.start_seconds}:{info.start_microseconds}"
     if sys.platform.startswith("linux"):
         fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        if fields[0] == "Z":
+            raise ProcessLookupError(errno.ESRCH, "worker has exited")
         return f"linux:{int(fields[19])}"
     raise Refusal("worker birth identity is unsupported on this platform")
 
@@ -449,7 +455,7 @@ def exclude_prior_groups(directory: Path) -> None:
                 if exc.errno != errno.ESRCH:
                     raise Refusal(f"prior group {pgid} absence cannot be proved: {exc}") from exc
             else:
-                raise Refusal(f"prior group {pgid} still exists; wait for drainage or inspect descendants")
+                raise Refusal(f"prior group {pgid} still exists; {STOP_RECOVERY}")
             write_record(prior / "drained.json", {
                 "version": 1, "drained": True, "process": process, "observed_at": time.time(),
             })
@@ -461,40 +467,105 @@ class _WorkerStopped(BaseException):
     pass
 
 
+def stop_attempt(attempt_id: str, *, root: Path | None = None) -> dict[str, Any]:
+    """Request TERM only with a live worker's verified birth and group identity.
+
+    Never use a surviving group, a terminal result or a free lock as authority
+    to signal. Stop neither observes drainage nor grants a retry.
+    """
+    response: dict[str, Any] = {"version": 1, "attempt_id": attempt_id, "accepted": False}
+    try:
+        directory, _ = load_attempt(attempt_id, root if root is not None else state_root())
+        process = _read_record(directory / "process.json")
+        if process is None:
+            raise Refusal("missing worker identity")
+        pgid = _safe_group(process)
+        pid = process["pid"]
+        if read_start_identity(pid) != process["start_identity"]:
+            raise Refusal("worker PID has been reused or its start identity changed")
+        if os.getpgid(pid) != pgid or os.getsid(pid) != process["sid"]:
+            raise Refusal("worker is outside its recorded session/group")
+        # Bracket membership inspection with birth checks; PID alone is never
+        # authority. No portable atomic birth-checked group signal exists.
+        if read_start_identity(pid) != process["start_identity"]:
+            raise Refusal("worker start identity changed during verification")
+    except (OSError, ValueError, TypeError, IndexError, RecursionError) as exc:
+        response["reason"] = _clip(f"Stop refused: worker identity or safe group could not be verified: {exc}. {STOP_RECOVERY}")
+        return response
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError as exc:
+        response["reason"] = _clip(f"Stop refused: SIGTERM could not be sent to verified group {pgid}: {exc}. {STOP_RECOVERY}")
+        return response
+    response.update(accepted=True, stop_requested=True,
+                    reason=f"Stop requested (SIGTERM); completion is not confirmed. {STOP_RECOVERY}")
+    try:
+        write_record(directory / "stop.json", {"version": 1, "process": process,
+                     "requested_at": time.time(), "signal": "SIGTERM"})
+    except (OSError, ValueError) as exc:
+        # The signal was delivered even if recording the request failed.
+        response["reason"] = _clip(f"{response['reason']} Stop request evidence could not be saved: {exc}")
+    return response
+
+
 def run_worker(attempt_id: str, *, root: Path | None = None,
                read_status: Callable[[str], Any] = read_run_status,
                remote_head: Callable[[str], str] = read_remote_head,
                pause_file: Path | None = None) -> int:
     root = root if root is not None else state_root()
     directory, offer = load_attempt(attempt_id, root)
+    requested = 0
+    process = None
+    child = None
 
     def stopped(signum: int, frame: Any) -> None:
-        raise _WorkerStopped()
+        nonlocal requested
+        requested = requested or signum
 
-    previous = signal.signal(signal.SIGTERM, stopped)
+    def check_stop() -> None:
+        if requested:
+            raise _WorkerStopped()
+
+    def result(outcome: str, reason: str, **kwargs: Any) -> None:
+        # A signal racing completion must never replace terminal evidence.
+        if not (directory / "result.json").exists():
+            record_result(directory, outcome, reason, **kwargs)
+
+    previous = {sig: signal.signal(sig, stopped) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
         # Never remove the stable lock or hand its descriptor to descendants.
         with (directory.parent.parent / "lock").open("a+b") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                record_result(directory, "refused", "another landing worker holds the PR lock")
+                result("refused", "another landing worker holds the PR lock")
                 return 1
             try:
                 if ((directory / "process.json").exists() or (directory / "result.json").exists()):
                     return 1  # A request is never replayed, even after failure.
+                check_stop()
                 exclude_prior_groups(directory)
                 # The durable record precedes identity-read and invocation children.
-                write_record(directory / "process.json", process_identity())
+                process = process_identity()
+                write_record(directory / "process.json", process)
                 record_progress(directory, "validating")
+                check_stop()
                 validate_offer(offer, read_status=read_status, remote_head=remote_head, pause_file=pause_file)
+                check_stop()
                 with (directory / "output.log").open("ab", buffering=0) as output:
                     child = subprocess.Popen(
                         [sys.executable, "-m", "nightshift.factory_land", "invoke", attempt_id],
                         stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
                         env={**os.environ, "NIGHTSHIFT_STATE_ROOT": str(root), "PYTHONUNBUFFERED": "1"},
                         close_fds=True)
-                    code = child.wait()
+                    while True:
+                        check_stop()
+                        try:
+                            code = child.wait(timeout=.1)
+                            break
+                        except subprocess.TimeoutExpired:
+                            pass
+                check_stop()
                 # Capture a bounded tail, while leaving the complete log intact.
                 with (directory / "output.log").open("rb") as tail:
                     tail.seek(0, os.SEEK_END)
@@ -502,21 +573,43 @@ def run_worker(attempt_id: str, *, root: Path | None = None,
                     detail = tail.read(DETAIL_LIMIT).decode("utf-8", errors="replace").strip()
                 progress = _read_record(directory / "progress.json")
                 assert progress is not None
-                record_result(directory, "succeeded" if code == 0 else "failed",
-                              "merge confirmed" if code == 0 else detail or f"invocation exited {code}",
-                              phase=progress["phase"], exit_code=code)
+                result("succeeded" if code == 0 else "failed",
+                       "merge confirmed" if code == 0 else detail or f"invocation exited {code}",
+                       phase=progress["phase"], exit_code=code)
+                check_stop()
                 return 0 if code == 0 else 1
-            except Refusal as exc:
-                record_result(directory, "refused", str(exc))
-                return 1
-            except _WorkerStopped:
-                record_result(directory, "stopped", "worker received SIGTERM; inspect any surviving descendants")
-                return 1
-            except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                record_result(directory, "failed", f"worker failed: {exc}")
+            except (_WorkerStopped, OSError, ValueError, subprocess.SubprocessError) as exc:
+                # TERM can make an active validation subprocess fail before
+                # check_stop runs. A recorded signal takes precedence over
+                # that error, including refusals wrapped by validate_offer.
+                if not requested:
+                    result("refused" if isinstance(exc, Refusal) else "failed",
+                           str(exc) if isinstance(exc, Refusal) else f"worker failed: {exc}")
+                    return 1
+                detail = ""
+                # Also forward a signal sent only to the worker. The handler
+                # merely sets a flag, so signalling our own group cannot recurse
+                # or interrupt atomic record publication/Popen construction.
+                if process is not None:
+                    try:
+                        current = process_identity()
+                        if any(current[key] != process[key] for key in ("pid", "pgid", "sid", "start_identity")):
+                            raise Refusal("worker group identity changed")
+                        os.killpg(process["pgid"], signal.SIGTERM)
+                    except (OSError, ValueError) as exc:
+                        detail = f" Group TERM could not be sent: {exc}."
+                if child is not None:
+                    try:
+                        child.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        detail += " Invocation remains running after SIGTERM."
+                progress = _read_record(directory / "progress.json", optional=True)
+                result("stopped", f"Worker stopped after {signal.Signals(requested).name}; group completion is not confirmed.{detail} {STOP_RECOVERY}",
+                       phase=progress["phase"] if progress else "starting", exit_code=128 + requested)
                 return 1
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def _run_logged(argv: list[str], output: Path, *, capture_output: bool, text: bool,
@@ -563,6 +656,13 @@ def _run_logged(argv: list[str], output: Path, *, capture_output: bool, text: bo
                     if not interrupted:
                         child.kill()
                         child.wait()
+                    else:
+                        # Reap normal commands, but never escalate or wait
+                        # indefinitely for a TERM-resistant command.
+                        try:
+                            child.wait(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            pass
                     # Do not wait for resistant descendants holding the pipes.
                     while events := selector.select(0):
                         drain(events)
@@ -651,12 +751,22 @@ def _summary(directory: Path, request: dict[str, Any], process: dict[str, Any] |
     if not terminal:
         if process is not None and live is False:
             summary.update(outcome="failed")
-            summary["diagnostics"].append("interrupted: worker identity is gone without a terminal result; inspect retained evidence")
+            summary["diagnostics"].append(f"interrupted: worker identity is gone without a terminal result. {STOP_RECOVERY}")
         elif process is None and now - request["created_at"] > START_ALLOWANCE:
             summary.update(outcome="failed")
             summary["diagnostics"].append("interrupted: startup not established within 60 seconds")
         elif live is None and process is not None:
             summary["diagnostics"].append("worker identity is unverifiable; no completion can be inferred")
+    try:
+        stop = _read_record(directory / "stop.json", optional=True)
+        if stop is not None:
+            if (stop.get("process") != process or not _timestamp(stop.get("requested_at"))
+                    or stop.get("signal") != "SIGTERM"):
+                raise ValueError("invalid stop request identity or timestamp")
+            state = "worker is still running" if live is True else "group completion is not confirmed"
+            summary["diagnostics"].append(f"Stop requested (SIGTERM); {state}. {STOP_RECOVERY}")
+    except _READ_ERRORS as exc:
+        summary["diagnostics"].append(_clip(f"damaged stop.json: {exc}", 512))
     summary["overdue"] = not terminal and now - request["created_at"] > OVERDUE_SECONDS
     return summary
 
@@ -777,7 +887,9 @@ def parser() -> argparse.ArgumentParser:
     status = modes.add_parser("status", allow_abbrev=False)
     status.add_argument("change", nargs="?", type=_change)
     status.add_argument("--limit", type=int, choices=range(1, MAX_LIMIT + 1), default=MAX_LIMIT)
-    for mode in (start, status):
+    stop = modes.add_parser("stop", allow_abbrev=False)
+    stop.add_argument("attempt_id")
+    for mode in (start, status, stop):
         mode.add_argument("--json", action="store_true", required=True)
     for name in ("worker", "invoke"):
         mode = modes.add_parser(name, allow_abbrev=False)
@@ -797,6 +909,10 @@ def main(argv: list[str] | None = None, *, launch: Callable[[str], Any] | None =
             return 1
     if args.mode == "status":
         response = landing_status(args.change, limit=args.limit, **dependencies)
+    elif args.mode == "stop":
+        if not _ATTEMPT.fullmatch(args.attempt_id):
+            arguments.error("invalid attempt ID")
+        response = stop_attempt(args.attempt_id, **dependencies)
     else:
         try:
             offer = Offer.parse(vars(args))
