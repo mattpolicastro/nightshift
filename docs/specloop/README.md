@@ -1025,6 +1025,29 @@ a local inference box is proven. The codex adapter against a local backend is un
 - per-attempt transcripts, seal, receipts and review decisions;
 - `followups.md`, the non-blocking review findings.
 
+Each Codex session uses disposable `<stem>.tmp` beside its transcript as
+writable `$TMPDIR`. The adapter attempts removal during finalization, after
+the existing runner returns (including failure, signal exit or wall/idle
+timeout), or when setup, spawning or result interpretation raises. This
+cleanup retains transcripts, schema/output JSON, seals, receipts, reviews and
+verify build directories; their storage still follows existing policies
+([issue #116](https://github.com/mattpolicastro/nightshift/issues/116)).
+
+Removal failures append a `session_tmpdir_cleanup_failed` JSON event to that
+session's `<stem>.stderr`, preserving existing diagnostics. Cleanup and event
+write failures leave the original result or exception unchanged; an unwritable
+stderr sink can prevent durable recording. Finalization does not confirm that
+the process group has exited: a surviving descendant may race removal, cause
+it to fail or recreate scratch afterward. Existing runner timeout handling and
+Claude behavior are unchanged. Historical scratch is not swept, and harness
+SIGKILL or host failure can leave new scratch behind.
+
+The real-host check remains pending: after the first updated build, a human
+must inspect one finished real Codex attempt, record its path and outcome,
+confirm `<stem>.tmp` is absent, check session stderr for cleanup failures and
+confirm transcripts, outputs, seals, receipts, reviews and verify builds remain.
+Automated fixtures do not establish this live-host result.
+
 The guarded migration uses these build-state mappings:
 
 | Legacy build state | Canonical build state |
