@@ -24,6 +24,8 @@ import uuid
 
 from specloop.state import SAFE_CHANGE, state_root
 
+from . import land
+
 
 MAX_LIMIT = 20
 DETAIL_LIMIT = 8192
@@ -146,6 +148,93 @@ def validate_offer(
         raise
     except (OSError, ValueError, TypeError, RecursionError, subprocess.SubprocessError) as exc:
         raise Refusal(f"fresh landing identity could not be read: {exc}") from exc
+
+
+class ConfirmedRunner:
+    """Bind land's pre-finish calls to one confirmation, without owning its gates.
+
+    Inspect the responses land actually consumes as well as independent fresh
+    identity reads before writes. After finish, land alone validates successor
+    heads and conditions the merge. No attestation state survives this runner.
+    """
+
+    def __init__(self, offer: Offer, *, runner: land.Runner | None = None,
+                 read_status: Callable[[str], Any] = read_run_status,
+                 remote_head: Callable[[str], str] = read_remote_head,
+                 pause_file: Path | None = None):
+        self.offer = Offer.parse(asdict(offer))
+        self.runner = subprocess.run if runner is None else runner
+        self.read_status, self.remote_head, self.pause_file = read_status, remote_head, pause_file
+        match = _PR.fullmatch(self.offer.pr)
+        assert match is not None
+        self.repo, self.number = f"{match[1]}/{match[2]}".lower(), match[3]
+        self.pr_read = self.status_read = self.finished = False
+
+    def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if self.finished:
+            return self.runner(argv, **kwargs)
+        repo, number = self.repo, self.number
+        view = ["gh", "pr", "view", number, "--repo", repo, "--json", land.PR_FIELDS]
+        status = [sys.executable, "-m", "nightshift.cli", "status", "--json"]
+        finish = [sys.executable, "-m", "nightshift.cli", "finish", self.offer.change,
+                  "--expect-head", self.offer.head]
+        reads = [view, status, ["gh", "api", f"repos/{repo}/git/ref/heads/main"],
+                 ["gh", "api", f"repos/{repo}/issues/{number}/comments", "--paginate", "--slurp"],
+                 ["gh", "api", "user"]]
+        is_finish = (len(argv) == len(finish) and argv[:-1] == finish[:-1]
+                     and argv[-1].lower() == self.offer.head)
+        mutation = is_finish
+        if (len(argv) == 7 and argv[:3] == ["gh", "api", "--method"]
+                and argv[5] == "-f" and argv[6].startswith("body=")):
+            endpoint = argv[4]
+            mutation = (
+                argv[3] == "POST" and endpoint == f"repos/{repo}/issues/{number}/comments"
+            ) or (argv[3] == "PATCH" and (
+                endpoint == f"repos/{repo}/pulls/{number}"
+                or re.fullmatch(rf"repos/{re.escape(repo)}/issues/comments/[1-9][0-9]*", endpoint)
+                is not None
+            ))
+        try:
+            if mutation:
+                if not self.pr_read or not self.status_read:
+                    raise Refusal("confirmed landing requires actual initial PR and run responses")
+                validate_offer(self.offer, read_status=self.read_status,
+                               remote_head=self.remote_head, pause_file=self.pause_file)
+            elif argv not in reads:
+                raise Refusal("unknown pre-finish landing command shape; refusing execution")
+            result = self.runner(argv, **kwargs)
+            if result.returncode == 0 and argv in (view, status):
+                data = json.loads(result.stdout)
+                if argv == status:
+                    if offer_from_status(data, self.offer.change) != self.offer:
+                        raise Refusal("stale landing confirmation: actual run response changed")
+                    self.status_read = True
+                else:
+                    if (not isinstance(data, dict) or not isinstance(data.get("url"), str)
+                            or data["url"].lower() != self.offer.pr.lower()
+                            or type(data.get("number")) is not int or data["number"] != int(number)
+                            or not isinstance(data.get("headRefOid"), str)
+                            or data["headRefOid"].lower() != self.offer.head):
+                        raise Refusal("stale landing confirmation: actual PR response changed")
+                    self.pr_read = True
+            if is_finish:
+                self.finished = True
+            return result
+        except (Refusal, ValueError, TypeError, RecursionError) as exc:
+            raise land.Refusal(str(exc)) from exc
+
+
+def invoke_confirmed(offer: Offer, *, runner: land.Runner | None = None,
+                     read_status: Callable[[str], Any] = read_run_status,
+                     remote_head: Callable[[str], str] = read_remote_head,
+                     pause_file: Path | None = None, config_path: Path | None = None) -> int:
+    """Invocation-child boundary; lifecycle/records belong to the worker."""
+    confirmed = ConfirmedRunner(offer, runner=runner, read_status=read_status,
+                                remote_head=remote_head, pause_file=pause_file)
+    argv = [offer.pr, "--checks-done"]
+    if config_path is not None:
+        argv.extend(["--config", str(config_path)])
+    return land.main(argv, runner=confirmed)
 
 
 def _clip(value: str, limit: int = DETAIL_LIMIT) -> str:

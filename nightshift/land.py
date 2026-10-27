@@ -688,7 +688,8 @@ def finish_run(
     if current is not None and run is not None and run.status != "done":
         if current.status == "paused":
             operations.run(
-                [sys.executable, "-m", "nightshift.cli", "finish", current.change],
+                [sys.executable, "-m", "nightshift.cli", "finish", current.change,
+                 "--expect-head", refreshed_pr.head],
                 timeout=FINISH_TIMEOUT,
                 stage=f"finish {current.change}; rerun land to recover",
             )
