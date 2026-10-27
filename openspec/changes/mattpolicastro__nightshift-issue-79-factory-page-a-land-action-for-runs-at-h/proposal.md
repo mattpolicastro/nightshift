@@ -1,30 +1,29 @@
 ## Why
 
-Runs waiting at `human_checks` already appear in Factory, often on a phone. After checking the PR, the operator should be able to start the reviewed landing workflow there and keep its progress and refusal reason in view instead of opening a terminal. This depends on #78's landing implementation and #40's unified Nightshift CLI, both present in this checkout.
+Factory is where an operator sees a run waiting at `human_checks`, often from a phone. Confirmed landing there saves a terminal session and keeps progress and refusals beside the run. Dependencies #78 (reviewed landing) and #40 (unified CLI) are present in this checkout.
 
 ## What Changes
 
-- Add a separate **Land** control only for a run paused at `human_checks` with a verifiable published PR, head and pause timestamp. Preserve the existing status verbs, controls and accessibility contracts.
-- Confirm completion of the PR's human checks against an immutable `(change, PR, pause_id, head, since)` offer. Revalidate at admission and worker startup; invoke existing `land --checks-done` through a runner bound to the confirmed initial head.
-- Add a standalone operator gateway and detached plugin-owned landing worker with durable request identity, retained outcomes, local inventory, verified stop and explicit stopped-hold release. Never schedule landing through daemon intake or the supervisor.
-- Display progress and retained per-attempt results in the originating row, or above the list when the row is folded or absent. Keep complete evidence locally while limiting history responses to the newest 20 attempts by default, plus a total and a separate current-attempt lookup.
-- Extend plugin TypeScript tests and root Python tests without weakening assertions. Migrate both rendered harness RPC routers explicitly. Use existing offline prepared plugin verification; add no pytest-to-Node bridge.
-- Update the plugin README, main README, engine guide and `KNOWN-LIMITATIONS.md` for the separate action and landing-specific job behavior.
+- Add separate Land only at a verifiable `human_checks` pause, preserving existing status verbs and accessibility. Bind confirmation to change, PR, `pause_id`, published head and pause `since`; revalidate admission and worker startup.
+- Invoke unchanged `nightshift.land` with `--checks-done` through its injectable runner, bound to the confirmed identity. Landing remains the sole merge path and retains its head-conditioned merge and existing gates.
+- Add private plugin transport and detached worker in `nightshift/factory_land.py`. Keep a log and small JSON records per attempt; hold one per-PR flock for the worker's lifetime. Stop verifies worker PID/start time before SIGTERM to its process group.
+- Read newest 20 attempts plus total and separate current progress; retain results and refusal reasons in the originating row or above the list when hidden.
+- Preserve existing assertions and migrate both rendered RPC harnesses. Python tests belong under root `tests/`; plugin TypeScript tests under `plugins/nightshift/tests/`.
+- Update the plugin README, engine guide, main README, `KNOWN-LIMITATIONS.md` and `docs/landing.md`, including duplicate-marker refusal/recovery and the worker-death limitation. Test structure rather than prose wording.
 
-Implementation scope is `plugins/nightshift/`, a standalone `nightshift/factory_land.py` gateway, a control-only `nightshift/factory_land_records.py` helper, narrow job-kind adapters in `nightshift/specloop_job.py`, root `tests/`, and the four named operator documents. The worker entry script lives at `plugins/nightshift/server/factory_land_job.py`. Shared job code reads and controls landing evidence but never imports or launches the gateway or worker. No registration is added to `nightshift/cli.py`: it is already reachable from daemon and supervisor paths, whose existing no-landing dependency assertion must remain intact.
+Implementation scope is `plugins/nightshift/`, new `nightshift/factory_land.py`, root `tests/` and those five documents. Six tasks group implementation and its tests by concern.
 
-Out of scope: changes to `nightshift/land.py` or its checklist, attestation, finish, CI, branch-update and merge logic; autonomous merging; canonical CLI registration or forwarding for landing; new `act` verbs; changed build status schemas; deployment; frozen CI, packaging, service wrappers or trusted manifests; dependency installation during verification. Matt checks desktop and phone behavior after deploy.
+Out of scope: changes to `nightshift/land.py`; duplicated checklist, attestation, finish, CI, update or merge gates; autonomous landing; canonical CLI registration or new act verbs; background-job-control inventory, compaction, ownership or escalation adapters; request-UUID replay; hold receipts, release or an uncertain state; inherited lock descriptors; automatic retries/pruning; changes to CI, trusted manifests or read-only verification source. Matt reviews desktop and phone behavior after deploy.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `factory-landing-jobs`: confirmed landing admission, durable launch and guarded invocation, retry identity, and bounded read-only history.
+- `factory-landing-jobs`: isolated operator-triggered attempts, bound identity, lifetime lock, verified Stop and bounded status. This names detached attempts, not a background-job-control job kind.
 
 ### Modified Capabilities
 
-- `paseo-runs-page`: explicit separate-Land exception to status-only buttons; confirmation, RPC boundaries, refreshes and visible retained outcomes.
-- `background-job-control`: landing inventory and timing, job-specific ownership verification, per-attempt release receipts and retained evidence. Existing intake behavior remains intact.
-- `specloop-documentation`: concise separate requirements for Factory landing, recovery, limitations and structural documentation checks.
+- `paseo-runs-page`: separate-Land exception to status-only verbs, confirmation, independent RPC state and retained notices.
+- `specloop-documentation`: focused workflow, recovery and evidence guidance with structural checks.
 
-`reviewed-pr-landing`, `run-actions`, `specloop-interface`, `factory-finished-runs`, `nightshift-cli`, `host-paths` and `verify-preparation` remain unchanged. Their existing gates and contracts apply. Factory invokes the standalone gateway directly; neither the canonical CLI nor any daemon/supervisor dependency gains a path to landing execution. No exception or weakening of the existing landing dependency checker is authorized.
+Remove the previous draft's background-job-control delta: landing no longer participates in that system. Existing `background-job-control`, `reviewed-pr-landing`, `run-actions`, `specloop-interface`, `factory-finished-runs`, `nightshift-cli`, `host-paths` and `verify-preparation` contracts remain unchanged.

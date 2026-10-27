@@ -1,113 +1,99 @@
 ## Purpose
 
-Invoke existing reviewed landing from an explicit Factory confirmation through durable, inspectable background work, without introducing autonomous landing or changing landing's gates.
+Provide small detached Factory landing attempts triggered by explicit human confirmation, using existing landing logic and retained records outside daemon job control.
 
 ## ADDED Requirements
 
-### Requirement: Published pause identity
-
-The landing gateway SHALL offer landing only for a readable run paused at `human_checks`, binding change, canonical PR URL, pause_id, published head SHA and finite pause.since. It SHALL revalidate every field against fresh status and the remote PR at admission and worker startup.
-
-#### Scenario: Only verifiable human checks qualify
-- **WHEN** the gateway reads human-check, other-paused, running, done, aborted, missing and erroneous runs
-- **THEN** only human-check runs with complete valid identity receive an offer; unavailable or null metadata produces no offer and a diagnostic without launching anything
-- **THEN** epoch zero and fractional pause timestamps are preserved without rounding
-
-#### Scenario: Republication invalidates confirmation
-- **WHEN** revision republishes the same change to the same PR with an unchanged `human_checks:` pause_id but a new head or pause.since
-- **THEN** the earlier confirmation is refused as stale at admission or worker startup, before any check edit, finish or merge
-- **THEN** a changed timestamp with unchanged head and a changed head with unchanged timestamp each independently invalidate the offer
-
-### Requirement: Durable request replay
-
-The gateway SHALL bind each valid request UUID to its immutable confirmed payload and retained outcome. It SHALL resolve a matching existing UUID before checking current run eligibility or pause, refuse changed payloads, and serialize new admissions per canonical PR.
-
-#### Scenario: Completed UUID survives changed eligibility
-- **WHEN** a start response is lost and the same UUID and payload are retried after the run becomes done, the PR merges, the daemon pauses or the gateway restarts
-- **THEN** the retained outcome and attempt ID are returned without launching, checking current eligibility as a new admission, or modifying the original evidence
-- **THEN** an originally refused UUID also returns its original refusal
-
-#### Scenario: Conflicting or concurrent requests refuse
-- **WHEN** a UUID is reused with different fields, or two new UUIDs target the same canonical PR concurrently
-- **THEN** conflicting reuse preserves the original outcome, and at most one new attempt starts; the other request receives a retained reason
-- **THEN** another change name, tab or gateway process cannot bypass a live, uncertain or unreleased stopped hold
-
-### Requirement: Gateway command contract
-
-The standalone `nightshift.factory_land` module SHALL expose bounded landing status, request resolution and confirmed start commands with singular version-1 JSON outcomes and literal arguments. New admissions SHALL require checks_done and refuse a daemon pause or failed eligibility read before launch.
-
-#### Scenario: Parse and dispatch safely
-- **WHEN** valid status, resolve and start argv or invalid identifiers, timestamps, flags and paths are supplied
-- **THEN** valid commands retain argument boundaries and return one validated document; malformed syntax exits 2 before state mutation, read success and accepted replay exit 0, and admission refusal exits 1 with its reason
-- **THEN** existing canonical and alias CLI behavior remains unchanged, neither registers nor forwards the gateway, and no client can supply executable, cwd or arbitrary command options
-
-#### Scenario: Pause blocks only new work
-- **WHEN** the daemon pause file exists before a new admission or worker startup, or a fresh eligibility read fails
-- **THEN** new execution refuses with a retained reason, while read-only status and matching UUID replay remain available
-- **THEN** a worker already past startup may complete while paused, and reading its result does not deliver or launch anything
-
 ### Requirement: Operator execution isolation
 
-Factory SHALL invoke the standalone gateway directly, which alone launches the plugin worker script. Shared job control SHALL inspect and control landing records without importing or launching either entry point or landing. The existing daemon/supervisor dependency checker and assertions SHALL remain unchanged.
+Only confirmed Factory submission SHALL start a Factory landing attempt. Its private module SHALL remain unreachable from daemon, serve, intake, job-control and canonical CLI execution paths, preserving existing dependency assertions.
 
-#### Scenario: Shared controls cannot execute landing
-- **WHEN** the unchanged dependency checker traverses daemon and supervisor modules, and jobs list, stop, release or daemon status observes landing evidence
-- **THEN** the control-only record helper is reachable but the gateway and landing module are not; shared code neither imports nor launches the plugin worker
-- **THEN** literal script identity used in process verification grants no execution authority, and command spies observe only permitted inspection/control operations
-- **THEN** no lazy/computed imports, reflective dispatch, renamed landing implementation or checker exclusions conceal an execution dependency
+#### Scenario: Background paths cannot start landing
+- **WHEN** dependency traversal and launch spies inspect daemon, supervisor, job-control and canonical/alias CLI paths
+- **THEN** none imports or launches nightshift.factory_land or nightshift.land, and no new landing subcommand or job kind exists
+- **THEN** the existing dependency checker and every assertion remain intact
 
-#### Scenario: Plugin starts the isolated entry point
-- **WHEN** a confirmed plugin submission uses trusted host settings with spaces in paths
-- **THEN** the gateway executor invokes configured uv with literal `run --no-sync python -m nightshift.factory_land` argv and configured cwd, and only accepted admission launches the fixed plugin worker script through the current interpreter
-- **THEN** ordinary Factory status/act still use their existing canonical CLI executor, and missing or inconsistent worker installations fail without redirecting execution
+#### Scenario: Plugin uses private literal transport
+- **WHEN** a confirmed submission uses configured tool and checkout paths containing spaces
+- **THEN** the server invokes configured uv with literal run --no-sync python -m nightshift.factory_land arguments and trusted cwd/PATH, without shell or caller-selected executable
+- **THEN** only private start transport launches the detached worker and ordinary status/act retain their existing executor
 
-### Requirement: Durable detached launch
+### Requirement: Published pause identity
 
-An accepted landing SHALL persist request identity, timing and a hold before spawning an independent worker with an inherited lifetime lock. Loss of the caller or response SHALL NOT cancel the worker or cause the accepted UUID to relaunch.
+A Land offer SHALL bind change, canonical PR, pause_id, published head and pause since for a readable human_checks pause. Admission and worker startup SHALL revalidate every field and the remote head before acting.
 
-#### Scenario: Caller exits after launch
-- **WHEN** the gateway exits after spawn but before acknowledgement, or the plugin unloads during landing
-- **THEN** the detached job retains its lock and evidence, is discoverable through status and jobs, and replay returns its identity without another worker
-- **THEN** subprocesses retain the lifetime FD so a dead wrapper with executing descendants does not look idle
+#### Scenario: Only verifiable human checks qualify
+- **WHEN** status includes human-check, other-paused, running, done, aborted, erroneous or incomplete runs
+- **THEN** only paused human_checks with valid complete identity receives an offer, preserving zero and fractional since values
+- **THEN** missing metadata produces a diagnostic without breaking ordinary Factory reads
 
-#### Scenario: Interrupted launch retains uncertainty
-- **WHEN** launch fails before spawn, or an accepted worker dies before writing its result
-- **THEN** known launch failure and uncertain completion remain distinguishable with retained evidence, and no read or repeated UUID restarts work or claims merge success
-- **THEN** an uncertain attempt blocks a new attempt pending operator inspection; it is never falsely recorded as a confirmed stopped job
+#### Scenario: Republication invalidates confirmation
+- **WHEN** revision republishes the same change and PR with unchanged pause_id but a changed head or since after confirmation opens
+- **THEN** admission and independently worker startup refuse the old offer as stale before check edits, finish or merge
+- **THEN** either a changed head with unchanged since or changed since with unchanged head suffices
+
+#### Scenario: Pause blocks new execution
+- **WHEN** the daemon pause file exists at admission or worker startup, or fresh identity cannot be read
+- **THEN** new execution refuses with its reason, status and Stop remain usable, and already-started landing is not automatically killed
 
 ### Requirement: Confirmed landing handoff
 
-The worker SHALL invoke existing land with checks_done through a runner bound to the confirmed identity. It SHALL reject changed initial reads and stale pre-finish mutations, preserve land's validated head transitions, and retain its final head-conditioned merge and refusal behavior.
+The worker SHALL supply the confirmed identity to unchanged nightshift.land through its injectable runner, use checks-done and preserve land as the sole merge path. It SHALL NOT duplicate landing gates or silently adopt an unrelated head.
 
-#### Scenario: Head changes after preflight
-- **WHEN** the PR head or pause changes between startup validation and the initial reads or pre-finish mutations made by land
-- **THEN** the adapter refuses before recording checks against changed inputs and preserves the original reason
-- **THEN** an unrecognized pre-finish mutation is refused rather than bypassing the adapter
+#### Scenario: Head changes at handoff
+- **WHEN** PR or pause changes between preflight and the actual initial responses consumed by land, or before a pre-finish mutation
+- **THEN** the adapter refuses stale confirmation before that mutation rather than authorizing the newly discovered head or pause
 
-#### Scenario: Existing landing gates remain authoritative
-- **WHEN** a confirmed attempt passes startup and land performs finish, a proven base update and CI
-- **THEN** the actual land entry point receives the confirmed-head runner and checks_done, and its merge uses `--merge --match-head-commit` with the resulting verified head
-- **THEN** direct CLI landing, checklist selection, attestation, refusal, timeout and protection behavior remain unchanged; daemon and supervisor never import or invoke landing
+#### Scenario: Landing gates and head pin remain authoritative
+- **WHEN** unchanged land executes through the adapter and finish or a validated base update advances the head
+- **THEN** existing checklist, attestation, finish, CI, provenance and protection gates decide the outcome and merge uses --match-head-commit with land's verified successor head
+- **THEN** land.py and existing landing assertions stay unchanged and unknown pre-finish mutation command shapes refuse
 
-### Requirement: Retained progress and outcome
+#### Scenario: Late attestation duplicate recovery
+- **WHEN** attempt one's timed-out POST commits after attempt two creates the same marker with an incomplete acknowledgement but before its reconciliation lookup
+- **THEN** attempt two refuses with `duplicate marker matches; resolve duplicates before retrying` without merging
+- **WHEN** one duplicate comment is removed and a fresh eligible attempt is confirmed
+- **THEN** unchanged land reuses the remaining marker and lands correctly, without cross-attempt unresolved-create state
 
-The worker SHALL persist bounded display progress and its success, refusal or uncertain failure while retaining complete local logs and result detail. Stop intent SHALL take precedence over later progress or result publication.
+### Requirement: Detached lifetime lock
 
-#### Scenario: Progress becomes a retained result
-- **WHEN** an attempt advances through validation, finishing, CI and merge, or land returns a specific refusal
-- **THEN** status reports the latest observed phase and durable outcome without waiting for the entire job, preserving land's refusal reason and never equating launch or exit without confirmed success to a merge
-- **THEN** later reads and gateway restart retain the outcome; stopped work cannot be reported successful because of a late result
+Each attempt SHALL retain a log and small records and execute detached. The worker SHALL hold one per-PR flock for its own lifetime, refuse contention and release it on exit without receipts, descriptor inheritance or manual release.
 
-### Requirement: Bounded landing history
+#### Scenario: Caller exits while landing runs
+- **WHEN** start returns its attempt ID and the RPC, page or plugin exits while land runs
+- **THEN** the detached worker and landing child continue, progress remains readable and its lock stays held until worker exit
+- **THEN** complete output and outcome or interruption diagnostics survive restart
 
-Landing status SHALL return at most the newest requested N attempts, default and maximum 20, plus total count, and a separate current attempt for named queries. It SHALL bound projected output below 1 MiB without reading unbounded log/result bodies or deleting evidence.
+#### Scenario: Concurrent click refuses and exit permits retry
+- **WHEN** another confirmation targets the same canonical PR while the first worker runs
+- **THEN** the contender records a lock refusal and cannot invoke land
+- **WHEN** the first worker exits and another explicit confirmation is made
+- **THEN** the lock is available without release and fresh identity plus land's gates decide the new attempt, with no replay or automatic retry
 
-#### Scenario: Long history preserves current progress
-- **WHEN** more than 20 retained attempts and oversized escaped diagnostics exist, with a current attempt older than the newest page
-- **THEN** the global read returns newest-first bounded history and the full count, and a named read still returns that current attempt's progress independently of the history window
-- **THEN** serialized UTF-8 output stays below 1 MiB and the subprocess's 2 MiB limit, truncation is explicit, and full on-disk evidence remains byte-identical
+### Requirement: Verified landing Stop
 
-#### Scenario: Read faults do not erase evidence
-- **WHEN** a selected summary or run status is unreadable, the run disappears, or a status request is repeated
-- **THEN** healthy retained attempts remain available with explicit diagnostics, and no read repairs files, acquires launch authority, clears holds or acknowledges delivery
-- **THEN** full logs and unselected historical result bodies are not read merely to produce the bounded page
+Stop SHALL verify recorded worker PID, start time and safe group membership before sending SIGTERM to its group. Missing or unverifiable identity SHALL refuse; Stop SHALL NOT imply rollback or guaranteed termination.
+
+#### Scenario: Stop reaches the normal tree
+- **WHEN** Stop targets a verified worker with landing and finish descendants in the same new session/group
+- **THEN** SIGTERM reaches that group, normal shutdown records stopped and releases the lock, and logs remain
+- **THEN** signal request alone is not confirmed completion and a previously terminal result remains intact
+
+#### Scenario: Missing worker refuses Stop
+- **WHEN** the worker is gone, its PID is reused, start identity is unreadable or its group is unsafe
+- **THEN** Stop explicitly refuses without signalling, even if descendants survive
+- **THEN** recovery directs waiting for descendants or killing them by hand before landing again, without a hold or release mechanism
+
+### Requirement: Bounded retained status
+
+Status SHALL return newest N attempts (default/max 20), total count and separate named current progress, with JSON below 1 MiB. Reads SHALL preserve local evidence and never launch, signal, deliver, compact or repair attempts.
+
+#### Scenario: Long history retains current progress
+- **WHEN** more than 20 attempts include oversized escaped diagnostics and a running attempt older than the newest page
+- **THEN** bounded newest-first summaries and total are returned and named status still returns current progress
+- **THEN** UTF-8 output remains below 1 MiB and the 2 MiB subprocess cap with explicit truncation, without reading or changing full logs
+
+#### Scenario: Progress and refusal survive reads
+- **WHEN** an attempt progresses, succeeds, refuses or loses its worker before writing a result
+- **THEN** status retains phase/outcome/reason or an explicit interruption diagnostic without inferring success, creating an uncertain hold or retrying
+- **THEN** overdue is display-only after 2400 seconds, damaged records do not erase healthy results and evidence remains until manual pruning

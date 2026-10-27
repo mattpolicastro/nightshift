@@ -1,44 +1,52 @@
 ## Purpose
 
-Explain the separate Factory landing action and its job-control exceptions without changing unrelated operator guidance or claiming unperformed host checks.
+Document Factory landing and accepted recovery limits while preserving intake guidance and verifying structure rather than wording.
 
 ## ADDED Requirements
 
 ### Requirement: Factory landing entry
 
-The plugin README and engine guide SHALL describe Land as a separate confirmed action at human_checks, preserving the status verb list and explaining visible progress and outcomes.
+The plugin README and engine guide SHALL document confirmed Land as a separate human_checks action alongside unchanged status verbs, distinguishing Finish from merge and preserving operator-only landing.
 
 #### Scenario: Operator chooses Land or Finish
-- **WHEN** the operator reads the Factory action table and engine guide's status-verbs passage
-- **THEN** both distinguish Finish from Land, explain human-check confirmation and head/pause binding, and show that Land invokes existing landing as a background job while Finish alone does not merge
-- **THEN** results/refusals stay in view, stale confirmation requires another review, and recovery after finish uses standalone landing without offering Land for done runs
-- **THEN** the plugin's general no-merge-operation claim is updated to describe this explicit operator action, and its standalone gateway is distinguished from the unchanged canonical CLI
+- **WHEN** the reader consults Factory controls in either guide
+- **THEN** guidance identifies bound confirmation, background progress and retained refusal, and explains that Finish does not merge while Land invokes existing landing
+- **THEN** the blanket no-merge-operation claim becomes an explicit confirmation boundary, preserving canonical CLI/daemon isolation
 
-### Requirement: Landing hold recovery
+### Requirement: Landing control boundaries
 
-The main README and engine guide SHALL document per-attempt landing hold receipts and offline stopped release beside the existing intake-receipt rule.
+The main README, engine guide and KNOWN-LIMITATIONS.md SHALL distinguish landing's lifetime lock and verified Stop from intake inventory, stopped holds, release and escalation.
 
-#### Scenario: Operator releases a stopped landing
-- **WHEN** a reader follows inventory, stop, inspection and release instructions
-- **THEN** landing uses its own hold receipt, exact-ID release detaches only the confirmed stopped hold, evidence and cancellation survive, and release launches nothing
-- **THEN** another landing requires a fresh human_checks confirmation and UUID; daemon polls, resume and label changes cannot restart it, and remote effects are not rolled back
+#### Scenario: Operator handles a stopped or interrupted landing
+- **WHEN** the operator follows landing recovery beside the intake release rule
+- **THEN** guidance explains separate records, no manual lock release, display-only overdue reporting and no jobs inventory, delivery receipts or escalation for landing
+- **THEN** worker-only death can release the lock while descendants survive; Stop refuses and the operator must wait for or manually terminate them before landing again
+- **THEN** intake receipt/release guidance remains correct and independent terminal land is outside the Factory lock
 
-### Requirement: Landing job exceptions
+### Requirement: Landing evidence retention
 
-The main README, engine guide and KNOWN-LIMITATIONS.md SHALL distinguish landing's display-only overdue status, per-attempt holds and permanently retained evidence from intake escalation, delivery and compaction.
+Operator guidance SHALL distinguish bounded landing display history from complete manually pruned evidence and existing intake compaction.
 
 #### Scenario: Operator interprets landing history
-- **WHEN** a reader consults background-job deadline, delivery and retention passages
-- **THEN** each document explains that landing has no daemon needs-human escalation or delivery acknowledgement, finished attempts remain visible as pending, and jobs compact skips their logs and evidence
-- **THEN** KNOWN-LIMITATIONS.md places these exceptions beside its existing escalation, item-receipt delivery and delivered-log-removal claims, preserving those claims for intake
-- **THEN** bounded recent display history is distinguished from complete local evidence and pending desktop/phone validation is not presented as automated proof
+- **WHEN** the reader checks landing storage and progress guidance
+- **THEN** it describes newest 20 plus total and separate current progress, persistent logs/results, no read acknowledgement and manual pruning
+- **THEN** KNOWN-LIMITATIONS.md qualifies delivered-log cleanup without promising bounded disk use or applying jobs compact to landing
+
+### Requirement: Delayed attestation recovery guidance
+
+The landing guide and KNOWN-LIMITATIONS.md SHALL document the cross-attempt delayed-POST duplicate-marker exception and manual recovery, replacing the unconditional never-posted-twice promise.
+
+#### Scenario: Operator resolves duplicate markers
+- **WHEN** a timed-out POST commits after a later attempt creates an identical marker
+- **THEN** docs/landing.md and KNOWN-LIMITATIONS.md explain `duplicate marker matches; resolve duplicates before retrying` and deletion of one duplicate before Land again if eligible or standalone land
+- **THEN** neither describes the duplicate as harmless, promises automatic success or suggests changing land.py
 
 ### Requirement: Landing documentation structure
 
-Documentation tests SHALL verify the landing guidance's structure, executable command forms, receipt examples and links without exact-prose assertions, using deterministic physical-line extraction and refusing ambiguous examples.
+Checks SHALL validate scoped headings, links, command examples and recovery structures through deterministic physical-line rules and real parsers, without exact explanatory prose assertions.
 
-#### Scenario: Examples describe executable behavior
-- **WHEN** root Python documentation tests inspect the four updated documents
-- **THEN** uniquely identified headings/tables and enumerated operator command examples parse against the existing canonical or standalone land parser without live effects, example receipts distinguish intake from landing, and relative links resolve
-- **THEN** headings match `^#{1,6} +\S`, tables use physical pipe rows, and whole-line or isolated single-backtick commands matching the existing command-prefix rule count wherever they occur; fences, HTML and indentation receive no semantic parsing
-- **THEN** unmatched command backticks, unknown placeholders, continuations or ambiguous structure block the check, and no existing assertion is weakened
+#### Scenario: Examples describe supported behavior
+- **WHEN** checks inspect the five updated documents
+- **THEN** unique physical headings and pipe-table keys select relevant passages, supported examples parse without dispatch and relative links resolve
+- **THEN** ambiguous structures, unmatched command backticks and unknown placeholders fail closed; fences, HTML and indentation do not hide recognized lines
+- **THEN** existing assertions remain intact and desktop/phone review stays on the human checklist
