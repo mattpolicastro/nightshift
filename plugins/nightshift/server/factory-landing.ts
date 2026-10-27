@@ -41,6 +41,7 @@ export function createFactoryLanding(
   }
   function invalidate(change?: string) {
     for (const [key, state] of queries) {
+      // mutation-equivalent: `key !!= ''` parses as `key! != ''`; Map keys are strings, so the erased non-null assertion and loose string equality leave behavior unchanged.
       if (change !== undefined && key !== '' && key !== change) continue;
       state.generation++;
       state.lastRead = -Infinity;

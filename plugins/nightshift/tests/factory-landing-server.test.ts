@@ -142,6 +142,30 @@ test('invalid, unknown and stale confirmations never reach private start', async
   }
 });
 
+test('landing PR URLs accept 512 characters and reject 513 in reads and confirmations', async () => {
+  for (const length of [512, 513]) {
+    const prefix = 'https://github.com/owner/', suffix = '/pull/7';
+    const pr = prefix + 'r'.repeat(length - prefix.length - suffix.length) + suffix;
+    assert.equal(pr.length, length);
+    const shown = { ...offer, pr };
+    const calls: string[][] = [];
+    const factory = createFactory(async () => response({ version: 1, runs: [{ ...run, pr }] }));
+    const landing = createFactoryLanding(async args => {
+      calls.push(args);
+      return args[0] === 'status' ? response(status({ offer: shown })) : accepted();
+    }, factory.read);
+    if (length === 512) {
+      assert.equal((await landing.read(query)).offer?.pr, pr);
+      assert.equal((await landing.start({ ...shown, checks_done: true })).accepted, true);
+      assert.deepEqual(calls.map(args => args[0]), ['status', 'start']);
+    } else {
+      await assert.rejects(landing.read(query), /unavailable/);
+      await assert.rejects(landing.start({ ...shown, checks_done: true }), /Invalid landing confirmation/);
+      assert.deepEqual(calls.map(args => args[0]), ['status']);
+    }
+  }
+});
+
 test('paseo-runs-page/landing-rpc-isolation/independent-caches-discard-stale-responses', async () => {
   let time = 0, failRuns = false, failNamed = false, admitted = false, defer = false;
   let release!: () => void;

@@ -55,6 +55,27 @@ def snapshot(root):
             for p in root.rglob("*") if p.is_file()}
 
 
+@pytest.mark.parametrize("invalid_field", [
+    {"attempt_id": "2" * 32}, {"checks_done": False},
+])
+def test_load_attempt_rejects_each_invalid_request_field_independently(tmp_path, invalid_field):
+    path = retained(tmp_path, 1)
+    assert landing.load_attempt(path.name, tmp_path) == (path, IDENTITY)
+    request_path = path / "request.json"
+    request = json.loads(request_path.read_text())
+    # Keep the other fields valid so either identity or confirmation alone must refuse.
+    landing.write_record(request_path, {**request, **invalid_field})
+    with pytest.raises(landing.Refusal, match="invalid retained landing request"):
+        landing.load_attempt(path.name, tmp_path)
+
+
+@pytest.mark.parametrize("limit", [0, 21, True, 1.0, "1", None])
+def test_status_rejects_out_of_range_and_non_integer_limits(tmp_path, limit):
+    # Exercise the API directly: argparse independently rejects invalid CLI limits.
+    with pytest.raises(ValueError, match="limit must be between 1 and 20"):
+        landing.landing_status(root=tmp_path, limit=limit)
+
+
 @pytest.mark.scenario("factory-landing-jobs/published-pause-identity/only-verifiable-human-checks-qualify")
 @pytest.mark.parametrize("since", [0, 0.125, 1800000000.75])
 def test_complete_offer_preserves_timestamp_and_status(since):
