@@ -49,15 +49,37 @@ The worker SHALL supply the confirmed identity to unchanged nightshift.land thro
 - **THEN** existing checklist, attestation, finish, CI, provenance and protection gates decide the outcome and merge uses --match-head-commit with land's verified successor head
 - **THEN** land.py and existing landing assertions stay unchanged and unknown pre-finish mutation command shapes refuse
 
+### Requirement: Retained attestation create evidence
+
+The Factory adapter SHALL persist create intent before delegating an attestation POST and retain it across attempts. An unresolved create SHALL prevent further mutations until reconciled through land's existing selectors; empty lookup SHALL NOT authorize another create. The adapter SHALL leave land.py unchanged.
+
+#### Scenario: Delayed create blocks a valid second acknowledgement
+- **WHEN** a first POST times out without a visible marker and a second confirmed attempt sees none, with the fake service configured to acknowledge a second POST validly
+- **THEN** the second attempt refuses before any mutation, finish or merge, and the service receives no second POST
+- **THEN** the same refusal occurs with an incomplete acknowledgement configured; safety does not depend on the second response shape
+- **WHEN** the first POST commits late and a fresh eligible attempt is confirmed
+- **THEN** existing paginated lookup and trusted-marker selection reconcile its ID, land reuses that marker and lands with exactly one create
+
+#### Scenario: Create evidence survives interruption
+- **WHEN** execution dies after a remote create but before recording its response, or unresolved evidence is older than the newest 20 attempts
+- **THEN** subsequent execution reconciles the retained intent before any mutation and refuses absent, unreadable, ambiguous or untrusted matches
+- **THEN** neither a terminal result, a changed head, elapsed time nor a new confirmation clears unresolved evidence
+- **WHEN** intent cannot be persisted before POST
+- **THEN** no POST is sent and the attempt retains a persistence refusal
+
+#### Scenario: Missing recorded marker cannot be recreated
+- **WHEN** a prior create is known or was reconciled but the marker disappears before land would issue a POST for the same key
+- **THEN** the adapter refuses that POST and requests inspection instead of replacing the marker or fabricating an acknowledgement
+
 #### Scenario: Late attestation duplicate recovery
-- **WHEN** attempt one's timed-out POST commits after attempt two creates the same marker with an incomplete acknowledgement but before its reconciliation lookup
-- **THEN** attempt two refuses with `duplicate marker matches; resolve duplicates before retrying` without merging
+- **WHEN** reconciliation of retained unresolved intent finds two trusted matching markers, including duplicates from earlier unguarded invocations
+- **THEN** unchanged land selection refuses with `duplicate marker matches; resolve duplicates before retrying` and the Factory adapter sends no mutation
 - **WHEN** one duplicate comment is removed and a fresh eligible attempt is confirmed
-- **THEN** unchanged land reuses the remaining marker and lands correctly, without cross-attempt unresolved-create state
+- **THEN** the adapter reconciles the remaining marker and unchanged land lands without another POST
 
 ### Requirement: Detached lifetime lock
 
-Each attempt SHALL retain a log and small records and execute detached. The worker SHALL hold one per-PR flock for its own lifetime, refuse contention and release it on exit without receipts, descriptor inheritance or manual release.
+Each attempt SHALL retain a log and small records and execute detached. The worker SHALL hold one per-PR flock for its own lifetime, refuse contention and release it on exit without receipts, descriptor inheritance or manual release. Acquiring flock SHALL NOT bypass verification that prior execution groups have drained.
 
 #### Scenario: Caller exits while landing runs
 - **WHEN** start returns its attempt ID and the RPC, page or plugin exits while land runs
@@ -68,7 +90,27 @@ Each attempt SHALL retain a log and small records and execute detached. The work
 - **WHEN** another confirmation targets the same canonical PR while the first worker runs
 - **THEN** the contender records a lock refusal and cannot invoke land
 - **WHEN** the first worker exits and another explicit confirmation is made
-- **THEN** the lock is available without release and fresh identity plus land's gates decide the new attempt, with no replay or automatic retry
+- **THEN** the lock is available without release and prior-group drainage, retained-create reconciliation, fresh identity and land's gates decide the new attempt, with no replay or automatic retry
+
+### Requirement: Prior execution exclusion
+
+Before launching an invocation child, the worker SHALL persist its process identity and, under flock, prove earlier recorded execution groups are absent through a kernel existence probe. Missing worker identity, a terminal result or lock release SHALL NOT establish drainage. Unverifiable inspection SHALL refuse new execution.
+
+#### Scenario: Worker death leaves a mutating child
+- **WHEN** only the worker dies while its invocation child waits before a GitHub write and all five confirmation fields remain unchanged
+- **THEN** a new worker may acquire flock but refuses before invoking land or making mutations while the earlier group has an executing member
+- **WHEN** the earlier tree exits and a fresh confirmation is submitted
+- **THEN** the worker verifies drainage under flock before permitting execution, retaining all other admission and reconciliation gates
+
+#### Scenario: Exclusion evidence fails closed
+- **WHEN** a prior attempt has a terminal result but a surviving child, or the group contains only zombies, its existence probe fails or its identity record is corrupt
+- **THEN** new invocation refuses with a retained reason, including for attempts older than the newest 20; only ESRCH from a safe group probe establishes absence
+- **THEN** status reads do not clear exclusion and no orphan group is signalled or automatically retried
+
+#### Scenario: Process record precedes child creation
+- **WHEN** the worker dies before publishing process metadata or immediately after spawning its invocation child
+- **THEN** the former case has started no invocation and the latter retains a durable group record that blocks overlapping execution until drainage is proved
+- **THEN** all landing and finish subprocesses remain in that group without inherited lock descriptors or another session
 
 ### Requirement: Verified landing Stop
 
@@ -82,7 +124,7 @@ Stop SHALL verify recorded worker PID, start time and safe group membership befo
 #### Scenario: Missing worker refuses Stop
 - **WHEN** the worker is gone, its PID is reused, start identity is unreadable or its group is unsafe
 - **THEN** Stop explicitly refuses without signalling, even if descendants survive
-- **THEN** recovery directs waiting for descendants or killing them by hand before landing again, without a hold or release mechanism
+- **THEN** recovery directs waiting for descendants or killing them by hand, and a fresh attempt still verifies group drainage before acting, without a jobs hold or release mechanism
 
 ### Requirement: Bounded retained status
 
@@ -96,4 +138,4 @@ Status SHALL return newest N attempts (default/max 20), total count and separate
 #### Scenario: Progress and refusal survive reads
 - **WHEN** an attempt progresses, succeeds, refuses or loses its worker before writing a result
 - **THEN** status retains phase/outcome/reason or an explicit interruption diagnostic without inferring success, creating an uncertain hold or retrying
-- **THEN** overdue is display-only after 2400 seconds, damaged records do not erase healthy results and evidence remains until manual pruning
+- **THEN** overdue is display-only after 2400 seconds, damaged records do not erase healthy results and evidence remains until manual pruning, preserving unresolved-create and undrained-group records
