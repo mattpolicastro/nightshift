@@ -3,6 +3,7 @@
 import json
 import re
 from http.client import HTTPException
+from time import sleep
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -102,6 +103,24 @@ class GiteaTransport:
                 data = json.dumps(json_body).encode("utf-8")
                 headers["Content-Type"] = "application/json"
             request = Request(url, data=data, method=method.upper(), headers=headers)
+        except UnicodeError:
+            raise GiteaHTTPError(None, "Unsupported request encoding", False) from None
+
+        attempts = 3 if request.get_method() == "GET" else 1
+        for attempt in range(attempts):
+            # Trusted guards must propagate unchanged, even for transport-like errors.
+            if self._guard is not None:
+                self._guard()
+            try:
+                return self._attempt(request)
+            except GiteaHTTPError as error:
+                if not error.transient or attempt == attempts - 1:
+                    raise
+            sleep(0.1 * (attempt + 1))
+
+    def _attempt(self, request: Request):
+        """Dispatch once and close streams before returning or raising."""
+        try:
             with self._opener.open(request, timeout=self._timeout) as response:
                 status = response.code
                 if not 200 <= status < 300:

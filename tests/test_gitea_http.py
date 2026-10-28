@@ -1,7 +1,7 @@
 """Socket-free checks of the Gitea HTTP transport and JSON helpers."""
 
 from email.message import Message
-from http.client import HTTPConnection, HTTPResponse
+from http.client import HTTPConnection, HTTPResponse, IncompleteRead
 from io import BytesIO
 import json
 import socket
@@ -14,6 +14,13 @@ from urllib.response import addinfourl
 import pytest
 
 from nightshift.forge import http
+
+
+@pytest.fixture(autouse=True)
+def fake_sleep(monkeypatch):
+    delays = []
+    monkeypatch.setattr(http, "sleep", delays.append)
+    return delays
 
 
 @pytest.fixture(autouse=True)
@@ -52,6 +59,165 @@ def opener(response):
                 raise self.result
             return self.result
     return FakeOpener()
+
+
+@pytest.fixture
+def scripted(opener, response, monkeypatch, fake_sleep):
+    events, streams = [], []
+    original_open = opener.open
+
+    def install(outcomes, token="secret"):
+        pending = iter(outcomes)
+
+        def dispatch(request, *, timeout):
+            events.append("open")
+            kind = next(pending)
+            stage, _, detail = kind.partition("-")
+            if stage in ("open", "read"):
+                error = {"url": URLError(token), "os": ConnectionResetError(token),
+                         "timeout": TimeoutError(token),
+                         "protocol": IncompleteRead(token.encode())}[detail]
+                if stage == "open":
+                    result = error
+                else:
+                    result = response()
+                    def fail_read():
+                        raise error
+                    monkeypatch.setattr(result, "read", fail_read)
+                    streams.append(result)
+            else:
+                status = int(detail) if stage in ("http", "status") else 200
+                result = response(status, b"[]" if kind == "ok" else token.encode(),
+                                  location="https://evil/" + token)
+                streams.append(result)
+                if stage == "http":
+                    result = HTTPError("https://evil/" + token, status, token,
+                                       result.headers, result)
+            opener.result = result
+            return original_open(request, timeout=timeout)
+
+        def pause(delay):
+            assert all(stream.closed for stream in streams)
+            events.append(delay)
+            fake_sleep.append(delay)
+
+        monkeypatch.setattr(opener, "open", dispatch)
+        monkeypatch.setattr(http, "sleep", pause)
+        return opener, events, streams
+    return install
+
+
+TRANSIENTS = [f"{source}-{status}" for source in ("http", "status")
+              for status in (429, 500, 503, 599)] + [
+    f"{stage}-{error}" for stage in ("open", "read")
+    for error in ("url", "os", "timeout", "protocol")]
+
+
+@pytest.mark.scenario("gitea-http/classified-failures-and-bounded-retries/get-transient-recovery-and-exhaustion")
+@pytest.mark.scenario("gitea-http/classified-failures-and-bounded-retries/writes-never-retry")
+@pytest.mark.parametrize("kind", TRANSIENTS)
+@pytest.mark.parametrize("method", ["get", "POST", "PATCH", "PUT", "DELETE", "HEAD", "OPTIONS", "CUSTOM"])
+@pytest.mark.parametrize("failures", [1, 2, 3])
+def test_get_retries_transient_but_writes_never_retry(scripted, fake_sleep, kind,
+                                                    method, failures):
+    opener, events, streams = scripted([kind] * failures + ["ok"])
+    client = http.GiteaTransport("https://forge.example", "secret", opener=opener, timeout=2.5)
+    attempts = min(failures + 1, 3) if method == "get" else 1
+    if method == "get" and failures < 3:
+        status, _, result = client.request(method, "/api", query={"page": 2})
+        assert status == 200 and result == []
+    else:
+        with pytest.raises(http.GiteaHTTPError) as failure:
+            client.request(method, "/api", query={"page": 2})
+        expected_status = int(kind.split("-")[1]) if kind.startswith(("http", "status")) else None
+        assert failure.value.status == expected_status and failure.value.transient is True
+    assert len(opener.calls) == attempts
+    assert fake_sleep == [0.1, 0.2][:attempts - 1]
+    assert events == ["open", 0.1, "open", 0.2, "open"][:2 * attempts - 1]
+    assert all(stream.closed for stream in streams)
+    for request, timeout in opener.calls:
+        assert request.get_method() == method.upper() and timeout == 2.5
+        assert request.full_url == "https://forge.example/api?page=2"
+
+
+@pytest.mark.scenario("gitea-http/classified-failures-and-bounded-retries/permanent-errors-stop-immediately")
+@pytest.mark.parametrize("kind", [f"{source}-{status}" for source in ("http", "status")
+                                 for status in (300, 304, 401, 403, 404, 499, 600)] + ["invalid"])
+def test_permanent_errors_stop_immediately(scripted, fake_sleep, kind):
+    opener, events, streams = scripted([kind, "ok"])
+    client = http.GiteaTransport("https://forge.example", "secret", opener=opener)
+    with pytest.raises(http.GiteaHTTPError) as failure:
+        client.request("GET", "/api")
+    assert failure.value.status == (200 if kind == "invalid" else int(kind.split("-")[1]))
+    assert failure.value.transient is False
+    assert len(opener.calls) == 1 and events == ["open"] and fake_sleep == []
+    assert all(stream.closed for stream in streams)
+
+
+@pytest.mark.scenario("gitea-http/per-attempt-guard/guard-precedes-each-attempt")
+@pytest.mark.scenario("gitea-http/per-attempt-guard/raising-guard-stops-dispatch")
+@pytest.mark.parametrize("call", ["request", "get_json", "get_page", "write"])
+@pytest.mark.parametrize("failures", [0, 2])
+@pytest.mark.parametrize("stop", [None, 1, 2])
+@pytest.mark.parametrize("error", [RuntimeError("paused"), URLError("paused"),
+                                  TimeoutError("paused"), http.GiteaHTTPError(503, "paused", True)])
+def test_guard_runs_before_every_request(scripted, fake_sleep, call, failures, stop, error):
+    opener, events, streams = scripted(["http-503"] * failures + ["ok"])
+    guards = []
+    def guard():
+        guards.append(None)
+        events.append("guard")
+        if len(guards) == stop:
+            raise error
+    client = http.GiteaTransport("https://forge.example", "secret", opener=opener, guard=guard)
+    invoke = {"request": lambda: client.request("GET", "/api"),
+              "get_json": lambda: client.get_json("/api"),
+              "get_page": lambda: client.get_page("/api", {}, 2, 10),
+              "write": lambda: client.request("POST", "/api")}[call]
+    attempts = 1 if call == "write" else failures + 1
+    if stop is not None and stop <= attempts:
+        with pytest.raises(type(error)) as failure:
+            invoke()
+        assert failure.value is error
+        expected = ["guard", "open", 0.1, "guard"][:3 * stop - 2]
+    elif call == "write" and failures:
+        with pytest.raises(http.GiteaHTTPError):
+            invoke()
+        expected = ["guard", "open"]
+    else:
+        invoke()
+        expected = ["guard", "open", 0.1, "guard", "open", 0.2, "guard", "open"][:3 * attempts - 1]
+    assert events == expected
+    assert len(opener.calls) == expected.count("open")
+    assert len(guards) == expected.count("guard")
+    assert fake_sleep == [value for value in expected if isinstance(value, float)]
+    assert all(stream.closed for stream in streams)
+
+
+@pytest.mark.scenario("gitea-http/token-secrecy/echoed-token-remains-secret")
+@pytest.mark.scenario("gitea-http/classified-failures-and-bounded-retries/get-transient-recovery-and-exhaustion")
+@pytest.mark.parametrize("kind", TRANSIENTS)
+@pytest.mark.parametrize("final", ["ok", "http-429", "status-503", "read-timeout", "status-403", "invalid"])
+def test_token_never_in_retry_or_final_errors(scripted, fake_sleep, caplog, kind, final):
+    token = "sensitive-token-123"
+    opener, _, streams = scripted([kind, kind, final], token)
+    client = http.GiteaTransport("https://forge.example", token, opener=opener)
+    diagnostics = repr(client)
+    if final == "ok":
+        assert client.get_json("/api") == []
+    else:
+        with pytest.raises(http.GiteaHTTPError) as failure:
+            client.get_json("/api")
+        error = failure.value
+        assert error.status == {"http-429": 429, "status-503": 503, "read-timeout": None,
+                                "status-403": 403, "invalid": 200}[final]
+        assert error.transient is (final in ("http-429", "status-503", "read-timeout"))
+        diagnostics += str(error) + repr(error) + repr(error.args)
+        diagnostics += "".join(traceback.format_exception(error))
+    assert token not in diagnostics + caplog.text
+    assert not caplog.records
+    assert len(opener.calls) == 3 and fake_sleep == [0.1, 0.2]
+    assert all(stream.closed for stream in streams)
 
 
 @pytest.mark.scenario("gitea-http/configured-origin/https-and-loopback-bases")
@@ -346,9 +512,11 @@ def test_valid_extension_methods(opener, method):
 
 @pytest.mark.scenario("gitea-http/token-secrecy/echoed-token-remains-secret")
 @pytest.mark.parametrize("prefix", [b"", b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n"])
-def test_token_never_in_protocol_errors(prefix, caplog):
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_token_never_in_protocol_errors(prefix, caplog, method, fake_sleep):
     token = "sensitive-token-123"
     stream = BytesIO(prefix + token.encode())
+    streams = [stream]
     calls = []
 
     class FakeSocket:
@@ -357,6 +525,10 @@ def test_token_never_in_protocol_errors(prefix, caplog):
 
     class FakeHTTP(HTTPHandler):
         def http_open(self, request):
+            nonlocal stream
+            if calls:
+                stream = BytesIO(prefix + token.encode())
+                streams.append(stream)
             calls.append(request)
             response = HTTPResponse(FakeSocket())
             try:
@@ -369,10 +541,15 @@ def test_token_never_in_protocol_errors(prefix, caplog):
     opener = build_opener(ProxyHandler({}), FakeHTTP())
     client = http.GiteaTransport("http://localhost", token, opener=opener)
     with pytest.raises(http.GiteaHTTPError) as failure:
-        client.request("GET", "/api")
+        client.request(method, "/api")
     error = failure.value
     assert error.status is None and error.transient is True
-    assert len(calls) == 1 and stream.closed
+    if method == "POST":  # A lost write response must not be replayed.
+        assert len(calls) == 1 and stream.closed
+        assert fake_sleep == []
+    else:
+        assert len(calls) == 3 and all(item.closed for item in streams)
+        assert fake_sleep == [0.1, 0.2]
     diagnostics = str(error) + repr(error) + repr(error.args) + repr(client) + caplog.text
     assert token not in diagnostics + "".join(traceback.format_exception(error))
 
