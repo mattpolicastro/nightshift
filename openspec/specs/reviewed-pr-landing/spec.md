@@ -37,6 +37,10 @@ Landing SHALL identify a front-door PR only by a matching run's canonical `pr` U
 - **WHEN** valid status contains no run matching the open non-draft PR URL
 - **THEN** landing uses the body checklist and proceeds through CI and merge gates without invoking finish
 
+#### Scenario: Other forge rows are unrelated
+- **WHEN** a status row has a well-formed HTTPS PR URL on another forge host
+- **THEN** it is unrelated to the target PR; a malformed github.com PR URL still refuses discovery
+
 #### Scenario: Uncertain discovery refused
 - **WHEN** status fails, has an unsupported version or malformed data, contains any error row, or contains multiple matching runs
 - **THEN** landing refuses before mutations instead of assuming a direct PR

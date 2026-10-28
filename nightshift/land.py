@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import config, queue
 
@@ -418,8 +419,17 @@ def discover_run(identity: Identity, operations: Operations) -> LandingRun | Non
         if not isinstance(pr, str):
             raise Refusal(f"{stage} ({change}): malformed or missing PR URL")
         try:
-            run_identity = _url_identity(pr) if pr else None
-        except Refusal as exc:
+            run_identity = None
+            if pr:
+                parsed = urlsplit(pr)
+                if (not pr.startswith("https://") or not parsed.hostname
+                        or re.search(r"[\s\x00-\x1f\x7f\\]", pr)):
+                    raise ValueError("invalid HTTPS URL")
+                # Accessing port also validates malformed or out-of-range ports.
+                _ = parsed.port
+                if parsed.hostname == urlsplit(identity.url).hostname:
+                    run_identity = _url_identity(pr)
+        except (Refusal, ValueError) as exc:
             raise Refusal(f"{stage} ({change}): malformed PR URL: {pr!r}") from exc
         if not isinstance(head, str) or not _SHA.fullmatch(head):
             raise Refusal(f"{stage} ({change}): malformed or missing head SHA")
