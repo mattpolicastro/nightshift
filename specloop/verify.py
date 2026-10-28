@@ -14,6 +14,7 @@ or a timeout never satisfies an expected non-zero exit.
 
 import ctypes
 import functools
+import hashlib
 import json
 import os
 import shutil
@@ -21,15 +22,44 @@ import signal
 import stat
 import subprocess
 import time
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from nightshift.host_paths import tool_path
 from specloop.agents import homes_dir
-from specloop.manifest import Manifest, Step
+from specloop.manifest import Manifest, Snapshot, Step, expand
 
 CREDENTIAL_DIRS = (".codex", ".claude", ".specloop/homes", ".nightshift/homes",
                    ".ssh", ".config", ".aws", "Library/Keychains")
+
+
+def snapshot_key(src: Path, definition: Snapshot) -> str | None:
+    """Hash framed raw lockfiles; unavailable or symlink-traversing inputs miss."""
+    digest = hashlib.sha256(b"specloop-snapshot-v1\0")
+    try:
+        for path in sorted(definition.lockfiles):
+            parts = path.split("/")
+            if any(part in ("", ".", "..") for part in parts):
+                return None
+            with ExitStack() as stack:
+                parent = os.open(src, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                stack.callback(os.close, parent)
+                for part in parts[:-1]:
+                    parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                    stack.callback(os.close, parent)
+                fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                stack.callback(os.close, fd)
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return None
+                with os.fdopen(fd, "rb", closefd=False) as stream:
+                    content = stream.read()
+            for value in (path.encode("utf-8"), content):
+                digest.update(len(value).to_bytes(8, "big"))
+                digest.update(value)
+    except (OSError, ValueError):
+        return None
+    return digest.hexdigest()
 
 
 def _real_path(path: Path, links: frozenset[Path] = frozenset()) -> Path:
@@ -154,12 +184,6 @@ def already_sandboxed() -> bool:
 
 def wrap(argv: list[str], sb: Path) -> list[str]:
     return argv if already_sandboxed() else ["sandbox-exec", "-f", str(sb), *argv]
-
-
-def expand(arg: str, values: dict[str, str]) -> str:
-    for k, v in values.items():
-        arg = arg.replace("{" + k + "}", v)
-    return arg
 
 
 def _make_writable(p: Path) -> None:
