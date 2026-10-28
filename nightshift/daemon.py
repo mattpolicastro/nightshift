@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from . import outcomes, notify, queue, specloop_intake, specloop_job
 from .config import Config, Repo
+from .forge.gitea import GiteaForge
 from .forge.github import GitHubForge
 
 log = logging.getLogger("nightshift")
@@ -30,6 +31,47 @@ TRANSCRIPT_DIR = STATE_DIR / "transcripts"
 # means it did not — which is the only way a restart loop becomes visible
 # without reading the log.
 HEARTBEAT_FILE = STATE_DIR / "heartbeat.json"
+
+
+def forge_for(repo: Repo, *, cfg: Config, runner=None, guard=None):
+    """Construct an adapter without requests; Gitea daemon dispatch stays held."""
+    definition = cfg.forge_for(repo)
+    if definition.kind == "github":
+        return GitHubForge(runner or queue._gh)
+    token = os.environ.get(definition.token_env)
+    if not token:
+        raise specloop_intake.ConfigurationError(
+            f"{definition.name}: missing bot credential {definition.token_env}")
+    return GiteaForge(definition.url, token, trusted_logins=definition.trusted_logins,
+                     bot_login=definition.bot_login, wip_prefix=definition.wip_prefix,
+                     guard=guard)
+
+
+def _check_landing_environment(cfg: Config) -> None:
+    for definition in cfg.forges:
+        if definition.land_token_env and definition.land_token_env in os.environ:
+            raise specloop_intake.ConfigurationError(
+                f"{definition.name}: landing credential {definition.land_token_env} "
+                "must be absent from the daemon environment")
+
+
+def _gitea_held(repo: Repo, cfg: Config, health: RepoHealth) -> bool:
+    if cfg.forge_for(repo).kind != "gitea":
+        return False
+    detail = "Gitea daemon stages disabled: authorization and durable label transitions are not implemented"
+    root = STATE_DIR / "engine-switch" / repo.name.replace("/", "__")
+    try:
+        # iterdir surfaces inspection errors that glob may silently suppress.
+        if any(path.name.endswith(".json") for path in root.iterdir()):
+            detail = f"Gitea foreign engine-switch journal hold; inspect {root}"
+    except FileNotFoundError:
+        pass
+    except OSError:
+        detail = f"Gitea engine-switch journal location cannot be inspected; inspect {root}"
+    error = specloop_intake.ConfigurationError(detail)
+    log.warning("%s — %s", repo.name, error)
+    health.record(repo.name, error, cfg.slack_webhook)
+    return True
 
 
 @dataclass(frozen=True)
@@ -359,9 +401,13 @@ def startup(cfg: Config, repo_dirs: dict[str, Path],
     repo_dirs and the empty legacy repair list remain CLI compatibility inputs
     and output. Durable journals and outcomes record the recovery decisions.
     """
+    _check_landing_environment(cfg)
+    health = health if health is not None else RepoHealth()
     for repo in cfg.repos:
         if paused():
             break
+        if _gitea_held(repo, cfg, health):
+            continue
         try:
             _reconcile_engine_switch(repo, cfg.labels)
         except specloop_intake.Paused:
@@ -380,6 +426,8 @@ def poll_specloop(cfg: Config, health: RepoHealth, *, runner=None, specloop_runn
     retries. A pause created during drafting must also stop its push/labels.
     Already admitted runs are driven by specloop's separate supervisor.
     """
+    _check_landing_environment(cfg)
+
     def check_running():
         if paused():
             raise specloop_intake.Paused()
@@ -407,6 +455,8 @@ def poll_specloop(cfg: Config, health: RepoHealth, *, runner=None, specloop_runn
     for repo in cfg.repos:
         if paused():
             return
+        if _gitea_held(repo, cfg, health):
+            continue
         errors: list[Exception] = []
         readiness = specloop_intake.manifest_readiness(repo)
         if isinstance(readiness, specloop_intake.ConfigurationError):
@@ -495,6 +545,7 @@ def loop(cfg: Config, repo_dirs: dict[str, Path], *, once: bool = False) -> None
     One-shot callers make one pass without waiting for detached jobs. Neither
     pause nor service exit stops builds owned by the independent supervisor.
     """
+    _check_landing_environment(cfg)
     health = RepoHealth()
     service = not once
     # A terminal's one-shot pass shares state with the service but never owns

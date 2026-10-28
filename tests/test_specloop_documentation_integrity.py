@@ -143,6 +143,8 @@ def heading_ids(markdown):
     "specloop-documentation/worker-retirement-guidance/existing-installation-is-checked-before-merge"
 )
 @pytest.mark.parametrize("path", (*DOCS, "docs/specloop/command-json.md"))
+@pytest.mark.scenario("specloop-documentation/configuration-resilience-guidance/operator-repairs-enrollment")
+@pytest.mark.scenario("specloop-documentation/configuration-resilience-guidance/operator-understands-names-and-limits")
 def test_relative_documentation_links_resolve_including_heading_fragments(path):
     document = ROOT / path
     links = 0

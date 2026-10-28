@@ -491,7 +491,8 @@ def test_colliding_run_does_not_bypass_admission_hold(enrollment, other_pr, save
     (failure, name) for failure in ("missing", "invalid", "absent")
     for name in ("owner/sample", "owner/widget..js")
 ] + [("unsupported-name", "owner/widget..js")])
-def test_unhealthy_repo_still_publishes_admitted_run(enrollment, failure, name):
+def test_unhealthy_repo_still_publishes_admitted_run(enrollment, failure, name, monkeypatch):
+    monkeypatch.setattr(daemon, "forge_for", lambda *a, **k: pytest.fail("GitHub must retain its runner path"))
     path, _ = enrollment
     if failure == "invalid":
         path.write_text("[broken")
@@ -526,6 +527,7 @@ def test_unhealthy_repo_still_publishes_admitted_run(enrollment, failure, name):
 @pytest.mark.scenario("issue-intake/owner-qualified-new-identities/unsafe-spelling-holds-new-work")
 @pytest.mark.parametrize("name", ["owner/sample", "owner/widget..js"])
 def test_build_feedback_does_not_read_enrollment(enrollment, monkeypatch, name):
+    monkeypatch.setattr(daemon, "forge_for", lambda *a, **k: pytest.fail("GitHub must retain its runner path"))
     path, _ = enrollment
     if name == "owner/sample":
         path.unlink()
@@ -560,6 +562,7 @@ def test_build_feedback_does_not_read_enrollment(enrollment, monkeypatch, name):
 @pytest.mark.parametrize("stage", ["propose", "admit", "revise"])
 @pytest.mark.parametrize("stopped", [False, True])
 def test_finished_jobs_survive_hold(enrollment, monkeypatch, stage, stopped):
+    monkeypatch.setattr(daemon, "forge_for", lambda *a, **k: pytest.fail("GitHub must retain its runner path"))
     path, _ = enrollment
     valid = path.read_bytes()
     repo = Repo("owner/sample", engine="specloop", manifest=path)

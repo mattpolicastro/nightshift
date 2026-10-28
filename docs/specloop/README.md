@@ -250,7 +250,7 @@ for intake and delivery, and `nightshift pause <change>` /
 
 ### Enrollment recovery
 
-Each unpaused poll validates the enrollment template, checking regular-file
+For GitHub-kind repositories, each unpaused poll validates the enrollment template, checking regular-file
 status before opening it. Symlinks to regular files are supported; directories,
 FIFOs and devices are rejected without reading. Missing, unreadable or invalid
 templates, or an omitted manifest path, cause repository-local health failures.
@@ -265,14 +265,26 @@ changing configuration requires a daemon restart; there is no hot reload.
 Malformed config TOML, invalid engines and empty or wrongly typed manifest
 values remain configuration-loading errors.
 
-Admitted runs continue publication and build-stage revisions with their copied
+For GitHub-kind repositories, admitted runs continue publication and build-stage revisions with their copied
 manifest and recorded branch, even if enrollment becomes unhealthy. Durable run
 state counts as admission even while its notification is pending. Existing jobs
 can finish and be collected; delivery needing an unavailable manifest-derived
 source path retains the successful result until repair, without re-drafting.
 Authorization, publication checks, pause and stopped-job holds still apply.
 
-Worker-to-specloop recovery runs before new intake on unpaused startup and polls,
+Gitea is excluded from that health bypass: drafting, admission, revisions,
+publication and pending delivery all remain disabled, including admitted work.
+Neither manifest repair, trusted logins nor passing preflight enables stages.
+The daemon reports a repository health hold, retaining triggers, receipts and
+feedback consumption. A direct JSON journal under
+`~/.nightshift/engine-switch/<owner>__<repo>/`, even completed or malformed, or an
+unreadable location requires human inspection. The daemon never replays, migrates
+or deletes that evidence. Moving the journal out of the active location removes
+only that diagnostic; Gitea dispatch stays disabled across restart. Changing the
+forge to GitHub is not a recovery procedure. Global job reaping and independent
+supervisors can still persist local results.
+
+GitHub-only worker-to-specloop recovery runs before new intake on unpaused startup and polls,
 even with an unhealthy manifest. Orphaned `agent:working` issues with no claim or
 surviving worktree return to `agent:ready` with a `needs_decision` outcome.
 Surviving branches/worktrees are preserved for human inspection, with their

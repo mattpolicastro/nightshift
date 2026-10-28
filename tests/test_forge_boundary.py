@@ -92,6 +92,6 @@ def test_layout_module_paths_resolve():
     layout = (ROOT / "README.md").read_text().split("## Layout\n", 1)[1].split("\n## ", 1)[0]
     modules = {name for row in layout.splitlines() if row.startswith("| `")
                for name in re.findall(r"`([^`]+)`", row.split("|")[1])}
-    assert {"forge/__init__.py", "forge/types.py", "forge/github.py", "queue.py"} <= modules
+    assert {"forge/__init__.py", "forge/types.py", "forge/github.py", "forge/gitea.py", "queue.py"} <= modules
     for name in modules:
         assert (ROOT / name if name.endswith("/") else ROOT / "nightshift" / name).exists()

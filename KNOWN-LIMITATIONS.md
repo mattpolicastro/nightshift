@@ -174,9 +174,16 @@ None of these follow-ups establishes live validation or a completed host rollout
 - **GitHub-only automation:** the automated front door and publication use
   GitHub. Local drafting and verification do not require a GitHub host; they
   do not provide automated intake or publication for other hosts.
+  Gitea daemon stages and pending delivery are disabled for every allowlist:
+  core's owner shortcut bypasses adapter allowlists, and multi-write label
+  transitions can lose their trigger after an accepted DELETE with a lost response.
+  Foreign engine-switch journals require inspection; clearing them, repairing
+  manifests or passing preflight does not enable execution
+  ([issue #128](https://github.com/mattpolicastro/nightshift/issues/128),
+  [issue #122](https://github.com/mattpolicastro/nightshift/issues/122)).
 - **Config:**
   - Manifest failures now hold new drafting/admission/spec re-drafting locally;
-    admitted publication/build revisions continue. Worker leftovers are released
+    admitted GitHub publication/build revisions continue. GitHub worker leftovers are released
     or preserved for human inspection, and new names include the owner
     ([issue #13](https://github.com/mattpolicastro/nightshift/issues/13)). See
     [enrollment recovery](docs/specloop/README.md#enrollment-recovery).
