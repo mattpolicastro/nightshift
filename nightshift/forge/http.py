@@ -82,7 +82,7 @@ class GiteaTransport:
     def __repr__(self) -> str:
         return "GiteaTransport()"
 
-    def request(self, method: str, path: str, *, query=None):
+    def request(self, method: str, path: str, *, query=None, json_body=None):
         # HTTP methods use ASCII token syntax, including extension methods.
         if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", method):
             raise ValueError("Invalid Gitea HTTP method")
@@ -95,8 +95,13 @@ class GiteaTransport:
                 url += "?" + urlencode(query, doseq=True)
             if _origin(urlsplit(url)) != self._origin:
                 raise ValueError("Gitea request origin mismatch")
-            request = Request(url, method=method.upper(), headers={
-                "Authorization": "token " + self._token, "Accept": "application/json"})
+            headers = {"Authorization": "token " + self._token,
+                       "Accept": "application/json"}
+            data = None
+            if json_body is not None:
+                data = json.dumps(json_body).encode("utf-8")
+                headers["Content-Type"] = "application/json"
+            request = Request(url, data=data, method=method.upper(), headers=headers)
             with self._opener.open(request, timeout=self._timeout) as response:
                 status = response.code
                 if not 200 <= status < 300:
@@ -114,3 +119,20 @@ class GiteaTransport:
             raise GiteaHTTPError(None, "Unsupported request encoding", False) from None
         except (URLError, OSError, HTTPException):
             raise GiteaHTTPError(None, "Connection failed", True) from None
+
+    def get_json(self, path: str, query=None):
+        """Return the parsed JSON from a GET, or None for an empty response."""
+        _, _, result = self.request("GET", path, query=query)
+        return result
+
+    def get_page(self, path: str, query, page: int, limit: int):
+        """Return one array and its headers, leaving completeness to the caller."""
+        if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0
+               for value in (page, limit)):
+            raise ValueError("Page and limit must be positive integers")
+        page_query = dict(query)
+        page_query.update(page=page, limit=limit)
+        status, headers, items = self.request("GET", path, query=page_query)
+        if not isinstance(items, list):
+            raise GiteaHTTPError(status, "Expected JSON array response", False)
+        return items, headers

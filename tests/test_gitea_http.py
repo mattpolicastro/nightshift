@@ -1,8 +1,9 @@
-"""Socket-free checks of the Gitea credential and redirect boundary."""
+"""Socket-free checks of the Gitea HTTP transport and JSON helpers."""
 
 from email.message import Message
 from http.client import HTTPConnection, HTTPResponse
 from io import BytesIO
+import json
 import socket
 import traceback
 from urllib.error import HTTPError, URLError
@@ -150,6 +151,7 @@ def test_token_never_in_errors_or_repr(opener, response, caplog):
     for result, status in ((response(403, token.encode()), 403),
                            (response(200, token.encode()), 200),
                            (response(200, token.encode() + b'\xff'), 200),
+                           (response(201, b'{"' + token.encode() + b'":}'), 201),
                            (response(302, location="https://evil/" + token), 302),
                            (HTTPError("https://evil/" + token, 401, token, Message(), BytesIO()), 401),
                            (URLError(token), None), (OSError(token), None)):
@@ -157,8 +159,15 @@ def test_token_never_in_errors_or_repr(opener, response, caplog):
         error = secret_free(lambda: client.request("GET", "/api"), http.GiteaHTTPError)
         assert error.status == status
         assert error.transient is (status is None)
+        if not isinstance(result, Exception):
+            assert result.closed
+    opener.result = response(200, json.dumps({"echo": token}).encode())
+    error = secret_free(lambda: client.get_page("/api", {}, 1, 10), http.GiteaHTTPError)
+    assert error.status == 200 and error.transient is False
+    assert opener.result.closed
     calls = len(opener.calls)
     secret_free(lambda: client.request("GET", "//" + token), ValueError)
+    secret_free(lambda: client.get_page("/api", {}, token, 10), ValueError)
     secret_free(lambda: http.GiteaTransport("https://host:" + token, token, opener=opener), ValueError)
     for bad_token in ("", token + "\r", token + "\n"):
         secret_free(lambda: http.GiteaTransport("https://host", bad_token, opener=opener), ValueError)
@@ -166,6 +175,143 @@ def test_token_never_in_errors_or_repr(opener, response, caplog):
         secret_free(lambda: http.GiteaTransport("https://host", token, opener=opener,
                                                timeout=timeout), ValueError)
     assert len(opener.calls) == calls
+
+
+@pytest.mark.scenario("gitea-http/json-requests/json-request-and-response")
+@pytest.mark.parametrize("timeout", [None, 2.5])
+@pytest.mark.parametrize("body", [{"title": "caf\u00e9 \u2603"}, [], {}, False, 0, "", None])
+def test_json_request_and_response(opener, response, timeout, body):
+    options = {} if timeout is None else {"timeout": timeout}
+    client = http.GiteaTransport("https://forge.example", "secret", opener=opener, **options)
+    query = {"label": ["a&b", "caf\u00e9"], "q": "with space", "page": 2}
+    for _ in range(2):  # Each open receives the configured timeout.
+        opener.result = response(201, '{"title": "caf\u00e9"}'.encode("utf-8"))
+        opener.result.headers["lInK"] = '</api?page=3>; rel="next"'
+        opener.result.headers["X-Total-Count"] = "12"
+        status, headers, result = client.request("post", "/api", query=query, json_body=body)
+        request, observed_timeout = opener.calls[-1]
+        assert request.get_method() == "POST"
+        assert request.full_url == (
+            "https://forge.example/api?label=a%26b&label=caf%C3%A9&q=with+space&page=2")
+        assert request.get_header("Authorization") == "token secret"
+        assert request.get_header("Accept") == "application/json"
+        assert observed_timeout == (30 if timeout is None else timeout)
+        if body is None:
+            assert request.data is None
+            assert request.get_header("Content-type") is None
+        else:
+            assert isinstance(request.data, bytes)
+            assert json.loads(request.data.decode("utf-8")) == body
+            assert request.get_header("Content-type") == "application/json"
+        assert status == 201 and result == {"title": "caf\u00e9"}
+        assert headers is opener.result.headers
+        assert headers["Link"] == headers["link"] == '</api?page=3>; rel="next"'
+        assert headers["x-total-count"] == "12"
+        assert opener.result.closed
+    assert len(opener.calls) == 2
+
+
+@pytest.mark.scenario("gitea-http/json-requests/empty-and-invalid-bodies")
+@pytest.mark.parametrize("status", [200, 204])
+@pytest.mark.parametrize("body", [b"", b"null", b"\xff", b'{"broken":}', b" "])
+def test_empty_and_invalid_bodies(opener, response, status, body):
+    client = http.GiteaTransport("https://forge.example", "secret", opener=opener)
+    opener.result = response(status, body)
+    if body in (b"", b"null"):
+        received, headers, result = client.request("GET", "/api")
+        assert received == status and result is None
+        assert headers is opener.result.headers
+    else:
+        with pytest.raises(http.GiteaHTTPError) as failure:
+            client.request("GET", "/api")
+        assert failure.value.status == status
+        assert failure.value.transient is False
+    assert opener.result.closed
+    assert len(opener.calls) == 1
+
+
+@pytest.mark.scenario("gitea-http/json-and-page-helpers/get-json-result")
+@pytest.mark.parametrize("query", [None, {"label": ["one", "two"]}])
+@pytest.mark.parametrize("body, expected", [(b'{"id": 1}', {"id": 1}), (b"[]", []),
+                                           (b"false", False), (b"null", None), (b"", None)])
+def test_get_json_result(opener, response, query, body, expected):
+    client = http.GiteaTransport("https://forge.example", "secret", opener=opener)
+    opener.result = response(200, body)
+    result = client.get_json("/api") if query is None else client.get_json("/api", query)
+    assert result == expected
+    assert len(opener.calls) == 1 and opener.result.closed
+    request, _ = opener.calls[0]
+    assert request.get_method() == "GET" and request.data is None
+    assert urlsplit(request.full_url).path == "/api"
+    assert parse_qs(urlsplit(request.full_url).query) == (query or {})
+
+
+@pytest.mark.scenario("gitea-http/json-and-page-helpers/get-json-result")
+@pytest.mark.parametrize("status, body", [(403, b"denied"), (200, b"invalid")])
+def test_get_json_preserves_request_errors(opener, response, status, body):
+    client = http.GiteaTransport("https://forge.example", "secret", opener=opener)
+    errors = []
+    for call in (lambda: client.request("GET", "/api"), lambda: client.get_json("/api")):
+        opener.result = response(status, body)
+        with pytest.raises(http.GiteaHTTPError) as failure:
+            call()
+        errors.append(failure.value)
+        assert failure.value.status == status and failure.value.transient is False
+        assert opener.result.closed
+    assert errors[0].args == errors[1].args
+    assert len(opener.calls) == 2
+    with pytest.raises(ValueError):
+        client.get_json("//foreign/api")
+    assert len(opener.calls) == 2
+
+
+@pytest.mark.scenario("gitea-http/json-and-page-helpers/single-page-without-completeness-policy")
+@pytest.mark.parametrize("items", [[], [{"id": 1}], [{"id": 1}, {"id": 2}]])
+@pytest.mark.parametrize("pagination", [False, True])
+def test_get_page_returns_one_array_and_headers(opener, response, items, pagination):
+    client = http.GiteaTransport("https://forge.example", "secret", opener=opener)
+    query = {"page": 99, "limit": 100, "label": ["a", "b"]}
+    opener.result = response(200, json.dumps(items).encode())
+    if pagination:
+        opener.result.headers["Link"] = '<https://foreign/api?page=4>; rel="next"'
+        opener.result.headers["X-Total-Count"] = "100"
+    result, headers = client.get_page("/api", query, page=3, limit=2)
+    assert result == items and headers is opener.result.headers
+    assert headers.get("link") == (
+        '<https://foreign/api?page=4>; rel="next"' if pagination else None)
+    assert headers.get("x-total-count") == ("100" if pagination else None)
+    assert query == {"page": 99, "limit": 100, "label": ["a", "b"]}
+    assert len(opener.calls) == 1 and opener.result.closed
+    request, _ = opener.calls[0]
+    assert request.get_method() == "GET" and request.data is None
+    assert urlsplit(request.full_url).path == "/api"
+    assert parse_qs(urlsplit(request.full_url).query) == {
+        "page": ["3"], "limit": ["2"], "label": ["a", "b"]}
+
+
+@pytest.mark.scenario("gitea-http/json-and-page-helpers/invalid-page-inputs-and-results")
+@pytest.mark.parametrize("field", ["page", "limit"])
+@pytest.mark.parametrize("value", [0, -1, 1.5, 1.0, "2", None, True, False, [], {}])
+def test_get_page_rejects_invalid_arguments(opener, field, value):
+    client = http.GiteaTransport("https://forge.example", "secret", opener=opener)
+    arguments = {"page": 1, "limit": 2, field: value}
+    query = {"label": "a"}
+    with pytest.raises(ValueError):
+        client.get_page("/api", query, **arguments)
+    assert not opener.calls
+    assert query == {"label": "a"}
+
+
+@pytest.mark.scenario("gitea-http/json-and-page-helpers/invalid-page-inputs-and-results")
+@pytest.mark.parametrize("status, body", [(200, b"{}"), (201, b'"items"'), (200, b"1"),
+                                       (200, b"false"), (200, b"null"), (204, b"")])
+def test_get_page_requires_an_array(opener, response, status, body):
+    client = http.GiteaTransport("https://forge.example", "secret", opener=opener)
+    opener.result = response(status, body)
+    with pytest.raises(http.GiteaHTTPError) as failure:
+        client.get_page("/api", {}, 1, 2)
+    assert failure.value.status == status and failure.value.transient is False
+    assert len(opener.calls) == 1 and opener.result.closed
 
 
 @pytest.mark.scenario("gitea-http/token-secrecy/echoed-token-remains-secret")
