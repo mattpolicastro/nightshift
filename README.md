@@ -391,6 +391,7 @@ Modules are under `nightshift/`; directory paths are repository-relative.
 | `specloop_client.py`, `specloop_attention.py` | Independent engine CLI and attention adapter |
 | `forge/__init__.py`, `forge/types.py` | Forge protocol and factual records |
 | `forge/github.py` | GitHub operations and queue-helper delegation through the selected runner |
+| `forge/gitea.py` | Standalone Gitea front-door operations over `forge/http.py` |
 | `queue.py` | Retained GitHub transport, retries and shared queue policy; daemon owns safe leftover recovery |
 | `outcomes.py`, `trace.py`, `mirror.py` | Historical outcomes, transcripts and optional import utility |
 | `specloop/` | Build engine, supervisor, verification and evidence gates |
@@ -399,8 +400,8 @@ Modules are under `nightshift/`; directory paths are repository-relative.
 The forge boundary is staged ([issue #126](https://github.com/mattpolicastro/nightshift/issues/126)):
 intake, merge-readiness and daemon engine-switch recovery use named operations;
 authorization, receipts and workflow decisions remain in core. Landing migration
-is future work (#130). The standalone `forge/http.py` transport does not enable
-Gitea enrollment; a Gitea backend remains future work.
+is future work (#130). The standalone `forge/gitea.py` backend is implemented over
+`forge/http.py`; Gitea enrollment and daemon integration remain future work.
 
 ## Usage
 

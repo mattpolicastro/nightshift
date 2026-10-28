@@ -1,8 +1,15 @@
 """Foundation contracts through the real transport, without a service or sockets."""
 
 import json
+import inspect
+import os
+from pathlib import Path
 import socket
+import subprocess
+import sys
 import traceback
+import typing
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -49,6 +56,28 @@ def test_constructor_copies_allowlist_without_dispatch(fake):
     assert make_forge(fake, trusted_logins=[], wip_prefix="Draft: ")._wip_prefix == "Draft: "
     assert fake.calls == []
     assert SECRET not in repr(forge) + repr(forge._transport)
+
+
+@pytest.mark.scenario("gitea-forge/standalone-adapter/construction-and-interface")
+def test_completed_structural_forge_signatures(fake):
+    from nightshift import forge as interface, queue
+    from nightshift.forge.types import ResponseText
+
+    forge = make_forge(fake)
+    assert isinstance(forge, interface.Forge)
+    assert interface.Forge not in type(forge).__mro__
+    namespace = dict(vars(interface), Issue=queue.Issue, FeedbackItem=queue.FeedbackItem,
+                     ResponseText=ResponseText)
+    for name, declaration in vars(interface.Forge).items():
+        if name.startswith("_") or not callable(declaration):
+            continue
+        implementation = getattr(GiteaForge, name)
+        expected = inspect.signature(declaration)
+        actual = inspect.signature(implementation)
+        assert [(p.name, p.kind, p.default) for p in actual.parameters.values()] == [
+            (p.name, p.kind, p.default) for p in expected.parameters.values()], name
+        assert typing.get_type_hints(implementation) == typing.get_type_hints(declaration, namespace), name
+    assert not fake.calls
 
 
 @pytest.mark.scenario("gitea-forge/standalone-adapter/construction-and-interface")
@@ -1578,3 +1607,219 @@ def test_comment_create_does_not_reconcile_non_http_exceptions(fake, comment_rep
     with pytest.raises(type(error)) as caught:
         make_forge(fake).create_comment("owner/repo", 1, "issue", BODY)
     assert caught.value is error and [c.method for c in fake.calls] == ["GET", "POST"]
+
+
+@pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/live-suite-skips-without-url")
+def test_contract_suite_skips_without_url(tmp_path):
+    plugin = tmp_path / "forbid_contract_network.py"
+    plugin.write_text('''
+import socket
+import urllib.request
+from nightshift.forge import http
+
+def forbidden(*args, **kwargs):
+    raise AssertionError("Network dispatch or live transport construction forbidden")
+
+def pytest_configure(config):
+    socket.socket = socket.create_connection = forbidden
+    urllib.request.OpenerDirector.open = forbidden
+    http.build_opener = forbidden
+''')
+    env = os.environ.copy()
+    for key in tuple(env):
+        if key.startswith("GITEA_CONTRACT_"):
+            env.pop(key)
+    env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(Path(__file__).parent),
+                                        env.get("PYTHONPATH", "")))
+    report = tmp_path / "contracts.xml"
+    result = subprocess.run([sys.executable, "-m", "pytest", "tests/contract", "--gitea-live",
+        "-p", "forbid_contract_network", "-p", "no:cacheprovider", "-o", "addopts=", "-q",
+        f"--junitxml={report}", f"--basetemp={tmp_path / 'child-pytest'}"],
+        cwd=Path(__file__).resolve().parents[1], env=env,
+        capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    cases = ET.parse(report).findall(".//testcase")
+    live = [case for case in cases if case.attrib["name"].endswith("[live]")]
+    fake = [case for case in cases if case.attrib["name"].endswith("[fake]")]
+    assert len(live) == len(fake) == 4
+    assert all(case.find("skipped") is not None for case in live)
+    assert all("GITEA_CONTRACT_URL" in case.find("skipped").attrib["message"] for case in live)
+    assert all(not list(case) for case in fake)
+
+
+def configured_contract_env():
+    return {"GITEA_CONTRACT_" + key: value for key, value in dict(
+        URL="https://forge.example/gitea", TOKEN="offline-token", REPO="owner/repo",
+        BOT_LOGIN="Robot", TRUSTED_LOGIN="Alice", FIXTURE=json.dumps(dict(
+            issue=1, pr=2, label="contract-ready", untrusted_login="Mallory", sha="a" * 40))).items()}
+
+
+@pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/configured-live-setup-is-strict")
+@pytest.mark.parametrize("missing", ["TOKEN", "REPO", "BOT_LOGIN", "TRUSTED_LOGIN", "FIXTURE"])
+def test_configured_contract_requires_complete_setup(monkeypatch, missing):
+    from contract.conftest import live_contract
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Incomplete setup must not construct a transport")
+    monkeypatch.setattr(http, "build_opener", forbidden)
+    env = configured_contract_env()
+    del env["GITEA_CONTRACT_" + missing]
+    with pytest.raises(pytest.fail.Exception, match="Missing GITEA_CONTRACT_" + missing):
+        live_contract(env)
+
+
+@pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/configured-live-setup-is-strict")
+@pytest.mark.parametrize("fixture", ["invalid-json", "[]", "{}", '{"issue":true}',
+    json.dumps(dict(issue=1, pr=1, label="x", untrusted_login="Mallory", sha="a" * 40))])
+def test_configured_contract_rejects_invalid_evidence(monkeypatch, fixture):
+    from contract.conftest import live_contract
+
+    monkeypatch.setattr(http, "build_opener", lambda: pytest.fail("Unexpected transport construction"))
+    env = configured_contract_env()
+    env["GITEA_CONTRACT_FIXTURE"] = fixture
+    with pytest.raises(pytest.fail.Exception, match="Invalid Gitea contract fixture configuration"):
+        live_contract(env)
+
+
+@pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/configured-live-setup-is-strict")
+@pytest.mark.parametrize("missing", ["comments", "reviews", "inline", "timeline", "status"])
+def test_configured_contract_requires_provisioned_evidence(missing):
+    from contract.conftest import fake_contract, require_evidence
+
+    contract = fake_contract()
+    state = contract.fake.repositories[contract.repo]
+    if missing in ("comments", "reviews"):
+        state["pulls"][0][missing].clear()
+    elif missing == "inline":
+        for review in state["pulls"][0]["reviews"]:
+            review["comments"].clear()
+    elif missing == "timeline":
+        state["issues"][0]["timeline"].clear()
+    else:
+        status = state["combined_statuses"][contract.evidence["sha"]]
+        status.update(total_count=0, statuses=[])
+    with pytest.raises(pytest.fail.Exception, match="Missing required Gitea contract fixture evidence"):
+        require_evidence(contract)
+    assert all(call.method == "GET" for call in contract.fake.calls)
+
+
+@pytest.mark.scenario("gitea-forge/complete-endpoint-pagination/incomplete-listing-refused")
+@pytest.mark.scenario("gitea-forge/issue-and-feedback-records/complete-identified-feedback")
+@pytest.mark.parametrize("endpoint", ["issues/2/comments", "pulls/2/reviews", "pulls/2/reviews/1/comments"])
+def test_contract_later_page_failure_refuses_feedback(endpoint):
+    from contract.conftest import fake_contract
+
+    contract = fake_contract()
+    contract.fake.route("GET", ROOT + "/" + endpoint, Reply(status=403), page=2)
+    with pytest.raises(ForgeError):
+        contract.forge.pr_feedback_records(contract.repo, contract.evidence["pr"])
+    assert contract.fake.calls[-1].path == ROOT + "/" + endpoint
+    assert contract.fake.calls[-1].query == {"page": ["2"], "limit": ["50"]}
+    assert all(call.method == "GET" for call in contract.fake.calls)
+
+
+@pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/configured-live-setup-is-strict")
+@pytest.mark.parametrize("login", ["Robot", "Mallory", None])
+def test_live_contract_checks_authenticated_bot_offline(monkeypatch, fake, login):
+    from contract.conftest import live_contract
+
+    monkeypatch.setattr(http, "build_opener", lambda: fake)
+    fake.route("GET", "/gitea/api/v1/user", Reply({"login": login}))
+    if login == "Robot":
+        contract = live_contract(configured_contract_env())
+        assert isinstance(contract.forge, GiteaForge) and contract.bot == login
+    else:
+        with pytest.raises(pytest.fail.Exception, match="authenticate as the bot"):
+            live_contract(configured_contract_env())
+    assert [(c.method, c.path) for c in fake.calls] == [("GET", "/gitea/api/v1/user")]
+
+
+@pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/configured-live-setup-is-strict")
+@pytest.mark.parametrize("fail", [False, True])
+def test_contract_cleanup_only_closes_run_owned_issue(fail):
+    from copy import deepcopy
+    from contract.conftest import fake_contract, owned_issue
+
+    contract = fake_contract()
+    state = contract.fake.repositories[contract.repo]
+    existing = deepcopy([*state["issues"], *state["pulls"]])
+    try:
+        with owned_issue(contract) as (number, title):
+            assert number not in {r["number"] for r in existing}
+            assert title.startswith("nightshift-contract-")
+            if fail:
+                raise RuntimeError("contract assertion failed")
+    except RuntimeError:
+        assert fail
+    assert state["issues"][:-1] + state["pulls"] == existing
+    assert state["issues"][-1]["state"] == "closed"
+    assert [(c.method, c.path) for c in contract.fake.calls] == [
+        ("POST", ROOT + "/issues"), ("PATCH", ROOT + f"/issues/{number}")]
+
+
+@pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/configured-live-setup-is-strict")
+@pytest.mark.parametrize("outcome", [Reply(status=403), Reply(dict(number=1, title="preexisting", body="preexisting"))])
+def test_contract_cleanup_does_not_adopt_failed_or_preexisting_creates(outcome):
+    from contract.conftest import fake_contract, owned_issue
+
+    contract = fake_contract()
+    contract.fake.route("POST", ROOT + "/issues", outcome)
+    with pytest.raises((AssertionError, ForgeError)):
+        with owned_issue(contract):
+            pytest.fail("An unconfirmed create must not be yielded")
+    assert [c.method for c in contract.fake.calls] == ["POST"]
+
+
+def layout_module_paths(text):
+    """Literal physical-line boundaries and first-cell backticks only."""
+    lines = text.split("\n")
+    starts = [i for i, line in enumerate(lines) if line == "## Layout"]
+    if len(starts) != 1:
+        raise ValueError("Expected one Layout boundary")
+    start = starts[0]
+    ends = [i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")]
+    if not ends:
+        raise ValueError("Missing closing Layout boundary")
+    modules = []
+    for line in lines[start + 1:ends[0]]:
+        if not line.startswith("| `"):
+            continue
+        cells = line.split("|")
+        if len(cells) < 3:
+            raise ValueError("Missing first-cell boundary")
+        spans = cells[1].split("`")
+        if len(spans) % 2 != 1 or any(not name for name in spans[1::2]):
+            raise ValueError("Unbalanced or empty module span")
+        modules.extend(spans[1::2])
+    if len(modules) != len(set(modules)):
+        raise ValueError("Duplicate module path")
+    return set(modules)
+
+
+@pytest.mark.scenario("forge-interface/module-layout-guidance/layout-describes-staged-boundary")
+def test_gitea_layout_module_paths_resolve():
+    root = Path(__file__).resolve().parents[1]
+    modules = layout_module_paths((root / "README.md").read_text())
+    assert {"forge/__init__.py", "forge/types.py", "forge/github.py", "forge/gitea.py", "queue.py"} <= modules
+    for name in modules:
+        assert (root / name if name.endswith("/") else root / "nightshift" / name).exists()
+
+
+@pytest.mark.scenario("forge-interface/module-layout-guidance/layout-describes-staged-boundary")
+@pytest.mark.parametrize("text", ["", " ## Layout\n## End", "## Layout \n## End", "## Layout\n",
+    "## Layout\n## Layout\n## End", "```\n## Layout\n```\n## Layout\n## End",
+    "## Layout\n| `bad | desc |\n## End", "## Layout\n| `` | desc |\n## End",
+    "## Layout\n| `a`, `a` | desc |\n## End", "## Layout\n| `a` | x |\n| `a` | y |\n## End",
+    "## Layout\n| `a`\n## End", "## Layout\n| `a`, `b | desc |\n## End"])
+def test_layout_refuses_ambiguous_structure(text):
+    with pytest.raises(ValueError):
+        layout_module_paths(text)
+
+
+@pytest.mark.scenario("forge-interface/module-layout-guidance/layout-describes-staged-boundary")
+@pytest.mark.parametrize("wrapper", ["```", "<div>", "    indented", "### nested"])
+def test_layout_uses_literal_lines_and_only_first_cell(wrapper):
+    assert layout_module_paths(f"## Layout\n{wrapper}\n| `a`, `b` | `not-a-module` |\n"
+        " | `ignored` | x |\n| plain `ignored` | x |\n ## Ignored\n| `c` | x |\n"
+        "## End\n| `outside` | x |") == {"a", "b", "c"}
+    assert layout_module_paths("prefix\u2028## Layout\n## Layout\n| `a` | x |\n## End") == {"a"}

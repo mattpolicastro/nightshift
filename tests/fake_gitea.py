@@ -57,6 +57,13 @@ class FakeGitea:
             rows = None
             if call.method == "GET" and call.path == root:
                 return Reply(state["facts"])
+            if call.method == "POST" and call.path == root + "/issues":
+                assert set(call.body) == {"title", "body"}
+                number = max((r["number"] for r in [*state["issues"], *state["pulls"]]), default=0) + 1
+                created = dict(id=number, number=number, state="open", labels=[], comments=[],
+                               user={"login": self.bot_login}, **call.body)
+                state["issues"].append(created)
+                return Reply(created, status=201)
             if call.method == "GET":
                 for commit in state["commits"]:
                     if call.path == root + "/git/commits/" + commit["sha"]:
@@ -90,6 +97,10 @@ class FakeGitea:
                     return Reply(pr)
             for issue in [*state["issues"], *state["pulls"]]:
                 detail_path = root + f'/issues/{issue["number"]}'
+                if call.method == "PATCH" and call.path == detail_path:
+                    assert call.body == {"state": "closed"}
+                    issue["state"] = "closed"
+                    return Reply(issue)
                 if call.method == "POST" and call.path == detail_path + "/comments":
                     assert set(call.body) == {"body"}
                     comment_id = max((comment["id"] for item in [*state["issues"], *state["pulls"]]
