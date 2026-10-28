@@ -1,11 +1,13 @@
 import json
 import os
 import subprocess
+import traceback
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from nightshift import config
 from specloop import manifest, seal, verify
 
 
@@ -83,6 +85,159 @@ def test_symlinks_secrets_and_nothing_changed(repo, tmp_path):
     s = seal.seal(bare, work, base, M, "msg", secrets=["sk-THIS-IS-A-SECRET-VALUE-123456"])
     assert any("src/link" in v for v in s.violations)
     assert s.secret_paths == ["src/leak.txt"] and s.sha is None
+
+
+FORGE_TABLES = '''
+[[forges]]
+name = "used"
+kind = "github"
+token_env = "SEAL_BOT"
+land_token_env = "SEAL_LAND"
+[[forges]]
+name = "unused"
+kind = "gitea"
+url = "https://forge.example"
+token_env = "SEAL_UNUSED_BOT"
+land_token_env = "SEAL_UNUSED_LAND"
+bot_login = "bot"
+# Enrollment validation must not run during credential discovery.
+[[repos]]
+name = 42
+forge = "used"
+'''
+FORGE_KEYS = ("SEAL_BOT", "SEAL_LAND", "SEAL_UNUSED_BOT", "SEAL_UNUSED_LAND")
+
+
+@pytest.fixture
+def forge_sources(monkeypatch):
+    for key in (*FORGE_KEYS, "CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
+                "SPECLOOP_SLACK_WEBHOOK"):
+        monkeypatch.delenv(key, raising=False)
+    config.ENV_FILE.parent.mkdir(parents=True)
+    config.DEFAULT_PATH.write_text(FORGE_TABLES)
+
+
+@pytest.mark.scenario("forge-seal/every-forge-token-is-scanned/all-declared-values-are-protected")
+def test_seal_scans_every_forge_token(repo, forge_sources, monkeypatch, capsys, caplog):
+    bare, work, base = repo
+    extra = {key: f"extra-value-{key}" for key in FORGE_KEYS}
+    ambient = {key: f"process-value-{key}" for key in FORGE_KEYS}
+    file_values = {key: f"file-value-{key}" for key in FORGE_KEYS}
+    file_values["SEAL_UNUSED_LAND"] = "xy"  # Short declared tokens are secrets too.
+    extra["SEAL_BOT"] = ambient["SEAL_BOT"]  # Duplicate values need only one scan.
+    monkeypatch.setenv("GH_TOKEN", extra["SEAL_BOT"])  # Also found by the legacy scan.
+    for key, value in ambient.items():
+        monkeypatch.setenv(key, value)
+    config.ENV_FILE.write_text("".join(f"export {k}='{v}'\n" for k, v in file_values.items()))
+    values = seal.credential_values(extra)
+    expected = set(extra.values()) | set(ambient.values()) | set(file_values.values())
+    assert set(values) == expected and len(values) == len(expected)
+    for i, value in enumerate(sorted(expected)):
+        (work / "src" / f"leak-{i:02}.txt").write_text(value)
+    (work / "new.txt").write_text("otherwise admissible")
+    real_git = seal.git
+
+    def no_commit(repo, *args, **kwargs):
+        assert "commit-tree" not in args
+        return real_git(repo, *args, **kwargs)
+
+    monkeypatch.setattr(seal, "git", no_commit)
+    result = seal.seal(bare, work, base, M, "msg", secrets=values)
+    assert result.sha is None and result.changed == ["new.txt"]
+    assert result.secret_paths == [f"src/leak-{i:02}.txt" for i in range(len(expected))]
+    captured = capsys.readouterr()
+    assert all(v not in repr(result) + captured.out + captured.err + caplog.text for v in expected)
+
+
+@pytest.mark.scenario("forge-seal/trusted-forge-discovery/configuration-selection-is-deterministic")
+@pytest.mark.parametrize("selection", ["explicit", "default", "absent"])
+def test_seal_trusted_config_selection(tmp_path, forge_sources, monkeypatch, selection):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "config.toml").write_text("malformed candidate config [")
+    monkeypatch.chdir(candidate)
+    explicit = tmp_path / "trusted.toml"
+    explicit.write_text(FORGE_TABLES)
+    if selection == "explicit":
+        monkeypatch.setenv("NIGHTSHIFT_FORGE_CONFIG", str(explicit))
+        config.DEFAULT_PATH.write_text("malformed ignored default [")
+    elif selection == "absent":
+        config.DEFAULT_PATH.unlink()
+    monkeypatch.setenv("SEAL_BOT", "trusted-bot-value")
+    # An untrusted manifest env source cannot override process selection.
+    extra = {"NIGHTSHIFT_FORGE_CONFIG": str(candidate / "config.toml")}
+    expected = [] if selection == "absent" else ["trusted-bot-value"]
+    assert seal.credential_values(extra) == expected
+    assert seal.credential_values() == expected
+
+
+@pytest.mark.scenario("forge-seal/trusted-forge-discovery/invalid-selected-source-blocks-sealing")
+@pytest.mark.parametrize("case", ["blank", "empty", "relative", "missing", "explicit-unreadable",
+                                  "default-unreadable", "explicit-malformed", "default-malformed",
+                                  "explicit-invalid-forge", "default-invalid-forge", "env-unreadable",
+                                  "default-dangling", "env-dangling"])
+def test_seal_invalid_credential_source(repo, forge_sources, monkeypatch, case):
+    bare, work, base = repo
+    sentinel = "synthetic-secret-must-not-appear"
+    if case in ("blank", "empty", "relative", "missing"):
+        override = {"blank": " ", "empty": "", "relative": sentinel, "missing": str(work / sentinel)}[case]
+        monkeypatch.setenv("NIGHTSHIFT_FORGE_CONFIG", override)
+    if case.startswith("explicit-"):
+        monkeypatch.setenv("NIGHTSHIFT_FORGE_CONFIG", str(config.DEFAULT_PATH))
+    if case.endswith("malformed"):
+        config.DEFAULT_PATH.write_text(f'[{sentinel}\n')
+    if case.endswith("invalid-forge"):
+        config.DEFAULT_PATH.write_text(f'forges = "{sentinel}"\n')
+    if case.endswith("dangling"):
+        target = config.ENV_FILE if case == "env-dangling" else config.DEFAULT_PATH
+        target.unlink(missing_ok=True)
+        target.symlink_to(work / sentinel)
+    if case.endswith("unreadable"):
+        target = config.ENV_FILE if case == "env-unreadable" else config.DEFAULT_PATH
+        target.touch()
+        read_text = Path.read_text
+
+        def unreadable(path, *args, **kwargs):
+            if path == target:
+                raise PermissionError(sentinel)
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", unreadable)
+    (work / "new.txt").write_text("otherwise admissible")
+    monkeypatch.setattr(seal, "git", lambda *a, **kw: pytest.fail("sealing reached git"))
+    with pytest.raises(ValueError) as caught:
+        seal.seal(bare, work, base, M, "msg", secrets=seal.credential_values())
+    assert sentinel not in "".join(traceback.format_exception(caught.value))
+    assert "NIGHTSHIFT_FORGE_CONFIG" in str(caught.value) or "invalid trusted config or env file" in str(caught.value)
+
+
+@pytest.mark.scenario("forge-seal/every-forge-token-is-scanned/missing-values-do-not-invent-secrets")
+def test_seal_missing_forge_values_preserves_existing_sources(forge_sources, monkeypatch):
+    monkeypatch.setenv("SEAL_BOT", "")
+    config.ENV_FILE.write_text("export SEAL_LAND=''\nexport UNDECLARED='not-a-known-secret'\n")
+    auth = Path.home() / ".codex-api" / "auth.json"
+    auth.parent.mkdir()
+    profile_token = "profile-secret-" + "x" * 24
+    auth.write_text(json.dumps({"tokens": {"access": profile_token, "short": "ignore"}}))
+    monkeypatch.setenv("GH_TOKEN", "shadowed-fixed-value")
+    monkeypatch.setenv("GITHUB_TOKEN", "existing-github-token")
+    monkeypatch.setenv("SPECLOOP_SLACK_WEBHOOK", "short")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: pytest.fail("credential retrieval"))
+    monkeypatch.setattr(config, "load_env_file", lambda *a, **kw: pytest.fail("credential injection"))
+    values = seal.credential_values({"GH_TOKEN": "existing-extra-token", "SEAL_UNUSED_BOT": ""})
+    assert set(values) == {profile_token, "existing-extra-token", "existing-github-token"}
+    assert os.environ["SEAL_BOT"] == "" and "SEAL_LAND" not in os.environ
+    assert "SEAL_UNUSED_LAND" not in os.environ  # No attempt to retrieve a human keychain token.
+
+
+@pytest.mark.scenario("forge-seal/every-forge-token-is-scanned/all-declared-values-are-protected")
+def test_seal_env_file_values_are_literal(forge_sources, monkeypatch, tmp_path):
+    marker = tmp_path / "must-not-exist"
+    literal = f"$(touch {marker})"
+    config.ENV_FILE.write_text(f"export SEAL_BOT='{literal}'\n")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: pytest.fail("shell execution"))
+    assert seal.credential_values() == [literal]
+    assert not marker.exists() and "SEAL_BOT" not in os.environ
 
 
 def test_executable_bit_is_kept(repo):

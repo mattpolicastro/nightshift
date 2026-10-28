@@ -1075,6 +1075,25 @@ subscription profile in a role's chain, and the role moves to it when the
 subscription is usage-limited or unavailable. The seal refuses diffs that
 contain any `~/.codex*/auth.json` value.
 
+Seal discovery also reads every declared forge's `token_env` and
+`land_token_env`, including unused forges, from the supplied environment, the
+supervisor process environment and `~/.config/nightshift/env`. Every distinct
+nonempty value is protected, including short and shadowed values. Existing
+fixed-name and profile-auth scans retain their length filters. Refusal reports
+affected paths, never token values.
+
+Only the supervisor's process `NIGHTSHIFT_FORGE_CONFIG` selects a custom forge
+config; it must be a nonempty absolute path. Otherwise discovery uses
+`nightshift.config.DEFAULT_PATH`, allowing an absent default. Invalid selected
+config or unreadable credential files block sealing. Candidate files and manifest
+environment values cannot redirect selection, and enrollment is not loaded.
+For a custom daemon `--config`, operators must provision the same path and bot
+credential sources in the independent supervisor; see [host setup](../../README.md#host-path-setup).
+The frozen `bin/specloop-serve` does not source the daemon env file. Discovery
+parses it without shell execution or environment injection. It cannot detect
+unavailable secrets, including human tokens held only in a keychain; it does
+not retrieve them. Never inject landing tokens into the daemon just for scanning.
+
 Spike S1 probed, from the harness itself, that each session can write only its
 workspace and has no network. The claude adapter with `qwen3-coder-next` on the
 a local inference box is proven. The codex adapter against a local backend is untested.

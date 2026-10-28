@@ -53,6 +53,8 @@ def isolate_outcome_store(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("NIGHTSHIFT_STATE_ROOT", str(state))
     monkeypatch.setenv("NIGHTSHIFT_LEGACY_STATE_ROOT", str(home / ".specloop"))
     monkeypatch.setattr(config, "ENV_FILE", home / ".config/nightshift/env")
+    monkeypatch.setattr(config, "DEFAULT_PATH", home / "config.toml")
+    monkeypatch.delenv("NIGHTSHIFT_FORGE_CONFIG", raising=False)
     monkeypatch.setattr(mirror, "DEFAULT_CONFIG_ROOT", home / ".config/nightshift/claude")
     monkeypatch.setattr(mirror, "DEFAULT_PROJECTS", home / ".claude/projects")
     monkeypatch.setattr(daemon, "STATE_DIR", state)
@@ -66,6 +68,9 @@ def isolate_outcome_store(tmp_path_factory, monkeypatch):
     # PYTHONPATH. Keep this generated bootstrap outside the candidate source.
     bootstrap = home / "test-bootstrap"
     bootstrap.mkdir()
+    # Children cannot inherit DEFAULT_PATH monkeypatches; select an empty trusted source.
+    child_config = bootstrap / "forge-config.toml"
+    child_config.write_text("")
     guard = Path(__file__).with_name("live_state_guard.py").read_text()
     (bootstrap / "sitecustomize.py").write_text(guard + f"\ninstall({LIVE_STATE_ROOTS!r})\n" + """
 # Preserve fixture-owned startup hooks, such as process-group inspection.
@@ -82,6 +87,7 @@ if spec and spec.loader:
 
     def guarded_child(self, *args, **kwargs):
         env = dict(kwargs.get("env") if kwargs.get("env") is not None else os.environ)
+        env.setdefault("NIGHTSHIFT_FORGE_CONFIG", str(child_config))
         env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(bootstrap), env.get("PYTHONPATH"))))
         kwargs["env"] = env
         original(self, *args, **kwargs)

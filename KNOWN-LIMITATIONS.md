@@ -255,7 +255,12 @@ real-host Stop/evidence inspection remain human checks, not fixture evidence.
 ## Other known gaps
 
 - Agents can read credential files; diffs containing their literal values are
-  refused.
+  refused when those values are available to seal discovery. Forge scans cover
+  declared bot/landing variables in supplied/process environments and the trusted
+  env file, including unused forges. Inaccessible keychain-only credentials cannot
+  be detected; discovery does not retrieve them or inject landing tokens into the
+  daemon. Custom supervisor config paths and bot credential sources require
+  [operator provisioning](README.md#host-path-setup).
 - Quota is handled by detecting a usage-limit error, not read ahead of time.
 
 ## Platform assumptions

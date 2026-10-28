@@ -506,6 +506,17 @@ win over inherited values for downstream settings. `bin/specloop-serve` does
 not source that file; provide its Python settings in the service environment.
 Candidate files and manifest env files do not configure the harness resolver.
 
+For forge-secret scanning, a custom daemon `--config` path also requires
+`NIGHTSHIFT_FORGE_CONFIG` set to the same **absolute path** in the independent
+supervisor's process environment. Otherwise sealing uses the checkout's default
+`config.toml`; an absent default contributes no forge definitions. Invalid
+selected files block sealing. Provision the supervisor's bot credential sources
+separately: the frozen `bin/specloop-serve` does not source the daemon env file.
+Discovery parses that trusted env file without executing it or exporting values.
+See the [seal credential limits](docs/specloop/README.md#how-the-engine-works)
+before relying on detection of human landing tokens. No service restart or
+credential provisioning is automatic.
+
 **Bundled service startup is still fixed.** Both unchanged wrappers use
 `$HOME/Projects/nightshift` and `/opt/homebrew/bin/uv`. `bin/nightshift-daemon`
 prepends `/opt/homebrew/bin:$HOME/n/bin` to incoming PATH;
