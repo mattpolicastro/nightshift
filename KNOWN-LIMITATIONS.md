@@ -69,6 +69,19 @@ None of these follow-ups establishes live validation or a completed host rollout
   human check in the design, alongside live-link and reader review. Missing or
   inconsistent journal/Git evidence is refused, not reconstructed. Journals
   accumulate with retained runs; deletion or incomplete backups lose protection.
+- **Revision re-runs:** same-round replacement results now get separate comments
+  ([issue #137](https://github.com/mattpolicastro/nightshift/issues/137)), but
+  `rejected` and `needs_input` still retain `agent:revise` and add `needs-human`.
+  To start a fresh round, resolve the questions or contradictions, remove
+  `agent:revise`, clear `needs-human`, then have a trusted actor re-add
+  `agent:revise` to create a new label event. Applying an already-present label
+  creates no fresh event. Normal pause, authorization and eligibility gates
+  still apply; relabeling does not release a stopped-job hold (see below).
+  On the next live rejected revision, a human must confirm the new reason is
+  posted on the PR and the earlier result remains visible, and record the
+  comment link. Checking that the remove/clear/re-add sequence creates a new
+  event on the next fresh request also remains pending; CI does not establish
+  these live interactions.
 - **Pause boundary:** jobs already running can finish while the daemon is
   paused. An admission that completes while paused can still build under the
   independent `nightshift serve` supervisor. Jobs have their own sessions, so
