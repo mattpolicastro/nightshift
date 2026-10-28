@@ -20,6 +20,7 @@ from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
+from typing import TypeGuard
 from urllib.parse import quote
 
 from specloop import manifest as manifests
@@ -27,6 +28,8 @@ from specloop import state as run_state, tasks as run_tasks
 
 from . import queue, specloop_client, specloop_job
 from .config import Repo
+from .forge import Forge
+from .forge.github import GitHubForge
 
 
 log = logging.getLogger(__name__)
@@ -227,16 +230,17 @@ def _each(items, action, *, on_error=None, on_pending=None) -> list[dict]:
     return results
 
 
-def report_failure(repo, labels, number, stage, kind, exc, *, runner):
+def report_failure(repo, labels, number, stage, kind, exc, *, runner=None, forge: Forge | None = None):
     """Best-effort item escalation must not prevent processing the next item."""
     try:
+        forge = forge if forge is not None else GitHubForge(runner)
         _comment(repo.name, number, str(number),
                  f"Specloop {stage} failed. Human input is needed.\n\n{exc}\n\n"
                  f"Resolve the failure, then remove `{labels.needs_human}` to retry.",
-                 runner=runner, action=f"{stage}-error", kind=kind)
+                 forge=forge, action=f"{stage}-error", kind=kind)
         # Label last so a failed comment leaves delivery armed for retry.
-        runner([kind, "edit", str(number), "--repo", repo.name,
-                "--add-label", labels.needs_human])
+        relabel = forge.relabel_issue if kind == "issue" else forge.relabel_pr
+        relabel(repo.name, number, add=[labels.needs_human], remove=[])
     except Paused:
         raise
     except Exception as error:
@@ -421,12 +425,13 @@ look like an absent label or an empty set of comments.
     return _each(sorted(pending), propose, on_error=on_error, on_pending=on_pending)
 
 
-def _issue_author_trusted(repo: str, number: int, gh) -> bool:
+def _issue_author_trusted(repo: str, number: int, gh=None, *, forge: Forge | None = None) -> bool:
     """The issue author's association, from REST (gh issue view does not carry it).
 
     A failed read raises: an unknown author must not be treated as trusted.
     """
-    issue = json.loads(gh(["api", f"repos/{repo}/issues/{number}"]))
+    forge = forge if forge is not None else GitHubForge(gh)
+    issue = forge.issue_author(repo, number)
     return queue.trusted(issue, "author_association")
 
 
@@ -1441,31 +1446,32 @@ def _approval_covers_head(state_dir: Path, repo: Repo, number: int, change: str,
     return False
 
 
-def _approval_event(repo: str, number: int, label: str, *, runner) -> int:
+def _approval_event(repo: str, number: int, label: str, *, runner=None, forge: Forge | None = None) -> int:
     """Identify this approval even when removal succeeded but its response was lost.
 
     A later label application permits a new admission with the same PR head
     (for example after a manifest correction). Reads must fail closed so an
     unavailable event history cannot masquerade as renewed approval.
     """
-    return _label_events(repo, number, {label}, runner=runner)[label]
+    return _label_events(repo, number, {label}, runner=runner, forge=forge)[label]
 
 
-def _label_events(repo: str, number: int, labels: set[str], *, runner) -> dict[str, int]:
+def _label_events(repo: str, number: int, labels: set[str], *, runner=None,
+                  forge: Forge | None = None) -> dict[str, int]:
     """Retain the ID-only receipt interface for current label applications."""
     return {label: event["id"] for label, event in
-            _latest_label_events(repo, number, labels, runner=runner).items()}
+            _latest_label_events(repo, number, labels, runner=runner, forge=forge).items()}
 
 
-def _latest_label_events(repo: str, number: int, labels: set[str], *, runner) -> dict[str, dict]:
+def _latest_label_events(repo: str, number: int, labels: set[str], *, runner=None,
+                         forge: Forge | None = None) -> dict[str, dict]:
     """Confirm current applications and retain their actor evidence.
 
     GitHub returns events in chronological page order. Select the final event
     before validating it, so an older application cannot authorize a newer one.
     """
-    pages = json.loads(runner([
-        "api", f"repos/{repo}/issues/{number}/events", "--paginate", "--slurp",
-    ]))
+    forge = forge if forge is not None else GitHubForge(runner)
+    pages = forge.label_event_pages(repo, number)
     malformed = f"malformed label event history for #{number}; retry next poll"
     if not isinstance(pages, list):
         raise RuntimeError(malformed)
@@ -1492,7 +1498,7 @@ def _latest_label_events(repo: str, number: int, labels: set[str], *, runner) ->
     return latest
 
 
-def _valid_actor_login(login) -> bool:
+def _valid_actor_login(login) -> TypeGuard[str]:
     # GitHub usernames, including enterprise managed users (alice_acme) and
     # app bot logins. Never accept URL syntax, whitespace, or the placeholder
     # GitHub uses for deleted accounts.
@@ -1501,15 +1507,20 @@ def _valid_actor_login(login) -> bool:
                              login) is not None)
 
 
-def _membership_status(endpoint: str, *, runner) -> int:
+def _membership_status(repo: str, login: str, *, runner=None,
+                       forge: Forge | None = None, organization=False) -> int:
     """Read a membership endpoint, preserving failures other than HTTP 404.
 
     queue._gh returns stdout on success but puts only stderr in GhError on
     failure. gh reports a negative membership check as `gh: ... (HTTP 404)`.
     A missing status or an unexpected response must remain a lookup failure.
     """
+    forge = forge if forge is not None else GitHubForge(runner)
+    endpoint = (f"orgs/{quote(repo, safe='')}/members/{quote(login, safe='')}" if organization
+                else f"repos/{repo}/collaborators/{quote(login, safe='')}")
     try:
-        response = runner(["api", endpoint, "--include"])
+        response = (forge.organization_member_response(repo, login) if organization
+                    else forge.collaborator_response(repo, login)).stdout
     except queue.GhError as exc:
         error = str(exc).rsplit(" failed: ", 1)[-1].strip()
         if not exc.transient and re.search(r"(?:^HTTP 404:|\(HTTP 404\)$)", error):
@@ -1525,14 +1536,16 @@ def _membership_status(endpoint: str, *, runner) -> int:
     raise RuntimeError(f"unconfirmed membership response from {endpoint}; retry next poll")
 
 
-def _label_actor_association(repo: str, event: dict, *, runner) -> str | None:
+def _label_actor_association(repo: str, event: dict, *, runner=None,
+                             forge: Forge | None = None) -> str | None:
     """Resolve only the label actor using current positive membership evidence."""
     actor = event.get("actor")
     login = actor.get("login") if isinstance(actor, dict) else None
     if not _valid_actor_login(login):
         return None
 
-    repository = json.loads(runner(["api", f"repos/{repo}"]))
+    forge = forge if forge is not None else GitHubForge(runner)
+    repository = forge.repository(repo)
     owner = repository.get("owner") if isinstance(repository, dict) else None
     if (not isinstance(owner, dict) or not _valid_actor_login(owner.get("login"))
             or owner.get("type") not in ("User", "Organization")):
@@ -1541,42 +1554,42 @@ def _label_actor_association(repo: str, event: dict, *, runner) -> str | None:
     association = None
     if owner["type"] == "User" and owner["login"].lower() == login.lower():
         association = "OWNER"
-    elif _membership_status(f"repos/{repo}/collaborators/{quote(login, safe='')}", runner=runner) == 204:
+    elif _membership_status(repo, login, forge=forge) == 204:
         association = "COLLABORATOR"
     elif owner["type"] == "Organization" and _membership_status(
-            f"orgs/{quote(owner['login'], safe='')}/members/{quote(login, safe='')}", runner=runner) == 204:
+            owner["login"], login, forge=forge, organization=True) == 204:
         association = "MEMBER"
     return association if association in queue.TRUSTED_ASSOCIATIONS else None
 
 
-def _authorize_label_events(repo: str, number: int, events: dict[str, dict], *, runner,
-                            kind="issue") -> bool:
+def _authorize_label_events(repo: str, number: int, events: dict[str, dict], *, runner=None,
+                            kind="issue", forge: Forge | None = None) -> bool:
     """Authorize every selected application, explaining each definitive denial.
 
     Resolve all actors before writing: a failed lookup leaves the item on the
     retry path, rather than partially explaining an unconfirmed decision.
     Recheck membership on each poll; neither receipts nor comments grant trust.
     """
+    forge = forge if forge is not None else GitHubForge(runner)
     rejected = [
         (label, event) for label, event in events.items()
-        if _label_actor_association(repo, event, runner=runner) not in queue.TRUSTED_ASSOCIATIONS
+        if _label_actor_association(repo, event, forge=forge) not in queue.TRUSTED_ASSOCIATIONS
     ]
     for label, event in rejected:
-        _comment_label_rejection(repo, number, label, event, runner=runner, kind=kind)
+        _comment_label_rejection(repo, number, label, event, forge=forge, kind=kind)
     return not rejected
 
 
-def _comment_label_rejection(repo: str, number: int, label: str, event: dict, *, runner,
-                             kind="issue") -> None:
+def _comment_label_rejection(repo: str, number: int, label: str, event: dict, *, runner=None,
+                             kind="issue", forge: Forge | None = None) -> None:
     """Create one explanation per application, without editing it on later polls.
 
     The draft namespace opts into queue._gh's ambiguous-create reconciliation.
     Only that transport retry may PATCH an existing comment with the same body.
     """
     marker = f"<!-- nightshift:draft:label-authorization-{number}:{event['id']} -->"
-    pages = json.loads(runner([
-        "api", f"repos/{repo}/issues/{number}/comments", "--paginate", "--slurp",
-    ]))
+    forge = forge if forge is not None else GitHubForge(runner)
+    pages = forge.comment_pages(repo, number)
     malformed = f"malformed comment history for #{number}; retry next poll"
     if not isinstance(pages, list):
         raise RuntimeError(malformed)
@@ -1604,7 +1617,7 @@ def _comment_label_rejection(repo: str, number: int, label: str, event: dict, *,
         "actor remove and reapply it; both remaining labels must be authorized.\n\n"
         f"{marker}"
     )
-    runner([kind, "comment", str(number), "--repo", repo, "--body", body])
+    forge.create_comment(repo, number, kind, body)
 
 
 _save = specloop_job.save
@@ -1798,8 +1811,9 @@ def _collect(path: Path, receipt: dict, command: str) -> bool:
         raise DeliveryError(str(exc)) from exc
 
 
-def _comment(repo: str, number: int, change: str, body: str, *, runner,
-             action="draft", kind="issue", round_id: str | None = None) -> None:
+def _comment(repo: str, number: int, change: str, body: str, *, runner=None,
+             action="draft", kind="issue", round_id: str | None = None,
+             forge: Forge | None = None) -> None:
     """Upsert one delivery round; queue._gh also reconciles internal retries.
 
     Legacy receipts without a round ID retain their original marker
@@ -1808,16 +1822,14 @@ def _comment(repo: str, number: int, change: str, body: str, *, runner,
     suffix = f":{round_id}" if round_id is not None else ""
     marker = f"<!-- nightshift:{action}:{change}{suffix} -->"
     body = f"{queue.SELF_COMMENT_PREFIX} {body}\n\n{marker}"
-    pages = json.loads(runner([
-        "api", f"repos/{repo}/issues/{number}/comments", "--paginate", "--slurp",
-    ]))
+    forge = forge if forge is not None else GitHubForge(runner)
+    pages = forge.comment_pages(repo, number)
     comments = [comment for page in pages for comment in page]
     previous = next((c for c in comments if marker in (c.get("body") or "")), None)
     if previous:
-        runner(["api", f"repos/{repo}/issues/comments/{previous['id']}",
-                "--method", "PATCH", "-f", f"body={body}"])
+        forge.update_comment(repo, previous['id'], body)
     else:
-        runner([kind, "comment", str(number), "--repo", repo, "--body", body])
+        forge.create_comment(repo, number, kind, body)
 
 
 def _deliver(repo: Repo, labels: queue.Labels, number: int, change: str,

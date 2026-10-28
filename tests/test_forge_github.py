@@ -3,11 +3,12 @@
 from dataclasses import FrozenInstanceError, fields
 import json
 from typing import Literal
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 
-from nightshift import queue
+from nightshift import queue, specloop_intake as intake
+from nightshift.config import Repo
 from nightshift.forge import Forge, ForgeError
 from nightshift.forge.github import GitHubForge
 from nightshift.forge.types import CICheck, Comment, Issue, LabelEvent, PullRequest, ResponseText
@@ -276,3 +277,175 @@ def test_constructor_binds_current_runner(monkeypatch):
         assert forge.list_issues("o/r", "draft") == []
     for runner in (first, second, explicit):
         runner.assert_called_once()
+
+
+@pytest.fixture
+def intake_forge(monkeypatch):
+    monkeypatch.setattr(intake, "GitHubForge", Mock(side_effect=AssertionError("unexpected backend")))
+    monkeypatch.setattr(queue, "_gh", Mock(side_effect=AssertionError("unexpected transport")))
+    return Mock(spec_set=Forge)
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("forge-interface/core-policy-preservation/authorization-and-comments-unchanged")
+@pytest.mark.scenario("forge-interface/late-bound-runners/explicit-runner-wins")
+@pytest.mark.parametrize("relationship", ["OWNER", "COLLABORATOR", "MEMBER", None])
+def test_intake_authorization_protocol_fake(intake_forge, relationship):
+    forge = intake_forge
+    event = {"id": 2, "event": "labeled", "label": {"name": "draft"}, "actor": {"login": "helper"}}
+    forge.label_event_pages.return_value = [[dict(event, id=99, actor={"login": "owner"})], [event]]
+    forge.repository.return_value = {"owner": {
+        "login": "helper" if relationship == "OWNER" else "owner", "type": "User" if relationship == "OWNER" else "Organization"}}
+    forge.collaborator_response.return_value = ResponseText(
+        f"HTTP/2.0 {204 if relationship == 'COLLABORATOR' else 404}\r\n\r\n")
+    forge.organization_member_response.return_value = ResponseText(
+        f"HTTP/1.1 {204 if relationship == 'MEMBER' else 404}\n\n")
+    forge.comment_pages.return_value = [[]]
+    for _ in range(2):
+        events = intake._latest_label_events("o/r", 7, {"draft"}, forge=forge)
+        assert events == {"draft": event}
+        assert intake._authorize_label_events("o/r", 7, events, forge=forge) is (relationship is not None)
+        if relationship is None:
+            body = forge.create_comment.call_args.args[-1]
+            assert "label-authorization-7:2" in body
+            forge.comment_pages.return_value = [[{"body": body, "author_association": "NONE"}]]
+    names = [c[0] for c in forge.mock_calls]
+    lookups = ["label_event_pages", "repository"]
+    if relationship != "OWNER":
+        lookups += ["collaborator_response"]
+    if relationship in ("MEMBER", None):
+        lookups += ["organization_member_response"]
+    assert names == (lookups + ["comment_pages", "create_comment"] + lookups + ["comment_pages"]
+                     if relationship is None else lookups * 2)
+    forge.reset_mock()
+    assert intake._label_events("o/r", 7, {"draft"}, forge=forge) == {"draft": 2}
+    assert intake._approval_event("o/r", 7, "draft", forge=forge) == 2
+    for association in ("OWNER", "MEMBER", "COLLABORATOR", "NONE", None):
+        forge.issue_author.return_value = {"author_association": association, "body": BODY}
+        assert intake._issue_author_trusted("o/r", 7, forge=forge) is (association in queue.TRUSTED_ASSOCIATIONS)
+
+
+@pytest.mark.scenario("forge-interface/core-policy-preservation/authorization-and-comments-unchanged")
+@pytest.mark.parametrize("pages", [None, {}, [None], [[None]], [[{"body": 42}]]])
+def test_rejection_fake_rejects_malformed_history(intake_forge, pages):
+    intake_forge.comment_pages.return_value = pages
+    with pytest.raises(RuntimeError, match="malformed comment history"):
+        intake._comment_label_rejection("o/r", 7, "draft", {"id": 2}, forge=intake_forge)
+    assert intake_forge.mock_calls == [call.comment_pages("o/r", 7)]
+
+
+@pytest.mark.scenario("forge-interface/core-policy-preservation/authorization-and-comments-unchanged")
+@pytest.mark.parametrize("event", [None, {"event": "labeled", "label": None},
+    {"event": "labeled", "label": {"name": "draft"}, "id": True}])
+def test_label_fake_rejects_malformed_evidence(intake_forge, event):
+    intake_forge.label_event_pages.return_value = [[event]]
+    with pytest.raises(RuntimeError, match="retry next poll"):
+        intake._label_events("o/r", 7, {"draft"}, forge=intake_forge)
+    assert intake_forge.mock_calls == [call.label_event_pages("o/r", 7)]
+
+
+@pytest.mark.scenario("forge-interface/core-policy-preservation/authorization-and-comments-unchanged")
+@pytest.mark.real_trust
+@pytest.mark.parametrize("error", ERRORS)
+@pytest.mark.parametrize("operation", ["issue_author", "label_event_pages", "collaborator_response", "comment_pages"])
+def test_intake_fake_read_errors_prevent_mutations(intake_forge, error, operation):
+    getattr(intake_forge, operation).side_effect = error
+    actions = {
+        "issue_author": lambda: intake._issue_author_trusted("o/r", 7, forge=intake_forge),
+        "label_event_pages": lambda: intake._label_events("o/r", 7, {"draft"}, forge=intake_forge),
+        "collaborator_response": lambda: intake._membership_status("o/r", "helper", forge=intake_forge),
+        "comment_pages": lambda: intake._comment("o/r", 7, "change", BODY, forge=intake_forge),
+    }
+    with pytest.raises(type(error)) as caught:
+        actions[operation]()
+    assert caught.value is error
+    assert len(intake_forge.mock_calls) == 1
+
+
+@pytest.mark.scenario("forge-interface/core-policy-preservation/authorization-and-comments-unchanged")
+@pytest.mark.parametrize("response,expected", [
+    (ResponseText("HTTP/2 204\n\n"), 204),
+    (ResponseText("HTTP/1.1 404 Not Found\r\n\r\n"), 404),
+    (queue.GhError("gh: Not Found (HTTP 404)", transient=False), 404),
+    (queue.GhError("gh: Not Found (HTTP 404)", transient=True), None),
+    (ResponseText("HTTP/2 204\n"), None), (ResponseText("HTTP/2 403\n\n"), None),
+    (ResponseText(""), None),
+])
+def test_membership_fake_keeps_status_parsing_in_core(intake_forge, response, expected):
+    if isinstance(response, Exception):
+        intake_forge.collaborator_response.side_effect = response
+    else:
+        intake_forge.collaborator_response.return_value = response
+    if expected is None:
+        with pytest.raises(RuntimeError):
+            intake._membership_status("o/r", "helper", forge=intake_forge)
+    else:
+        assert intake._membership_status("o/r", "helper", forge=intake_forge) == expected
+    assert intake_forge.mock_calls == [call.collaborator_response("o/r", "helper")]
+
+
+@pytest.mark.scenario("forge-interface/core-policy-preservation/authorization-and-comments-unchanged")
+@pytest.mark.parametrize("existing", [False, True])
+def test_comment_fake_preserves_literal_marker_and_raw_body(intake_forge, existing):
+    marker = "<!-- nightshift:draft:change:round -->"
+    intake_forge.comment_pages.return_value = [[], [{"id": 42, "body": "prefix " + marker + " suffix",
+        "author_association": "NONE"}] if existing else []]
+    intake._comment("o/r", 7, "change", BODY, round_id="round", forge=intake_forge)
+    body = f"{queue.SELF_COMMENT_PREFIX} {BODY}\n\n{marker}"
+    assert intake_forge.mock_calls == [call.comment_pages("o/r", 7),
+        call.update_comment("o/r", 42, body) if existing else call.create_comment("o/r", 7, "issue", body)]
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("forge-interface/late-bound-runners/explicit-runner-wins")
+@pytest.mark.parametrize("kind", ["issue", "pr"])
+def test_intake_explicit_runner_and_failure_order(monkeypatch, kind):
+    monkeypatch.setattr(queue, "_gh", Mock(side_effect=AssertionError("unbound runner")))
+    runner = Mock(side_effect=['{"author_association":"OWNER"}', "[]", "", ""])
+    assert intake._issue_author_trusted("o/r", 7, runner)
+    assert intake.report_failure(Repo("o/r"), queue.Labels(), 7, "draft", kind, RuntimeError("oops"), runner=runner) == []
+    body = (f"{queue.SELF_COMMENT_PREFIX} Specloop draft failed. Human input is needed.\n\noops\n\n"
+            "Resolve the failure, then remove `needs-human` to retry.\n\n<!-- nightshift:draft-error:7 -->")
+    assert runner.call_args_list == [call(argv) for argv in [
+        ["api", "repos/o/r/issues/7"],
+        ["api", "repos/o/r/issues/7/comments", "--paginate", "--slurp"],
+        [kind, "comment", "7", "--repo", "o/r", "--body", body],
+        [kind, "edit", "7", "--repo", "o/r", "--add-label", "needs-human"],
+    ]]
+
+
+@pytest.mark.scenario("forge-interface/late-bound-runners/explicit-runner-wins")
+def test_label_authorization_uses_explicit_runner(monkeypatch):
+    monkeypatch.setattr(queue, "_gh", Mock(side_effect=AssertionError("unbound runner")))
+    event = {"id": 2, "event": "labeled", "label": {"name": "draft"}, "actor": {"login": "helper"}}
+    runner = Mock(side_effect=[json.dumps([[event]]),
+        '{"owner":{"login":"owner","type":"Organization"}}',
+        "HTTP/2 404\n\n", "HTTP/2 204\n\n"])
+    events = intake._latest_label_events("o/r", 7, {"draft"}, runner=runner)
+    assert intake._authorize_label_events("o/r", 7, events, runner=runner)
+    assert runner.call_args_list == [call(argv) for argv in [
+        ["api", "repos/o/r/issues/7/events", "--paginate", "--slurp"],
+        ["api", "repos/o/r"],
+        ["api", "repos/o/r/collaborators/helper", "--include"],
+        ["api", "orgs/owner/members/helper", "--include"],
+    ]]
+
+
+@pytest.mark.scenario("forge-interface/late-bound-runners/explicit-runner-wins")
+@pytest.mark.parametrize("kind", ["issue", "pr"])
+def test_failure_reporting_reuses_fake_and_labels_last(intake_forge, kind):
+    forge = intake_forge
+    forge.comment_pages.return_value = []
+    args = (Repo("o/r"), queue.Labels(), 7, "draft", kind, RuntimeError("oops"))
+    assert intake.report_failure(*args, forge=forge) == []
+    assert [c[0] for c in forge.mock_calls] == ["comment_pages", "create_comment", f"relabel_{kind}"]
+    for error in ERRORS:
+        forge.reset_mock()
+        forge.comment_pages.side_effect = error
+        if isinstance(error, Paused):
+            with pytest.raises(Paused) as caught:
+                intake.report_failure(*args, forge=forge)
+            assert caught.value is error
+        else:
+            assert intake.report_failure(*args, forge=forge) == [error]
+        assert forge.mock_calls == [call.comment_pages("o/r", 7)]
