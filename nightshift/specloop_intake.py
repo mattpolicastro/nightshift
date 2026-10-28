@@ -440,17 +440,11 @@ def admit_pending(
     """Admit approved spec branches and recover interrupted PR notifications."""
     if repo.engine != "specloop":
         return []
-    gh = runner or queue._gh
-    pending = json.loads(gh([
-        "pr", "list", "--repo", repo.name, "--label", labels.spec_approved,
-        "--state", "open", "--json", "number", "--limit", "100",
-    ]))
+    forge = GitHubForge(runner or queue._gh)
+    pending = forge.list_open_prs(repo.name, labels.spec_approved)
 
     def admit(number):
-        pr = json.loads(gh([
-            "pr", "view", str(number), "--repo", repo.name, "--json",
-            "state,labels,headRefName,headRefOid,isCrossRepository,url",
-        ]))
+        pr = forge.pr_for_admission(repo.name, number)
         current = {label["name"] for label in pr["labels"]}
         branch = pr["headRefName"]
         if (pr["state"] != "OPEN" or labels.spec_approved not in current
@@ -461,8 +455,8 @@ def admit_pending(
         # and hyphens. Keep it a single safe path/ref component.
         if not _safe_change(change):
             return None
-        events = _latest_label_events(repo.name, number, {labels.spec_approved}, runner=gh)
-        if not _authorize_label_events(repo.name, number, events, runner=gh, kind="pr"):
+        events = _latest_label_events(repo.name, number, {labels.spec_approved}, forge=forge)
+        if not _authorize_label_events(repo.name, number, events, forge=forge, kind="pr"):
             return None
         # Bind the receipt and reviewed head to the same authorized application.
         approval_event = events[labels.spec_approved]["id"]
@@ -470,7 +464,7 @@ def admit_pending(
             # Healthy approvals alongside agent:revise still bind the reviewed
             # head, but a configuration hold must not record a new attempt.
             _require_manifest(repo, readiness)
-            _approval_covers_head(state_dir, repo, number, change, approval_event, pr, labels, gh)
+            _approval_covers_head(state_dir, repo, number, change, approval_event, pr, labels, forge=forge)
             return None
         path = state_dir / "admissions" / repo.name.replace("/", "__") / f"{number}.json"
         receipt = json.loads(path.read_text()) if path.exists() else None
@@ -492,7 +486,7 @@ def admit_pending(
             # recovery. Hold a new refusal just like a new admit until repair.
             if existing is not None or not recovering:
                 source = _require_manifest(repo, readiness).repo
-            if not _approval_covers_head(state_dir, repo, number, change, approval_event, pr, labels, gh):
+            if not _approval_covers_head(state_dir, repo, number, change, approval_event, pr, labels, forge=forge):
                 return None
         # Durable run state completes admission even if its response was lost.
         # Notification recovery needs neither enrollment nor a new approval head.
@@ -557,14 +551,9 @@ def admit_pending(
                 for reason in result.get("reasons", [])
             )
             add, remove = [labels.needs_human], [labels.spec_approved]
-        _comment(repo.name, number, change, body, runner=gh, action="admit", kind="pr",
+        _comment(repo.name, number, change, body, forge=forge, action="admit", kind="pr",
                  round_id=f"{approval_event}:{receipt['head']}:{result['outcome']}")
-        edit = ["pr", "edit", str(number), "--repo", repo.name]
-        for label in add:
-            edit += ["--add-label", label]
-        for label in remove:
-            edit += ["--remove-label", label]
-        gh(edit)
+        forge.relabel_pr(repo.name, number, add=add, remove=remove)
         _finish_delivery(path, receipt)
         return result
 
@@ -584,7 +573,8 @@ def _revision_instant(value) -> datetime:
 
 
 def _initialize_revision_feedback(path: Path, receipt: dict | None, repo: str,
-                                  number: int, head: str, *, runner=queue._gh) -> dict | None:
+                                  number: int, head: str, *, runner=None,
+                                  forge: Forge | None = None) -> dict | None:
     """After authorization, initialize legacy state before collection or delivery.
 
     `head` must be the current PR head, not the old receipt's head. Return a
@@ -600,16 +590,17 @@ def _initialize_revision_feedback(path: Path, receipt: dict | None, repo: str,
     if metadata.intersection(receipt):
         _validate_revision_feedback(receipt)
         return receipt
+    forge = forge if forge is not None else GitHubForge(runner or queue._gh)
     if "saved_at" in receipt or "updated_at" in receipt:
         cutoff = _revision_instant(receipt["saved_at"] if "saved_at" in receipt
                                    else receipt["updated_at"])
         source = "receipt_saved_at"
     else:
-        tip = json.loads(runner(["api", f"repos/{repo}/commits/{head}"]))
+        tip = forge.commit(repo, head)
         cutoff = _revision_instant(tip["commit"]["committer"]["date"])
         source = "branch_tip"
     consumed = set()
-    for kind, record in queue._pr_feedback_records(repo, number, runner=runner):
+    for kind, record in forge.pr_feedback_records(repo, number):
         identity = queue._feedback_id(kind, record)
         created = _revision_instant(record.get("submitted_at" if kind == "review" else "created_at"))
         if created <= cutoff:
@@ -723,17 +714,11 @@ def revise_pending(
     """Re-draft specs or queue review tasks for admitted changes on their PR."""
     if repo.engine != "specloop":
         return []
-    gh = runner or queue._gh
-    pending = json.loads(gh([
-        "pr", "list", "--repo", repo.name, "--label", labels.revise,
-        "--state", "open", "--json", "number", "--limit", "100",
-    ]))
+    forge = GitHubForge(runner or queue._gh)
+    pending = forge.list_open_prs(repo.name, labels.revise)
 
     def revise(number):
-        pr = json.loads(gh([
-            "pr", "view", str(number), "--repo", repo.name, "--json",
-            "state,title,body,labels,headRefName,headRefOid,isCrossRepository,url",
-        ]))
+        pr = forge.pr_for_revision(repo.name, number)
         current = {label["name"] for label in pr["labels"]}
         branch = pr["headRefName"]
         if (pr["state"] != "OPEN" or labels.revise not in current
@@ -743,8 +728,8 @@ def revise_pending(
         change = branch.removeprefix("spec/")
         if not _safe_change(change):
             return None
-        events = _latest_label_events(repo.name, number, {labels.revise}, runner=gh)
-        if not _authorize_label_events(repo.name, number, events, runner=gh, kind="pr"):
+        events = _latest_label_events(repo.name, number, {labels.revise}, forge=forge)
+        if not _authorize_label_events(repo.name, number, events, forge=forge, kind="pr"):
             return None
         # Authorization and receipt identity use the same current application.
         # Even collecting a finished job must wait until its trigger is trusted.
@@ -754,7 +739,7 @@ def revise_pending(
         receipt = json.loads(path.read_text()) if path.exists() else None
         try:
             receipt = _initialize_revision_feedback(
-                path, receipt, repo.name, number, pr["headRefOid"], runner=gh)
+                path, receipt, repo.name, number, pr["headRefOid"], forge=forge)
         except _ReceiptChanged:
             return _PENDING
         # A newer authorized event cannot replace a running job's snapshot.
@@ -814,7 +799,7 @@ def revise_pending(
                 git = partial(_bounded_run, runner=git_runner)
                 if receipt is None or (not (awaiting_legacy or recovered_attempt) and receipt["result"]["outcome"] in (
                         "needs_input", "rejected", "refused")):
-                    items = queue.pr_feedback_items(repo.name, number, runner=gh)
+                    items = forge.pr_feedback_items(repo.name, number)
                     consumed = set(previous["consumed_feedback_ids"]) if previous else set()
                     items = [item for item in items if item.id not in consumed]
                     feedback = [item.block for item in items]
@@ -919,19 +904,18 @@ def revise_pending(
             )
         if not _recover_item_cleanup(path):
             return _PENDING
-        _comment(repo.name, number, change, body, runner=gh, action="revise", kind="pr",
+        _comment(repo.name, number, change, body, forge=forge, action="revise", kind="pr",
                  round_id=receipt.get("round_id"))
-        edit = ["pr", "edit", str(number), "--repo", repo.name]
+        add, remove = [], []
         if result["outcome"] in ("drafted", "revised", "empty"):
             # Execution or comment delivery may have outlived the application.
-            latest = _latest_label_events(repo.name, number, {labels.revise}, runner=gh)
+            latest = _latest_label_events(repo.name, number, {labels.revise}, forge=forge)
             if latest.get(labels.revise, {}).get("id") == receipt["event"]:
-                edit += ["--remove-label", labels.revise]
+                remove.append(labels.revise)
         else:
-            edit += ["--add-label", labels.needs_human]
-        # mutation-equivalent: edit has 5 arguments or 7 after a flag/value pair, so > 5 and > 6 agree.
-        if len(edit) > 5:
-            gh(edit)
+            add.append(labels.needs_human)
+        if add or remove:
+            forge.relabel_pr(repo.name, number, add=add, remove=remove)
         _finish_delivery(path, receipt)
         return result
 
@@ -1423,7 +1407,7 @@ def publish_pending(
 
 
 def _approval_covers_head(state_dir: Path, repo: Repo, number: int, change: str, event: int, pr: dict,
-                          labels: queue.Labels, gh) -> bool:
+                          labels: queue.Labels, gh=None, *, forge: Forge | None = None) -> bool:
     """An approval covers the head it was first seen with, and nothing pushed later.
 
     Without this, approving a spec PR that also carries agent:revise (or
@@ -1436,11 +1420,12 @@ def _approval_covers_head(state_dir: Path, repo: Repo, number: int, change: str,
         return True
     if seen["head"] == pr["headRefOid"]:
         return True
+    forge = forge if forge is not None else GitHubForge(gh or queue._gh)
     _comment(repo.name, number, change,
              f"The spec changed after it was approved ({seen['head'][:12]} -> {pr['headRefOid'][:12]}), so it was "
              f"not admitted. Review the new revision, then reapply `{labels.spec_approved}`.",
-             runner=gh, action="approval", kind="pr", round_id=str(event))
-    gh(["pr", "edit", str(number), "--repo", repo.name, "--remove-label", labels.spec_approved])
+             forge=forge, action="approval", kind="pr", round_id=str(event))
+    forge.relabel_pr(repo.name, number, add=[], remove=[labels.spec_approved])
     return False
 
 

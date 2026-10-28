@@ -15,6 +15,10 @@ from nightshift.forge.types import CICheck, Comment, Issue, LabelEvent, PullRequ
 from nightshift.specloop_intake import Paused
 import test_specloop_intake as proposal_tests
 from test_specloop_intake import repo
+import test_specloop_approval as approval_tests
+import test_specloop_spec_revision as spec_revision_tests
+from test_specloop_build_revision import BuildCommands
+from test_revision_feedback_state import LegacyGh, legacy_receipt, CUTOFF
 
 
 class StructuralFake:
@@ -584,3 +588,149 @@ def test_failure_reporting_reuses_fake_and_labels_last(intake_forge, kind):
         else:
             assert intake.report_failure(*args, forge=forge) == [error]
         assert forge.mock_calls == [call.comment_pages("o/r", 7)]
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("forge-interface/late-bound-runners/default-runner-remains-patchable")
+@pytest.mark.scenario("issue-intake/forge-mediated-intake/existing-workflows-retain-transcripts")
+@pytest.mark.parametrize("stage", ["approval", "spec", "build"])
+def test_approval_and_revision_bind_each_poll(monkeypatch, repo, tmp_path, stage):
+    forbidden = Mock(side_effect=AssertionError("unbound transport"))
+    for attempt in range(3):
+        state = tmp_path / str(attempt)
+        if stage == "approval":
+            gh, commands = approval_tests.ApprovalGh(), approval_tests.Commands()
+            poll, directory = intake.admit_pending, "admissions"
+        else:
+            gh = spec_revision_tests.RevisionGh()
+            commands = BuildCommands(gh) if stage == "build" else spec_revision_tests.Commands(gh)
+            poll, directory = intake.revise_pending, "revisions"
+            spec_revision_tests.seed_consumed(state)
+        path = state / directory / "owner__sample/8.json"
+
+        def dispatch(args):
+            monkeypatch.setattr(queue, "_gh", forbidden)
+            if stage != "approval" and args[:2] == ["pr", "comment"]:
+                receipt = json.loads(path.read_text())
+                assert receipt["feedback_ids"] == ["conversation:102"]
+                assert receipt["consumed_feedback_ids"] == ["conversation:101", "conversation:102"]
+            return gh(args)
+
+        runner = Mock(side_effect=dispatch)
+        monkeypatch.setattr(queue, "_gh", runner if attempt < 2 else forbidden)
+        forge = Mock(spec_set=Forge, wraps=GitHubForge(runner))
+        constructor = Mock(return_value=forge)
+        monkeypatch.setattr(intake, "GitHubForge", constructor)
+        poll(repo, queue.Labels(), state, specloop_runner=commands, git_runner=commands,
+             **({"runner": runner} if attempt == 2 else {}))
+        constructor.assert_called_once_with(runner)
+        expected = ["list_open_prs", "pr_for_admission" if stage == "approval" else "pr_for_revision",
+                    "label_event_pages", "repository", "collaborator_response"]
+        if stage != "approval":
+            expected += ["pr_feedback_items"]
+        expected += ["comment_pages", "create_comment"]
+        if stage != "approval":
+            expected += ["label_event_pages"]
+        assert [c[0] for c in forge.mock_calls] == expected + ["relabel_pr"]
+        receipt = json.loads(path.read_text())
+        assert receipt["delivered"] and receipt["head"] == approval_tests.HEAD
+        assert len(gh.comments) == 1
+        assert gh.labels == (set() if stage == "approval" else {"spec:review"})
+        if stage != "build":
+            action = "admit" if stage == "approval" else "revise"
+            assert next(c for c in commands.calls if c[0] == "git") == [
+                "git", "-C", str(tmp_path / "manifest-source"), "fetch", "origin",
+                f"+refs/heads/{approval_tests.BRANCH}:refs/nightshift/{action}/{approval_tests.CHANGE}",
+            ]
+    forbidden.assert_not_called()
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("forge-interface/core-policy-preservation/revision-and-proposal-delivery-unchanged")
+@pytest.mark.parametrize("stage", ["spec", "build"])
+def test_revision_forge_recovers_snapshot_without_removing_new_event(monkeypatch, repo, tmp_path, stage):
+    gh = spec_revision_tests.RevisionGh()
+    commands = BuildCommands(gh) if stage == "build" else spec_revision_tests.Commands(gh)
+    path = spec_revision_tests.seed_consumed(tmp_path)
+    forge = Mock(spec_set=Forge, wraps=GitHubForge(gh))
+    monkeypatch.setattr(intake, "GitHubForge", Mock(return_value=forge))
+    gh.fail_comment = True
+    with pytest.raises(RuntimeError, match="comment response lost"):
+        intake.revise_pending(repo, queue.Labels(), tmp_path, runner=gh,
+                              specloop_runner=commands, git_runner=commands)
+    saved = json.loads(path.read_text())
+    calls = list(commands.calls)
+    comment = dict(gh.comments[0])
+    gh.feedback[1]["body"] = "Edited after dispatch"
+    gh.label_event("agent:revise", "unlabeled")
+    gh.label_event("agent:revise", "labeled")
+    forge.reset_mock()
+    intake.revise_pending(repo, queue.Labels(), tmp_path, runner=gh,
+                          specloop_runner=commands, git_runner=commands)
+    recovered = json.loads(path.read_text())
+    assert recovered == {**saved, "delivered": True}
+    assert gh.comments == [comment] and "agent:revise" in gh.labels
+    assert [c[0] for c in forge.mock_calls] == [
+        "list_open_prs", "pr_for_revision", "label_event_pages", "repository",
+        "collaborator_response", "comment_pages", "update_comment", "label_event_pages",
+    ]
+    assert commands.calls == calls + ([] if stage == "build" else [[
+        "git", "-C", str(tmp_path / "manifest-source"), "push", "origin",
+        f"{spec_revision_tests.REVISED}:refs/heads/{approval_tests.BRANCH}",
+    ]])
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("forge-interface/late-bound-runners/default-runner-remains-patchable")
+@pytest.mark.scenario("forge-interface/core-policy-preservation/revision-and-proposal-delivery-unchanged")
+@pytest.mark.parametrize("saved_time", [False, True])
+def test_legacy_feedback_forge_late_binding_and_read_budget(monkeypatch, tmp_path, saved_time):
+    forbidden = Mock(side_effect=AssertionError("unbound transport"))
+    for attempt in range(3):
+        path, gh = tmp_path / str(attempt) / "8.json", LegacyGh()
+        receipt = legacy_receipt(path, **({"saved_at": CUTOFF} if saved_time else {}))
+
+        def dispatch(args):
+            monkeypatch.setattr(queue, "_gh", forbidden)
+            return gh(args)
+
+        runner = Mock(side_effect=dispatch)
+        monkeypatch.setattr(queue, "_gh", runner if attempt < 2 else forbidden)
+        forge = Mock(spec_set=Forge, wraps=GitHubForge(runner))
+        constructor = Mock(return_value=forge)
+        monkeypatch.setattr(intake, "GitHubForge", constructor)
+        migrated = intake._initialize_revision_feedback(
+            path, receipt, "owner/sample", 8, "current-head",
+            **({"runner": runner} if attempt == 2 else {}))
+        constructor.assert_called_once_with(runner)
+        assert forge.mock_calls == ([] if saved_time else [call.commit("owner/sample", "current-head")]) + [
+            call.pr_feedback_records("owner/sample", 8)]
+        assert gh.calls == ([] if saved_time else [["api", "repos/owner/sample/commits/current-head"]]) + [
+            ["api", "repos/owner/sample/issues/8/comments", "--paginate", "--slurp"],
+            ["api", "repos/owner/sample/pulls/8/reviews", "--paginate", "--slurp"],
+            ["api", "repos/owner/sample/pulls/8/comments", "--paginate", "--slurp"],
+        ]
+        assert migrated == json.loads(path.read_text())
+        assert all(migrated[key] == value for key, value in receipt.items())
+        assert migrated["consumed_feedback_ids"] == sorted(
+            f"{kind}:{i}" for kind in ("conversation", "review", "inline") for i in (1, 2))
+        forge.reset_mock()
+        assert intake._initialize_revision_feedback(path, migrated, "owner/sample", 8, "new-head", forge=forge) == migrated
+        assert forge.mock_calls == []
+    forbidden.assert_not_called()
+
+
+@pytest.mark.scenario("forge-interface/core-policy-preservation/revision-and-proposal-delivery-unchanged")
+def test_approval_head_binding_uses_supplied_forge(intake_forge, tmp_path):
+    forge = intake_forge
+    forge.comment_pages.return_value = []
+    args = (tmp_path, Repo("o/r"), 7, "change", 2)
+    labels = queue.Labels()
+    assert intake._approval_covers_head(*args, {"headRefOid": "old"}, labels, forge=forge)
+    assert intake._approval_covers_head(*args, {"headRefOid": "old"}, labels, forge=forge)
+    assert forge.mock_calls == []
+    assert not intake._approval_covers_head(*args, {"headRefOid": "new"}, labels, forge=forge)
+    assert [c[0] for c in forge.mock_calls] == ["comment_pages", "create_comment", "relabel_pr"]
+    forge.relabel_pr.assert_called_once_with("o/r", 7, add=[], remove=["spec:approved"])
+    assert "<!-- nightshift:approval:change:2 -->" in forge.create_comment.call_args.args[-1]
+    assert json.loads((tmp_path / "approvals/o__r/7.json").read_text()) == {"event": 2, "head": "old"}
