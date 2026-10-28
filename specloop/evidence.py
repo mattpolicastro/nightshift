@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from specloop import verify
+from specloop.manifest import DEFAULT_MUTATION_INVALID_STEPS as BUILD_STEPS
 from specloop.manifest import Manifest, Step, matches
 from specloop.seal import git
 
@@ -323,7 +324,6 @@ def generate(lines: list[tuple[str, int, str]], count: int, seed: int, *,
     return picked
 
 
-BUILD_STEPS = ("configure", "build")
 # A mutant gets this many times the baseline's duration per step (at least
 # MIN_MUTANT_SECONDS): a mutant that hangs is caught by its timeout instead of
 # holding the gate for the step's full ceiling (15 minutes for Nightshift's
@@ -399,7 +399,7 @@ def _mutate_one(number: int, mut: Mutant, baseline_src: Path, head: str,
         narrowed = any("{mutant_path}" in arg for s in steps for arg in s.run)
         uses_path = narrowed or any("{mutant_path}" in arg for s in m.prepare for arg in s.run)
         phases = [(mutant_out, mut.path), (mutant_out / "confirmation", "")] if narrowed else [(mutant_out, "")]
-        invalid_steps = set(BUILD_STEPS) | {s.id for s in m.prepare}
+        invalid_steps = set(m.mutation_invalid_steps) | {s.id for s in m.prepare}
         for run_out, path in phases:
             if run_out != mutant_out:
                 run_dirs.append(run_out)

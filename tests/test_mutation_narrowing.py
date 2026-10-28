@@ -107,8 +107,10 @@ def decision(out, mut, phases):
 
 @pytest.mark.scenario("parallel-evidence-mutants/mutation-decision-receipts/deciding-runs-are-recorded")
 @pytest.mark.scenario("parallel-evidence-mutants/narrow-then-confirm/narrowed-failure-kills")
-def test_narrowed_kill_counts_as_killed(narrowing):
+@pytest.mark.parametrize("invalid_steps", [("configure", "build"), ()])
+def test_narrowed_kill_counts_as_killed(narrowing, invalid_steps):
     repo, m, out, calls = narrowing
+    m = replace(m, mutation_invalid_steps=invalid_steps)
     mut = mutant("    return x < 0")
     assert evidence.mutate(repo, "head", [mut], m, out)
     worker = out / "mutant-1"
@@ -126,8 +128,10 @@ def test_narrowed_kill_counts_as_killed(narrowing):
 @pytest.mark.scenario("parallel-evidence-mutants/mutation-decision-receipts/deciding-runs-are-recorded")
 @pytest.mark.scenario("parallel-evidence-mutants/narrow-then-confirm/narrowed-survivor-receives-full-confirmation")
 @pytest.mark.parametrize("survives", [False, True])
-def test_narrowed_survivor_confirmed_on_full_steps(narrowing, survives, monkeypatch):
+@pytest.mark.parametrize("invalid_steps", [("configure", "build"), ()])
+def test_narrowed_survivor_confirmed_on_full_steps(narrowing, survives, monkeypatch, invalid_steps):
     repo, m, out, calls = narrowing
+    m = replace(m, mutation_invalid_steps=invalid_steps)
     prepare = m.prepare[0]
     argv = list(prepare.run)
     argv[3] += '\nPath("artifacts/phase.txt").write_text(sys.argv[2])\n'
@@ -175,10 +179,12 @@ def test_narrowed_survivor_confirmed_on_full_steps(narrowing, survives, monkeypa
 @pytest.mark.scenario("parallel-evidence-mutants/mutation-decision-receipts/deciding-runs-are-recorded")
 @pytest.mark.scenario("parallel-evidence-mutants/narrow-then-confirm/timeout-and-invalid-results-remain-distinct")
 @pytest.mark.parametrize("phase", ["narrowed", "confirmation"])
-@pytest.mark.parametrize("stage", ["prepare", "configure", "build", "test"])
+@pytest.mark.parametrize("stage", ["prepare", "configure", "build", "test", "dart-analyze"])
 @pytest.mark.parametrize("code", [None, 9, -15, 7], ids=["timeout", "unexpected", "signal", "expected"])
 def test_phase_classifications(narrowing, phase, stage, code):
     repo, m, out, calls = narrowing
+    if stage == "dart-analyze":
+        m = replace(m, mutation_invalid_steps=(stage,))
     script = '''import os, signal, sys, time
 from pathlib import Path
 is_mutant = "# changed" in Path(sys.argv[1], "calc.py").read_text()
@@ -224,8 +230,10 @@ sys.exit(7)
 @pytest.mark.scenario("parallel-evidence-mutants/mutation-decision-receipts/deciding-runs-are-recorded")
 @pytest.mark.scenario("parallel-evidence-mutants/narrow-then-confirm/commands-without-narrowing-run-once")
 @pytest.mark.parametrize("after,expected", [("    return x > 0", "killed"), ("    return x >= 0 # same", "survived")])
-def test_commands_without_placeholder_run_once(narrowing, after, expected):
+@pytest.mark.parametrize("invalid_steps", [("configure", "build"), ()])
+def test_commands_without_placeholder_run_once(narrowing, after, expected, invalid_steps):
     repo, m, out, calls = narrowing
+    m = replace(m, mutation_invalid_steps=invalid_steps)
     steps = tuple(replace(s, run=tuple(arg.replace("{mutant_path}", "") for arg in s.run)) for s in m.verify)
     m = replace(m, verify=steps)
     mut = mutant(after)
@@ -260,8 +268,10 @@ def test_prechecks_execute_no_mutant_commands(narrowing, precheck):
 
 
 @pytest.mark.scenario("parallel-evidence-mutants/baseline-step-time-boxes/both-phases-use-their-full-baseline")
-def test_both_phases_use_assigned_full_baseline(narrowing, monkeypatch):
+@pytest.mark.parametrize("invalid_steps", [("configure", "build"), ()])
+def test_both_phases_use_assigned_full_baseline(narrowing, monkeypatch, invalid_steps):
     repo, m, out, _ = narrowing
+    m = replace(m, mutation_invalid_steps=invalid_steps)
     (repo / "other.py").write_text((repo / "calc.py").read_text())
     m = replace(m, mutation_routes=(manifest.MutationRoute(("other.py",), ("later", "test", "inspect")),))
     original = deepcopy(m)
@@ -446,8 +456,10 @@ def test_persisted_indexes_ignore_completion_order(narrowing, monkeypatch):
 @pytest.mark.scenario("parallel-evidence-mutants/narrow-then-confirm/two-phases-preserve-isolation-and-cleanup")
 @pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize("parallel,crashes", [(1, False), (2, False), (2, True)])
-def test_phase_lifecycle(narrowing, monkeypatch, prepared, parallel, crashes):
+@pytest.mark.parametrize("invalid_steps", [("configure", "build"), ()])
+def test_phase_lifecycle(narrowing, monkeypatch, prepared, parallel, crashes, invalid_steps):
     repo, m, out, _ = narrowing
+    m = replace(m, mutation_invalid_steps=invalid_steps)
     original = (repo / "calc.py").read_text()
     mutants = [mutant(f"    return x >= 0 # worker {i}") for i in range(1, 4)]
     inspect = manifest.Step("inspect", (sys.executable, "-B", "-c", '''import os, subprocess, sys

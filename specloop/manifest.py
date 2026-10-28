@@ -11,6 +11,7 @@ from datetime import date, datetime, time
 from pathlib import Path, PureWindowsPath
 
 ADAPTERS = ("codex", "claude")
+DEFAULT_MUTATION_INVALID_STEPS = ("configure", "build")
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ class Manifest:
     mutation_step: tuple[Step, ...] = ()
     mutation_routes: tuple[MutationRoute, ...] = ()
     auth_targets: tuple[str, ...] = ()  # all profiles, including unused and fallback logins
+    mutation_invalid_steps: tuple[str, ...] = DEFAULT_MUTATION_INVALID_STEPS
 
 
 def _path(s: str) -> Path:
@@ -197,6 +199,9 @@ def parse(data: dict, roles_override: dict[str, str] | None = None) -> Manifest:
 
 
 def _gates(g: dict, definitions: tuple[Step, ...]) -> dict:
+    invalid_steps = g.get("mutation_invalid_steps", list(DEFAULT_MUTATION_INVALID_STEPS))
+    if not isinstance(invalid_steps, list) or any(not isinstance(s, str) or not s for s in invalid_steps):
+        raise ValueError("gates.mutation_invalid_steps must be an array of nonempty step ids")
     skip = g.get("mutation_skip", [])
     if not isinstance(skip, list) or any(not isinstance(p, str) or not p for p in skip):
         raise ValueError("gates.mutation_skip must be an array of nonempty strings")
@@ -243,6 +248,7 @@ def _gates(g: dict, definitions: tuple[Step, ...]) -> dict:
             raise ValueError(f"gates.{key} must be \"human\" or \"agent\", not {g[key]!r}")
     return {"evidence": bool(g.get("evidence", False)), "mutation_steps": steps,
             "mutation_routes": tuple(routes),
+            "mutation_invalid_steps": tuple(invalid_steps),
             "mutation_parallel": parallel,
             "mutation_skip": tuple(skip),
             "gate_review": g.get("review", "human"), "stuck": g.get("stuck", "human"),

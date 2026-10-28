@@ -952,7 +952,8 @@ def test_a_hanging_mutant_is_caught_by_a_scaled_timeout(tmp_path, monkeypatch):
         "parallel-evidence-mutants/test-timeout-classification/prepared-test-times-out")),
 ])
 @pytest.mark.parametrize("parallel", [1, 2])
-def test_mutant_timeout_is_recorded_not_killed(tmp_path, monkeypatch, prepared, parallel):
+@pytest.mark.parametrize("compiler_id", ["build", "analyze"])
+def test_mutant_timeout_is_recorded_not_killed(tmp_path, monkeypatch, prepared, parallel, compiler_id):
     repo, base, _ = project(tmp_path, STRONG)
     code = CODE + "unused = True  # mutation-equivalent: unused value\n"
     (repo / "calc.py").write_text(code)
@@ -960,7 +961,7 @@ def test_mutant_timeout_is_recorded_not_killed(tmp_path, monkeypatch, prepared, 
     head = sh(repo, "git", "rev-parse", "HEAD")
     before = CODE.splitlines()[1]
     outcomes = ["timeout-check-1", "success", "failure", "signal", "timeout-check-2",
-                "timeout-configure", "timeout-build"]
+                "timeout-configure", f"timeout-{compiler_id}"]
     if prepared:
         outcomes.append("timeout-dependencies")
     selected = [evidence.Mutant("calc.py", 2, "comment", before, before + f" # {outcome}")
@@ -992,10 +993,10 @@ if grep -Fq '# signal' "{source}"; then kill -TERM $$; fi
 '''
         return manifest.Step(stage, ("/bin/sh", "-c", script + "exit 7\n"), expect=7, timeout=1)
 
-    stages = (["dependencies"] if prepared else []) + ["configure", "build", "check", "later"]
-    m = replace(M, prepare=(step("dependencies"),) if prepared else (),
+    stages = (["dependencies"] if prepared else []) + ["configure", compiler_id, "check", "later"]
+    m = replace(M, mutation_invalid_steps=("configure", compiler_id), prepare=(step("dependencies"),) if prepared else (),
                 verify=tuple(step(s) for s in stages if s != "dependencies"),
-                mutation_steps=("configure", "build", "check", "later"), mutation_parallel=parallel)
+                mutation_steps=("configure", compiler_id, "check", "later"), mutation_parallel=parallel)
     out = tmp_path / "out"
     real_run = verify.run_extracted
     overlap = Barrier(2)
@@ -1054,9 +1055,11 @@ if grep -Fq '# signal' "{source}"; then kill -TERM $$; fi
 
 @pytest.mark.scenario("parallel-evidence-mutants/test-timeout-classification/other-outcomes-retain-classification")
 @pytest.mark.parametrize("stage", ["dependencies", "configure", "build", "check"])
-def test_baseline_timeout_is_invalid_without_dispatch(tmp_path, monkeypatch, stage):
+@pytest.mark.scenario("parallel-evidence-mutants/configured-failure-classification/replacement-and-preparation-precedence")
+@pytest.mark.parametrize("invalid_steps", [("configure", "build"), (), ("dart-analyze",)])
+def test_baseline_timeout_is_invalid_without_dispatch(tmp_path, monkeypatch, stage, invalid_steps):
     step = manifest.Step(stage, ("/bin/sh", "-c", "true"))
-    m = replace(M, prepare=(step,) if stage == "dependencies" else (),
+    m = replace(M, mutation_invalid_steps=invalid_steps, prepare=(step,) if stage == "dependencies" else (),
                 verify=() if stage == "dependencies" else (step,), mutation_steps=(stage,))
     mutants = [evidence.Mutant("calc.py", 1, "int", "x = 1", "x = 2")]
 
@@ -1075,10 +1078,11 @@ def test_baseline_timeout_is_invalid_without_dispatch(tmp_path, monkeypatch, sta
 @pytest.mark.scenario("parallel-evidence-mutants/baseline-step-time-boxes/missing-duration-uses-manifest-ceiling")
 @pytest.mark.scenario("parallel-evidence-mutants/test-timeout-classification/other-outcomes-retain-classification")
 @pytest.mark.parametrize("seconds", [None, 0, 20])
-@pytest.mark.parametrize("stage", ["dependencies", "configure", "build", "check"])
+@pytest.mark.parametrize("stage", ["dependencies", "configure", "build", "check", "dart-analyze"])
 def test_timeout_at_manifest_ceiling_keeps_invalid_step_precedence(tmp_path, monkeypatch, seconds, stage):
     step = manifest.Step(stage, ("/bin/sh", "-c", "true"), timeout=5)
-    m = replace(M, prepare=(step,) if stage == "dependencies" else (),
+    m = replace(M, mutation_invalid_steps=(stage,) if stage == "dart-analyze" else M.mutation_invalid_steps,
+                prepare=(step,) if stage == "dependencies" else (),
                 verify=() if stage == "dependencies" else (step,), mutation_steps=(stage,))
     original = asdict(m)
     out = tmp_path / "out"
@@ -1476,7 +1480,8 @@ def test_all_invalid_mutants_are_unmeasured_not_a_pass():
 @pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize("case", ["weak", "strong", pytest.param("all-invalid", marks=pytest.mark.scenario(
     "parallel-evidence-mutants/stable-evidence-results/all-invalid-remains-unmeasured"))])
-def test_parallel_mutants_match_serial_results(tmp_path, monkeypatch, prepared, case):
+@pytest.mark.parametrize("compiler_id", ["build", "dart-analyze"])
+def test_parallel_mutants_match_serial_results(tmp_path, monkeypatch, prepared, case, compiler_id):
     repo, base, _ = project(tmp_path, WEAK if case == "weak" else STRONG)
     code = CODE + "unused = True  # mutation-equivalent: unused value\n"
     (repo / "calc.py").write_text(code)
@@ -1487,7 +1492,7 @@ def test_parallel_mutants_match_serial_results(tmp_path, monkeypatch, prepared, 
         evidence.Mutant("calc.py", 2, "<=", before, "    return lo < x and x <= hi"),
         evidence.Mutant("calc.py", 6, "+", CODE.splitlines()[5], "    return x * k - 1"),
     ]
-    stages = (["prepare"] if prepared else []) + ["configure", "build"]
+    stages = (["prepare"] if prepared else []) + ["configure", compiler_id]
     invalid = [evidence.Mutant("calc.py", 2, "comment", before, before + f" # fail-{stage}")
                for stage in stages]
     mismatch = evidence.Mutant("calc.py", 2, "mismatch", "wrong original", "unused")
@@ -1532,9 +1537,9 @@ print(source, end="")
     test = M.verify[0]
     if prepared:
         test = replace(test, run=tuple(arg.replace("{src}", "{build}/project") for arg in test.run))
-    m = replace(M, prepare=(stage_step("prepare"),) if prepared else (),
-                verify=(stage_step("configure"), stage_step("build"), test),
-                mutation_steps=("configure", "build", "test"), coverage_exempt={"human": "manual"})
+    m = replace(M, mutation_invalid_steps=("configure", compiler_id), prepare=(stage_step("prepare"),) if prepared else (),
+                verify=(stage_step("configure"), stage_step(compiler_id), test),
+                mutation_steps=("configure", compiler_id, "test"), coverage_exempt={"human": "manual"})
     real_run, real_cleanup = verify.run_extracted, verify.cleanup
     snapshots = []
     for parallel in (1, 2, len(selected) + 2):
