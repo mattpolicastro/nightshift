@@ -235,7 +235,8 @@ class GiteaForge:
                 items.append(FeedbackItem(f'{source}:{row["id"]}', block))
         return items
 
-    def _pages(self, path: str, query=None, *, strict: bool = True) -> list[list[dict]]:
+    def _pages(self, path: str, query=None, *, strict: bool = True,
+               unpack: Callable[[object], list] | None = None) -> list[list[dict]]:
         """Read through an empty page or refuse the entire listing.
 
         Keep queries endpoint-local and treat response links only as evidence,
@@ -256,6 +257,8 @@ class GiteaForge:
                 # partial evidence; guard and malformed-page errors still escape.
                 return []
             _, headers, rows = result
+            if unpack is not None:
+                rows = unpack(rows)
             if not isinstance(rows, list):
                 raise ForgeError("Invalid Gitea page", transient=False)
             count = headers.get("X-Total-Count")
@@ -309,6 +312,78 @@ class GiteaForge:
             if unique:
                 pages.append(unique)
         raise ForgeError("Gitea pagination limit exceeded", transient=False)
+
+    @staticmethod
+    def _sha(value: object) -> str:
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", value):
+            raise ForgeError("Invalid Gitea commit SHA", transient=False)
+        return value
+
+    def checks_for_sha(self, repo: str, sha: str) -> ResponseText:
+        sha = self._sha(sha)
+        buckets = {"success": "pass", "pending": "pending", "failure": "fail",
+                   "error": "fail", "warning": "fail", "skipped": "skipping"}
+        snapshot: tuple[str, int] | None = None
+
+        def unpack(payload: object) -> list:
+            nonlocal snapshot
+            if not isinstance(payload, dict):
+                raise ForgeError("Invalid Gitea combined status", transient=False)
+            state, count, rows = (payload.get(key) for key in ("state", "total_count", "statuses"))
+            if (self._sha(payload.get("sha")).lower() != sha.lower()
+                    or not isinstance(state, str) or state not in buckets
+                    or type(count) is not int or count < 0 or not isinstance(rows, list)):
+                raise ForgeError("Invalid Gitea combined status", transient=False)
+            current = (state, count)
+            if snapshot is not None and snapshot != current:
+                raise ForgeError("Inconsistent Gitea combined status", transient=False)
+            snapshot = current
+            for row in rows:
+                if (not isinstance(row, dict) or not isinstance(row.get("state"), str)
+                        or row["state"] not in buckets):
+                    raise ForgeError("Invalid Gitea status record", transient=False)
+            return rows
+
+        pages = self._pages(self._repo_path(repo, "commits", sha, "status"), unpack=unpack)
+        assert snapshot is not None  # Even the empty terminal page has an envelope.
+        state, count = snapshot
+        if sum(len(page) for page in pages) != count:
+            raise ForgeError("Incomplete Gitea combined status", transient=False)
+        if state == "success" and count:
+            # Skipped checks are neutral, not successful evidence. Inspect the
+            # complete set so a later pending/failing row cannot become green.
+            states = {row["state"] for page in pages for row in page}
+            if "success" not in states or states - {"success", "skipped"}:
+                raise ForgeError("Contradictory Gitea combined status", transient=False)
+        checks = ([{"name": "Gitea combined status", "bucket": buckets[state], "state": state}]
+                  if count else [])
+        return ResponseText(json.dumps(checks))
+
+    def pr_checks(self, repo: str, number: int) -> ResponseText:
+        row = self._detail(self._repo_path(repo, "pulls", self._number(number)))
+        head = row.get("head")
+        if not isinstance(head, dict):
+            raise ForgeError("Invalid Gitea PR head", transient=False)
+        return self.checks_for_sha(repo, self._sha(head.get("sha")))
+
+    def commit(self, repo: str, head: str) -> dict:
+        head = self._sha(head)
+        row = self._detail(self._repo_path(repo, "git", "commits", head))
+        if self._sha(row.get("sha")).lower() != head.lower():
+            raise ForgeError("Mismatching Gitea commit SHA", transient=False)
+        parents = row.get("parents")
+        if not isinstance(parents, list) or any(not isinstance(p, dict) for p in parents):
+            raise ForgeError("Invalid Gitea commit parents", transient=False)
+        normalized = [{"sha": self._sha(parent.get("sha"))} for parent in parents]
+        metadata = row.get("commit", {})
+        if not isinstance(metadata, dict):
+            raise ForgeError("Invalid Gitea commit metadata", transient=False)
+        for role in ("author", "committer"):
+            person = metadata.get(role)
+            if person is not None and (not isinstance(person, dict)
+                    or (person.get("date") is not None and not isinstance(person["date"], str))):
+                raise ForgeError("Invalid Gitea commit date", transient=False)
+        return {"sha": row["sha"], "parents": normalized, "commit": metadata}
 
     @staticmethod
     def _label_map(rows: object) -> dict[str, int]:

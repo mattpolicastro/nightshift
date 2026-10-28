@@ -36,7 +36,8 @@ class FakeGitea:
         self.repositories = {}
         self.silent_label_writes = set()
 
-    def repository(self, repo, *, labels, issues=(), pulls=(), page_size=1, facts=None):
+    def repository(self, repo, *, labels, issues=(), pulls=(), page_size=1, facts=None,
+                   commits=(), combined_statuses=None):
         """Install factual read/write routes; deliberately ignore label/head filters.
 
         Issues may carry comments and timeline arrays; PRs may additionally
@@ -44,6 +45,7 @@ class FakeGitea:
         """
         self.repositories[repo] = dict(labels=labels, issues=list(issues),
                                        pulls=list(pulls), page_size=page_size,
+                                       commits=list(commits), combined_statuses=combined_statuses or {},
                                        facts=facts if facts is not None else {"name": repo.split("/")[1]})
 
     def _state_reply(self, call, page):
@@ -53,6 +55,16 @@ class FakeGitea:
             rows = None
             if call.method == "GET" and call.path == root:
                 return Reply(state["facts"])
+            if call.method == "GET":
+                for commit in state["commits"]:
+                    if call.path == root + "/git/commits/" + commit["sha"]:
+                        return Reply(commit)
+                for sha, combined in state["combined_statuses"].items():
+                    if call.path == root + "/commits/" + sha + "/status":
+                        assert page is not None
+                        size = min(state["page_size"], int(call.query["limit"][0]))
+                        return Reply({**combined, "statuses":
+                                      combined["statuses"][(page - 1) * size:page * size]})
             if call.method == "POST" and call.path == root + "/pulls":
                 assert set(call.body) == {"title", "body", "head", "base"}
                 number = max((row["number"] for row in [*state["issues"], *state["pulls"]]), default=0) + 1

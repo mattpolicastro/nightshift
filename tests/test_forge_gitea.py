@@ -1,5 +1,6 @@
 """Foundation contracts through the real transport, without a service or sockets."""
 
+import json
 import socket
 import traceback
 
@@ -1080,3 +1081,255 @@ def test_pr_guard_identity_prevents_fallback(fake, kind, stage, strict):
     fake.route("GET", PULLS_PATH, failure, failure, failure, page=1)
     assert forge.latest_pr_number("owner/repo", "topic/work", strict=False) is None
     assert len(fake.calls) == stop + 2
+
+
+SHA = "a" * 40
+COMMIT_PATH = ROOT + "/git/commits/" + SHA
+STATUS_PATH = ROOT + "/commits/" + SHA + "/status"
+
+
+def combined(state="success", count=1, **changes):
+    return {"sha": SHA, "state": state, "total_count": count,
+            "statuses": [{"id": n + 1, "state": state} for n in range(count)], **changes}
+
+
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/status-mapping")
+@pytest.mark.parametrize("state,bucket", [("success", "pass"), ("pending", "pending"),
+    ("failure", "fail"), ("error", "fail"), ("warning", "fail"), ("skipped", "skipping")])
+@pytest.mark.parametrize("count", [0, 1, 3])
+def test_gitea_ci_status_mapping(fake, state, bucket, count):
+    fake.repository("owner/repo", labels=[], combined_statuses={SHA: combined(state, count)})
+    result = make_forge(fake).checks_for_sha("owner/repo", SHA)
+    assert json.loads(result.stdout) == ([
+        {"name": "Gitea combined status", "bucket": bucket, "state": state}] if count else [])
+    assert [(c.method, c.path, c.query) for c in fake.calls] == [
+        ("GET", STATUS_PATH, {"page": [str(page)], "limit": ["50"]})
+        for page in range(1, count + 2)]
+
+
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/status-mapping")
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/sha-and-status-refusal")
+@pytest.mark.parametrize("states", [
+    ["skipped"], ["skipped", "skipped", "skipped"],
+    *[[state] for state in ("pending", "failure", "error", "warning")],
+    *[["success", state] for state in ("pending", "failure", "error", "warning")]])
+def test_success_refuses_contradictory_status_rows(fake, states):
+    rows = [{"id": n + 1, "state": state} for n, state in enumerate(states)]
+    fake.repository("owner/repo", labels=[], combined_statuses={
+        SHA: combined(count=len(rows), statuses=rows)})
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).checks_for_sha("owner/repo", SHA)
+    assert not caught.value.transient
+    assert [(c.path, c.query) for c in fake.calls] == [
+        (STATUS_PATH, {"page": [str(page)], "limit": ["50"]})
+        for page in range(1, len(rows) + 2)]
+
+
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/status-mapping")
+@pytest.mark.parametrize("states", [("success", "skipped"), ("skipped", "success")])
+def test_success_with_skipped_rows_requires_successful_evidence(fake, states):
+    fake.repository("owner/repo", labels=[], combined_statuses={SHA: combined(
+        count=2, statuses=[{"id": n + 1, "state": state} for n, state in enumerate(states)])})
+    result = make_forge(fake).checks_for_sha("owner/repo", SHA)
+    assert json.loads(result.stdout) == [
+        {"name": "Gitea combined status", "bucket": "pass", "state": "success"}]
+    assert [c.query["page"] for c in fake.calls] == [["1"], ["2"], ["3"]]
+
+
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/sha-and-status-refusal")
+@pytest.mark.scenario("gitea-forge/commit-parent-facts/complete-commit-parents")
+@pytest.mark.parametrize("method", ["checks_for_sha", "commit"])
+@pytest.mark.parametrize("sha", ["main", "refs/pull/7/merge", "a" * 7, "a" * 39,
+    "a" * 41, "g" * 40, SHA + "\n", None, True, {}, SECRET])
+def test_exact_sha_required_before_dispatch(fake, method, sha):
+    with pytest.raises(ForgeError) as caught:
+        getattr(make_forge(fake), method)("owner/repo", sha)
+    assert not caught.value.transient and not fake.calls
+    assert SECRET not in "".join(traceback.format_exception(caught.value))
+
+
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/sha-and-status-refusal")
+@pytest.mark.parametrize("payload", [None, [], {},
+    *[{k: v for k, v in combined().items() if k != field}
+      for field in ("sha", "state", "total_count", "statuses")],
+    *[combined(sha=sha) for sha in (None, "b" * 40, "short", [])],
+    *[combined(state=state, statuses=[]) for state in (None, "", "unknown", "SUCCESS", [], {})],
+    *[combined(total_count=count) for count in (None, True, -1, 1.0, "1", 0, 2)],
+    *[combined(statuses=rows) for rows in (None, {}, [], [None], [{}],
+        [{"id": True, "state": "success"}], [{"id": 0, "state": "success"}],
+        [{"id": 1}], [{"id": 1, "state": []}], [{"id": 1, "state": "unknown"}])]])
+def test_combined_status_malformed_evidence_refused(fake, payload):
+    fake.repository("owner/repo", labels=[], combined_statuses={SHA: combined()})
+    fake.route("GET", STATUS_PATH, Reply(payload), page=1)
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).checks_for_sha("owner/repo", SHA)
+    assert not caught.value.transient
+
+
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/sha-and-status-refusal")
+@pytest.mark.parametrize("second", [
+    combined(sha="b" * 40, statuses=[]), combined(state="pending", statuses=[]),
+    combined(total_count=2, statuses=[]), combined(statuses=None), combined(),
+    combined(statuses=[{"id": 1, "state": "failure"}]),
+    combined(statuses=[{"id": 2, "state": "success"}])])
+def test_combined_status_inconsistent_later_pages_refused(fake, second):
+    fake.repository("owner/repo", labels=[], combined_statuses={SHA: combined()})
+    fake.route("GET", STATUS_PATH, Reply(second), page=2)
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).checks_for_sha("owner/repo", SHA)
+    assert not caught.value.transient
+
+
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/sha-and-status-refusal")
+@pytest.mark.parametrize("page,headers", [
+    (1, {"X-Total-Count": "0"}), (1, {"X-Total-Count": "invalid"}),
+    (1, {"X-Total-Count": "2"}), (1, {"X-Next-Page": "3"}),
+    (2, {"X-Next-Page": "3"}), (2, {"Link": '<https://foreign/>; rel="next"'})])
+def test_combined_status_contradictory_metadata_refused(fake, page, headers):
+    fake.repository("owner/repo", labels=[], combined_statuses={SHA: combined()})
+    fake.route("GET", STATUS_PATH, Reply(combined(statuses=(combined()["statuses"]
+               if page == 1 else [])), headers=headers), page=page)
+    with pytest.raises(ForgeError):
+        make_forge(fake).checks_for_sha("owner/repo", SHA)
+    assert all(call.path == STATUS_PATH for call in fake.calls)
+
+
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/status-mapping")
+def test_status_pagination_deduplicates_identical_overlaps_without_following_links(fake):
+    payload = combined(count=3)
+    for page, rows in enumerate(([payload["statuses"][0]], payload["statuses"], []), 1):
+        headers = {"X-Total-Count": "3"}
+        if rows:
+            headers["Link"] = '<https://foreign/status>; rel="next"'
+        fake.route("GET", STATUS_PATH, Reply({**payload, "statuses": rows}, headers=headers), page=page)
+    assert json.loads(make_forge(fake).checks_for_sha("owner/repo", SHA).stdout)[0]["bucket"] == "pass"
+    assert [c.query for c in fake.calls] == [
+        {"page": [str(p)], "limit": ["50"]} for p in (1, 2, 3)]
+    assert all(c.path == STATUS_PATH for c in fake.calls)
+
+
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/sha-and-status-refusal")
+def test_status_pagination_bound_refuses_without_empty_terminal_page(fake):
+    fake.repository("owner/repo", labels=[], combined_statuses={SHA: combined(count=1000)})
+    with pytest.raises(ForgeError, match="pagination limit"):
+        make_forge(fake).checks_for_sha("owner/repo", SHA)
+    assert len(fake.calls) == 1000
+
+
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/sha-and-status-refusal")
+def test_pr_checks_captures_exact_sha_and_refreshes_on_next_call(fake):
+    pr, next_sha = pull(), "b" * 40
+    fake.repository("owner/repo", labels=[], pulls=[pr], combined_statuses={
+        SHA: combined(), next_sha: combined("failure", sha=next_sha)})
+
+    def change_head(call):
+        pr["head"]["sha"] = next_sha
+        return Reply(combined())
+
+    fake.route("GET", STATUS_PATH, change_head, page=1)
+    forge = make_forge(fake)
+    assert json.loads(forge.pr_checks("owner/repo", 7).stdout)[0]["bucket"] == "pass"
+    assert json.loads(forge.pr_checks("owner/repo", 7).stdout)[0]["bucket"] == "fail"
+    assert [c.path for c in fake.calls] == [PULLS_PATH + "/7", STATUS_PATH, STATUS_PATH,
+        PULLS_PATH + "/7", STATUS_PATH.replace(SHA, next_sha), STATUS_PATH.replace(SHA, next_sha)]
+    assert all(c.method == "GET" for c in fake.calls)
+
+
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/sha-and-status-refusal")
+@pytest.mark.parametrize("head", [None, {}, {"sha": "main"}, {"sha": "abc1234"}])
+def test_pr_checks_refuses_missing_or_invalid_head(fake, head):
+    fake.repository("owner/repo", labels=[], pulls=[pull(head=head)])
+    with pytest.raises(ForgeError):
+        make_forge(fake).pr_checks("owner/repo", 7)
+    assert len(fake.calls) == 1
+
+
+def commit_row(parents=()):
+    return {"sha": SHA, "parents": [{"sha": sha, "url": "https://foreign/"} for sha in parents],
+            "commit": {"message": "Preserved metadata", "author": {"date": "2026-10-01T12:30:01Z"},
+                       "committer": {"date": "2026-10-02T12:30:02-05:00"}}}
+
+
+@pytest.mark.scenario("gitea-forge/commit-parent-facts/complete-commit-parents")
+@pytest.mark.parametrize("parents", [[], ["b" * 40], ["b" * 40, "c" * 40, "D" * 40]])
+@pytest.mark.parametrize("metadata", [None, {}, {"author": {"date": None}}])
+def test_commit_preserves_all_parents_and_available_dates(fake, parents, metadata):
+    row = commit_row(parents)
+    if metadata is not None:
+        row["commit"] = metadata
+    fake.repository("owner/repo", labels=[], commits=[row])
+    assert make_forge(fake).commit("owner/repo", SHA) == {
+        "sha": SHA, "parents": [{"sha": sha} for sha in parents], "commit": row["commit"]}
+    assert [(c.method, c.path, c.query) for c in fake.calls] == [("GET", COMMIT_PATH, {})]
+
+
+@pytest.mark.scenario("gitea-forge/commit-parent-facts/complete-commit-parents")
+@pytest.mark.parametrize("changes", [
+    {"sha": "b" * 40}, {"sha": None}, {"sha": "short"}, {"parents": None}, {"parents": {}},
+    *[{"parents": [parent]} for parent in (None, {}, {"sha": "short"}, {"sha": "g" * 40},
+        {"sha": None}, {"sha": []}, SHA)], {"commit": []}, {"commit": {"author": []}},
+    {"commit": {"committer": {"date": 42}}}, "missing-parents"])
+def test_commit_refuses_incomplete_or_mismatching_facts(fake, changes):
+    row = commit_row()
+    if changes == "missing-parents":
+        del row["parents"]
+    else:
+        row.update(changes)
+    fake.route("GET", COMMIT_PATH, Reply(row))
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).commit("owner/repo", SHA)
+    assert not caught.value.transient and len(fake.calls) == 1
+
+
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/sha-and-status-refusal")
+@pytest.mark.scenario("gitea-forge/commit-parent-facts/complete-commit-parents")
+@pytest.mark.parametrize("method", ["checks_for_sha", "commit"])
+@pytest.mark.parametrize("status", [403, 503])
+def test_commit_and_later_status_transport_failure(fake, method, status):
+    fake.repository("owner/repo", labels=[], combined_statuses={SHA: combined()})
+    path, page = (STATUS_PATH, 2) if method == "checks_for_sha" else (COMMIT_PATH, None)
+    attempts = 3 if status == 503 else 1
+    fake.route("GET", path, *[Reply(status=status, raw=SECRET.encode())] * attempts, page=page)
+    with pytest.raises(ForgeError) as caught:
+        getattr(make_forge(fake), method)("owner/repo", SHA)
+    assert caught.value.transient is (status == 503)
+    assert SECRET not in "".join(traceback.format_exception(caught.value))
+    assert len(fake.calls) == attempts + (method == "checks_for_sha")
+
+
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/sha-and-status-refusal")
+@pytest.mark.scenario("gitea-forge/commit-parent-facts/complete-commit-parents")
+@pytest.mark.parametrize("kind", ["http", "forge", "os", "pause"])
+@pytest.mark.parametrize("stage", ["commit", "status", "terminal", "retry", "after-pr"])
+def test_commit_status_guard_identity(fake, kind, stage):
+    error, guards = guard_error(kind), []
+    stop = 1 if stage in ("commit", "status") else 2
+
+    def guard():
+        guards.append(True)
+        if len(guards) == stop:
+            raise error
+
+    fake.repository("owner/repo", labels=[], pulls=[pull()], combined_statuses={SHA: combined()})
+    if stage == "retry":
+        fake.route("GET", STATUS_PATH, Reply(status=503), page=1)
+    forge = make_forge(fake, guard=guard)
+    method = "commit" if stage == "commit" else "pr_checks" if stage == "after-pr" else "checks_for_sha"
+    with pytest.raises(type(error)) as caught:
+        getattr(forge, method)("owner/repo", 7 if stage == "after-pr" else SHA)
+    assert caught.value is error and len(fake.calls) == stop - 1
+    assert len(guards) == stop and forge._guard_error.get() is None
+
+
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/sha-and-status-refusal")
+@pytest.mark.scenario("gitea-forge/commit-parent-facts/complete-commit-parents")
+@pytest.mark.parametrize("method", ["checks_for_sha", "commit"])
+def test_full_hex_sha_case_preserves_identity(fake, method):
+    path = (COMMIT_PATH if method == "commit" else STATUS_PATH).replace(SHA, SHA.upper())
+    if method == "commit":
+        fake.route("GET", path, Reply(commit_row()))
+    else:
+        fake.route("GET", path, Reply(combined(count=0)), page=1)
+    result = getattr(make_forge(fake), method)("owner/repo", SHA.upper())
+    assert (result["sha"] == SHA if method == "commit" else json.loads(result.stdout) == [])
+    assert len(fake.calls) == 1 and fake.calls[0].path == path
