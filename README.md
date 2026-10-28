@@ -389,7 +389,7 @@ Modules are under `nightshift/`; directory paths are repository-relative.
 | `cli.py`, `config.py`, `preflight.py` | Commands, enrollment and front-door checks |
 | `daemon.py`, `specloop_intake.py`, `specloop_job.py` | Polling, durable jobs and delivery |
 | `specloop_client.py`, `specloop_attention.py` | Independent engine CLI and attention adapter |
-| `queue.py`, `vcs.py` | Shared queue/git utilities; daemon owns safe leftover recovery |
+| `queue.py` | Shared queue utilities; daemon owns safe leftover recovery |
 | `outcomes.py`, `trace.py`, `mirror.py` | Historical outcomes, transcripts and optional import utility |
 | `specloop/` | Build engine, supervisor, verification and evidence gates |
 | `tests/` | Regression checks; run `uv run pytest` |

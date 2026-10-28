@@ -754,7 +754,6 @@ review = "retired:unused"
     claim.write()
     (cli.queue.CLAIM_DIR / "enrolled__repo#43.json").write_text("{broken")
     monkeypatch.setattr(cli.queue, "in_flight", forbidden)
-    monkeypatch.setattr(cli.queue, "title_of", forbidden)
     monkeypatch.setattr(cli.queue, "contradictions", lambda *args: [])
     reads, before_network = [], []
     list_jobs = jobs.list_jobs

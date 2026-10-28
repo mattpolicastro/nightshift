@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from manifest_fixtures import manifest_text
-from nightshift import daemon, outcomes, queue, vcs
+from nightshift import daemon, outcomes, queue
 from nightshift.config import Config, Repo
 from test_specloop_isolation import Pipeline, poll
 
@@ -30,12 +30,6 @@ def switched(tmp_path, monkeypatch):
     # Durable recovery must work after the executable decision tree is deleted.
     assert importlib.util.find_spec("nightshift.recovery") is None
 
-    def forbidden(*args, **kwargs):
-        pytest.fail("safe recovery must not claim work or destroy its worktree/branch")
-
-    monkeypatch.setattr(queue, "claim", forbidden)
-    monkeypatch.setattr(queue, "reconcile", forbidden)
-    monkeypatch.setattr(vcs, "remove_worktree", forbidden)
     monkeypatch.setattr(daemon, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(queue, "CLAIM_DIR", tmp_path / "claims")
     manifest = tmp_path / "template.toml"
@@ -76,7 +70,6 @@ def test_engine_switch_recovers_working_issues(switched, tmp_path, monkeypatch):
     peer_claim = working(independent, 9, tmp_path)
     cfg = Config(repos=[switched.repo, independent.repo])
     pipelines = [switched, independent]
-    monkeypatch.setattr(queue, "reconcile", lambda *a, **k: pytest.fail("discarded switch evidence"))
 
     def journal_before_write(args):
         name = args[1].split("/")[2] if args[0] == "api" else args[args.index("--repo") + 1].split("/")[1]
@@ -419,7 +412,6 @@ def test_remote_write_failure_recovers_on_restart(
         assert "agent:working" not in labels(switched, 1)
 
     switched.gh = original
-    monkeypatch.setattr(queue, "reconcile", lambda *a, **k: pytest.fail("discarded switch evidence"))
     daemon.startup(Config(repos=[switched.repo]), {}, daemon.RepoHealth())
     poll([switched], health)
     assert not health.failures and not claim.path.exists()

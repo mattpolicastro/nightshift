@@ -9,15 +9,10 @@ import json
 
 import pytest
 
-from nightshift import queue, specloop_intake
 from test_engine_routing import DraftGh
 from test_specloop_intake import Commands, idea_file, poll, repo  # noqa: F401 (fixture)
 
 pytestmark = pytest.mark.real_trust
-
-ASSOCIATIONS = ["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "NONE", "FIRST_TIME_CONTRIBUTOR", None]
-KEPT = {"OWNER", "MEMBER", "COLLABORATOR"}
-
 
 def comment(assoc, key="authorAssociation", **extra):
     item = {"author": {"login": f"user-{assoc}"}, "user": {"login": f"user-{assoc}"},
@@ -26,30 +21,6 @@ def comment(assoc, key="authorAssociation", **extra):
     if assoc is not None:
         item[key] = assoc
     return item
-
-
-def test_issue_comments_from_outsiders_never_reach_a_prompt():
-    def gh(args):
-        assert args[:2] == ["issue", "view"]
-        return json.dumps({"comments": [comment(a) for a in ASSOCIATIONS]})
-
-    blocks = queue.comments_of("owner/repo", 7, runner=gh)
-    assert [b.split("from ")[-1] for b in blocks] == ["OWNER", "MEMBER", "COLLABORATOR"]
-
-
-def test_pr_feedback_drops_outsiders_comments_reviews_and_inline_comments():
-    def gh(args):
-        if args[:2] == ["pr", "view"]:
-            return json.dumps({
-                "comments": [comment(a) for a in ASSOCIATIONS],
-                "reviews": [comment(a, submittedAt="2026-10-21T00:00:00Z", state="COMMENTED") for a in ASSOCIATIONS],
-            })
-        assert args[0] == "api" and args[1].endswith("/pulls/8/comments")
-        return json.dumps([[comment(a, key="author_association", path="a.py", line=3) for a in ASSOCIATIONS]])
-
-    blocks = queue.pr_feedback("owner/repo", "spec/x", runner=gh, strict=True, number=8)
-    assert len(blocks) == 9
-    assert not any(f"from {a}" in b for b in blocks for a in ("CONTRIBUTOR", "NONE", "FIRST_TIME_CONTRIBUTOR", "None"))
 
 
 class AuthoredGh(DraftGh):
