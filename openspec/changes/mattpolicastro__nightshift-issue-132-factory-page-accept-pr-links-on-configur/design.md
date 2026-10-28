@@ -6,6 +6,8 @@
 
 The current `run-context` display scenario explicitly drops every non-GitHub URL, so it needs a MODIFIED delta alongside the requested `paseo-runs-page` change. The producer requirement in `run-context/Context in status` stays unchanged: producing forge-aware status links belongs to #145. No `AGENTS.md` was present in this checkout or its searched repository subdirectories.
 
+The implementation environment freezes `openspec/**`. This draft retains the requirement/scenario amendments under its own `specs/` directory for normal OpenSpec archival. Neither implementing task applies those amendments to `openspec/specs/` or edits any other OpenSpec artifact; archival is a later lifecycle operation, not an implementing-agent task.
+
 ## Goals / Non-Goals
 
 Display a published run from a configured forge without breaking the Factory section. Make trust explicit, local, exact by origin, reloadable, and testable with temporary files and fake status transport. Preserve cold errors, stale fallback, projection/redaction, action checks, and all current landing protections.
