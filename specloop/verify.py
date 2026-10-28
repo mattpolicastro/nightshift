@@ -17,14 +17,18 @@ import functools
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import stat
 import subprocess
 import time
+import uuid
+from collections.abc import Callable
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from threading import Lock
 
 from nightshift.host_paths import tool_path
 from specloop.agents import homes_dir
@@ -32,6 +36,109 @@ from specloop.manifest import Manifest, Snapshot, Step, expand
 
 CREDENTIAL_DIRS = (".codex", ".claude", ".specloop/homes", ".nightshift/homes",
                    ".ssh", ".config", ".aws", "Library/Keychains")
+
+
+@dataclass
+class SnapshotContext:
+    root: Path
+    event: Callable[..., None] = lambda *args, **kwargs: None
+    _lock: Lock = field(default_factory=Lock, repr=False)
+
+    def emit(self, kind: str, **data) -> None:
+        with self._lock:
+            self.event(kind, **data)
+
+
+def _payload_paths(root: Path, *, readonly: bool = False) -> list[Path]:
+    if not stat.S_ISDIR(root.lstat().st_mode):
+        raise ValueError("payload must be a directory")
+    paths = [root]
+    for path in paths:
+        info = path.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            paths.extend(path.iterdir())
+        elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("payload contains a link or special file")
+        if readonly and info.st_mode & 0o222:
+            raise ValueError("entry is writable")
+    return paths
+
+
+def _snapshot_entries(root: Path) -> list[tuple[Path, dict]]:
+    result = []
+    for entry in (root / "entries").iterdir():
+        try:
+            _payload_paths(entry, readonly=True)
+            data = json.loads((entry / "metadata.json").read_text())
+            if (data["schema"] == 1 and type(data["sequence"]) is int and data["sequence"] > 0
+                    and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", data["id"])
+                    and re.fullmatch(r"[0-9a-f]{64}", data["key"])
+                    and re.fullmatch(r"[0-9a-f]{40,64}", data["base_sha"])
+                    and entry.name == f'{data["sequence"]}-{data["id"]}-{data["key"]}'):
+                _payload_paths(entry / "payload", readonly=True)
+                result.append((entry, data))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return result
+
+
+def warm_snapshots(repo: Path, base_sha: str, m: Manifest, context: SnapshotContext) -> None:
+    """Warm only the caller's pinned trusted base, under the run lock; never prepare."""
+    if not m.snapshots:
+        return
+    root = context.root.resolve()
+    (root / "entries").mkdir(parents=True, exist_ok=True)
+    for old in root.glob(".staging-*"):
+        if re.fullmatch(r"\.staging-[0-9a-f]{32}", old.name) and stat.S_ISDIR(old.lstat().st_mode):
+            # Restore access before scanning children; never follow or chmod links.
+            pending = [old]
+            for parent in pending:
+                parent.chmod(parent.lstat().st_mode | 0o700)
+                pending.extend(p for p in parent.iterdir() if stat.S_ISDIR(p.lstat().st_mode))
+            shutil.rmtree(old)
+    for definition in m.snapshots:
+        attempt = uuid.uuid4().hex
+        stage, out = root / f".staging-{attempt}", root / "warms" / attempt
+        out.mkdir(parents=True)
+        key = None
+        details = dict(id=definition.id, base_sha=base_sha, diagnostics=str(out))
+        try:
+            src, build = stage / "src", stage / "build"
+            extract(repo, base_sha, src)
+            key = snapshot_key(src, definition)
+            if key is None:
+                raise ValueError("lockfile key unavailable")
+            if any(d["id"] == definition.id and d["key"] == key for _, d in _snapshot_entries(root)):
+                context.emit("snapshot_reused", key=key, **details)
+                continue
+            for name in ("home", "tmp", "payload"):
+                (build / name).mkdir(parents=True)
+            sb = out / "prepare.sb"
+            sb.write_text(profile(build, m, prepare=True, src=src, snapshots=context))
+            values = {**m.vars, "src": str(src), "build": str(build), "sha": base_sha,
+                      f"snapshot:{definition.id}": str(build / "payload")}
+            receipts = _run_commands([(Step("warm", definition.warm, 0, 600), sb)], values, build, out, tool_path())
+            if not receipts[0].passed:
+                raise ValueError("warm command failed")
+            _payload_paths(build / "payload")
+            entry = stage / "entry"
+            entry.mkdir()
+            (build / "payload").rename(entry / "payload")
+            sequence = max((int(p.name.split("-", 1)[0]) for p in (root / "entries").iterdir()
+                            if re.fullmatch(r"[1-9][0-9]*-[A-Za-z0-9_-]+-[0-9a-f]{64}", p.name)), default=0) + 1
+            metadata = dict(schema=1, id=definition.id, key=key, base_sha=base_sha, sequence=sequence)
+            (entry / "metadata.json").write_text(json.dumps(metadata))
+            for payload_path in reversed(_payload_paths(entry)[1:]):
+                payload_path.chmod(payload_path.stat().st_mode & ~0o222)
+            # macOS needs rename write permission; locked readers reject unfinished entries.
+            published = entry.rename(root / "entries" / f"{sequence}-{definition.id}-{key}")
+            published.chmod(published.stat().st_mode & ~0o222)
+            context.emit("snapshot_warmed", key=key, **details)
+        except BaseException as exc:
+            (out / "failure.txt").write_text(str(exc))
+            context.emit("snapshot_warm_failed", key=key, **details)
+            if not isinstance(exc, (OSError, ValueError, subprocess.SubprocessError)):
+                raise
 
 
 def snapshot_key(src: Path, definition: Snapshot) -> str | None:
@@ -130,7 +237,7 @@ class Receipt:
 
 
 def profile(build: Path, m: Manifest, *, prepare: bool = False, home: Path | None = None,
-            src: Path | None = None) -> str:
+            src: Path | None = None, snapshots: SnapshotContext | None = None) -> str:
     # The sandbox matches real paths: /tmp/x is /private/tmp/x to it.
     build = build.resolve()
 
@@ -161,7 +268,7 @@ def profile(build: Path, m: Manifest, *, prepare: bool = False, home: Path | Non
   (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (regex #"^/dev/fd/"))
 {reads}
 {f"(deny file-read* {deny})" if deny else ""}
-"""
+""" + (f'(deny file-write* (subpath {q(str((snapshots.root / "entries").resolve()))}))\n' if snapshots else "")
 
 
 @functools.cache
@@ -221,10 +328,15 @@ def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out
     if m.prepare:
         prep_sb.write_text(profile(build, m, prepare=True, src=src))
     values = {**m.vars, "src": str(src), "build": str(build), "sha": sha}
+    scheduled = [(s, prep_sb) for s in m.prepare] + [(s, sb) for s in steps]
+    return _run_commands(scheduled, values, build, out, path)
+
+
+def _run_commands(scheduled: list[tuple[Step, Path]], values: dict[str, str],
+                  build: Path, out: Path, path: str) -> list[Receipt]:
     env = {"PATH": path, "HOME": str(build / "home"), "TMPDIR": str(build / "tmp"),
            "LANG": "en_US.UTF-8", "COPYFILE_DISABLE": "1"}
     receipts = []
-    scheduled = [(s, prep_sb) for s in m.prepare] + [(s, sb) for s in steps]
     for step, step_sb in scheduled:
         argv = [expand(a, values) for a in step.run]
         log = out / f"{step.id}.log"
@@ -236,13 +348,13 @@ def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out
                 code = p.wait(timeout=step.timeout)
             except subprocess.TimeoutExpired:
                 code = None
-            # Nothing a step started outlives it: a prepare step's background
-            # process would otherwise keep network access into the verify steps.
-            try:
-                os.killpg(p.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            p.wait()
+            finally:
+                # Descendants must not retain network access or mutate a payload.
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                p.wait()
         tail = log.read_bytes()[-2000:].decode(errors="replace")
         passed = code is not None and code >= 0 and code == step.expect
         receipts.append(Receipt(step.id, argv, step.expect, code, passed, round(time.monotonic() - t0, 2), tail))
