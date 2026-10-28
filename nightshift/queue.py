@@ -14,6 +14,8 @@ from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
 
+from .forge import ForgeError
+
 CLAIM_DIR = Path.home() / ".nightshift" / "claims"
 
 log = logging.getLogger(__name__)
@@ -125,7 +127,7 @@ def claim_path(repo: str, number: int) -> Path:
     return CLAIM_DIR / f"{repo.replace('/', '__')}#{number}.json"
 
 
-class GhError(RuntimeError):
+class GhError(ForgeError):
     """A `gh` call that failed, and whether it is worth trying again.
 
     The distinction is the whole point. "GitHub is briefly unavailable" and
@@ -135,10 +137,6 @@ class GhError(RuntimeError):
     death of the universe is a WORSE failure than exiting, because it looks
     fine while nothing happens.
     """
-
-    def __init__(self, message: str, *, transient: bool) -> None:
-        super().__init__(message)
-        self.transient = transient
 
 
 # Measured, not guessed: every string here comes from the 107 tracebacks in the
