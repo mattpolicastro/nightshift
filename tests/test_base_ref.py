@@ -18,7 +18,6 @@ from pathlib import Path
 
 import pytest
 
-from nightshift import vcs
 from nightshift.config import Repo
 
 
@@ -72,55 +71,3 @@ def test_local_main_is_stale_after_someone_merges(origin_and_clone):
     """The premise. If this ever fails, the bug fixed itself and these can go."""
     _, clone = origin_and_clone
     assert "dependency.txt" not in git(["ls-tree", "main", "--name-only"], clone)
-
-
-def test_worktree_off_local_base_misses_the_merge(origin_and_clone, tmp_path):
-    """What the daemon used to do, pinned so the regression is recognisable."""
-    _, clone = origin_and_clone
-    root = tmp_path / "wt"
-    vcs.add_worktree(clone, root / "stale", "claude/1", "main", allowed_root=root)
-    assert not (root / "stale" / "dependency.txt").exists()
-
-
-def test_worktree_off_base_ref_gets_the_merge(origin_and_clone, tmp_path):
-    """The fix: fetch, then branch from the remote ref."""
-    _, clone = origin_and_clone
-    root = tmp_path / "wt"
-    repo = Repo(name="x/y", verify="true")
-
-    vcs.fetch(clone)
-    vcs.add_worktree(clone, root / "fresh", "claude/2", repo.base_ref, allowed_root=root)
-
-    assert (root / "fresh" / "dependency.txt").exists()
-
-
-def test_fetch_alone_does_not_move_the_local_branch(origin_and_clone):
-    """Why base_ref exists rather than just adding a fetch.
-
-    `git fetch` updates remote-tracking refs only. The local `main` stays put,
-    so a fetch without the ref change would have fixed nothing.
-    """
-    _, clone = origin_and_clone
-    vcs.fetch(clone)
-    assert "dependency.txt" not in git(["ls-tree", "main", "--name-only"], clone)
-    assert "dependency.txt" in git(["ls-tree", "origin/main", "--name-only"], clone)
-
-
-def test_diff_against_a_stale_base_attributes_someone_elses_merge(
-    origin_and_clone, tmp_path
-):
-    """The half that corrupts review rather than merely blocking work."""
-    _, clone = origin_and_clone
-    root = tmp_path / "wt"
-    vcs.fetch(clone)
-    wt = root / "work"
-    vcs.add_worktree(clone, wt, "claude/3", "origin/main", allowed_root=root)
-    (wt / "mine.txt").write_text("the worker's actual change\n")
-    git(["add", "."], wt)
-    git(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "work"], wt)
-
-    stale = vcs.changed_files(wt, "main")
-    fresh = vcs.changed_files(wt, "origin/main")
-
-    assert "dependency.txt" in stale, "someone else's merge, read as the worker's"
-    assert fresh == ["mine.txt"]

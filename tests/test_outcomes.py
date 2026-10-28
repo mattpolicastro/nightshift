@@ -70,21 +70,6 @@ def test_history_survives_concurrent_writes_and_repo_collisions():
         assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 24
 
 
-def test_escalation_and_pr_are_recorded_before_github_mutation(tmp_path, monkeypatch):
-    monkeypatch.setattr(queue, "CLAIM_DIR", tmp_path)
-    def fail(args):
-        raise RuntimeError("offline")
-    import pytest
-    with pytest.raises(RuntimeError):
-        queue.escalate("a/b", 1, "workflow requires a human", runner=fail, unclaimed=True)
-    with pytest.raises(RuntimeError):
-        queue.complete("a/b", 2, "https://github.com/a/b/pull/3", runner=fail)
-    items = outcomes.tasks()
-    assert items[0]["state"] == "needs_decision"
-    assert not items[0]["escalated"]
-    assert items[1]["pr_url"].endswith("/3")
-
-
 def test_running_tasks_do_not_query_github():
     outcomes.record("a/b", 1, state="running")
     def fail(args):

@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from manifest_fixtures import manifest_text
-from nightshift import cli, config, daemon, outcomes, queue, specloop_job, vcs
+from nightshift import cli, config, daemon, outcomes, queue, specloop_job
 from nightshift.config import Config
 from test_engine_routing import DraftGh
 from test_engine_switch_recovery import RecoveryPipeline, labels, working
@@ -50,7 +50,6 @@ def lifecycle(monkeypatch):
     monkeypatch.setattr(daemon, "startup", startup)
     monkeypatch.setattr(daemon, "_note_unclean_exit", lambda *a: events.append("check-crash"))
     monkeypatch.setattr(daemon, "poll_specloop", lambda *a: events.append("poll"))
-    monkeypatch.setattr(queue, "claim", forbidden)
     monkeypatch.setattr(daemon.signal, "signal", lambda sig, handler: handlers.update({sig: handler}))
     return events, handlers, child
 
@@ -136,7 +135,7 @@ def test_daemon_has_no_worker_executor_or_dispatch_entry_points():
     retired = """Claimed Tally _WindowStart _FALLBACK_WINDOW_SECONDS
         endpoints_ready claim_next run_claimed _run_claimed _recover _merge
         _running _harvest _wrap_up _record_quota _branch_to_delete _escalation_text
-        task worker recovery trace vcs preflight ThreadPoolExecutor Future
+        task worker recovery trace preflight ThreadPoolExecutor Future
         futures_wait FIRST_COMPLETED""".split()
     assert not (set(retired) & vars(daemon).keys())
 
@@ -171,7 +170,7 @@ sys.meta_path.insert(0, RejectRetired())
 for name in ("nightshift.cli", "specloop.cli"):
     assert callable(importlib.import_module(name).main), name
 for name in ("nightshift.preflight", "nightshift.trace", "nightshift.mirror",
-             "nightshift.queue", "nightshift.vcs", "specloop.prompts"):
+             "nightshift.queue", "specloop.prompts"):
     importlib.import_module(name)
 
 # Import every application module, including provider adapters, in a fresh process.
@@ -273,7 +272,6 @@ manifest = "repository.toml"
     monkeypatch.setattr(subprocess, "run", external)
     monkeypatch.setattr(subprocess, "Popen", forbidden)
     monkeypatch.setattr(socket, "create_connection", forbidden)
-    monkeypatch.setattr(queue, "claim", forbidden)
     monkeypatch.setattr(queue, "_gh", gh)
     monkeypatch.setattr(daemon.notify, "send", forbidden)
     monkeypatch.setattr(daemon.specloop_intake, "run_git", external)
@@ -310,7 +308,7 @@ def test_worker_cli_refuses_before_any_child(tmp_path, monkeypatch, capsys, capl
         pytest.fail("retired enrollment reached a child or dispatch")
 
     for target, name in ((subprocess, "run"), (subprocess, "Popen"), (daemon, "loop"),
-                         (queue, "claim"), (socket, "create_connection")):
+                         (socket, "create_connection")):
         monkeypatch.setattr(target, name, forbidden)
     assert cli.main([*command, "--config", str(selected)]) == 2
     output = capsys.readouterr()
@@ -342,8 +340,7 @@ def test_one_shot_recovery_then_public_attention(tmp_path, monkeypatch, capsys, 
     def forbidden(*args, **kwargs):
         pytest.fail("historical recovery/read attempted execution or destructive cleanup")
 
-    for target, name in ((subprocess, "run"), (subprocess, "Popen"), (queue, "claim"),
-                         (queue, "reconcile"), (vcs, "remove_worktree")):
+    for target, name in ((subprocess, "run"), (subprocess, "Popen")):
         monkeypatch.setattr(target, name, forbidden)
     assert cli.main(["daemon", "run", "--once", "--config", str(selected)]) == 0
     assert capsys.readouterr().out == "poll complete\n"

@@ -18,20 +18,10 @@ main` failed with a `fatal:` naming a path that no longer existed.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
-import pytest
-
-from nightshift import vcs
 from nightshift.cli import _repo_dirs
 from nightshift.config import DEFAULT_CLONE_ROOT, Config, Repo, load
-
-
-def git(args: list[str], cwd: Path) -> str:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
-    ).stdout
 
 
 def test_no_dir_keeps_the_convention():
@@ -100,46 +90,3 @@ def test_cli_repo_dirs_honours_dir():
     dirs = _repo_dirs(cfg)
     assert dirs["x/one"] == Path("/tmp/clones/one")
     assert dirs["x/two"] == DEFAULT_CLONE_ROOT / "two"
-
-
-@pytest.fixture
-def clone_with_worktree(tmp_path):
-    """A clone with one branch already checked out in a worktree."""
-    origin = tmp_path / "origin.git"
-    seed = tmp_path / "seed"
-    seed.mkdir()
-    git(["init", "-q", "-b", "main"], seed)
-    git(["config", "user.email", "t@t"], seed)
-    git(["config", "user.name", "t"], seed)
-    (seed / "base.txt").write_text("one\n")
-    git(["add", "."], seed)
-    git(["commit", "-qm", "first"], seed)
-    git(["clone", "-q", "--bare", str(seed), str(origin)], tmp_path)
-
-    clone = tmp_path / "clone"
-    git(["clone", "-q", str(origin), str(clone)], tmp_path)
-    return clone
-
-
-def test_a_worktree_branch_is_locked_against_the_clone_it_came_from(
-    clone_with_worktree, tmp_path
-):
-    """The premise, pinned. This is what enrolling your working clone costs.
-
-    If git ever stops locking the branch this test fails, and the `dir` key
-    becomes a tidiness preference rather than a correctness one.
-    """
-    clone = clone_with_worktree
-    root = tmp_path / "wt"
-    vcs.add_worktree(clone, root / "task", "claude/23", "origin/main", allowed_root=root)
-
-    checkout = subprocess.run(
-        ["git", "checkout", "claude/23"],
-        cwd=clone,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert checkout.returncode != 0
-    assert "already used by worktree" in checkout.stderr
