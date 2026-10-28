@@ -17,6 +17,9 @@ in this checkout. It fixes result delivery without changing revision triggers.
   the saved identity and reconcile the same comment.
 - Keep legacy unqualified and round-qualified markers readable, with no receipt
   migration that changes a pending result's marker.
+- Reject malformed attempt metadata before revision execution or completion
+  delivery, preserving the existing stage-error reporting and `needs-human`
+  escalation under their current thresholds and pause guards.
 - Add `test_rerun_round_posts_new_result` and
   `test_old_round_markers_still_recognised`, plus focused retry coverage. Preserve
   existing assertions except the explicitly superseded one-comment/overwritten

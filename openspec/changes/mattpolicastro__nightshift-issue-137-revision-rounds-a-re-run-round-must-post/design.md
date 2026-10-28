@@ -69,10 +69,17 @@ while the existing changed-feedback replacement path receives a fresh suffix.
 
 Validate a present field in `_validate_revision_feedback`: require a string
 matching `[0-9a-f]{32}` and a nonempty string `round_id`. Invalid metadata fails
-through the existing receipt error path before replacement, command dispatch or
-comment/label writes; it must not silently fall back to the initial marker or
-reset history. Missing metadata is valid compatibility state. Preserve the
-existing feedback schema version, consumed IDs and all other unknown fields.
+before receipt replacement, command dispatch or revision completion delivery,
+including its completion-comment and label writes. It must not silently fall
+back to the initial marker, reset history or mark the receipt delivered.
+Preserve the existing receipt error path: `_each` forwards the validation error
+to `on_error`, and the daemon's existing item-failure threshold may invoke
+`report_failure` to post the stage-error comment and add `needs-human`. Those
+failure-reporting writes remain permitted under the existing pause guards;
+they neither deliver the malformed revision result nor remove `agent:revise`.
+Do not change the threshold, failure marker namespace or daemon behavior.
+Missing metadata is valid compatibility state. Preserve the existing feedback
+schema version, consumed IDs and all other unknown fields.
 An unsuccessful snapshot save leaves the old durable receipt untouched and
 dispatches nothing.
 
@@ -174,6 +181,14 @@ Cover identity persistence before dispatch, failure to save, successive
 same-round replacements and a later new event returning to the initial format.
 Use bounded parametrization and existing fixtures to keep each task within
 about 300 changed lines.
+
+For malformed metadata, assert no revision command, completion comment,
+completion label mutation or receipt mutation. Separately exercise the existing
+daemon failure threshold with a recording runner: the stage-error comment and
+`needs-human` escalation must still occur, retaining `agent:revise`, receipt
+bytes and consumption history. Exercise pause before escalation to prove the
+failure-reporting exception does not bypass its guards. Reuse the existing
+daemon test helpers without editing daemon code or its existing tests.
 
 `test_old_round_markers_still_recognised` covers unqualified, event-derived and
 UUID-round markers against saved receipts without the new field. Verify that

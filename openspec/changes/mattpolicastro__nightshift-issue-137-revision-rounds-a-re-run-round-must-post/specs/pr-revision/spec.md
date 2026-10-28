@@ -26,8 +26,13 @@ label handling SHALL remain unchanged.
 
 #### Scenario: Invalid attempt metadata blocks processing
 - **WHEN** a loaded receipt has a present `delivery_attempt` that is not a 32-character lowercase hexadecimal string or has no nonempty string round ID
-- **THEN** processing fails without command dispatch, comment or label writes, replacing the receipt or resetting consumption
+- **THEN** validation fails before revision command dispatch or revision completion delivery, including its completion-comment and label writes, without replacing or marking the receipt delivered or resetting consumption
 - **THEN** absent attempt metadata remains valid and is not silently substituted for malformed metadata
+
+#### Scenario: Invalid attempt metadata retains failure reporting
+- **WHEN** an eligible receipt's invalid attempt metadata reaches the existing daemon item-failure escalation threshold
+- **THEN** the existing error path can post its stage-error comment and add `needs-human`, while retaining `agent:revise`, the original receipt bytes and consumption history and posting no revision completion comment
+- **THEN** existing pause guards still prevent further failure-reporting operations while paused; failure reporting does not mark the revision result delivered
 
 #### Scenario: Retained attempt survives delivery interruption
 - **WHEN** an eligible saved result with an attempt suffix is retried after a delivery error, pause or daemon restart
