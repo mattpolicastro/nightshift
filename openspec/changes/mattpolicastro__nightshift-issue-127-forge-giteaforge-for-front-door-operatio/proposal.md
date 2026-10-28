@@ -20,12 +20,15 @@ before daemon integration.
   unchanged, including exceptions sharing the HTTP error class.
 - Add an in-process `FakeGitea`, adapter tests and reusable contracts with an
   explicitly configured live mode that skips without a URL.
+- Correct the root README's module layout to name the implemented standalone
+  Gitea backend while keeping enrollment and daemon integration deferred.
 
 Out of scope: configuration keys, daemon enrollment or wiring, membership
-lookups, `specloop/`, `nightshift/land.py`, plugin changes, README edits and CI
-workflow changes. Existing GitHub assertions, core authorization/lifecycle
+lookups, `specloop/`, `nightshift/land.py`, plugin changes, unrelated README edits
+and CI workflow changes. Existing GitHub assertions, core authorization/lifecycle
 policy and transport behavior remain intact. Implementing agents edit only the
-new Python implementation/test files listed in the design. They never edit
+new Python implementation/test files and scoped README passage listed in the
+design. They never edit
 `openspec/**`; the harness archives this change's capability deltas at finish.
 
 ## Capabilities

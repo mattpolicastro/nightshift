@@ -18,7 +18,8 @@ contracts reusable against a disposable Gitea repository.
 
 Non-goals: daemon/configuration wiring, new config keys, membership discovery,
 landing, publication policy, merging, changes to the plugin or build engine,
-and installing a live-service CI job. No changes to `README.md`,
+and installing a live-service CI job. No changes to README outside its module
+layout and adjacent staged-boundary explanation, or to
 `nightshift/forge/{__init__,types,http,github}.py`, existing tests or type baseline.
 In particular do not edit `docs/specloop/prepare.md`, `specloop/loop.py`,
 `specloop/manifest.py`, `specloop/verify.py`, or
@@ -35,12 +36,27 @@ Only these implementation files may be created or extended by implementing tasks
 - `tests/test_forge_gitea.py`: focused offline behavior and regression tests.
 - `tests/contract/conftest.py`: fake/live contract selection and scoped fixtures.
 - `tests/contract/test_gitea_contract.py`: shared observable API contracts.
+- `README.md`: only the module-layout table and adjacent staged-boundary
+  explanation, distinguishing the implemented backend from deferred enrollment.
 
 Capability deltas remain in this change for the harness to archive at finish.
 They are drafting artifacts, not implementation files. Task 1.7 does not apply
-specs, edit `openspec/**`, or update README. The Module layout delta only removes
-the obsolete prohibition on having a standalone backend; it retains the existing
-README's module entries, staged boundary and lack of enrollment claims.
+specs or edit `openspec/**`. It corrects README's obsolete claim that a Gitea
+backend remains future work, as required by the Module layout guidance delta.
+Preserve the existing module entries and core-policy explanation; add a
+`forge/gitea.py` entry for standalone front-door operations over `forge/http.py`.
+State that the backend is implemented while Gitea enrollment/daemon integration
+and landing migration remain future work. Do not imply live compatibility has
+been established by offline tests.
+
+For this documentation edit and any structural verification, select the unique
+physical line exactly `## Layout` through, but excluding, the next column-zero
+line beginning `## `. Missing or duplicate boundaries block the edit/check.
+Within it, module rows begin literally `| ` followed by a backtick; module paths
+are the balanced backtick spans in the first pipe-delimited cell. Refuse
+unbalanced spans or duplicate module paths. Treat fences, HTML and indentation
+literally, without semantic parsing. Verify named paths resolve, retain the
+existing layout test, and do not introduce exact explanatory-prose assertions.
 
 Seven tasks separate transport/fake foundation, label safety, identity/evidence (including feedback reads),
 PR operations, CI/provenance, comment mutation, and contract execution. Each
