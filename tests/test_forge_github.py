@@ -13,6 +13,8 @@ from nightshift.forge import Forge, ForgeError
 from nightshift.forge.github import GitHubForge
 from nightshift.forge.types import CICheck, Comment, Issue, LabelEvent, PullRequest, ResponseText
 from nightshift.specloop_intake import Paused
+import test_specloop_intake as proposal_tests
+from test_specloop_intake import repo
 
 
 class StructuralFake:
@@ -279,11 +281,144 @@ def test_constructor_binds_current_runner(monkeypatch):
         runner.assert_called_once()
 
 
+@pytest.mark.real_trust
+@pytest.mark.scenario("forge-interface/late-bound-runners/default-runner-remains-patchable")
+@pytest.mark.scenario("forge-interface/late-bound-runners/explicit-runner-wins")
+@pytest.mark.scenario("forge-interface/core-policy-preservation/revision-and-proposal-delivery-unchanged")
+@pytest.mark.scenario("issue-intake/forge-mediated-intake/existing-workflows-retain-transcripts")
+@pytest.mark.parametrize("recover", [False, True])
+def test_late_bound_runner_still_patchable(monkeypatch, repo, tmp_path, recover):
+    # Intake and the backend were imported above, before any transport patch.
+    forbidden = Mock(side_effect=AssertionError("unbound transport"))
+    transcripts = []
+    for attempt in range(3):
+        gh, commands = proposal_tests.DraftGh(("spec:draft",)), proposal_tests.Commands()
+        if recover:
+            gh.prs = [{"number": 8}]
+
+        def dispatch(args):
+            # Even a patch during a poll cannot redirect delegated helpers.
+            monkeypatch.setattr(queue, "_gh", forbidden)
+            return gh(args)
+
+        runner = Mock(side_effect=dispatch)
+        monkeypatch.setattr(queue, "_gh", runner if attempt < 2 else forbidden)
+        forge = Mock(spec_set=Forge, wraps=GitHubForge(runner))
+        constructor = Mock(return_value=forge)
+        monkeypatch.setattr(intake, "GitHubForge", constructor)
+        runner.assert_not_called()
+        rows = intake.propose_pending(
+            repo, queue.Labels(), tmp_path / str(attempt),
+            **({"runner": runner} if attempt == 2 else {}),
+            specloop_runner=commands, git_runner=commands,
+        )
+        constructor.assert_called_once_with(runner)
+        names = [c[0] for c in forge.mock_calls]
+        expected = ["list_issues", "list_issues", "issue_for_draft", "latest_pr_number"]
+        expected += ["pr_for_recovery"] if recover else ["latest_pr_number", "open_blockers"]
+        expected += ["label_event_pages", "repository", "collaborator_response"]
+        if not recover:
+            expected += ["issue_author", "create_draft_pr"]
+        expected += ["pr_state_url", "relabel_pr", "comment_pages", "create_comment", "relabel_issue"]
+        assert names == expected
+        assert gh.labels == set()
+        assert len(gh.prs) == 1
+        assert "<!-- nightshift:draft:" + proposal_tests.CHANGE + ":pr-8 -->" in gh.comments[-1]["body"]
+        if recover:
+            assert rows == [] and commands.calls == []
+        else:
+            assert rows[0]["delivered"] is True
+            assert commands.calls[-1] == [
+                "git", "-C", str(tmp_path / "manifest-source"), "push", "origin",
+                "abc123:refs/heads/" + proposal_tests.BRANCH,
+            ]
+        transcripts.append(gh.calls)
+    assert transcripts[0] == transcripts[1] == transcripts[2]
+    forbidden.assert_not_called()
+
+
+@pytest.fixture
+def proposal_blocker_spy(monkeypatch):
+    """Run retained workflows unchanged, while proving the new operation is used."""
+    blockers = Mock(wraps=queue.open_blockers)
+    forges = []
+
+    def construct(runner):
+        forge = Mock(spec_set=Forge, wraps=GitHubForge(runner))
+        forges.append(forge)
+        return forge
+
+    monkeypatch.setattr(intake, "GitHubForge", construct)
+    monkeypatch.setattr(queue, "open_blockers", blockers)
+    monkeypatch.setattr(queue, "_gh", Mock(side_effect=AssertionError("unbound transport")))
+    yield
+    operations = [c for forge in forges for c in forge.open_blockers.call_args_list]
+    assert operations
+    assert [(c.args, {}) for c in blockers.call_args_list] == operations
+    assert all(call.kwargs["runner"] is not None for call in blockers.call_args_list)
+
+
+@pytest.mark.scenario("issue-intake/dependency-gated-drafting/open-blocker-defers-round")
+@pytest.mark.scenario("issue-intake/dependency-gated-drafting/all-blockers-closed-allows-round")
+@pytest.mark.scenario("issue-intake/dependency-gated-drafting/unreadable-blocker-defers-round")
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+@pytest.mark.parametrize("blockers,lookup_failure", [((6,), False), ((5, 6), False), ((6,), True)])
+def test_forge_blockers_retain_polling(repo, tmp_path, caplog, proposal_blocker_spy,
+                                     armed, blockers, lookup_failure):
+    proposal_tests.test_blocked_issue_is_not_drafted_until_blockers_close(
+        repo, tmp_path, caplog, armed, blockers, lookup_failure)
+
+
+@pytest.mark.scenario("issue-intake/dependency-gated-drafting/blocked-poll-preserves-state")
+@pytest.mark.scenario("issue-intake/dependency-gated-drafting/rearmed-round-waits")
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+@pytest.mark.parametrize("previous,lost_response", [
+    (None, False), ("needs_input", False), ("rejected", False), ("drafted", False),
+    ("needs_input", True), ("rejected", True), ("drafted", True), ("released", False),
+])
+def test_forge_blockers_preserve_receipts(repo, tmp_path, monkeypatch, caplog,
+                                        proposal_blocker_spy, armed, previous, lost_response):
+    proposal_tests.test_blocked_issue_changes_no_labels_or_comments(
+        repo, tmp_path, monkeypatch, caplog, armed, previous, lost_response)
+
+
+@pytest.mark.scenario("issue-intake/dependency-gated-drafting/no-dependencies-allows-round")
+@pytest.mark.parametrize("armed", ["spec:draft", "agent:ready"])
+def test_forge_empty_blockers_do_not_read(repo, tmp_path, caplog, proposal_blocker_spy, armed):
+    proposal_tests.test_body_without_dependencies_drafts_without_blocker_lookups(
+        repo, tmp_path, caplog, armed)
+
+
 @pytest.fixture
 def intake_forge(monkeypatch):
     monkeypatch.setattr(intake, "GitHubForge", Mock(side_effect=AssertionError("unexpected backend")))
     monkeypatch.setattr(queue, "_gh", Mock(side_effect=AssertionError("unexpected transport")))
     return Mock(spec_set=Forge)
+
+
+@pytest.mark.scenario("forge-interface/late-bound-runners/explicit-runner-wins")
+@pytest.mark.scenario("forge-interface/core-policy-preservation/revision-and-proposal-delivery-unchanged")
+@pytest.mark.parametrize("recover", [False, True])
+def test_proposal_delivery_uses_supplied_forge(intake_forge, recover):
+    forge = intake_forge
+    forge.comment_pages.return_value = []
+    forge.pr_state_url.return_value = {"state": "OPEN", "url": URL}
+    receipt = {"round_id": "round", "result": {"outcome": "needs_input", "questions": ["Which base?"]}}
+    intake._deliver(Repo("o/r"), queue.Labels(), 7, "change", receipt,
+                    {"spec:draft", "agent:ready"}, pr=7 if recover else None, forge=forge)
+    if recover:
+        body = f"{queue.SELF_COMMENT_PREFIX} Spec draft ready for review: {URL}\n\n<!-- nightshift:draft:change:pr-7 -->"
+        expected = [call.pr_state_url("o/r", "7"),
+                    call.relabel_pr("o/r", URL, add=["spec:review"], remove=[])]
+    else:
+        body = (f"{queue.SELF_COMMENT_PREFIX} The spec draft needs human input.\n\nQuestions:\n- Which base?"
+                "\n\n<!-- nightshift:draft:change:round -->")
+        expected = []
+    assert forge.mock_calls == expected + [
+        call.comment_pages("o/r", 7), call.create_comment("o/r", 7, "issue", body),
+        call.relabel_issue("o/r", 7, add=[] if recover else ["needs-human"],
+                           remove=["agent:ready", "spec:draft"]),
+    ]
 
 
 @pytest.mark.real_trust

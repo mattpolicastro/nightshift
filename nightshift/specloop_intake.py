@@ -259,17 +259,14 @@ look like an absent label or an empty set of comments.
 """
     if repo.engine != "specloop":
         return []
-    gh = runner or queue._gh
+    forge = GitHubForge(runner or queue._gh)
     pending = {}
     for label in (labels.ready, labels.spec_draft):
-        for issue in queue._list(repo.name, label, runner=gh):
+        for issue in forge.list_issues(repo.name, label):
             pending[issue.number] = issue
 
     def propose(number):
-        raw = json.loads(gh([
-            "issue", "view", str(number), "--repo", repo.name,
-            "--json", "state,title,body,labels,comments",
-        ]))
+        raw = forge.issue_for_draft(repo.name, number)
         current = {label["name"] for label in raw["labels"]}
         if raw["state"] != "OPEN" or not current.intersection((labels.ready, labels.spec_draft)):
             return None
@@ -285,10 +282,10 @@ look like an absent label or an empty set of comments.
         def authorize():
             nonlocal selected_events, drafting_events, authorized
             if selected_events is None:
-                selected_events = _latest_label_events(repo.name, number, drafting_labels, runner=gh)
+                selected_events = _latest_label_events(repo.name, number, drafting_labels, forge=forge)
                 drafting_events = {label: event["id"] for label, event in selected_events.items()}
             if not authorized:
-                authorized = _authorize_label_events(repo.name, number, selected_events, runner=gh)
+                authorized = _authorize_label_events(repo.name, number, selected_events, forge=forge)
             return authorized
 
         # Collection can write the receipt and job records. Hold both intact
@@ -316,7 +313,7 @@ look like an absent label or an empty set of comments.
             # label application then starts a new round without an input edit
             # or a locally recorded `delivered` flag.
             if selected_events is None:
-                selected_events = _latest_label_events(repo.name, number, drafting_labels, runner=gh)
+                selected_events = _latest_label_events(repo.name, number, drafting_labels, forge=forge)
                 drafting_events = {label: event["id"] for label, event in selected_events.items()}
             if (receipt.get("delivered") or issue_input != receipt.get("input", receipt["idea"])
                     or drafting_events != receipt.get("drafting_events", drafting_events)):
@@ -327,20 +324,18 @@ look like an absent label or an empty set of comments.
         else:
             change = recorded_change or _change_name(repo.name, number, raw["title"])
         branch = f"spec/{change}"
-        pr = queue._latest_pr_number(repo.name, branch, runner=gh, strict=True)
+        pr = forge.latest_pr_number(repo.name, branch, strict=True)
         if not receipt and not recorded_change and pr is None:
             # Bounded recovery after receipt loss: exact branches in this
             # repository, using the current title. Errors must not look like
             # absence, and recorded identities never depend on today's title.
             legacy = change.removeprefix(repo.name.split("/", 1)[0] + "__")
-            pr = queue._latest_pr_number(repo.name, f"spec/{legacy}", runner=gh, strict=True)
+            pr = forge.latest_pr_number(repo.name, f"spec/{legacy}", strict=True)
             if pr is not None:
                 change = legacy
         replaces_pr = None
         if pr is not None:
-            previous = json.loads(gh([
-                "pr", "view", str(pr), "--repo", repo.name, "--json", "state,headRefOid",
-            ]))
+            previous = forge.pr_for_recovery(repo.name, pr)
             if previous["state"] == "CLOSED":
                 # A re-armed issue starts a new draft after a human closes its
                 # PR. Keep replacement receipts on delivery retries, even
@@ -364,7 +359,7 @@ look like an absent label or an empty set of comments.
                 matching = previous.get("headRefOid") == receipt["result"]["commit"]
             if matching and not _recover_item_cleanup(path):
                 return _PENDING
-            _deliver(repo, labels, number, change, None, current, pr=pr, runner=gh)
+            _deliver(repo, labels, number, change, None, current, pr=pr, forge=forge)
             if matching:
                 _finish_delivery(path, receipt)
             return receipt
@@ -373,11 +368,11 @@ look like an absent label or an empty set of comments.
                 _require_manifest(repo, readiness, new_work=False)
             if not _recover_item_cleanup(path):
                 return _PENDING
-            _deliver(repo, labels, number, change, receipt, current, runner=gh,
+            _deliver(repo, labels, number, change, receipt, current, forge=forge,
                      git_runner=git_runner, readiness=readiness)
             _finish_delivery(path, receipt)
             return receipt
-        blocked = queue.open_blockers(repo.name, queue.blockers(raw["body"]), runner=gh)
+        blocked = forge.open_blockers(repo.name, queue.blockers(raw["body"]))
         if blocked:
             log.info("#%s is blocked by %s — not drafting", number,
                      ", ".join(f"#{blocker}" for blocker in blocked))
@@ -399,7 +394,7 @@ look like an absent label or an empty set of comments.
                    "round_id": uuid.uuid4().hex, "drafting_events": drafting_events}
         if replaces_pr:
             receipt["replaces_pr"] = replaces_pr
-        if not _issue_author_trusted(repo.name, number, gh):
+        if not _issue_author_trusted(repo.name, number, forge):
             # The issue's own text can change after a collaborator labels it,
             # so an outside author's issue is never drafted as written.
             receipt["result"] = {"outcome": "rejected", "contradictions": [], "risks": [], "problems": [
@@ -407,7 +402,7 @@ look like an absent label or an empty set of comments.
                 "change after it is labelled, so it is not drafted as written. A collaborator can open an "
                 "issue with the request (or restate it in a comment here and re-open it as their own)."]}
             _save(path, receipt)
-            _deliver(repo, labels, number, change, receipt, current, runner=gh,
+            _deliver(repo, labels, number, change, receipt, current, forge=forge,
                      git_runner=git_runner, readiness=readiness)
             _finish_delivery(path, receipt)
             return receipt
@@ -417,7 +412,7 @@ look like an absent label or an empty set of comments.
         ], idea=idea, runner=specloop_runner, launcher=launcher):
             return _PENDING
         _save(path, receipt)
-        _deliver(repo, labels, number, change, receipt, current, runner=gh,
+        _deliver(repo, labels, number, change, receipt, current, forge=forge,
                  git_runner=git_runner, readiness=readiness)
         _finish_delivery(path, receipt)
         return receipt
@@ -430,6 +425,9 @@ def _issue_author_trusted(repo: str, number: int, gh=None, *, forge: Forge | Non
 
     A failed read raises: an unknown author must not be treated as trusted.
     """
+    # Retain the positional injection used by existing author-check callers.
+    if forge is None and isinstance(gh, Forge):
+        forge = gh
     forge = forge if forge is not None else GitHubForge(gh)
     issue = forge.issue_author(repo, number)
     return queue.trusted(issue, "author_association")
@@ -1834,7 +1832,8 @@ def _comment(repo: str, number: int, change: str, body: str, *, runner=None,
 
 def _deliver(repo: Repo, labels: queue.Labels, number: int, change: str,
              receipt: dict | None, current: set[str], *, pr: int | None = None,
-             runner, git_runner=None, readiness=None) -> None:
+             runner=None, git_runner=None, readiness=None, forge: Forge | None = None) -> None:
+    forge = forge if forge is not None else GitHubForge(runner)
     drafting_labels = [label for label in (labels.ready, labels.spec_draft) if label in current]
     result = receipt["result"] if receipt else {}
     if pr is None and result["outcome"] != "drafted":
@@ -1844,9 +1843,9 @@ def _deliver(repo: Repo, labels: queue.Labels, number: int, change: str,
                 parts.append(field.capitalize() + ":\n" + "\n".join(
                     "- " + (json.dumps(item, ensure_ascii=False) if isinstance(item, dict) else item)
                     for item in result[field]))
-        _comment(repo.name, number, change, "\n\n".join(parts), runner=runner,
+        _comment(repo.name, number, change, "\n\n".join(parts), forge=forge,
                  round_id=receipt.get("round_id"))
-        queue._relabel(repo.name, number, add=[labels.needs_human], remove=drafting_labels, runner=runner)
+        forge.relabel_issue(repo.name, number, add=[labels.needs_human], remove=drafting_labels)
         return
     if pr is None:
         branch = f"spec/{change}"
@@ -1876,24 +1875,23 @@ def _deliver(repo: Repo, labels: queue.Labels, number: int, change: str,
         body = f"Closes #{number}\n"
         if result.get("risks"):
             body += "\nFeasibility risks:\n" + "\n".join(f"- {risk}" for risk in result["risks"])
-        url = runner([
-            "pr", "create", "--repo", repo.name, "--head", branch, "--base", repo.base,
-            "--draft", "--title", f"Spec: {receipt['title']}", "--body", body,
-        ]).strip()
+        url = forge.create_draft_pr(
+            repo.name, branch, repo.base, f"Spec: {receipt['title']}", body,
+        ).stdout.strip()
         if not url:
             raise RuntimeError("GitHub returned no URL for the draft PR")
     else:
         url = str(pr)
     # Recheck even a newly created PR before writing: it may have been closed
     # since the lookup or while a create response was being recovered.
-    live = json.loads(runner(["pr", "view", url, "--repo", repo.name, "--json", "state,url"]))
+    live = forge.pr_state_url(repo.name, url)
     if live["state"] != "OPEN":
         raise RuntimeError(f"draft PR {url} is no longer open; retry on the next poll")
     url = live["url"]
-    runner(["pr", "edit", url, "--repo", repo.name, "--add-label", labels.spec_review])
+    forge.relabel_pr(repo.name, url, add=[labels.spec_review], remove=[])
     # The PR identifies the successful draft even after a lost create response
     # or when recovering an existing PR without a local proposal receipt.
-    _comment(repo.name, number, change, f"Spec draft ready for review: {url}", runner=runner,
+    _comment(repo.name, number, change, f"Spec draft ready for review: {url}", forge=forge,
              round_id=f"pr-{url.rsplit('/', 1)[-1]}")
     # Last: a failed label/comment write leaves the issue armed for recovery.
-    queue._relabel(repo.name, number, add=[], remove=drafting_labels, runner=runner)
+    forge.relabel_issue(repo.name, number, add=[], remove=drafting_labels)
