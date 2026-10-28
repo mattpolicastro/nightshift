@@ -1,4 +1,4 @@
-"""Guarded transport and complete-list foundation for the standalone Gitea forge."""
+"""Standalone Gitea operations with complete reads and verified label writes."""
 
 from collections.abc import Callable, Iterable, Mapping
 from contextvars import ContextVar
@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 from nightshift.forge import ForgeError
 from nightshift.forge.http import GiteaHTTPError, GiteaTransport
+from nightshift.queue import Issue
 
 
 class GiteaForge:
@@ -148,3 +149,96 @@ class GiteaForge:
             if unique:
                 pages.append(unique)
         raise ForgeError("Gitea pagination limit exceeded", transient=False)
+
+    @staticmethod
+    def _label_map(rows: object) -> dict[str, int]:
+        if not isinstance(rows, list):
+            raise ForgeError("Invalid Gitea labels", transient=False)
+        labels: dict[str, int] = {}
+        ids: set[int] = set()
+        for row in rows:
+            if (not isinstance(row, dict) or type(row.get("id")) is not int
+                    or row["id"] <= 0 or not isinstance(row.get("name"), str)
+                    or not row["name"].strip()):
+                raise ForgeError("Invalid Gitea label", transient=False)
+            if row["name"] in labels or row["id"] in ids:
+                raise ForgeError("Ambiguous Gitea labels", transient=False)
+            labels[row["name"]] = row["id"]
+            ids.add(row["id"])
+        return labels
+
+    def _read_labels(self, path: str) -> dict[str, int]:
+        return self._label_map([row for page in self._pages(path) for row in page])
+
+    def _resolve_labels(self, repo: str, names: Iterable[str]) -> dict[str, int]:
+        labels = self._read_labels(self._repo_path(repo, "labels"))
+        for name in names:
+            if not isinstance(name, str) or name not in labels:
+                raise ForgeError("Requested Gitea label unavailable", transient=False)
+        return labels
+
+    @staticmethod
+    def _number(number: object) -> str:
+        if type(number) is not int or number <= 0:
+            raise ForgeError("Invalid Gitea issue or PR number", transient=False)
+        return str(number)
+
+    def _label_candidates(self, repo: str, label: str, endpoint: str) -> list[dict]:
+        label_id = self._resolve_labels(repo, [label])[label]
+        pages = self._pages(self._repo_path(repo, endpoint), {"state": "open"})
+        candidates = []
+        for page in pages:
+            for row in page:
+                if endpoint == "issues" and row.get("pull_request") is not None:
+                    continue
+                if label_id in self._label_map(row.get("labels")).values():
+                    self._number(row.get("number"))
+                    candidates.append(row)
+        return candidates
+
+    def list_issues(self, repo: str, label: str) -> list[Issue]:
+        issues = []
+        for row in self._label_candidates(repo, label, "issues"):
+            if (not isinstance(row.get("title"), str)
+                    or (row.get("body") is not None and not isinstance(row["body"], str))):
+                raise ForgeError("Invalid Gitea issue text", transient=False)
+            issues.append(Issue(repo, row["number"], row["title"], row.get("body") or ""))
+        return issues
+
+    def list_open_prs(self, repo: str, label: str) -> list[dict]:
+        return [{"number": row["number"]}
+                for row in self._label_candidates(repo, label, "pulls")]
+
+    def issue_labels(self, repo: str, number: int) -> set[str]:
+        path = self._repo_path(repo, "issues", self._number(number), "labels")
+        return set(self._read_labels(path))
+
+    def relabel_issue(self, repo: str, number: int, *, add: list[str], remove: list[str]) -> None:
+        path = self._repo_path(repo, "issues", self._number(number), "labels")
+        labels = self._resolve_labels(repo, [*add, *remove])
+        if set(add) & set(remove):
+            raise ForgeError("Overlapping Gitea label changes", transient=False)
+        current = set(self._read_labels(path).values())
+        for adding, names in ((False, remove), (True, add)):
+            for name in sorted(set(names)):
+                label_id = labels[name]
+                if (label_id in current) == adding:
+                    continue
+                if adding:
+                    self._request("POST", path, json_body={"labels": [label_id]})
+                else:
+                    self._request("DELETE", path + "/" + str(label_id))
+                current = set(self._read_labels(path).values())
+                if (label_id in current) != adding:
+                    raise ForgeError("Gitea label write verification failed", transient=False)
+
+    def relabel_pr(self, repo: str, target: str | int, *, add: list[str], remove: list[str]) -> None:
+        # Branch and URL resolution is added with the PR operations.
+        if isinstance(target, str) and re.fullmatch(r"[0-9]+", target):
+            try:
+                target = int(target)
+            except ValueError:
+                raise ForgeError("Invalid Gitea PR number", transient=False) from None
+        if type(target) is not int:
+            raise ForgeError("Invalid Gitea PR number", transient=False)
+        self.relabel_issue(repo, target, add=add, remove=remove)

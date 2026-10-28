@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from email.message import Message
 from io import BytesIO
 import json
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 from urllib.response import addinfourl
 
 
@@ -33,6 +33,47 @@ class FakeGitea:
         self.handlers = []
         self.responses = []
         self.routes = {}
+        self.repositories = {}
+        self.silent_label_writes = set()
+
+    def repository(self, repo, *, labels, issues=(), pulls=(), page_size=1):
+        """Install stateful label/poll routes; deliberately ignore label filters."""
+        self.repositories[repo] = dict(labels=labels, issues=list(issues),
+                                       pulls=list(pulls), page_size=page_size)
+
+    def _state_reply(self, call, page):
+        for repo, state in self.repositories.items():
+            root = urlsplit(self.base_url).path + "/api/v1/repos/" + "/".join(
+                quote(part, safe="") for part in repo.split("/"))
+            rows = None
+            for endpoint in ("labels", "issues", "pulls"):
+                if call.path == root + "/" + endpoint and call.method == "GET":
+                    rows = state[endpoint]
+                    if endpoint != "labels" and "state" in call.query:
+                        rows = [row for row in rows if row["state"] == call.query["state"][0]]
+            for issue in [*state["issues"], *state["pulls"]]:
+                path = root + f'/issues/{issue["number"]}/labels'
+                if call.method == "GET" and call.path == path:
+                    rows = issue["labels"]
+                elif call.method == "POST" and call.path == path:
+                    assert set(call.body) == {"labels"}
+                    if "POST" not in self.silent_label_writes:
+                        current = {label["id"] for label in issue["labels"]}
+                        issue["labels"].extend(label for label in state["labels"]
+                                               if label["id"] in call.body["labels"]
+                                               and label["id"] not in current)
+                    return Reply(issue["labels"])
+                elif call.method == "DELETE" and call.path.startswith(path + "/"):
+                    label_id = int(call.path[len(path) + 1:])
+                    if "DELETE" not in self.silent_label_writes:
+                        issue["labels"][:] = [label for label in issue["labels"]
+                                               if label["id"] != label_id]
+                    return Reply(status=204, raw=b"")
+            if rows is not None:
+                assert page is not None
+                size = min(state["page_size"], int(call.query["limit"][0]))
+                return Reply(rows[(page - 1) * size:page * size])
+        raise AssertionError("Unexpected fake Gitea route")
 
     def add_handler(self, handler):
         self.handlers.append(handler)
@@ -50,9 +91,13 @@ class FakeGitea:
                     json.loads(request.data) if request.data is not None else None, timeout)
         self.calls.append(call)  # Deliberately never retain authorization headers.
         page = int(query["page"][0]) if "page" in query else None
-        pending = self.routes.get((call.method, call.path, page))
-        assert pending, "Unexpected or exhausted fake Gitea route"
-        outcome = pending.popleft()
+        key = (call.method, call.path, page)
+        if key in self.routes:
+            pending = self.routes[key]
+            assert pending, "Unexpected or exhausted fake Gitea route"
+            outcome = pending.popleft()
+        else:
+            outcome = self._state_reply(call, page)
         if callable(outcome):
             outcome = outcome(call)
         if isinstance(outcome, BaseException):
