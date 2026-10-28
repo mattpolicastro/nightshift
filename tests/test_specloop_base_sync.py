@@ -64,9 +64,91 @@ def advance_base(env, text="upstream change\n"):
     return head
 
 
+@pytest.fixture
+def snapshot_env(base_env, monkeypatch):
+    from test_snapshot_warming import SUCCESS
+    env, ctx = base_env, base_env.ctx
+    commit(env.upstream, "warm.sh", SUCCESS)
+    commit(env.upstream, "lock", "original")
+    sh(env.upstream, "git", "push", "-q", "origin", "release/stable")
+    sh(env.src, "git", "fetch", "-q", "origin")
+    sh(env.src, "git", *seal.SAFE_FLAGS, "-c", "user.name=test", "-c", "user.email=t@t",
+       "merge", "--no-edit", "origin/release/stable")
+    env.candidate = commit(env.src, "warm.sh", "exit 99")
+    sh(ctx.repo, "git", "fetch", "-q", str(env.src), f"+spec/c:{ctx.ref}")
+    env.base = commit(env.upstream, "lock", "base")
+    sh(env.upstream, "git", "push", "-q", "origin", "release/stable")
+    ctx.m = replace(ctx.m, snapshots=(manifest.Snapshot("deps", ("lock",),
+        ("/bin/sh", "{src}/warm.sh", "{src}", "{sha}", "{snapshot:deps}")),),
+        prepare=(manifest.Step("ordinary", ("/bin/sh", "-ec",
+            'test -d "$1"; printf "%s" "$1" > "$1/prepared"', "sh", "{snapshot:deps}")),),
+        verify=(manifest.Step("ok", ("/bin/sh", "-ec",
+            'test "$(cat "$1/prepared")" = "$1"', "sh", "{snapshot:deps}")),))
+    monkeypatch.setattr(loop.verify, "wrap", lambda argv, sb: argv)  # Portable, not sandbox evidence.
+    return env
+
+
 def snapshot(path):
     # Include the index, refs, config, reflogs and dirty/untracked working files.
     return {str(p.relative_to(path)): p.read_bytes() for p in path.rglob("*") if p.is_file()}
+
+
+@pytest.mark.scenario("verify-preparation/private-snapshot-consumption/preparation-and-checks-share-the-private-path")
+def test_driver_snapshot_event_forwarding_is_serialized(base_env, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Lock
+    import time
+    ctx, active = base_env.ctx, Lock()
+    event = ctx.run.event
+    def forward(kind, **data):
+        assert active.acquire(blocking=False)
+        try:
+            time.sleep(0.002)  # Yield while inside the callback to expose overlapping writers.
+            event(kind, **data)
+        finally:
+            active.release()
+    monkeypatch.setattr(ctx.run, "event", forward)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda n: ctx.snapshots.emit("snapshot_fallback", execution=n), range(16)))
+    events = [json.loads(line) for line in (ctx.run.dir / "events.jsonl").read_text().splitlines()]
+    assert sorted(e["execution"] for e in events if e["event"] == "snapshot_fallback") == list(range(16))
+
+
+@pytest.mark.scenario("verify-preparation/trusted-base-warming/sync-failure-and-publish-preserve-behavior")
+@pytest.mark.parametrize("requested_pause", [False, True])
+def test_snapshot_initial_fetch_failure_and_pause(snapshot_env, monkeypatch, requested_pause):
+    env, ctx = snapshot_env, snapshot_env.ctx
+    stale = loop._fetch_publish_base(ctx, timeout=300)
+    base = commit(env.src, ctx.tasks_path, "## 1. Core\n\n- [ ] 1.1 Pending\n")
+    sh(ctx.repo, "git", "fetch", "-q", str(env.src), f"+spec/c:{ctx.ref}")
+    fetches, prepared = [], []
+    def failed_fetch(current, *, timeout):
+        fetches.append(timeout)
+        raise RuntimeError("offline fixture")
+    def step(current, task, head):
+        assert head == base and ctx.run.state.base_sync == {}
+        ok, _, receipts = loop._seen_scenarios(ctx, head, ctx.run.dir / "task-preparation")
+        assert ok and [r.id for r in receipts] == ["ordinary", "ok"]
+        prepared.append(task.key)
+        ctx.pause("requested")
+    monkeypatch.setattr(loop, "_fetch_publish_base", failed_fetch)
+    monkeypatch.setattr(loop, "step", step)
+    monkeypatch.setattr(loop.verify, "warm_snapshots", lambda *a: pytest.fail("a stale fetch must never warm"))
+    if requested_pause:
+        ctx.run.request_pause()
+    with ctx.run.lock() as mine:
+        assert mine and loop.run(ctx) == "paused"
+    assert fetches == ([] if requested_pause else [300])
+    assert prepared == ([] if requested_pause else [loop.tasks.parse(ctx.tasks_text(base))[0].key])
+    events = [json.loads(line) for line in (ctx.run.dir / "events.jsonl").read_text().splitlines()]
+    assert [e["event"] for e in events if e["event"].startswith("snapshot_")] == (
+        [] if requested_pause else ["snapshot_sync_failed", "snapshot_fallback"])
+    assert ctx.run.state.pause.reason == "requested" and not ctx.run.pause_requested()
+    assert not (ctx.run.dir / "snapshots").exists()
+    with ctx.run.lock() as mine:
+        assert mine and not loop.prepare_publish(ctx)
+    assert ctx.run.state.pause.reason == "base_fetch" and "offline fixture" in ctx.run.state.pause.detail
+    assert sh(ctx.repo, "git", "rev-parse", "refs/specloop/publish-base") == stale
 
 
 @pytest.mark.scenario("publish-base-sync/fetch-current-base/readiness-uses-origin")
@@ -556,6 +638,7 @@ def test_driver_checks_merged_head_before_readiness(base_env, monkeypatch):
 
 
 @pytest.mark.scenario("publish-base-sync/verify-integrated-head/unmoved-base")
+@pytest.mark.scenario("verify-preparation/snapshot-fallback-events/legacy-manifests-keep-their-behavior")
 @pytest.mark.parametrize("previously_integrated", [False, True])
 def test_driver_unmoved_base_fetches_once_without_merge_or_extra_verify(base_env, monkeypatch,
                                                                      previously_integrated):
@@ -580,6 +663,10 @@ def test_driver_unmoved_base_fetches_once_without_merge_or_extra_verify(base_env
     assert json.dumps(ctx.run.state.base_sync, sort_keys=True) == sync
     assert ctx.run.state.pause.reason == "ready_to_publish"
     assert head[:12] in ctx.run.state.pause.detail
+    assert not (ctx.run.dir / "snapshots").exists()
+    assert not list(ctx.run.dir.rglob("snapshot-events.jsonl"))
+    assert not any(json.loads(line)["event"].startswith("snapshot_")
+                   for line in (ctx.run.dir / "events.jsonl").read_text().splitlines())
 
 
 @pytest.mark.scenario("publish-base-sync/fetch-current-base/fetch-cannot-establish-base")
@@ -708,7 +795,23 @@ def publish_without_preparing(monkeypatch, command, code):
         for name in ("prepare_publish", "_merge_publish_base", "_merge_commits", "run", "finals"):
             guard.setattr(loop, name, forbidden)
         guard.setattr(loop.verify, "run_steps", forbidden)
+        guard.setattr(loop.verify, "warm_snapshots", forbidden)
         assert main(command) == code
+
+
+@pytest.mark.scenario("verify-preparation/trusted-base-warming/sync-failure-and-publish-preserve-behavior")
+def test_snapshot_publish_only_schedules_preparation(publish_env, monkeypatch, capfd):
+    env, ctx = publish_env, publish_env.ctx
+    ctx.m = replace(ctx.m, snapshots=(manifest.Snapshot("deps", ("base.txt",), ("false",)),))
+    ctx.pause("ready_to_publish")
+    advance_base(env)
+    head = ctx.head()
+    publish_without_preparing(monkeypatch, ["publish", "c", "--json"], 1)
+    assert "scheduled" in json.loads(capfd.readouterr().out)["error"]
+    ctx.run.reload()
+    assert ctx.run.state.status == "running" and ctx.run.state.base_sync == {}
+    assert ctx.head() == head and env.operations == [("fetch", 20)]
+    assert not (ctx.run.dir / "snapshots").exists()
 
 
 @pytest.mark.scenario("publish-base-sync/fetch-current-base/publish-fetches-again")

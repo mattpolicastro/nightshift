@@ -433,17 +433,21 @@ def test_empty_review_does_not_redraft(setup, tmp_path):
     assert gh.labels == {"spec:review"}
 
 
+@pytest.mark.scenario("pr-revision/spec-stage-revision/spec-revised-from-review")
 def test_rejected_revision_explained_without_push(setup, tmp_path):
     _, gh, commands = setup
     commands.result = {"version": 1, "outcome": "needs_input", "questions": ["Mono or stereo?"]}
     poll(setup, tmp_path)
     assert gh.head == HEAD and "needs-human" in gh.labels
     assert "agent:revise" in gh.labels and "Mono or stereo?" in gh.comments[0]["body"]
+    original = gh.comments[0].copy()
     gh.labels.remove("needs-human")
     commands.result = {"version": 1, "outcome": "drafted", "commit": REVISED, "branch": BRANCH}
     poll(setup, tmp_path)
     assert len(commands.proposals) == 2 and gh.head == REVISED
-    assert gh.labels == {"spec:review"} and len(gh.comments) == 1
+    assert gh.labels == {"spec:review"} and len(gh.comments) == 2
+    assert gh.comments[0] == original and gh.comments[1]["id"] != original["id"]
+    assert REVISED in gh.comments[1]["body"]
 
 
 @pytest.mark.scenario("pr-revision/spec-stage-revision/spec-revised-from-review")
@@ -457,6 +461,7 @@ def test_answer_after_lost_needs_human_response_retries_propose(setup, tmp_path,
     assert "needs-human" in gh.labels and "agent:revise" in gh.labels
     receipt = json.loads((tmp_path / "revisions" / "owner__sample" / "8.json").read_text())
     assert not receipt.get("delivered")
+    original = gh.comments[0].copy()
     poll(setup, tmp_path)
     assert len(commands.proposals) == 1
     gh.feedback.append({"id": 104, "author": {"login": "reviewer"}, "body": "Use stereo.",
@@ -467,8 +472,9 @@ def test_answer_after_lost_needs_human_response_retries_propose(setup, tmp_path,
     assert len(commands.proposals) == 2 and gh.head == REVISED
     proposal = commands.proposals[-1]
     assert "Use stereo." in idea_file(proposal).read_text(encoding="utf-8")
-    assert gh.labels == {"spec:review"} and len(gh.comments) == 1
-    assert REVISED in gh.comments[0]["body"]
+    assert gh.labels == {"spec:review"} and len(gh.comments) == 2
+    assert gh.comments[0] == original and gh.comments[1]["id"] != original["id"]
+    assert REVISED in gh.comments[1]["body"]
 
 
 def test_moved_pr_does_not_overwrite_human_commit(setup, tmp_path):
