@@ -446,7 +446,7 @@ def section_evidence(ctx: Ctx, n: int, head: str, all_tasks: list[tasks.Task]) -
     base = _evidence_base(ctx, n, head)
     if base is None:
         return False
-    ev = evidence.gather(ctx.repo, base, head, cited, seen, m, out, n)
+    ev = evidence.gather(ctx.repo, base, head, cited, seen, m, out, n, **ctx.snapshot_kwargs)
     summary = ev.summary()
     ctx.run.event("evidence", section=n, passed=ev.passed(m.mutation_min), score=ev.score,
                   timeouts=sum(x.result == "timeout" for x in ev.mutants),
