@@ -11,6 +11,7 @@ from nightshift.config import Config
 from test_revision_feedback_consumption import read, receipt_path
 from test_revision_feedback_recovery import restart, tick
 from test_specloop_spec_revision import CHANGE, HEAD, setup as spec_setup
+from test_specloop_intake import idea_file
 
 pytestmark = pytest.mark.real_trust
 
@@ -19,6 +20,61 @@ def attempt(saved):
     value = saved["delivery_attempt"]
     assert UUID(value).version == 4 and UUID(value).hex == value
     return value
+
+
+@pytest.mark.scenario("specloop-documentation/revision-rerun-workaround/operator-starts-a-fresh-revision-round")
+@pytest.mark.parametrize("outcome,field", [("rejected", "contradictions"), ("needs_input", "questions")])
+def test_operator_starts_fresh_revision_round(spec_setup, tmp_path, monkeypatch, outcome, field):
+    repo, gh, commands = spec_setup
+    success = commands.result
+    commands.result = {"version": 1, "outcome": outcome, field: ["Clarify empty input"]}
+    tick(spec_setup, tmp_path)
+    refused = read(tmp_path)
+    earlier = [comment.copy() for comment in gh.comments]
+    assert gh.labels == {"spec:review", "agent:revise", "needs-human"}
+
+    events = list(gh.events)
+    gh.label_event("agent:revise", "labeled")
+    assert gh.events == events  # Applying an existing label cannot create a round.
+    assert tick(spec_setup, tmp_path) == []
+    assert read(tmp_path) == refused and len(commands.proposals) == 1
+
+    gh.feedback.append({**gh.feedback[1], "id": 104, "body": "Empty input must return an empty list."})
+    gh.label_event("agent:revise", "unlabeled")
+    gh.label_event("needs-human", "unlabeled")
+    assert tick(spec_setup, tmp_path) == []
+    gh.label_event("agent:revise", "labeled", actor="outsider")
+    assert tick(spec_setup, tmp_path) == []
+    assert read(tmp_path) == refused and len(commands.proposals) == 1
+    assert len(gh.comments) == 2 and gh.comments[:1] == earlier
+    assert gh.comments[-1]["body"].endswith(
+        f"<!-- nightshift:draft:label-authorization-8:{gh.events[-1]['id']} -->")
+    earlier = [comment.copy() for comment in gh.comments]
+
+    gh.label_event("agent:revise", "unlabeled")
+    gh.label_event("agent:revise", "labeled", actor="maintainer")
+    event = gh.events[-1]["id"]
+    assert event != refused["event"]
+    monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(intake, "run_git", commands)
+    daemon.PAUSE_FILE.touch()
+    daemon.poll_specloop(Config(repos=[repo]), daemon.RepoHealth(), runner=gh, specloop_runner=commands)
+    assert read(tmp_path) == refused and len(commands.proposals) == 1
+    daemon.PAUSE_FILE.unlink()
+
+    commands.result = success
+    tick(spec_setup, tmp_path)
+    saved = read(tmp_path)
+    assert saved["event"] == event and saved["round_id"] == str(event)
+    assert "delivery_attempt" not in saved and saved["delivered"]
+    assert len(commands.proposals) == 2
+    assert gh.feedback[-1]["body"] in idea_file(commands.proposals[-1]).read_text()
+    assert saved["consumed_feedback_ids"] == sorted([
+        *refused["consumed_feedback_ids"], "conversation:102", "conversation:104",
+    ])
+    assert len(gh.comments) == 3 and gh.comments[:-1] == earlier
+    assert gh.comments[-1]["body"].endswith(f"<!-- nightshift:revise:{CHANGE}:{event} -->")
+    assert gh.labels == {"spec:review"}
 
 
 @pytest.mark.scenario("pr-revision/attempt-scoped-revision-results/rerun-round-posts-new-result")
