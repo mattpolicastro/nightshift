@@ -219,6 +219,13 @@ model/endpoint tables, concurrency, task caps and phase budgets are inert, with
 sorted key-only ignored-setting notes. They do not configure manifests or
 providers. See [manifest templates and CLI outcomes](docs/specloop/command-json.md).
 
+Omitting `repos.forge` always selects legacy GitHub. An explicit selection must
+exactly match a named forge table; repository names must be unique across all
+forges, ignoring case. See [config.example.toml](config.example.toml) for the
+forge fields and Gitea defaults. Named GitHub retains ambient `gh` authentication
+and host selection. Gitea configuration does not enable daemon execution or
+authorize GitHub landing.
+
 Each unpaused poll checks regular-file status and validates the template before
 new work. Symlinks to regular files work; directories, FIFOs and devices are
 rejected before reading. Missing, unreadable or invalid templates, including an
@@ -401,7 +408,7 @@ The forge boundary is staged ([issue #126](https://github.com/mattpolicastro/nig
 intake, merge-readiness and daemon engine-switch recovery use named operations;
 authorization, receipts and workflow decisions remain in core. Landing migration
 is future work (#130). The standalone `forge/gitea.py` backend is implemented over
-`forge/http.py`; Gitea enrollment and daemon integration remain future work.
+`forge/http.py`; named Gitea enrollment is configurable, with daemon execution deferred.
 
 ## Usage
 
@@ -746,6 +753,7 @@ and [landing recovery](docs/landing.md#recovering-from-a-refusal).
 
 `nightshift daemon status` reports daemon liveness, alerts, active background jobs and
 repository ready/blocked counts and lists, including contradiction diagnostics.
+Gitea rows print `not queried (gitea)` without GitHub queue queries.
 Worker working counts, claim/phase/transcript lines and the off-subscription
 model report are removed; other status behavior and exit codes are unchanged.
 Use `nightshift jobs --all` for job history and `nightshift status` for independent

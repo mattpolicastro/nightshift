@@ -31,6 +31,12 @@ are inert, with key-only ignored-setting notes; no manifest is generated from th
 See [enrollment and preparation](../../README.md#enroll-a-repository) and the
 [CLI contract](command-json.md).
 
+Forge selection defaults to GitHub independently of named table order. Optional
+`repos.forge` selects an exact name; owner/repository collisions across forges
+are rejected ignoring case. See [forge configuration](../../config.example.toml).
+Gitea enrollment grants no GitHub landing authority; daemon status reports it
+as `not queried (gitea)`. Gitea daemon execution remains deferred.
+
 | Label | Stage and action |
 | --- | --- |
 | `spec:draft` or `agent:ready` on an issue | Draft its title, body and comments into an OpenSpec change. |

@@ -284,6 +284,9 @@ def _daemon_command(args) -> int:
         print(f"  alerts: {'slack' if cfg.slack_webhook else 'NOT CONFIGURED'}")
         _active_jobs()
         for repo in cfg.repos:
+            if cfg.forge_for(repo).kind == "gitea":
+                print(f"  {repo.name}: not queried (gitea)")
+                continue
             pending = queue.ready(repo.name, cfg.labels)
             # Split them: a queue full of blocked issues looks identical to an
             # idle daemon otherwise, and the difference is the whole question
