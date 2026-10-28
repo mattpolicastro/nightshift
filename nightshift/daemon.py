@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from . import outcomes, notify, queue, specloop_intake, specloop_job
 from .config import Config, Repo
+from .forge.github import GitHubForge
 
 log = logging.getLogger("nightshift")
 
@@ -228,7 +229,7 @@ def _reconcile_engine_switch(repo: Repo, labels: queue.Labels, *, runner=None) -
             with queue.gh_guard(check):
                 result = (runner or queue._gh)(args)
             check()
-            if args[:2] == ["issue", "view"]:
+            if tuple(args[:2]) == ("issue", "view"):
                 data = json.loads(result)
                 if not isinstance(data.get("labels"), list):
                     raise ValueError("missing recovery labels")
@@ -238,8 +239,10 @@ def _reconcile_engine_switch(repo: Repo, labels: queue.Labels, *, runner=None) -
             read_errors.append(exc)
             raise
 
+    forge = GitHubForge(gh)
+
     def read_labels(number):
-        current = queue.labels_of(repo.name, number, runner=gh)
+        current = forge.issue_labels(repo.name, number)
         if read_errors:
             raise read_errors[-1]
         return current
@@ -256,7 +259,7 @@ def _reconcile_engine_switch(repo: Repo, labels: queue.Labels, *, runner=None) -
         if journal["version"] != 1 or journal["action"] not in {"release", "hold"}:
             raise ValueError(f"unknown recovery journal: {path}")
         journals[int(path.stem)] = journal
-    working = {issue.number for issue in queue._list(repo.name, labels.working, runner=gh)}
+    working = {issue.number for issue in forge.list_issues(repo.name, labels.working)}
     for number in sorted(working | set(by_number) | set(journals)):
         journal = journals.get(number)
         claim = by_number.get(number)
@@ -316,14 +319,12 @@ def _reconcile_engine_switch(repo: Repo, labels: queue.Labels, *, runner=None) -
 
         validate_labels(current)
         if hold and not journal.get("commented"):
-            pages = json.loads(gh([
-                "api", f"repos/{repo.name}/issues/{number}/comments", "--paginate", "--slurp",
-            ]))
+            pages = forge.comment_pages(repo.name, number)
             if not any(journal["marker"] in c["body"] for page in pages for c in page):
                 validate_labels(read_labels(number))
-                gh(["issue", "comment", str(number), "--repo", repo.name, "--body",
+                forge.create_comment(repo.name, number, "issue",
                     f"{queue.SELF_COMMENT_PREFIX} {journal['detail']}. "
-                    f"Work is preserved for human inspection.\n\n{journal['marker']}"])
+                    f"Work is preserved for human inspection.\n\n{journal['marker']}")
             # Once acknowledged, even a stale comment list must not cause a
             # duplicate. An ambiguous response instead reconciles the marker.
             journal["commented"] = True
@@ -333,7 +334,7 @@ def _reconcile_engine_switch(repo: Repo, labels: queue.Labels, *, runner=None) -
         current = read_labels(number)
         validate_labels(current)
         if labels.working in current:
-            queue._relabel(repo.name, number, add=[target], remove=[labels.working], runner=gh)
+            forge.relabel_issue(repo.name, number, add=[target], remove=[labels.working])
         journal["transitioned"] = True
         specloop_job.save(path, journal)
         # record() is best effort. Verify its durable result before cleanup and
