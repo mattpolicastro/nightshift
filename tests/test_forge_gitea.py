@@ -1333,3 +1333,248 @@ def test_full_hex_sha_case_preserves_identity(fake, method):
     result = getattr(make_forge(fake), method)("owner/repo", SHA.upper())
     assert (result["sha"] == SHA if method == "commit" else json.loads(result.stdout) == [])
     assert len(fake.calls) == 1 and fake.calls[0].path == path
+
+
+MARKER = "<!-- nightshift:revise:owner/repo:1:λ -->"
+COMMENT_PATH = ROOT + "/issues/1/comments"
+COMMENT_DETAIL = ROOT + "/issues/comments/1"
+BODY = "Updated 🦉\r\n" + MARKER + "\r\n"
+
+
+@pytest.fixture
+def comment_repo(fake):
+    issue = candidate(1, [], comments=[])
+    fake.repository("owner/repo", labels=[], issues=[issue])
+    return issue["comments"]
+
+
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/deterministic-marker-matching")
+@pytest.mark.parametrize("namespace", ["draft", "admit", "publish", "revise", "approval",
+    "draft-error", "admit-error", "publish-error", "revise-error"])
+@pytest.mark.parametrize("prefix,suffix", [("", ""), ("Text\r\n", "\r\n"),
+    ("```\n", "\n"), ("<div>\n", ""), ("  indented text\n", ""),
+    ("inline <!-- nightshift:other:token -->\n", "")])
+def test_comment_marker_rules_preserve_original_body(fake, comment_repo, namespace, prefix, suffix):
+    body = prefix + f"<!-- nightshift:{namespace}:λ:/repo#1 -->" + suffix
+    forge = make_forge(fake)
+    forge.create_comment("owner/repo", 1, "issue", body)
+    assert comment_repo[0]["body"] == body and fake.calls[-1].body == {"body": body}
+    assert [c.method for c in fake.calls] == ["GET", "POST"]
+    fake.calls.clear()
+    forge.create_comment("owner/repo", 1, "pr", body)
+    assert [c.method for c in fake.calls] == ["GET", "GET"]
+
+
+INVALID_MARKERS = [" " + MARKER, "\t" + MARKER, "inline " + MARKER, MARKER + " trailing",
+    MARKER + "\ntext", MARKER + "\n\n", MARKER + "\r", MARKER + "\n" + MARKER,
+    "<!-- nightshift:bogus:x -->\n" + MARKER, "```\n" + MARKER + "\n```",
+    "<div>" + MARKER + "</div>", MARKER.replace("revise", "approval-error"),
+    MARKER.replace("revise", "unknown"), MARKER.replace("λ", "a b"),
+    MARKER.replace("λ", "a<b"), "<!-- nightshift:draft: -->", "<!-- nightshift:",
+    MARKER.replace("λ", "a\u2028b"), "text\r" + MARKER]
+
+
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/deterministic-marker-matching")
+@pytest.mark.parametrize("body", INVALID_MARKERS)
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_malformed_comment_input_refused_before_dispatch(fake, body, operation):
+    forge = make_forge(fake)
+    with pytest.raises(ForgeError, match="marker"):
+        if operation == "create":
+            forge.create_comment("owner/repo", 1, "issue", body)
+        else:
+            forge.update_comment("owner/repo", 1, body)
+    assert not fake.calls
+
+
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/deterministic-marker-matching")
+@pytest.mark.parametrize("login", ["Alice", "Robot"])
+@pytest.mark.parametrize("body", [" " + MARKER, MARKER + "\ntrailing", MARKER + "\n" + MARKER])
+def test_malformed_existing_marker_is_not_absence(fake, comment_repo, login, body):
+    comment_repo.append(authored(login=login, body=body))
+    with pytest.raises(ForgeError, match="marker"):
+        make_forge(fake).create_comment("owner/repo", 1, "issue", BODY)
+    assert all(c.method == "GET" for c in fake.calls) and comment_repo[0]["body"] == body
+
+
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/bot-ownership-gates-upserts")
+@pytest.mark.parametrize("bots", [0, 1, 2])
+def test_comment_upsert_ignores_humans_and_reads_all_pages(fake, comment_repo, bots):
+    comment_repo.append(authored(body=BODY))
+    comment_repo.extend(authored(i + 2, "rObOt", "old\n" + MARKER) for i in range(bots))
+    forge = make_forge(fake, trusted_logins=["Alice", "Robot"])
+    assert [r["user"]["login"] for p in forge.comment_pages("owner/repo", 1) for r in p] == [
+        "Alice", *["rObOt"] * bots]
+    fake.calls.clear()
+    if bots == 2:
+        with pytest.raises(ForgeError, match="Ambiguous"):
+            forge.create_comment("owner/repo", 1, "issue", BODY)
+        assert all(c.method == "GET" for c in fake.calls)
+    else:
+        forge.create_comment("owner/repo", 1, "issue", BODY)
+        assert fake.calls[-1].method == ("PATCH" if bots else "POST")
+        assert comment_repo[-1]["body"] == BODY
+        if bots:
+            assert fake.calls[-2].path == ROOT + "/issues/comments/2"
+    assert [c.query["page"] for c in fake.calls if c.query] == [
+        [str(p)] for p in range(1, bots + 3)]
+    assert comment_repo[0] == authored(body=BODY)
+
+
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/bot-ownership-gates-upserts")
+@pytest.mark.parametrize("login", ["Alice", None, "rObOt"])
+@pytest.mark.parametrize("upsert", [False, True])
+def test_every_patch_checks_current_ownership(fake, comment_repo, login, upsert):
+    comment_repo.append(authored(login="Robot", body=MARKER))
+    fake.route("GET", COMMENT_DETAIL, Reply(authored(login=login, body=MARKER)))
+    forge = make_forge(fake)
+    def act():
+        if upsert:
+            forge.create_comment("owner/repo", 1, "issue", BODY)
+        else:
+            forge.update_comment("owner/repo", 1, BODY)
+    if login != "rObOt":
+        with pytest.raises(ForgeError, match="bot-owned"):
+            act()
+        assert not any(c.method == "PATCH" for c in fake.calls)
+        assert comment_repo[0]["body"] == MARKER
+    else:
+        act()
+        assert [c.method for c in fake.calls[-2:]] == ["GET", "PATCH"]
+        assert comment_repo[0]["body"] == BODY
+
+
+@pytest.mark.scenario("gitea-forge/ambiguous-comment-reconciliation/accepted-create-loses-response")
+@pytest.mark.parametrize("outcome", [OSError(SECRET), Reply(status=201, raw=b"invalid-json"),
+    Reply(status=201, raw=b"\xff"), Reply(status=503)])
+@pytest.mark.parametrize("different", [False, True])
+def test_gitea_comment_create_reconciles_marker(fake, comment_repo, outcome, different):
+    # The human copy is present before creation; the bot lands on a later page.
+    comment_repo.append(authored(body=BODY))
+    def accepted(call):
+        if different:
+            comment_repo[-1]["body"] = "Older text\n" + MARKER
+        return outcome
+    fake.comment_create_outcome = accepted
+    make_forge(fake).create_comment("owner/repo", 1, "pr", BODY)
+    assert len(comment_repo) == 2 and all(row["body"] == BODY for row in comment_repo)
+    assert [c.method for c in fake.calls].count("POST") == 1
+    assert [c.query["page"] for c in fake.calls if c.query] == [["1"], ["2"], ["1"], ["2"], ["3"]]
+    assert sum(c.method == "PATCH" for c in fake.calls) == int(different)
+    if different:
+        assert fake.calls[-2].path == ROOT + "/issues/comments/2"
+
+
+@pytest.mark.scenario("gitea-forge/ambiguous-comment-reconciliation/reconciliation-cannot-confirm-success")
+@pytest.mark.parametrize("mode", ["absent", "human", "duplicate", "read-fails", "patch-fails", "human-detail"])
+def test_comment_reconciliation_failure_never_posts_again(fake, comment_repo, mode):
+    original = http.GiteaHTTPError(503, SECRET, True)
+    def fail(call):
+        if mode == "human":
+            comment_repo.append(authored(body=BODY))
+        elif mode != "absent":
+            comment_repo.append(authored(login="Robot", body=MARKER))
+        if mode == "duplicate":
+            comment_repo.append(authored(2, "Robot", BODY))
+        if mode == "read-fails":
+            fake.route("GET", COMMENT_PATH, Reply(status=403), page=2)
+        if mode == "patch-fails":
+            fake.route("PATCH", COMMENT_DETAIL, Reply(status=403))
+        if mode == "human-detail":
+            fake.route("GET", COMMENT_DETAIL, Reply(authored(body=MARKER)))
+        return original
+    fake.route("POST", COMMENT_PATH, fail)
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).create_comment("owner/repo", 1, "issue", BODY)
+    assert caught.value.transient is (mode in ("absent", "human"))
+    assert SECRET not in "".join(traceback.format_exception(caught.value))
+    assert sum(c.method == "POST" for c in fake.calls) == 1
+    assert sum(c.method == "PATCH" for c in fake.calls) == (mode == "patch-fails")
+    assert all(row["body"] == (BODY if mode == "human" or row["id"] == 2 else MARKER)
+               for row in comment_repo)
+
+
+@pytest.mark.scenario("gitea-forge/ambiguous-comment-reconciliation/reconciliation-cannot-confirm-success")
+@pytest.mark.parametrize("body,outcome,transient", [
+    (BODY, Reply(status=403), False), (BODY, Reply(status=302), False),
+    (BODY, http.GiteaHTTPError(None, SECRET, False), False),
+    ("plain\r\n  🦉", OSError(SECRET), True), ("plain", Reply(status=201, raw=b"?"), False)])
+def test_unmarked_or_permanent_comment_failures_do_not_reconcile(fake, comment_repo, body, outcome, transient):
+    fake.route("POST", COMMENT_PATH, outcome)
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).create_comment("owner/repo", 1, "issue", body)
+    assert caught.value.transient is transient
+    assert [c.method for c in fake.calls] == (["GET", "POST"] if body == BODY else ["POST"])
+
+
+@pytest.mark.scenario("gitea-forge/failure-and-guard-boundaries/guard-exception-identity")
+@pytest.mark.scenario("gitea-forge/ambiguous-comment-reconciliation/reconciliation-cannot-confirm-success")
+@pytest.mark.parametrize("kind", ["http", "forge", "os", "pause"])
+@pytest.mark.parametrize("stage,stop", [("initial", 1), ("post", 2), ("reconcile", 3),
+    ("terminal", 4), ("ownership", 5), ("patch", 6), ("retry", 4)])
+def test_comment_guard_identity_at_every_boundary(fake, comment_repo, kind, stage, stop):
+    error, guards = guard_error(kind), []
+    def guard():
+        guards.append(True)
+        if len(guards) == stop:
+            raise error
+    def accepted(call):
+        comment_repo[-1]["body"] = MARKER
+        if stage == "retry":
+            fake.route("GET", COMMENT_PATH, Reply(status=503), page=1)
+        return OSError(SECRET)
+    fake.comment_create_outcome = accepted
+    forge = make_forge(fake, guard=guard)
+    with pytest.raises(type(error)) as caught:
+        forge.create_comment("owner/repo", 1, "issue", BODY)
+    assert caught.value is error and len(fake.calls) == stop - 1
+    assert len(guards) == stop and forge._guard_error.get() is None
+    assert sum(c.method == "POST" for c in fake.calls) <= 1
+    # The same exception object, now genuinely from transport, may reconcile.
+    comment_repo.clear()
+    fake.routes.clear()
+    fake.comment_create_outcome = error if kind == "http" else OSError(SECRET)
+    forge.create_comment("owner/repo", 1, "issue", BODY)
+    assert len(comment_repo) == 1 and comment_repo[0]["body"] == BODY
+
+
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/deterministic-marker-matching")
+@pytest.mark.parametrize("body", ["", "Plain\r\n  🦉\n\n", MARKER.replace("revise", "draft")])
+def test_unmarked_and_distinct_markers_create_without_touching_existing(fake, comment_repo, body):
+    comment_repo.append(authored(login="Robot", body=BODY))
+    make_forge(fake).create_comment("owner/repo", 1, "issue", body)
+    assert [row["body"] for row in comment_repo] == [BODY, body]
+    assert fake.calls[-1].body == {"body": body}
+    expected = ["GET", "GET", "POST"] if "<!-- nightshift:" in body else ["POST"]
+    assert [c.method for c in fake.calls] == expected
+
+
+@pytest.mark.scenario("gitea-forge/ambiguous-comment-reconciliation/reconciliation-cannot-confirm-success")
+@pytest.mark.parametrize("operation", ["upsert", "direct", "reconcile"])
+def test_comment_patch_failure_is_never_retried_or_reconciled(fake, comment_repo, operation):
+    fake.route("PATCH", COMMENT_DETAIL, Reply(status=503, raw=SECRET.encode()))
+    if operation == "reconcile":
+        def accepted(call):
+            comment_repo[-1]["body"] = MARKER
+            return OSError(SECRET)
+        fake.comment_create_outcome = accepted
+    else:
+        comment_repo.append(authored(login="Robot", body=MARKER))
+    forge = make_forge(fake)
+    with pytest.raises(ForgeError) as caught:
+        if operation == "direct":
+            forge.update_comment("owner/repo", 1, BODY)
+        else:
+            forge.create_comment("owner/repo", 1, "issue", BODY)
+    assert caught.value.transient and fake.calls[-1].method == "PATCH"
+    assert sum(c.method == "PATCH" for c in fake.calls) == 1
+    assert sum(c.method == "POST" for c in fake.calls) == (operation == "reconcile")
+
+
+@pytest.mark.scenario("gitea-forge/ambiguous-comment-reconciliation/reconciliation-cannot-confirm-success")
+@pytest.mark.parametrize("error", [ForgeError(SECRET, transient=True), RuntimeError(SECRET)])
+def test_comment_create_does_not_reconcile_non_http_exceptions(fake, comment_repo, error):
+    fake.comment_create_outcome = error
+    with pytest.raises(type(error)) as caught:
+        make_forge(fake).create_comment("owner/repo", 1, "issue", BODY)
+    assert caught.value is error and [c.method for c in fake.calls] == ["GET", "POST"]

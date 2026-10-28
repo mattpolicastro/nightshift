@@ -35,6 +35,8 @@ class FakeGitea:
         self.routes = {}
         self.repositories = {}
         self.silent_label_writes = set()
+        self.bot_login = "Robot"
+        self.comment_create_outcome = None
 
     def repository(self, repo, *, labels, issues=(), pulls=(), page_size=1, facts=None,
                    commits=(), combined_statuses=None):
@@ -88,6 +90,23 @@ class FakeGitea:
                     return Reply(pr)
             for issue in [*state["issues"], *state["pulls"]]:
                 detail_path = root + f'/issues/{issue["number"]}'
+                if call.method == "POST" and call.path == detail_path + "/comments":
+                    assert set(call.body) == {"body"}
+                    comment_id = max((comment["id"] for item in [*state["issues"], *state["pulls"]]
+                                      for comment in item.get("comments", [])), default=0) + 1
+                    created = dict(id=comment_id, body=call.body["body"], user={"login": self.bot_login})
+                    issue.setdefault("comments", []).append(created)
+                    # Failure is injected after storing the accepted create.
+                    return (self.comment_create_outcome if self.comment_create_outcome is not None
+                            else Reply(created, status=201))
+                for comment in issue.get("comments", []):
+                    if call.path == root + f'/issues/comments/{comment["id"]}':
+                        if call.method == "GET":
+                            return Reply(comment)
+                        if call.method == "PATCH":
+                            assert set(call.body) == {"body"}
+                            comment["body"] = call.body["body"]
+                            return Reply(comment)
                 if call.method == "GET":
                     if call.path == detail_path:
                         return Reply(issue)

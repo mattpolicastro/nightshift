@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextvars import ContextVar
 import json
 import re
+from typing import Literal
 from urllib.parse import quote, urlsplit
 
 from nightshift.forge import ForgeError
@@ -68,11 +69,12 @@ class GiteaForge:
             quote(part, safe="") for part in (*repo.split("/"), *components))
 
     def _request(self, method: str, path: str, *, query=None, json_body=None,
-                 blocking_fallback: bool = False):
+                 blocking_fallback: bool = False,
+                 reconcile: Callable[[], bool] | None = None):
         """The sole transport boundary; guard origin takes priority over type.
 
-        Suppression/reconciliation belongs in the genuine HTTP-error
-        branch below, before translation, never around a broad exception catch.
+        Classify genuine HTTP failures before translation. Reconciliation runs
+        outside the handler so failures do not inherit the write error context.
         """
         scope = self._guard_error.set(None)
         try:
@@ -80,11 +82,15 @@ class GiteaForge:
         except GiteaHTTPError as error:
             if self._guard_error.get() is error:
                 raise
-            if blocking_fallback:
-                return None
-            raise ForgeError("Gitea request failed", transient=error.transient) from None
+            transient = error.transient
+            ambiguous = transient or (error.status is not None and 200 <= error.status < 300)
         finally:
             self._guard_error.reset(scope)
+        if reconcile is not None and ambiguous and reconcile():
+            return None
+        if blocking_fallback:
+            return None
+        raise ForgeError("Gitea request failed", transient=transient) from None
 
     @staticmethod
     def _login(user: object) -> str | None:
@@ -122,6 +128,57 @@ class GiteaForge:
     def comment_pages(self, repo: str, number: int) -> list[list[dict]]:
         pages = self._pages(self._repo_path(repo, "issues", self._number(number), "comments"))
         return [[self._record(row) for row in page] for page in pages]
+
+    @staticmethod
+    def _comment_marker(body: str) -> str | None:
+        if not isinstance(body, str):
+            raise ForgeError("Invalid Gitea comment body", transient=False)
+        token = "<!-- nightshift:"
+        if token not in body:
+            return None
+        # Only CRLF and a single trailing newline are normalized for matching.
+        # Markdown/HTML context and indentation have no special meaning.
+        lines = body.replace("\r\n", "\n").removesuffix("\n").split("\n")
+        if (sum(line.startswith(token) for line in lines) != 1 or
+                re.fullmatch(r"<!-- nightshift:(?:(?:draft|admit|publish|revise)(?:-error)?|approval):[^\s<>]+ -->",
+                             lines[-1]) is None):
+            raise ForgeError("Invalid Gitea comment marker", transient=False)
+        return lines[-1]
+
+    def _upsert_marked_comment(self, repo: str, number: int, body: str, marker: str) -> bool:
+        matches = []
+        for page in self.comment_pages(repo, number):
+            for row in page:
+                candidate = self._comment_marker(row["body"])
+                if candidate == marker and self._is_bot(row["user"]):
+                    matches.append(row)
+        if len(matches) > 1:
+            raise ForgeError("Ambiguous Gitea comment marker", transient=False)
+        if not matches:
+            return False
+        if matches[0]["body"] != body:
+            self.update_comment(repo, matches[0]["id"], body)
+        return True
+
+    def create_comment(self, repo: str, number: int, kind: Literal["issue", "pr"],
+                       body: str) -> None:
+        marker = self._comment_marker(body)
+        path = self._repo_path(repo, "issues", self._number(number), "comments")
+        reconcile = None
+        if marker is not None:
+            def reconcile() -> bool:
+                return self._upsert_marked_comment(repo, number, body, marker)
+            if reconcile():
+                return
+        self._request("POST", path, json_body={"body": body}, reconcile=reconcile)
+
+    def update_comment(self, repo: str, comment_id: int, body: str) -> None:
+        self._comment_marker(body)
+        path = self._repo_path(repo, "issues", "comments", self._number(comment_id))
+        row = self._detail(path)
+        if type(row.get("id")) is not int or row["id"] != comment_id or not self._is_bot(row.get("user")):
+            raise ForgeError("Gitea comment is not bot-owned", transient=False)
+        self._request("PATCH", path, json_body={"body": body})
 
     def issue_for_draft(self, repo: str, number: int) -> dict:
         row = self.issue_author(repo, number)
