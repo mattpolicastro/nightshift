@@ -37,6 +37,9 @@ def absent(pgid):
         os.killpg(pgid, 0)
     except ProcessLookupError:
         return True
+    except PermissionError:
+        # The group id was reused by another user's process: ours is gone.
+        return True
     return False
 
 

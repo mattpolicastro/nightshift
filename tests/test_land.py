@@ -340,6 +340,59 @@ def test_every_status_row_must_be_readable(
     assert [argv for argv, _ in scripted_runner.calls] == [VIEW, MAIN, STATUS]
 
 
+@pytest.mark.scenario("reviewed-pr-landing/reliable-run-discovery/other-forge-rows-are-unrelated")
+@pytest.mark.parametrize("matching", [False, True])
+@pytest.mark.parametrize("foreign_first", [False, True])
+def test_discovery_ignores_rows_on_other_forge_hosts(
+    scripted_runner, matching, foreign_first,
+):
+    foreign = {**RUN, "pr": "https://gitea.example/owner/project/pulls/5"}
+    rows = [foreign] + ([RUN] if matching else [])
+    if not foreign_first:
+        rows.reverse()
+    scripted_runner.expect(STATUS, {**EMPTY_STATUS, "runs": rows})
+    operations = land.Operations(scripted_runner, lambda _: None, lambda: 100.0)
+    found = land.discover_run(land.Identity(REPO, 78), operations)
+    assert found == (land.LandingRun("reviewed-change", URL, HEAD, "paused", "human_checks")
+                     if matching else None)
+    assert [argv for argv, _ in scripted_runner.calls] == [STATUS]
+
+
+@pytest.mark.scenario("reviewed-pr-landing/reliable-run-discovery/other-forge-rows-are-unrelated")
+@pytest.mark.parametrize("pr", [
+    "https://github.com/owner/project/pulls/5",
+    "https://github.com/owner/project/pull/nope",
+    "https://github.com/owner/project/pull/0",
+    "https://github.com/owner/project",
+])
+def test_discovery_still_refuses_malformed_github_pr_url(
+    config_path, scripted_runner, capsys, pr,
+):
+    scripted_runner.expect(VIEW, PR).expect(MAIN, MAIN_REF).expect(
+        STATUS, {**EMPTY_STATUS, "runs": [RUN, {**RUN, "pr": pr}]})
+    assert invoke(config_path, scripted_runner, URL) == 1
+    assert "status row 2 (reviewed-change): malformed PR URL" in capsys.readouterr().err
+    assert [argv for argv, _ in scripted_runner.calls] == [VIEW, MAIN, STATUS]
+
+
+@pytest.mark.scenario("reviewed-pr-landing/reliable-run-discovery/uncertain-discovery-refused")
+@pytest.mark.parametrize("pr", [
+    "http://gitea.example/owner/project/pulls/5",
+    "https:///owner/project/pulls/5",
+    "https://[broken/owner/project/pulls/5",
+    "https://gitea.example:bad/owner/project/pulls/5",
+    "https://gitea.example:99999/owner/project/pulls/5",
+    "https://bad host/owner/project/pulls/5",
+    "https://gitea.example/owner/\nproject/pulls/5",
+])
+def test_discovery_refuses_malformed_foreign_urls(scripted_runner, pr):
+    scripted_runner.expect(STATUS, {**EMPTY_STATUS, "runs": [RUN, {**RUN, "pr": pr}]})
+    operations = land.Operations(scripted_runner, lambda _: None, lambda: 100.0)
+    with pytest.raises(land.Refusal, match="malformed PR URL"):
+        land.discover_run(land.Identity(REPO, 78), operations)
+    assert [argv for argv, _ in scripted_runner.calls] == [STATUS]
+
+
 @pytest.mark.scenario("reviewed-pr-landing/landing-interpreter-prerequisites/operator-prepares-the-environment")
 @pytest.mark.parametrize("engine", [None, "specloop"])
 @pytest.mark.parametrize("matching", [False, True])
