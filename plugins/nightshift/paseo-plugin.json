@@ -1,4 +1,4 @@
 {
   "id": "nightshift",
-  "requirements": { "paseo": ">=0.10.1 <0.13.0" }
+  "requirements": { "paseo": ">=0.10.1 <0.14.0" }
 }

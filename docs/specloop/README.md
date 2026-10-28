@@ -601,8 +601,8 @@ against its last good status before calling `act`, which rechecks live state.
 Only display fields cross to the client, with home directories replaced by
 `~` and raw command errors excluded.
 
-The supported range remains `>=0.10.1 <0.13.0`, built
-against SDK 0.12.0. See the [plugin README](../../plugins/nightshift/README.md#factory)
+The supported range is `>=0.10.1 <0.14.0`, built
+against SDK 0.13.2. See the [plugin README](../../plugins/nightshift/README.md#factory)
 for usage, refresh behavior and installation.
 
 ## How the engine works
