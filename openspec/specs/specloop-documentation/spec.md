@@ -80,14 +80,15 @@ describe specloop as the only engine, with historical worker material clearly id
 ### Requirement: Mutation evidence guidance
 
 The guide SHALL explain mutant concurrency, classifications, exclusions and
-guard-clause operators with their implementation PR citations. It SHALL
+guard-clause operators with their implementation PR citations, plus native
+operator selection and configurable invalid steps with the issue #133 citation. It SHALL
 preserve the distinction between measured evidence, unmeasured generated
 mutants and a no-candidate skip.
 
 #### Scenario: Parallel and timed out mutants are interpreted
 - **WHEN** a reader configures or reads a section mutation result
 - **THEN** the guide describes baseline-first isolated execution, default `mutation_parallel = 2`, serial value `1`, and scoring only killed/survived results
-- **THEN** it distinguishes selected-test `timeout` from preparation/configure/build `invalid`, excludes timeouts from both score terms, and cites issue #4 / PR #27 and issue #31 / PR #44
+- **THEN** it distinguishes selected-test `timeout` from preparation/configured-step `invalid` (configure/build by default, replaced by an explicit array), excludes timeouts from both score terms, and cites issue #4 / PR #27 and issue #31 / PR #44
 
 #### Scenario: Exclusions do not fabricate evidence
 - **WHEN** prose, comment lines or configured skip patterns remove candidates, or all generated results are equivalent, invalid or timed out
@@ -463,3 +464,20 @@ Checks SHALL validate scoped headings, links, command examples and recovery stru
 - **THEN** unique physical headings and pipe-table keys select relevant passages, supported examples parse without dispatch and relative links resolve
 - **THEN** ambiguous structures, unmatched command backticks and unknown placeholders fail closed; fences, HTML and indentation do not hide recognized lines
 - **THEN** existing assertions remain intact and desktop/phone review stays on the human checklist
+
+### Requirement: Native evidence example
+
+The evidence guide SHALL document invalid-step replacement/defaults, prepare
+precedence, C-family suffixes and operators, physical-line exclusions and their
+limits, citing issue #133. It SHALL link a parseable Dart manifest example and
+identify first-run validation on scheming-vizier as a pending human check.
+
+#### Scenario: Dart configuration is structurally valid
+- **WHEN** `examples/specloop/dart.toml` is loaded with the real manifest parser
+- **THEN** mutation selects defined `dart-analyze` then `dart-tests` steps, classifies `dart-analyze` failures as invalid and targets `lib/**`, with commands using the configured toolchain and prepared writable project
+- **THEN** tests check argv, IDs, order and placeholders without invoking Dart, installing dependencies or claiming project-specific coverage integration
+
+#### Scenario: Guidance states operational limits
+- **WHEN** the evidence passage and example are reviewed using the design's deterministic physical-line boundary and standalone-link rules
+- **THEN** the link resolves, ambiguous boundaries block validation and no prose-exact assertions or Markdown parsing are introduced
+- **THEN** guidance explains the conservative loss of string-containing lines, limited comment protection, lack of whole-file refusal and pending real-engine usefulness check without claiming fixtures prove operational support

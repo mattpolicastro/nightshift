@@ -913,8 +913,13 @@ add a timing-report command; CI cannot prove the real-gate speed-up.
 
 Only `killed` and `survived` results enter the score:
 `killed / (killed + survived)`. A selected-test timeout is `timeout`, excluded
-from both numerator and denominator. Preparation or steps named `configure`
-or `build` failing or timing out produce `invalid`, not a kill or test timeout.
+from both numerator and denominator. Preparation failures and timeouts always
+produce `invalid`. `mutation_invalid_steps` defaults to `["configure", "build"]`;
+failures or timeouts in those selected steps are also `invalid`. An explicit
+array replaces these defaults, rather than extending them; `[]` removes only
+the configured-step exception, never preparation's precedence. This setting
+classifies steps; it neither defines nor selects commands. The first failing
+receipt decides the result, in every route and execution phase.
 For example, two killed, one survived and three timed out score `2/3`, not
 `5/6` or `2/6` ([issue #31](https://github.com/mattpolicastro/nightshift/issues/31),
 [PR #44](https://github.com/mattpolicastro/nightshift/pull/44)).
@@ -924,10 +929,47 @@ docstrings and comments, including inline comments, in `.py` and `.pyi` files;
 adjacent executable code stays eligible. Other languages have limited
 line-based filtering: comment prefixes (`#`, `//`, `/*`, `*`) and complete
 `/* ... */` blocks whose opening and closing lines contain only comments.
-This is not general string or inline-comment parsing. Arbitrary runtime
-strings and JSX styles are not automatically excluded
+This is not general string or inline-comment parsing. Python runtime strings
+and unsupported-extension strings or JSX styles are not automatically excluded
 ([issue #21](https://github.com/mattpolicastro/nightshift/issues/21),
 [PR #48](https://github.com/mattpolicastro/nightshift/pull/48)).
+
+**Native candidates.** Exact, case-sensitive suffixes `.dart`, `.ts`, `.swift`,
+`.kt`, `.c` and `.cpp` select textual C-family operators: `true` ↔ `false`,
+`&&` ↔ `||`, `==` ↔ `!=`, `<` ↔ `<=`, `>` ↔ `>=`, and removal of leading
+logical `!`. Token guards exclude identifier fragments, longer operators and
+postfix `!`. There are no integer, arithmetic or Python control-flow operators
+in this set. Python and other extensions retain their existing operators
+([issue #133](https://github.com/mattpolicastro/nightshift/issues/133)).
+
+For these six suffixes, any ASCII apostrophe, double quote or backtick anywhere
+on a physical line excludes that entire line before sampling, including useful
+code beside strings and quotes in comments. Lines whose first non-whitespace
+text starts with `//`, `/*` or `*` are also excluded. Existing complete-block
+protection and literal skips still apply. No interpolation or division parsing,
+language-specific syntax validation or whole-file refusal is performed: other
+eligible lines remain candidates. Quote-free interiors of multiline strings
+and inline/trailing comment text outside protected blocks can still mutate.
+Tokens in generics or overloaded operators may not change useful behavior;
+inspect actual mutants and use narrow literal skips where needed.
+
+[Dart manifest](../../examples/specloop/dart.toml)
+
+Copy this trusted template outside the repository and configure its project,
+toolchain and provider paths. Preparation copies the current source into writable
+`{build}/project` and fetches locked dependencies. Every mutant prepares afresh;
+`dart-analyze` precedes `dart-tests`, and `mutation_invalid_steps = ["dart-analyze"]`
+classifies analyzer failures as invalid. Tests alone or cached baseline build
+state cannot establish that classification. Coverage reporting is project-specific
+and must be integrated separately; this template is not turnkey enrollment.
+
+The first real evidence gate on scheming-vizier remains a pending human check
+with its actual Dart toolchain, package cache and manifest. Confirm a passing
+baseline, invalid analyzer/compilation failures, meaningful killed and survived
+mutants, and a useful sample after quote-line skips. Inspect source, receipts,
+skips and outcome totals, and record the findings before claiming operational
+support. Structural fixtures do not prove real-engine usefulness; no meaningful
+candidates is a limitation, not evidence of support.
 
 Python docstrings need no `mutation-equivalent:` annotation; the touchpoint
 report's docstring annotation was removed in
