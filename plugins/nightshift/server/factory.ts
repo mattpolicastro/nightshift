@@ -1,7 +1,8 @@
 import { execFile, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { z } from 'zod';
-import { resolveHostPaths } from './host-paths';
+import { resolveForgeOriginsFile, resolveHostPaths } from './host-paths';
 import {
   factoryRunSchema, factoryActInputSchema, factoryActResultSchema,
   type FactoryRun, type FactorySnapshot, type FactoryActInput, type FactoryActResult,
@@ -11,7 +12,29 @@ const sourceSchema = z.object({ version: z.literal(1), runs: z.array(factoryRunS
 const unavailable = 'Factory status is unavailable on this host. Try again shortly.';
 export type FactoryExecute = (args: string[]) => Promise<{ code: number; stdout: string }>;
 
-export function createFactory(execute: FactoryExecute, clock = () => Date.now(), home = homedir()) {
+function loadForgeOrigins(home: string): ReadonlySet<string> {
+  // Invalid host settings fail status; unreadable or invalid files grant no extras.
+  const file = resolveForgeOriginsFile(process.env, home);
+  const github = 'https://github.com';
+  try {
+    const origins = new Set([github]);
+    for (const raw of readFileSync(file, 'utf8').split('\n')) {
+      const line = raw.replace(/\r$/, '');
+      if (!line.trim() || /^\s*#/.test(line)) continue;
+      const url = new URL(line);
+      if (url.protocol !== 'https:' || url.origin !== line) throw new Error('Invalid origin');
+      origins.add(line);
+    }
+    return origins;
+  } catch {
+    return new Set([github]);
+  }
+}
+
+export function createFactory(
+  execute: FactoryExecute, clock = () => Date.now(), home = homedir(),
+  originsLoader: () => ReadonlySet<string> = () => loadForgeOrigins(home),
+) {
   let cached: FactorySnapshot | undefined;
   let inFlight: Promise<FactorySnapshot> | undefined;
   let lastRead = -Infinity;
@@ -19,22 +42,23 @@ export function createFactory(execute: FactoryExecute, clock = () => Date.now(),
   let disposed = false;
   const display = (text: string) => home ? text.split(home).join('~') : text;
 
-  function githubLink(text: string): string {
+  function githubLink(text: string, origins: ReadonlySet<string>): string {
     const link = display(text);
-    if (!link.startsWith('https://github.com/')) return '';
     try {
       const url = new URL(link);
-      return url.origin === 'https://github.com' && !url.username && !url.password ? link : '';
+      return url.protocol === 'https:' && origins.has(url.origin) && !url.username && !url.password ? link : '';
     } catch {
       return '';
     }
   }
 
-  function project(run: FactoryRun): FactoryRun {
+  function project(run: FactoryRun, origins: ReadonlySet<string>): FactoryRun {
     if (run.pr) {
       const url = new URL(run.pr);
-      if (url.origin !== 'https://github.com' || url.username || url.password ||
-          !/^\/[^/]+\/[^/]+\/pull\/\d+$/.test(url.pathname) || url.search || url.hash) {
+      const shape = url.origin === 'https://github.com'
+        ? /^\/[^/]+\/[^/]+\/pull\/\d+$/ : /^\/[^/]+\/[^/]+\/pulls\/\d+$/;
+      if (!origins.has(url.origin) || url.protocol !== 'https:' || url.username || url.password ||
+          !shape.test(url.pathname) || url.search || url.hash) {
         throw new Error('Unexpected PR link');
       }
     }
@@ -54,7 +78,7 @@ export function createFactory(execute: FactoryExecute, clock = () => Date.now(),
           text: display(run.context.task.text),
         } : null,
         recent: run.context.recent.map(event => ({ at: display(event.at), text: display(event.text) })),
-        github: githubLink(run.context.github),
+        github: githubLink(run.context.github, origins),
       } } : {}),
       ...(run.action ? { action: {
         kind: display(run.action.kind), headline: display(run.action.headline),
@@ -68,11 +92,12 @@ export function createFactory(execute: FactoryExecute, clock = () => Date.now(),
   async function load(epoch: number): Promise<FactorySnapshot> {
     let snapshot: FactorySnapshot;
     try {
+      const origins = originsLoader();
       const result = await execute(['status', '--json']);
       if (result.code !== 0) throw new Error('Status failed');
       const raw = sourceSchema.parse(JSON.parse(result.stdout));
       snapshot = {
-        runs: raw.runs.map(project), stale: false,
+        runs: raw.runs.map(run => project(run, origins)), stale: false,
         fetchedAt: new Date(clock()).toISOString(), error: null,
       };
     } catch {
