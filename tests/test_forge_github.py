@@ -8,8 +8,8 @@ from unittest.mock import Mock, call
 
 import pytest
 
-from nightshift import queue, specloop_intake as intake
-from nightshift.config import Repo
+from nightshift import daemon, outcomes, queue, specloop_intake as intake
+from nightshift.config import Config, Repo
 from nightshift.forge import Forge, ForgeError
 from nightshift.forge.github import GitHubForge
 from nightshift.forge.types import CICheck, Comment, Issue, LabelEvent, PullRequest, ResponseText
@@ -24,6 +24,9 @@ from merge_readiness_fixtures import local_run
 from test_merge_readiness_polling import polling
 import test_merge_readiness_polling as polling_tests
 from test_specloop_publication import setup as publication_setup
+import test_specloop_publication as publication_tests
+import test_engine_switch_recovery as recovery_tests
+from test_engine_switch_recovery import switched
 
 
 class StructuralFake:
@@ -898,3 +901,120 @@ def test_publication_forge_late_binding_and_recovery(monkeypatch, publication_se
     forbidden.assert_not_called()
     assert len(commands.publications) == 1
     assert not (tmp_path / "merge-readiness/owner__sample/8.json").exists()
+
+
+@pytest.fixture
+def recovery_forges(monkeypatch):
+    forges = []
+
+    def construct(runner):
+        forge = Mock(spec_set=Forge, wraps=GitHubForge(runner))
+        forges.append(forge)
+        return forge
+
+    monkeypatch.setattr(daemon, "GitHubForge", construct)
+    return forges
+
+
+@pytest.mark.scenario("forge-interface/late-bound-runners/default-runner-remains-patchable")
+def test_daemon_recovery_binds_each_invocation(monkeypatch, switched, tmp_path, recovery_forges):
+    forbidden = Mock(side_effect=AssertionError("unbound transport"))
+    for attempt in range(3):
+        number = attempt + 1
+        claim = recovery_tests.working(switched, number, tmp_path, survives=True)
+        runner = Mock(side_effect=switched.gh)
+        monkeypatch.setattr(queue, "_gh", runner if attempt < 2 else forbidden)
+        daemon._reconcile_engine_switch(switched.repo, queue.Labels(),
+                                       **({"runner": runner} if attempt == 2 else {}))
+        forge = recovery_forges[-1]
+        assert [c[0] for c in forge.mock_calls] == [
+            "list_issues", "issue_labels", "comment_pages", "issue_labels",
+            "create_comment", "issue_labels", "relabel_issue"]
+        assert runner.call_count == 7 and not claim.path.exists()
+        assert recovery_tests.labels(switched, number) == {"needs-human", "keep-me"}
+        assert json.loads((daemon.STATE_DIR / f"engine-switch/owner__switched/{number}.json").read_text())["done"]
+    assert len(recovery_forges) == len(outcomes.tasks()) == 3
+    forbidden.assert_not_called()
+
+
+@pytest.mark.scenario("forge-interface/guarded-daemon-calls/engine-switch-recovery-unchanged")
+def test_recovery_preserves_existing_journals_and_order(switched, tmp_path, monkeypatch, recovery_forges):
+    recovery_tests.test_engine_switch_recovers_working_issues(switched, tmp_path, monkeypatch)
+    assert {c[0] for forge in recovery_forges for c in forge.mock_calls} == {
+        "list_issues", "issue_labels", "comment_pages", "create_comment", "relabel_issue"}
+
+
+@pytest.mark.scenario("forge-interface/guarded-daemon-calls/engine-switch-recovery-unchanged")
+@pytest.mark.scenario("forge-interface/forge-failure-compatibility/delegated-helper-error-fallbacks")
+@pytest.mark.parametrize("response", [*ERRORS, "{}", '{"labels":null}', '{"labels":{}}'])
+def test_recovery_label_failure_cannot_authorize_cleanup(switched, tmp_path, recovery_forges, response):
+    claim = recovery_tests.working(switched, 1, tmp_path, survives=True)
+    before = claim.path.read_bytes()
+
+    def dispatch(args):
+        if args[:2] == ["issue", "view"]:
+            if isinstance(response, Exception):
+                raise response
+            return response
+        return switched.gh(args)
+
+    runner = Mock(side_effect=dispatch)
+    with pytest.raises(type(response) if isinstance(response, Exception) else ValueError) as caught:
+        daemon._reconcile_engine_switch(switched.repo, queue.Labels(), runner=runner)
+    if isinstance(response, Exception):
+        assert caught.value is response
+    assert runner.call_count == 2
+    assert recovery_forges[0].mock_calls == [
+        call.list_issues(switched.repo.name, "agent:working"), call.issue_labels(switched.repo.name, 1)]
+    assert claim.path.read_bytes() == before and not outcomes.tasks()
+    assert not recovery_tests.recovery_path().exists()
+    assert recovery_tests.labels(switched, 1) == {"agent:working", "keep-me"}
+
+
+@pytest.mark.scenario("forge-interface/guarded-daemon-calls/pause-during-dispatch-and-retry")
+@pytest.mark.parametrize("boundary", ["intent", "comments-read", "comment", "edit"])
+def test_forge_recovery_pause_retains_intent(switched, tmp_path, monkeypatch, recovery_forges, boundary):
+    recovery_tests.test_pause_between_recovery_operations_retains_intent(switched, tmp_path, monkeypatch, boundary)
+    assert recovery_forges and any(f.create_comment.called for f in recovery_forges)
+
+
+@pytest.mark.scenario("forge-interface/guarded-daemon-calls/pause-during-dispatch-and-retry")
+@pytest.mark.parametrize("stage", ["label_retry", "comment_retry", "lookup_retry", "patch_retry",
+                                  "after_lookup", "after_absent_lookup"])
+def test_forge_nested_retries_keep_poll_guard(publication_setup, monkeypatch, tmp_path, stage):
+    constructor = Mock(side_effect=GitHubForge)
+    monkeypatch.setattr(intake, "GitHubForge", constructor)
+    publication_tests.test_pause_stops_real_gh_retries_and_comment_reconciliation(
+        publication_setup, monkeypatch, tmp_path, stage)
+    assert constructor.called
+    assert all(c.args[0] is not queue._gh for c in constructor.call_args_list)
+
+
+@pytest.mark.scenario("forge-interface/guarded-daemon-calls/pause-during-dispatch-and-retry")
+@pytest.mark.parametrize("boundary", ["before", "accepted"])
+def test_error_reporting_retains_guard(monkeypatch, publication_setup, boundary):
+    repo, gh, commands = publication_setup
+    writes = []
+
+    def dispatch(args):
+        if args[:2] == ["issue", "comment"]:
+            writes.append(args)
+            daemon.PAUSE_FILE.touch()
+            return ""
+        return gh(args)
+
+    def fail_item(*args, on_error, **kwargs):
+        if boundary == "before":
+            daemon.PAUSE_FILE.touch()
+        on_error(7, intake.DeliveryError("held"))
+
+    monkeypatch.setattr(intake, "propose_pending", fail_item)
+    constructor = Mock(side_effect=GitHubForge)
+    monkeypatch.setattr(intake, "GitHubForge", constructor)
+    runner = Mock(side_effect=dispatch)
+    daemon.poll_specloop(Config(repos=[repo]), daemon.RepoHealth(), runner=runner, specloop_runner=commands)
+    assert constructor.call_count == 1 and constructor.call_args.args[0] is not runner
+    assert len(writes) == (boundary == "accepted")
+    assert [c.args[0][:2] for c in runner.call_args_list] == [["issue", "list"]] + (
+        [["api", "repos/owner/sample/issues/7/comments"], ["issue", "comment"]]
+        if boundary == "accepted" else [])
