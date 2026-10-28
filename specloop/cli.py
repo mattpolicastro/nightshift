@@ -448,9 +448,11 @@ def _remote(ctx: loop.Ctx) -> str:
 
 def _pr_body(ctx: loop.Ctx) -> str:
     m = ctx.m
-    checks = "\n".join(f"- [ ] `{sid}` — {why}" for sid, why in sorted(m.coverage_exempt.items()))
+    head = ctx.head()
+    checks = "\n".join(loop.append_design_checks(ctx, head, [
+        f"- [ ] `{sid}` — {why}" for sid, why in sorted(m.coverage_exempt.items())]))
     follow = (ctx.run.dir / "followups.md").read_text() if (ctx.run.dir / "followups.md").exists() else "(none)\n"
-    done = [t for t in tasks.parse(ctx.tasks_text(ctx.head())) if t.done]
+    done = [t for t in tasks.parse(ctx.tasks_text(head)) if t.done]
     return (f"OpenSpec change `{m.change}`, driven by specloop: {len(done)} tasks, each sealed, verified by the "
             f"harness and independently reviewed.\n\n## Checks a human must make\n\n{checks or '(none)'}\n\n"
             f"## Non-blocking review findings\n\n{follow}\n"

@@ -301,6 +301,42 @@ def run(ctx: Ctx) -> str:
     return st.status
 
 
+def design_human_checks(ctx: Ctx, head: str) -> list[str]:
+    """Collect literal pending checks from the committed design, including examples."""
+    path = f"openspec/changes/{ctx.m.change}/design.md"
+    try:
+        if not git(ctx.repo, "ls-tree", "-z", "--name-only", head, "--", path):
+            return []
+        text = git(ctx.repo, "show", f"{head}:{path}").decode("utf-8")
+    except (RuntimeError, OSError, subprocess.SubprocessError, UnicodeError) as exc:
+        raise RuntimeError(f"could not collect human checks from {head}:{path}: {exc}") from exc
+    selected = {"## Human checks": 2, "### Verification and human rollout checklist": 3}
+    depth = 0
+    checks = []
+    for physical_line in text.splitlines():
+        line = physical_line.strip(" \t")
+        heading = re.match(r"^(#{1,6})[ \t]+", line)
+        if heading and len(heading[1]) <= depth:
+            depth = 0
+        # A nested selected heading must not narrow its enclosing section.
+        if not depth and line in selected:
+            depth = selected[line]
+        elif depth and re.match(r"- \[ \][ \t]", line) and line[6:].strip():
+            checks.append(line)
+    return checks
+
+
+def append_design_checks(ctx: Ctx, head: str, existing: list[str]) -> list[str]:
+    """Preserve existing rendering/duplicates; deduplicate only design additions."""
+    checks = list(existing)
+    seen = {line.strip(" \t") for line in existing}
+    for line in design_human_checks(ctx, head):
+        if line not in seen:
+            checks.append(line)
+            seen.add(line)
+    return checks
+
+
 def finals(ctx: Ctx, head: str) -> bool:
     """Prepare the current base, then coverage and acceptance after tasks land.
 
@@ -332,7 +368,8 @@ def finals(ctx: Ctx, head: str) -> bool:
         ctx.run.event("acceptance", passed=verify.ok(receipts, m.prepare + m.acceptance))
         if not verify.ok(receipts, m.prepare + m.acceptance):
             return _final_fix(ctx, head, "acceptance", "Make the acceptance checks pass:\n" + verify.summary(receipts))
-    checks = "\n".join(f"- [ ] `{sid}`: {why}" for sid, why in sorted(m.coverage_exempt.items()))
+    checks = "\n".join(append_design_checks(ctx, head, [
+        f"- [ ] `{sid}`: {why}" for sid, why in sorted(m.coverage_exempt.items())]))
     ctx.pause("ready_to_publish", detail=f"all tasks landed at {head[:12]}; human checks after publishing:\n{checks}\n"
               f"Next: `specloop publish {m.change}`")
     return False
