@@ -1,6 +1,6 @@
-import { type PluginSurfaceProps, useRpc } from '@getpaseo/plugin/client';
+import { openExternalUrl, type PluginSurfaceProps, useRpc } from '@getpaseo/plugin/client';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState, Linking, Pressable, ScrollView, Text, View } from 'react-native';
+import { AppState, Pressable, ScrollView, Text, View } from 'react-native';
 import { attention, type Snapshot, type Task } from '../shared/attention';
 import { FactorySection } from './factory';
 
@@ -62,7 +62,7 @@ function AttentionSurface({ theme, host, layout, navigation }: PluginSurfaceProp
           {task.stale ? 'Stale · ' : ''}Last checked: {date(task.checkedAt)}
         </Text>
         <Pressable accessibilityRole="link" accessibilityLabel={`Open ${task.title} on GitHub`}
-          onPress={() => { void Linking.openURL(task.url).catch(() => setError('Could not open GitHub.')); }}
+          onPress={() => { void openExternalUrl(task.url).catch(() => setError('Could not open GitHub.')); }}
           style={{ paddingVertical: 8, alignSelf: 'flex-start' }}>
           <Text style={{ color: colors.accent, fontWeight: '600' }}>Open on GitHub ↗</Text>
         </Pressable>

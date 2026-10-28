@@ -111,9 +111,9 @@ function view(options: {
       if (name === 'react-native') return {
         View: 'View', Text: 'Text', Pressable: 'Pressable', TextInput: 'TextInput',
         AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) },
-        Linking: { openURL: async (url: string) => { calls.links.push(url); } },
       };
       if (name === '@getpaseo/plugin/client') return {
+        openExternalUrl: async (url: string) => { calls.links.push(url); },
         useRpc: (rpc: unknown) => {
           if (rpc === runsRpc) return read;
           if (rpc === actRpc) return act;
