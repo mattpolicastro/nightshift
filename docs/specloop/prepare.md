@@ -88,3 +88,60 @@ harness gates; local results are not acceptance receipts. Record actual sandbox
 probe execution or skips separately from generated-profile tests. Host rollout
 and credential/bootstrap inspection remain human checks in the
 [deployment checklist](../deploy.md#human-host-checklist).
+
+## Trusted dependency snapshots
+
+Opt in with `[[snapshot]]`: unique `id` matching `[A-Za-z0-9][A-Za-z0-9_-]*`, nonempty `lockfiles`, and argv-list `warm`.
+Lockfiles are canonical repository-relative regular-file paths without symlinks. Identity hashes sorted paths and exact
+bytes. Declare all dependency lockfiles; re-admit with an appropriate manifest when toolchain or unlisted inputs change.
+
+Only driver base synchronization warms, including initial sync before tasks. `warm` gets fetched base `{src}`/`{sha}`,
+disposable `{build}`, and payload output `{snapshot:<id>}`. Manifest variables are allowed; other snapshots and
+`{mutant_path}` are not. Prepare's network/credential restrictions apply, with timeout 600 seconds and expected exit zero.
+Only payload is published read-only; links/special files are rejected. Warm logs/receipts stay separate from candidates'.
+
+This Dart recipe caches only `PUB_CACHE`. Set `dart` to your SDK; home-local SDKs may need `[sandbox].prepare_read`.
+Both phases copy their own source and regenerate `.dart_tool` project paths.
+
+<!-- snapshot-example:start -->
+```toml
+[vars]
+dart = "/opt/homebrew/bin/dart"
+[[snapshot]]
+id = "pub"
+lockfiles = ["pubspec.lock"]
+warm = ["/bin/sh", "-ec", '''
+cp -R "{src}/." "{build}/project"
+chmod -R u+w "{build}/project"
+cd "{build}/project"
+rm -rf .dart_tool
+export PUB_CACHE="{snapshot:pub}"
+"{dart}" pub get
+''']
+[[prepare]]
+id = "dependencies"
+timeout = 600
+run = ["/bin/sh", "-ec", '''
+cp -R "{src}/." "{build}/project"
+chmod -R u+w "{build}/project"
+cd "{build}/project"
+rm -rf .dart_tool
+export PUB_CACHE="{snapshot:pub}"
+"{dart}" pub get --offline || "{dart}" pub get
+''']
+```
+<!-- snapshot-example:end -->
+
+Candidate preparation always runs, including for mutants. Each fresh build gets a private writable APFS `clonefile`
+copy at `{snapshot:pub}`, shared by its steps. Unsupported platforms/filesystems, cross-device clones and other misses
+supply an empty directory, never byte-copy substitution. The recipe tries offline setup, then network fallback.
+`snapshot_fallback` events beside receipts and in run events report `missing`, `stale`, `key_unavailable`, `invalid`,
+`context_unavailable` or `clone_failed`. Candidates never warm/publish; ordinary prepare/check receipts decide results.
+
+Each run retains three completed entries total across all IDs/keys by publication sequence; reuse does not promote them.
+More than three IDs compete and can miss. Locked sync retries pruning; `snapshot_retention_failed` reports an unmet bound.
+Diagnostics remain. No age/size/access-time/cross-run eviction occurs. Failed warming evicts nothing. No migration is needed.
+
+See [#134](https://github.com/mattpolicastro/nightshift/issues/134). Pending human work: compare equivalent scheming-vizier
+runs before/after: base SHA, keys, host/toolchain, mutation settings, warm/prepare/verify/evidence times, misses, APFS clones
+and payload relocation against 25 seconds/565 MB. Inspect regenerated configuration. CI proves no speedup or savings.

@@ -400,7 +400,8 @@ def resolve_mutation_steps(path: str, m: Manifest) -> tuple[int | None, tuple[St
 
 def _mutate_one(number: int, mut: Mutant, baseline_src: Path, head: str,
                 steps: tuple[Step, ...], m: Manifest, out: Path,
-                run_phases: list[str] | None = None) -> str:
+                run_phases: list[str] | None = None, *,
+                snapshots: verify.SnapshotContext | None = None) -> str:
     """Run one mutation in a private source and build, retaining its diagnostics."""
     mutant_out = out / f"mutant-{number}"
     run_dirs = [mutant_out]
@@ -432,7 +433,8 @@ def _mutate_one(number: int, mut: Mutant, baseline_src: Path, head: str,
             # Keep the same mutation and baseline budgets in this worker slot.
             # A separate output directory gives confirmation fresh preparation
             # and builds without overwriting the narrowed diagnostics.
-            receipts = verify.run_extracted(src, head, steps, run_m, run_out)
+            receipts = verify.run_extracted(src, head, steps, run_m, run_out,
+                                           **({"snapshots": snapshots} if snapshots is not None else {}))
             if run_phases is not None:
                 run_phases.append("confirmation" if run_out != mutant_out else
                                   "narrowed" if narrowed else "full")
@@ -447,7 +449,8 @@ def _mutate_one(number: int, mut: Mutant, baseline_src: Path, head: str,
             verify.cleanup(run_out)
 
 
-def mutate(repo: Path, head: str, mutants: list[Mutant], m: Manifest, out: Path) -> bool:
+def mutate(repo: Path, head: str, mutants: list[Mutant], m: Manifest, out: Path, *,
+           snapshots: verify.SnapshotContext | None = None) -> bool:
     """Classify each mutant. False when the unmutated head itself fails."""
     resolved = [resolve_mutation_steps(mut.path, m) for mut in mutants]
     sequences = {tuple(s.id for s in steps): steps for _, steps in resolved}
@@ -491,7 +494,8 @@ def mutate(repo: Path, head: str, mutants: list[Mutant], m: Manifest, out: Path)
                 full_manifest = replace(m, vars={**m.vars, "mutant_path": ""})
             baseline_out = out if number == 1 else out / f"baseline-{number}"
             baseline_dirs.append(baseline_out)
-            receipts = verify.run_steps(repo, head, steps, full_manifest, baseline_out)
+            receipts = verify.run_steps(repo, head, steps, full_manifest, baseline_out,
+                                       **({"snapshots": snapshots} if snapshots is not None else {}))
             baselines[number - 1]["receipts"] = (baseline_out / "receipts.json").relative_to(out).as_posix()
             if not verify.ok(receipts, m.prepare + steps):
                 baselines[number - 1]["failed"] = True
@@ -510,7 +514,8 @@ def mutate(repo: Path, head: str, mutants: list[Mutant], m: Manifest, out: Path)
                 for index, (mut, (_, steps)) in enumerate(zip(mutants, resolved)):
                     src, limited_steps, mutant_manifest = assignments[tuple(s.id for s in steps)]
                     future = pool.submit(_mutate_one, index + 1, mut, src, head,
-                                         limited_steps, mutant_manifest, out, run_phases[index])
+                                         limited_steps, mutant_manifest, out, run_phases[index],
+                                         **({"snapshots": snapshots} if snapshots is not None else {}))
                     futures[future] = index
                 for future in as_completed(futures):
                     mutants[futures[future]].result = future.result()
@@ -522,7 +527,8 @@ def mutate(repo: Path, head: str, mutants: list[Mutant], m: Manifest, out: Path)
 
 
 def gather(repo: Path, base: str, head: str, section_scenarios: list[str], seen: set[str],
-           m: Manifest, out: Path, section: int) -> Evidence:
+           m: Manifest, out: Path, section: int, *,
+           snapshots: verify.SnapshotContext | None = None) -> Evidence:
     ev = Evidence(section)
     wanted = [s for s in section_scenarios if s not in m.coverage_exempt]
     ev.covered = [s for s in wanted if s in seen]
@@ -545,7 +551,8 @@ def gather(repo: Path, base: str, head: str, section_scenarios: list[str], seen:
         if not ev.mutants:
             ev.skipped = "no mutable lines added under mutation_paths"
         else:
-            ev.baseline_failed = not mutate(repo, head, ev.mutants, m, out)
+            ev.baseline_failed = not mutate(repo, head, ev.mutants, m, out,
+                                           **({"snapshots": snapshots} if snapshots is not None else {}))
     out.mkdir(parents=True, exist_ok=True)
     (out / "evidence.json").write_text(json.dumps({**asdict(ev), "score": ev.score}, indent=2))
     return ev
