@@ -64,7 +64,7 @@ def _payload_paths(root: Path, *, readonly: bool = False) -> list[Path]:
     return paths
 
 
-def _snapshot_entries(root: Path) -> list[tuple[Path, dict]]:
+def _snapshot_entries(root: Path, *, strict_io: bool = False) -> list[tuple[Path, dict]]:
     result = []
     for entry in (root / "entries").iterdir():
         try:
@@ -77,9 +77,46 @@ def _snapshot_entries(root: Path) -> list[tuple[Path, dict]]:
                     and entry.name == f'{data["sequence"]}-{data["id"]}-{data["key"]}'):
                 _payload_paths(entry / "payload", readonly=True)
                 result.append((entry, data))
-        except (OSError, ValueError, KeyError, TypeError):
+        except OSError:
+            if strict_io:  # Retention cannot establish its bound from an incomplete scan.
+                raise
+        except (ValueError, KeyError, TypeError):
             continue
     return result
+
+
+def _remove_snapshot_tree(root: Path) -> None:
+    # Restore directory access without following or chmodding symlinks.
+    pending = [root]
+    for parent in pending:
+        if not stat.S_ISDIR(parent.lstat().st_mode):
+            raise ValueError("snapshot cleanup target must be a directory")
+        parent.chmod(parent.lstat().st_mode | 0o700)
+        pending.extend(p for p in parent.iterdir() if stat.S_ISDIR(p.lstat().st_mode))
+    shutil.rmtree(root)
+
+
+def _retain_snapshots(context: SnapshotContext) -> None:
+    """Recover recorded deletions and keep three publications; caller holds run lock."""
+    root = context.root
+    try:
+        # Record validated deletion intent before chmod/rmtree can invalidate an
+        # entry. A crash at any later point leaves this marker for the next sync.
+        for marker in (root / "entries").glob(".prune-*"):
+            name = marker.name.removeprefix(".prune-")
+            if (re.fullmatch(r"[1-9][0-9]*-[A-Za-z0-9_-]+-[0-9a-f]{64}", name)
+                    and stat.S_ISREG(marker.lstat().st_mode)):
+                entry = root / "entries" / name
+                if entry.is_symlink() or entry.exists():
+                    _remove_snapshot_tree(entry)
+                marker.unlink()
+        for entry, _ in sorted(_snapshot_entries(root, strict_io=True), key=lambda item: item[1]["sequence"])[:-3]:
+            marker = root / "entries" / f".prune-{entry.name}"
+            marker.touch(exist_ok=False)
+            _remove_snapshot_tree(entry)
+            marker.unlink()
+    except (OSError, ValueError) as exc:
+        context.emit("snapshot_retention_failed", error=str(exc), root=str(root))
 
 
 def warm_snapshots(repo: Path, base_sha: str, m: Manifest, context: SnapshotContext) -> None:
@@ -88,14 +125,10 @@ def warm_snapshots(repo: Path, base_sha: str, m: Manifest, context: SnapshotCont
         return
     root = context.root.resolve()
     (root / "entries").mkdir(parents=True, exist_ok=True)
+    _retain_snapshots(context)
     for old in root.glob(".staging-*"):
         if re.fullmatch(r"\.staging-[0-9a-f]{32}", old.name) and stat.S_ISDIR(old.lstat().st_mode):
-            # Restore access before scanning children; never follow or chmod links.
-            pending = [old]
-            for parent in pending:
-                parent.chmod(parent.lstat().st_mode | 0o700)
-                pending.extend(p for p in parent.iterdir() if stat.S_ISDIR(p.lstat().st_mode))
-            shutil.rmtree(old)
+            _remove_snapshot_tree(old)
     for definition in m.snapshots:
         attempt = uuid.uuid4().hex
         stage, out = root / f".staging-{attempt}", root / "warms" / attempt
@@ -139,6 +172,8 @@ def warm_snapshots(repo: Path, base_sha: str, m: Manifest, context: SnapshotCont
             context.emit("snapshot_warm_failed", key=key, **details)
             if not isinstance(exc, (OSError, ValueError, subprocess.SubprocessError)):
                 raise
+        else:
+            _retain_snapshots(context)
 
 
 def snapshot_key(src: Path, definition: Snapshot) -> str | None:
