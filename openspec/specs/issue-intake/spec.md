@@ -56,11 +56,13 @@ admission, revision or publication.
 
 ### Requirement: Dependency gated drafting
 
-For an otherwise eligible issue armed with either configured intake label,
-`propose_pending` SHALL permit a new drafting round only when
-`queue.open_blockers(repo.name, queue.blockers(raw["body"]), runner=gh)` returns
-no blockers. It SHALL recheck the current body and blocker states on each
-eligible poll until drafting can proceed.
+For an otherwise eligible issue armed with either intake label,
+`propose_pending` SHALL start a new drafting round only when
+`forge.open_blockers(repo.name, queue.blockers(raw["body"]))` returns no
+blockers. GitHubForge SHALL delegate to `queue.open_blockers` with its bound
+runner, preserving results, errors and body parsing. Intake SHALL recheck
+the current body and blocker states on each eligible poll until drafting
+can proceed.
 
 #### Scenario: Open blocker defers round
 - **WHEN** issue 7 is armed with `spec:draft` or `agent:ready`, has `blocked-by: #6` in its current body, and issue 6 remains open across two polls
@@ -434,3 +436,15 @@ Every repository SHALL use specloop when engine is omitted or explicitly specloo
 #### Scenario: Omitted manifest holds only its repository
 - **WHEN** a repository omits both engine and manifest alongside a healthy specloop repository
 - **THEN** config loading succeeds, the missing-manifest repository holds new work without consuming triggers, and the healthy repository continues
+
+### Requirement: Forge mediated intake
+
+Intake SHALL obtain GitHub facts and perform GitHub mutations through named
+Forge operations, retaining its existing runner injection and all current
+workflow requirements. Git pushes and engine commands SHALL retain their
+existing runners. Existing runner-form argv assertions SHALL pass unchanged.
+
+#### Scenario: Existing workflows retain transcripts
+- **WHEN** drafting, approval, revision, publication delivery and their recovery or failure-reporting paths run through GitHubForge
+- **THEN** existing runner-form tests pass without assertion or fixture edits, with the same GitHub calls, git operations, outputs and receipt effects
+- **THEN** backend construction causes no read and no operation bypasses the forge to construct GitHub argv in intake
