@@ -626,6 +626,8 @@ def _validate_revision_feedback(receipt: dict) -> None:
     """Validate an initialized ledger; legacy receipts must be migrated first."""
     if not isinstance(receipt, dict):
         raise ValueError("revision feedback receipt must be an object")
+    if "delivery_attempt" in receipt:
+        _validate_delivery_attempt(receipt.get("round_id"), receipt["delivery_attempt"])
     version = receipt.get("feedback_state_version")
     if type(version) is not int or version != 1:
         raise ValueError("unsupported or missing revision feedback_state_version")
@@ -654,6 +656,12 @@ def _validate_revision_feedback(receipt: dict) -> None:
         raise ValueError("revision feedback_ids must align with a non-legacy snapshot")
 
 
+def _validate_delivery_attempt(round_id, attempt) -> None:
+    if (not isinstance(attempt, str) or not re.fullmatch(r"[0-9a-f]{32}", attempt)
+            or not isinstance(round_id, str) or not round_id):
+        raise ValueError("invalid revision delivery_attempt or round_id")
+
+
 def _save_revision_snapshot(path: Path, previous: dict | None,
                             items: list[queue.FeedbackItem], **round_fields) -> dict:
     """Replace a finished round, preserving its ledger and unknown fields.
@@ -668,9 +676,13 @@ def _save_revision_snapshot(path: Path, previous: dict | None,
     receipt = dict(previous) if previous is not None else {}
     for field in ("change", "head", "event", "round_id", "command", "job", "result",
                   "delivered", "feedback", "feedback_ids", "legacy_snapshot",
-                  "revision_key_version", "round_job"):
+                  "revision_key_version", "round_job", "delivery_attempt"):
         receipt.pop(field, None)
     receipt.update(round_fields)
+    if (previous is not None and previous.get("round_id") is not None
+            and previous.get("change") == receipt.get("change")
+            and previous["round_id"] == receipt.get("round_id")):
+        receipt["delivery_attempt"] = uuid.uuid4().hex
     receipt.update(feedback_state_version=1, consumed_feedback_ids=sorted(consumed),
                    feedback_ids=[item.id for item in selected],
                    feedback=[item.block for item in selected])
@@ -905,7 +917,7 @@ def revise_pending(
         if not _recover_item_cleanup(path):
             return _PENDING
         _comment(repo.name, number, change, body, forge=forge, action="revise", kind="pr",
-                 round_id=receipt.get("round_id"))
+                 round_id=receipt.get("round_id"), delivery_attempt=receipt.get("delivery_attempt"))
         add, remove = [], []
         if result["outcome"] in ("drafted", "revised", "empty"):
             # Execution or comment delivery may have outlived the application.
@@ -1791,13 +1803,16 @@ def _collect(path: Path, receipt: dict, command: str) -> bool:
 
 def _comment(repo: str, number: int, change: str, body: str, *, runner=None,
              action="draft", kind="issue", round_id: str | None = None,
-             forge: Forge | None = None) -> None:
-    """Upsert one delivery round; queue._gh also reconciles internal retries.
+             forge: Forge | None = None, delivery_attempt: str | None = None) -> None:
+    """Upsert one delivery attempt; queue._gh also reconciles internal retries.
 
     Legacy receipts without a round ID retain their original marker
     when retried. New receipts save the ID before attempting delivery.
     """
     suffix = f":{round_id}" if round_id is not None else ""
+    if delivery_attempt is not None:
+        _validate_delivery_attempt(round_id, delivery_attempt)
+        suffix += f":attempt-{delivery_attempt}"
     marker = f"<!-- nightshift:{action}:{change}{suffix} -->"
     body = f"{queue.SELF_COMMENT_PREFIX} {body}\n\n{marker}"
     forge = forge if forge is not None else GitHubForge(runner)
