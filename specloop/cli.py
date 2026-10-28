@@ -553,6 +553,12 @@ def finish(args) -> int:
     return _locked_command(args, _finish)
 
 
+def _expected_head(value: str) -> str:
+    if not re.fullmatch(r"[a-fA-F0-9]{40}", value):
+        raise argparse.ArgumentTypeError("expected head must be a full 40-hex SHA")
+    return value.lower()
+
+
 def _tasks_path(repo: Path, head: str, change: str) -> str:
     """Locate tasks at this commit, including an interrupted finish's archive."""
     live = f"openspec/changes/{change}/tasks.md"
@@ -571,7 +577,21 @@ def _finish(args, run: Run) -> int:
         print(f"{args.change} has not been published", file=sys.stderr)
         return 1
     ctx = _ctx(run)
-    head = ctx.head()
+    expected = getattr(args, "expect_head", None)
+    try:
+        head = ctx.head()
+        if expected is not None and (not isinstance(head, str)
+                                     or not re.fullmatch(r"[a-fA-F0-9]{40}", head)):
+            raise ValueError(f"invalid branch head: {head!r}")
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        if expected is None:
+            raise
+        print(f"expected head {expected}; could not read run branch head: {exc}", file=sys.stderr)
+        return 1
+    if expected is not None and head.lower() != expected.lower():
+        print(f"expected head {expected}; observed run branch head {head}; refusing to finish",
+              file=sys.stderr)
+        return 1
     task_path = _tasks_path(ctx.repo, head, ctx.m.change)
     text = git(ctx.repo, "show", f"{head}:{task_path}").decode()
     if any(not t.done for t in tasks.parse(text)):
@@ -1083,6 +1103,8 @@ def add_build_parsers(sub, *, optional_run=False):
     pb.add_argument("--json", action="store_true", help="print one version-1 outcome document")
     fi = sub.add_parser("finish")
     fi.add_argument("change")
+    fi.add_argument("--expect-head", type=_expected_head, metavar="SHA",
+                    help="require the full run branch SHA under the finish lock")
     pr = sub.add_parser("propose")
     pr.add_argument("manifest", help="a manifest for the target repo (its repo, paths, verify and profiles are used)")
     pr.add_argument("legacy_change", nargs="?", metavar="change")

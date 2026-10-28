@@ -3,8 +3,11 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Linking, Pressable, Text, TextInput, View } from 'react-native';
 import {
   factoryRuns, factoryAct, type FactoryRun, type FactorySnapshot, type FactoryActInput,
+  factoryLanding, factoryLand, factoryLandStop, type FactoryLandingSnapshot,
+  type FactoryLandingOffer, type FactoryLandInput, type FactoryLandingAttempt,
 } from '../shared/factory';
-import { decideFactoryAction, factoryButtons, factoryDetails, factoryWaitingTime, groupFactoryRuns, matchWorkspace, type ActionDecision } from './factory-model';
+import { decideFactoryAction, factoryButtons, factoryDetails, factoryWaitingTime, groupFactoryRuns, matchWorkspace, type ActionDecision,
+  factoryLandOffer, sameLandingOffer, landingAttemptNotice, retainLandingNotices, type LandingNotice } from './factory-model';
 
 type Colors = PluginSurfaceProps['theme']['colors'];
 type Confirmation = Extract<ActionDecision, { kind: 'confirm' }>;
@@ -28,14 +31,32 @@ function actionStyles(colors: Colors, role: 'primary' | 'destructive' | 'outline
   };
 }
 
-function FactoryRow({ run, colors, disabled, act, report, notice, host, navigation, workspaces, onDetailsOpen }: {
+function LandingNotices({ notices, colors, named = false }: { notices: LandingNotice[]; colors: Colors; named?: boolean }) {
+  return <>{notices.map(notice => <Text key={notice.id} accessibilityRole="alert" style={{ color: colors.foreground }}>
+    {`${named ? `${notice.change}: ` : ''}${[notice.text, ...notice.messages].join(' · ')}`}
+  </Text>)}</>;
+}
+
+function FactoryRow({ run, colors, disabled, act, report, notice, host, navigation, workspaces, onDetailsOpen,
+  offer, currentLanding, landingBusy, land, stopLanding, landingNotices }: {
   run: FactoryRun; colors: Colors; disabled: boolean;
   act: (input: FactoryActInput) => Promise<void>; report: (message: string) => void; notice: string | null;
   workspaces: Workspaces; onDetailsOpen: () => void;
+  offer: FactoryLandingOffer | null; currentLanding: FactoryLandingAttempt | null; landingBusy: boolean;
+  land: (input: FactoryLandInput) => Promise<void>; stopLanding: (attempt: FactoryLandingAttempt) => Promise<void>;
+  landingNotices: LandingNotice[];
 } & HostProps) {
   const [note, setNote] = useState('');
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [landConfirmation, setLandConfirmation] = useState<FactoryLandingOffer | null>(null);
+  const invalidLandConfirmation = useRef(false);
+  if (landConfirmation && (!sameLandingOffer(landConfirmation, offer) || currentLanding)) {
+    invalidLandConfirmation.current = true;
+  }
+  const landStale = invalidLandConfirmation.current;
+  const landStyles = actionStyles(colors, 'outlined');
+  const confirmLandStyles = actionStyles(colors, 'primary');
   const buttons = factoryButtons(run);
   const details = factoryDetails(run);
   const waiting = factoryWaitingTime(run);
@@ -95,6 +116,37 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
         </Pressable>;
       })}
     </View>
+    {offer || currentLanding ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+      {offer ? <Pressable accessibilityRole="button" accessibilityLabel={`Land ${run.change}`}
+        disabled={disabled || landingBusy || Boolean(currentLanding) || landConfirmation !== null}
+        onPress={() => { invalidLandConfirmation.current = false; setLandConfirmation(Object.freeze({ ...offer })); }}
+        style={landStyles.button}><Text style={landStyles.text}>Land</Text></Pressable> : null}
+      {currentLanding ? <Pressable accessibilityRole="button" accessibilityLabel={`Stop landing ${run.change}`}
+        disabled={landingBusy} onPress={() => { void stopLanding(currentLanding); }} style={landStyles.button}>
+        <Text style={landStyles.text}>Stop landing</Text>
+      </Pressable> : null}
+    </View> : null}
+    {landConfirmation ? <View style={{ gap: 8 }}>
+      <Text accessibilityRole="alert" style={{ color: colors.foreground }}>
+        {`Land ${landConfirmation.change}? Have you performed the human checks for ${landConfirmation.pr} at head ${landConfirmation.head}? Confirm land to finish and merge this PR into its base branch.`}
+      </Text>
+      {landStale ? <Text accessibilityRole="alert" style={{ color: colors.statusWarning }}>
+        This landing offer is stale. Cancel and refresh status before confirming again.
+      </Text> : null}
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+        <Pressable accessibilityRole="button" accessibilityLabel={`Confirm land ${run.change}`}
+          disabled={disabled || landingBusy || landStale || Boolean(currentLanding)}
+          onPress={() => {
+            if (disabled || landingBusy || invalidLandConfirmation.current || currentLanding ||
+                !sameLandingOffer(landConfirmation, offer)) return;
+            setLandConfirmation(null);
+            void land({ ...landConfirmation, checks_done: true });
+          }} style={confirmLandStyles.button}><Text style={confirmLandStyles.text}>Confirm land</Text></Pressable>
+        <Pressable accessibilityRole="button" onPress={() => setLandConfirmation(null)} style={cancelStyles.button}>
+          <Text style={cancelStyles.text}>Cancel</Text>
+        </Pressable>
+      </View>
+    </View> : null}
     {confirmation ? <View style={{ gap: 8 }}>
       <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{confirmation.message}</Text>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
@@ -152,12 +204,16 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
       <Text selectable style={{ color: colors.foreground }}>{details.command}</Text>
     </View> : null}
     {notice ? <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{notice}</Text> : null}
+    <LandingNotices notices={landingNotices} colors={colors} />
   </View>;
 }
 
 export function FactorySection({ theme, host, navigation }: Pick<PluginSurfaceProps, 'theme'> & HostProps) {
   const read = useRpc(factoryRuns);
   const send = useRpc(factoryAct);
+  const readLanding = useRpc(factoryLanding);
+  const sendLand = useRpc(factoryLand);
+  const sendStop = useRpc(factoryLandStop);
   const [data, setData] = useState<FactorySnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Keep outcomes beside their rendered row, or above the list while folded or absent.
@@ -165,6 +221,16 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
   const [finishedOpen, setFinishedOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [acting, setActing] = useState(false);
+  const [landings, setLandings] = useState<Record<string, FactoryLandingSnapshot>>({});
+  const [landingNotices, setLandingNotices] = useState<LandingNotice[]>([]);
+  const [landingError, setLandingError] = useState<string | null>(null);
+  const [landingBusy, setLandingBusy] = useState(false);
+  const landingInFlight = useRef(false);
+  const landingGeneration = useRef(0);
+  const localNoticeId = useRef(0);
+  const trackedChanges = useRef(new Set<string>());
+  const latestRuns = useRef<FactorySnapshot | null>(null);
+  const latestLandings = useRef<Record<string, FactoryLandingSnapshot>>({});
   const [workspaces, setWorkspaces] = useState<Workspaces>([]);
   const workspacesRequested = useRef(false);
   const alive = useRef(false);
@@ -196,12 +262,50 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
   const refresh = useCallback((): Promise<void> => {
     if (inFlight.current) return inFlight.current;
     setLoading(true);
+    const generation = landingGeneration.current;
+    const readLandingStatus = async (change?: string) => {
+      try {
+        const snapshot = await readLanding({ ...(change ? { change } : {}), refresh: true });
+        if (!alive.current || generation !== landingGeneration.current) return;
+        if (change) {
+          latestLandings.current = { ...latestLandings.current, [change]: snapshot };
+          setLandings(latestLandings.current);
+        } else setLandingError(snapshot.error);
+        if (change && snapshot.error) setLandingError(`${change}: ${snapshot.error}`);
+        const attempts = [...snapshot.attempts, ...(snapshot.current ? [snapshot.current] : [])];
+        attempts.forEach(attempt => trackedChanges.current.add(attempt.change));
+        setLandingNotices(previous => retainLandingNotices(previous, attempts.map(landingAttemptNotice)));
+      } catch {
+        if (!alive.current || generation !== landingGeneration.current) return;
+        if (change && latestLandings.current[change]) {
+          latestLandings.current = { ...latestLandings.current,
+            [change]: { ...latestLandings.current[change], stale: true } };
+          setLandings(latestLandings.current);
+        }
+        setLandingError('Landing refresh failed. Previously loaded results are retained. Refresh status before confirming again.');
+      }
+    };
     const pending = (async () => {
       try {
-        const next = await read({ refresh: true });
-        if (alive.current) { setData(next); setError(null); }
-      } catch {
-        if (alive.current) setError('Factory refresh failed. Any previously loaded list is stale and retained.');
+        await Promise.all([readLandingStatus(), (async () => {
+          try {
+            const next = await read({ refresh: true });
+            if (alive.current) { latestRuns.current = next; setData(next); setError(null); }
+          } catch {
+            if (alive.current) {
+              if (latestRuns.current) latestRuns.current = { ...latestRuns.current, stale: true };
+              setError('Factory refresh failed. Any previously loaded list is stale and retained.');
+            }
+          }
+        })()]);
+        const changes = [...new Set([...(latestRuns.current?.runs.map(run => run.change) ?? []), ...trackedChanges.current])];
+        // Reuse the page's refresh lifecycle, with at most four named reads in flight.
+        let index = 0;
+        await Promise.all(Array.from({ length: Math.min(4, changes.length) }, async () => {
+          while (alive.current && generation === landingGeneration.current && index < changes.length) {
+            await readLandingStatus(changes[index++]);
+          }
+        }));
       } finally {
         inFlight.current = null;
         if (alive.current) setLoading(false);
@@ -209,7 +313,7 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
     })();
     inFlight.current = pending;
     return pending;
-  }, [read]);
+  }, [read, readLanding]);
 
   useEffect(() => {
     alive.current = true;
@@ -242,12 +346,65 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
     }
   }
 
+  async function landingAction(change: string, operation: () => Promise<LandingNotice>, attempt?: FactoryLandingAttempt) {
+    if (landingInFlight.current) return;
+    landingInFlight.current = true;
+    landingGeneration.current++;
+    trackedChanges.current.add(change);
+    setLandingBusy(true);
+    try {
+      const result = await operation();
+      if (alive.current) setLandingNotices(previous => retainLandingNotices(previous, [result]));
+    } catch {
+      const message = `${attempt ? 'Stop' : 'Landing'} result unavailable. Refresh landing status to recover the attempt before confirming again.`;
+      const result = attempt ? { ...landingAttemptNotice(attempt), messages: [message] }
+        : { id: `local-${++localNoticeId.current}`, change, text: message, terminal: true, updatedAt: Date.now(), messages: [] };
+      if (alive.current) setLandingNotices(previous => retainLandingNotices(previous, [result]));
+    } finally {
+      landingGeneration.current++;
+      // A response lost after admission is recovered only by reading status.
+      await inFlight.current;
+      if (alive.current) await refresh();
+      landingInFlight.current = false;
+      if (alive.current) setLandingBusy(false);
+    }
+  }
+
+  async function land(input: FactoryLandInput) {
+    const runs = latestRuns.current;
+    const run = runs?.runs.find(item => item.change === input.change);
+    const snapshot = latestLandings.current[input.change];
+    if (!run || !sameLandingOffer(input, factoryLandOffer(run, snapshot, runs?.stale)) || snapshot?.current) return;
+    await landingAction(input.change, async () => {
+      const result = await sendLand(input);
+      return {
+        id: result.attempt_id ?? `local-${++localNoticeId.current}`, change: input.change,
+        text: result.accepted ? `Landing ${result.attempt_id.slice(0, 8)} · starting`
+          : `Landing refused · ${result.reason}`,
+        terminal: !result.accepted, updatedAt: 0, messages: [],
+      };
+    });
+  }
+
+  async function stopLanding(attempt: FactoryLandingAttempt) {
+    await landingAction(attempt.change, async () => {
+      const result = await sendStop({ attempt_id: attempt.attempt_id });
+      return { ...landingAttemptNotice(attempt), messages: [
+        `${result.accepted ? 'Stop requested' : 'Stop refused'} · ${result.reason}`,
+      ] };
+    }, attempt);
+  }
+
   const { active, finished } = groupFactoryRuns(data?.runs ?? []);
+  const visibleChanges = new Set([...active, ...(finishedOpen ? finished : [])].map(run => run.change));
   const noticeInRow = notice && (active.some(run => run.change === notice.change) ||
     (finishedOpen && finished.some(run => run.change === notice.change)));
   const renderRow = (run: FactoryRun) => <FactoryRow key={run.change} run={run} colors={colors}
     disabled={acting} act={act} report={text => setNotice({ change: run.change, text })}
     notice={noticeInRow && notice?.change === run.change ? notice.text : null} host={host} navigation={navigation}
+    offer={factoryLandOffer(run, landings[run.change], Boolean(data?.stale || error))}
+    currentLanding={landings[run.change]?.current ?? null} landingBusy={landingBusy}
+    land={land} stopLanding={stopLanding} landingNotices={landingNotices.filter(item => item.change === run.change)}
     workspaces={workspaces} onDetailsOpen={() => { void loadWorkspaces(); }} />;
 
   return <View style={{ gap: 12 }}>
@@ -262,8 +419,10 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
       <Text style={{ color: colors.foreground, fontSize: 13, fontWeight: '600' }}>{loading ? 'Checking…' : 'Refresh Factory'}</Text>
     </Pressable>
     {error || data?.error ? <Text accessibilityRole="alert" style={{ color: colors.statusWarning }}>{error || data?.error}</Text> : null}
+    {landingError ? <Text accessibilityRole="alert" style={{ color: colors.statusWarning }}>{landingError}</Text> : null}
     {notice && !noticeInRow
       ? <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{`${notice.change}: ${notice.text}`}</Text> : null}
+    <LandingNotices notices={landingNotices.filter(item => !visibleChanges.has(item.change))} colors={colors} named />
     {data && !active.length && !finished.length ? <Text style={{ color: colors.foreground }}>No Factory runs.</Text> : null}
     {active.map(renderRow)}
     {finished.length ? <Pressable accessibilityRole="button" accessibilityLabel={`Finished (${finished.length})`}

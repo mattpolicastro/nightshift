@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import React from 'react';
 import ts from 'typescript';
-import type { FactoryActInput, FactoryRun, FactorySnapshot } from '../shared/factory';
+import type { FactoryActInput, FactoryRun, FactorySnapshot, FactoryLandingInput, FactoryLandingSnapshot, FactoryLandInput, FactoryLandStopInput } from '../shared/factory';
 
 // Distinct sentinels make incorrect token choices visible in rendered styles.
 export const colors = {
@@ -22,6 +22,9 @@ type Hook = { value?: any; deps?: unknown[]; cleanup?: () => void };
 export function styleView(runs: FactoryRun[], options: {
   act?: (input: FactoryActInput) => Promise<unknown>;
   read?: () => Promise<FactorySnapshot>;
+  landing?: (input: FactoryLandingInput) => Promise<FactoryLandingSnapshot>;
+  land?: (input: FactoryLandInput) => Promise<unknown>;
+  stop?: (input: FactoryLandStopInput) => Promise<unknown>;
   client?: unknown;
   navigation?: { openWorkspace?: (input: { serverId: string; workspaceId: string }) => void };
   openURL?: (url: string) => Promise<void>;
@@ -66,7 +69,24 @@ export function styleView(runs: FactoryRun[], options: {
       return { remove() { subscription.removed = true; } };
     },
   };
-  const runsRpc = {}, actRpc = {};
+  const runsRpc = {};
+  const actRpc = {}, landingRpc = {}, landRpc = {}, stopRpc = {};
+  const landingReads: FactoryLandingInput[] = [], lands: FactoryLandInput[] = [], stops: FactoryLandStopInput[] = [];
+  const landing = async (input: FactoryLandingInput) => {
+    landingReads.push(input);
+    return options.landing ? options.landing(input) : {
+      version: 1, attempts: [], total: 0, diagnostics: [], offer: null, current: null,
+      truncated: false, stale: false, fetchedAt: '', error: null,
+    };
+  };
+  const land = async (input: FactoryLandInput) => {
+    lands.push(input);
+    return options.land ? options.land(input) : { version: 1, accepted: false, attempt_id: null, reason: 'No landing configured' };
+  };
+  const stop = async (input: FactoryLandStopInput) => {
+    stops.push(input);
+    return options.stop ? options.stop(input) : { version: 1, accepted: false, attempt_id: input.attempt_id, reason: 'No Stop configured' };
+  };
   const read = async (input: unknown) => {
     reads.push(input);
     return options.read ? options.read() : { runs, stale: false, fetchedAt: '', error: null };
@@ -79,7 +99,7 @@ export function styleView(runs: FactoryRun[], options: {
   const require = createRequire(filename);
   const exports: Props = {};
   const source = ts.transpileModule(readFileSync(filename, 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, esModuleInterop: true },
+    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, esModuleInterop: true },
   }).outputText;
   runInNewContext(source, {
     exports,
@@ -96,13 +116,20 @@ export function styleView(runs: FactoryRun[], options: {
         Linking: { openURL: async (url: string) => { urls.push(url); await options.openURL?.(url); } },
       };
       if (name === '@getpaseo/plugin/client') return {
-        useRpc: (rpc: unknown) => rpc === runsRpc ? read : act,
+        useRpc: (rpc: unknown) => {
+          if (rpc === runsRpc) return read;
+          if (rpc === actRpc) return act;
+          if (rpc === landingRpc) return landing;
+          if (rpc === landRpc) return land;
+          if (rpc === stopRpc) return stop;
+          throw new Error('Unknown RPC descriptor');
+        },
         getPaseoClient: (host: string) => {
           hosts.push(host);
           return 'client' in options ? options.client : { workspaces: { list: async () => ({ entries: [] }) } };
         },
       };
-      if (name === '../shared/factory') return { factoryRuns: runsRpc, factoryAct: actRpc };
+      if (name === '../shared/factory') return { factoryRuns: runsRpc, factoryAct: actRpc, factoryLanding: landingRpc, factoryLand: landRpc, factoryLandStop: stopRpc };
       return require(name);
     },
   });
@@ -134,7 +161,7 @@ export function styleView(runs: FactoryRun[], options: {
   async function settle() { await new Promise(resolve => setImmediate(resolve)); draw(); }
   draw();
   return {
-    actions, reads, hosts, urls, nodes, text, find, settle, intervals, subscriptions, appState,
+    actions, reads, landingReads, lands, stops, hosts, urls, nodes, text, find, settle, intervals, subscriptions, appState,
     setColors(next: typeof colors) { themeColors = next; draw(); },
     async press(control: string | Node) {
       const button = typeof control === 'string' ? find(control) : control;

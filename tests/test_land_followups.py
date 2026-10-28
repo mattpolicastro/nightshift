@@ -67,7 +67,7 @@ def test_land_runs_nightshift_through_its_interpreter(
     assert len(finish_calls) == (1 if kind == "finish" else 0)
     if finish_calls:
         assert finish_calls == [(
-            [sys.executable, "-m", "nightshift.cli", "finish", RUN["change"]],
+            [sys.executable, "-m", "nightshift.cli", "finish", RUN["change"], "--expect-head", HEAD],
             {"capture_output": True, "text": True, "check": False, "timeout": 300},
         )]
 
