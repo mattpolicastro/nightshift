@@ -30,6 +30,11 @@ class Ctx:
         self.tasks_path = f"openspec/changes/{m.change}/tasks.md"
         self.credentials = seal.credential_values(secrets)
         self.infra_retries: _InfraRetries | None = None
+        self.snapshots = verify.SnapshotContext(run.dir / "snapshots", lambda kind, **data: self.run.event(kind, **data))
+
+    @property
+    def snapshot_kwargs(self) -> dict[str, verify.SnapshotContext]:
+        return {"snapshots": self.snapshots} if self.m.snapshots else {}
 
     def head(self) -> str:
         return git(self.repo, "rev-parse", self.ref).decode().strip()
@@ -183,6 +188,8 @@ def prepare_publish(ctx: Ctx) -> bool:
         ctx.pause("base_fetch", detail=f"{exc}\n{recovery}")
         return False
 
+    if ctx.m.snapshots:
+        verify.warm_snapshots(ctx.repo, base, ctx.m, ctx.snapshots)
     out = None
     head = ctx.head()
     sync = ctx.run.state.base_sync
@@ -226,7 +233,7 @@ def prepare_publish(ctx: Ctx) -> bool:
         (out / "integration.json").write_text(json.dumps(
             {"base": base, "head": head, "previous_head": sync.get("previous_head", "")}, indent=2))
         try:
-            receipts = verify.run_steps(ctx.repo, head, ctx.m.verify, ctx.m, out)
+            receipts = verify.run_steps(ctx.repo, head, ctx.m.verify, ctx.m, out, **ctx.snapshot_kwargs)
         finally:
             verify.cleanup(out)
         if not verify.ok(receipts, ctx.m.prepare + ctx.m.verify):
@@ -256,12 +263,21 @@ def run(ctx: Ctx) -> str:
     # The CLI constructs Ctx before writing its resume event.
     ctx.infra_retries = _InfraRetries(ctx)
     st = ctx.run.state
+    snapshot_sync_pending = bool(ctx.m.snapshots)
     while st.status == "running":
         if ctx.run.pause_requested():
             ctx.run.clear_pause_request()
             ctx.pause("requested", detail="stopped at a task boundary, as asked; `specloop resume` continues "
                                           "and takes fast-forward spec edits from the source branch")
             break
+        if snapshot_sync_pending:
+            snapshot_sync_pending = False
+            try:
+                base = _fetch_publish_base(ctx, timeout=300)
+            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                ctx.snapshots.emit("snapshot_sync_failed", detail=str(exc))
+            else:
+                verify.warm_snapshots(ctx.repo, base, ctx.m, ctx.snapshots)
         head = ctx.head()
         all_tasks = tasks.parse(ctx.tasks_text(head))
         if ctx.m.evidence and (n := _evidence_due(all_tasks, st)) is not None:
@@ -311,7 +327,7 @@ def finals(ctx: Ctx, head: str) -> bool:
             return _append(ctx, head, "Coverage", _coverage_tasks(missing))
     if m.acceptance:
         out = ctx.run.dir / "final" / f"acceptance-{st.acceptance_rounds}"
-        receipts = verify.run_steps(ctx.repo, head, m.acceptance, m, out)
+        receipts = verify.run_steps(ctx.repo, head, m.acceptance, m, out, **ctx.snapshot_kwargs)
         verify.cleanup(out)
         ctx.run.event("acceptance", passed=verify.ok(receipts, m.prepare + m.acceptance))
         if not verify.ok(receipts, m.prepare + m.acceptance):
@@ -372,7 +388,7 @@ def _evidence_due(all_tasks: list[tasks.Task], st) -> int | None:
 
 
 def _seen_scenarios(ctx: Ctx, head: str, out: Path) -> tuple[bool, set[str], list]:
-    receipts = verify.run_steps(ctx.repo, head, ctx.m.verify, ctx.m, out)
+    receipts = verify.run_steps(ctx.repo, head, ctx.m.verify, ctx.m, out, **ctx.snapshot_kwargs)
     log = out / f"{ctx.m.coverage_step}.log"
     seen = set(tasks.SCENARIO_ID.findall(log.read_text(errors="replace"))) if log.exists() else set()
     verify.cleanup(out)
@@ -656,7 +672,7 @@ def step(ctx: Ctx, task: tasks.Task, head: str) -> None:
 
 
 def _verify_then_review(ctx: Ctx, task: tasks.Task, ts: TaskState, head: str, sha: str, adir: Path) -> None:
-    receipts = verify.run_steps(ctx.repo, sha, ctx.m.verify, ctx.m, adir / "verify")
+    receipts = verify.run_steps(ctx.repo, sha, ctx.m.verify, ctx.m, adir / "verify", **ctx.snapshot_kwargs)
     verify.cleanup(adir / "verify")
     passed = verify.ok(receipts, ctx.m.prepare + ctx.m.verify)
     ctx.run.event("verified", task=task.key, sha=sha, passed=passed)

@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from specloop import manifest, verify
+from specloop import evidence, loop, manifest, state, tasks, verify
+from test_specloop_base_sync import base_env, snapshot_env, commit as base_commit, track_base_fetches
 from test_specloop_seal_verify import M_DATA, sh
 
 SUCCESS = 'cat "$1/lock" > "$3/dependency"; printf "%s\\n" "$1" "$2" > "$3/origin"; chmod 755 "$3/dependency"'
@@ -36,8 +37,9 @@ def warming(tmp_path, monkeypatch):
 
 @pytest.mark.scenario("verify-preparation/trusted-base-warming/candidate-changes-cannot-warm")
 @pytest.mark.scenario("verify-preparation/trusted-base-warming/matching-base-reuses-completed-work")
+@pytest.mark.scenario("verify-preparation/private-snapshot-consumption/preparation-and-checks-share-the-private-path")
 @pytest.mark.scenario("verify-preparation/immutable-snapshot-publication/warm-is-confined-and-payload-is-read-only")
-def test_snapshot_warms_only_on_base_commit(warming, tmp_path):
+def test_snapshot_warms_only_on_base_commit(warming, tmp_path, snapshot_env, monkeypatch):
     repo, commit, m, context, events = warming
     base = commit()
     candidate = commit("exit 99", "candidate")
@@ -60,6 +62,85 @@ def test_snapshot_warms_only_on_base_commit(warming, tmp_path):
     assert all(not p.stat().st_mode & 0o222 for p in verify._payload_paths(entry))
     assert (entry / "payload/dependency").stat().st_mode & 0o111 == 0o111
     assert [r["id"] for r in json.loads(next((context.root / "warms").glob("*/receipts.json")).read_text())] == ["warm"]
+
+    env, ctx = snapshot_env, snapshot_env.ctx
+    fetches = track_base_fetches(monkeypatch)
+    ctx.m = replace(ctx.m, coverage_step="ok", acceptance=(replace(ctx.m.verify[0], id="accept"),))
+    monkeypatch.setattr(loop, "_scenarios_at", lambda *a: {})
+    # Exercise the real consumer portably, without claiming clonefile or sandbox enforcement.
+    import shutil
+    monkeypatch.setattr(verify, "_clone_api", lambda: lambda src, dst, flags: (shutil.copyfile(src, dst), 0)[1])
+    checked, run_steps = [], verify.run_steps
+    def check(repo, sha, steps, m, out, *, snapshots=None):
+        assert snapshots is ctx.snapshots
+        rs = run_steps(repo, sha, steps, m, out, snapshots=snapshots)
+        assert [r.id for r in rs] == ["ordinary", steps[0].id] and all(r.passed for r in rs)
+        assert rs[0].argv[-1] == rs[1].argv[-1] == str(out / "build/snapshots/deps")
+        for mode in ("prepare", "verify"):
+            profile = (out / f"{mode}.sb").read_text()
+            assert ("(deny network*)" in profile) == (mode == "verify")
+            assert str(ctx.snapshots.root / "entries") in profile
+        checked.append(out)
+        return rs
+    monkeypatch.setattr(verify, "run_steps", check)
+    with ctx.run.lock() as mine:
+        assert mine and loop.run(ctx) == "paused"
+    integrated = ctx.head()
+    assert integrated not in (env.base, env.candidate)
+    assert sh(ctx.repo, "git", "show", f"{integrated}:warm.sh") == "exit 99"
+    assert sh(ctx.repo, "git", "show", f"{env.candidate}:lock") == "original"
+    entry, metadata = verify._snapshot_entries(ctx.snapshots.root)[0]
+    assert (entry / "payload/dependency").read_text() == "base"
+    assert (entry / "payload/origin").read_text().splitlines()[1] == metadata["base_sha"] == env.base
+    assert len(fetches) == 2 and ctx.run.state.base_sync["verified_head"] == integrated
+    task = tasks.parse(ctx.tasks_text(integrated))[0]
+    ts = ctx.run.state.tasks.setdefault(task.key, state.TaskState())
+    monkeypatch.setattr(loop, "_review", lambda *a: None)
+    with ctx.run.lock() as mine:
+        assert mine
+        loop._verify_then_review(ctx, task, ts, integrated, env.candidate, ctx.run.dir / "task-check")
+    assert ts.pending_review == env.candidate
+    assert [out.name for out in checked[1:]] == ["coverage-0", "acceptance-0", "verify"]
+    assert all(not (out / "build").exists() for out in checked)
+    assert (checked[-1] / "snapshot-events.jsonl").is_file()
+    def snapshot_events():
+        return [e for line in (ctx.run.dir / "events.jsonl").read_text().splitlines()
+                if (e := json.loads(line))["event"].startswith("snapshot_")]
+    assert [e["event"] for e in snapshot_events()[:2]] == ["snapshot_warmed", "snapshot_reused"]
+    next_base = base_commit(env.upstream, "lock", "next-base")
+    sh(env.upstream, "git", "push", "-q", "origin", "release/stable")
+    with ctx.run.lock() as mine:
+        assert mine and loop.prepare_publish(ctx)
+    entries = verify._snapshot_entries(ctx.snapshots.root)
+    next_entry, _ = next((p, d) for p, d in entries if d["base_sha"] == next_base)
+    assert (next_entry / "payload/dependency").read_text() == "next-base"
+    assert (next_entry / "payload/origin").read_text().splitlines()[1] == next_base
+    assert snapshot_events()[-1]["event"] == "snapshot_warmed" and len(fetches) == 3
+    # A restart with unrelated base edits reuses the completed entry, even though
+    # the new base's warm script would fail if executed.
+    unrelated = base_commit(env.upstream, "warm.sh", "exit 97")
+    sh(env.upstream, "git", "push", "-q", "origin", "release/stable")
+    ctx = loop.Ctx(ctx.run, ctx.m, {})
+    monkeypatch.setattr(loop, "finals", lambda current, head: False)
+    ctx.run.state.status = "running"
+    before = (ctx.head(), json.dumps(ctx.run.state.base_sync, sort_keys=True))
+    with ctx.run.lock() as mine:
+        assert mine and loop.run(ctx) == "running"
+    assert (ctx.head(), json.dumps(ctx.run.state.base_sync, sort_keys=True)) == before
+    assert snapshot_events()[-1]["event"] == "snapshot_reused"
+    assert snapshot_events()[-1]["base_sha"] == unrelated and len(fetches) == 4
+    monkeypatch.setattr(verify, "run_steps", run_steps)
+    with monkeypatch.context() as guard:
+        guard.setattr(verify, "warm_snapshots", lambda *a: pytest.fail("consumers must never warm"))
+        for sha in (env.candidate, integrated):
+            rs = verify.run_steps(ctx.repo, sha, ctx.m.verify, ctx.m, tmp_path / f"driver-{sha}",
+                                  snapshots=ctx.snapshots)
+            assert verify.ok(rs, ctx.m.prepare + ctx.m.verify)
+        mutants = [evidence.Mutant("warm.sh", 1, "test", "exit 99", "exit 98")]
+        assert evidence.mutate(ctx.repo, env.candidate, mutants,
+                               replace(ctx.m, mutation_steps=("ok",)), tmp_path / "mutants")
+        assert mutants[0].result == "survived"
+    assert len(verify._snapshot_entries(ctx.snapshots.root)) == 2
 
 
 @pytest.mark.scenario("verify-preparation/immutable-snapshot-publication/failed-or-interrupted-warm-is-not-reusable")
