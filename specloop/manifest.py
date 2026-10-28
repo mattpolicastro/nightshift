@@ -5,6 +5,7 @@ the run directory and the run only ever reads that copy.
 """
 
 import json
+import re
 import tomllib
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
@@ -36,6 +37,13 @@ class Step:
 class MutationRoute:
     paths: tuple[str, ...]
     steps: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    id: str
+    lockfiles: tuple[str, ...]
+    warm: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -80,6 +88,7 @@ class Manifest:
     mutation_routes: tuple[MutationRoute, ...] = ()
     auth_targets: tuple[str, ...] = ()  # all profiles, including unused and fallback logins
     mutation_invalid_steps: tuple[str, ...] = DEFAULT_MUTATION_INVALID_STEPS
+    snapshots: tuple[Snapshot, ...] = ()
 
 
 def _path(s: str) -> Path:
@@ -112,6 +121,52 @@ def _steps(raw, setting: str = "step") -> tuple[Step, ...]:
     if len(ids) != len(set(ids)):
         raise ValueError(f"{setting}: duplicate step ids: {ids}")
     return tuple(steps)
+
+
+def expand(arg: str, values: dict[str, str]) -> str:
+    for k, v in values.items():
+        arg = arg.replace("{" + k + "}", v)
+    return arg
+
+
+def _snapshot_refs(argv: tuple[str, ...], ids: set[str], setting: str,
+                   variables: dict[str, str], *, warm: bool = False) -> None:
+    for arg in argv:
+        # Check aliases with the same ordered substitution used at execution.
+        for value in (arg, expand(arg, variables)):
+            for ref in re.findall(r"\{(snapshot:[^{}]*|mutant_path)\}", value):
+                if (ref.startswith("snapshot:") and ref[9:] not in ids) or (warm and ref == "mutant_path"):
+                    raise ValueError(f"{setting}: unavailable placeholder {{{ref}}}")
+
+
+def _snapshots(raw) -> tuple[Snapshot, ...]:
+    if not isinstance(raw, list):
+        raise ValueError("snapshot: must be an array of tables")
+    snapshots: list[Snapshot] = []
+    ids: set[str] = set()
+    for index, item in enumerate(raw):
+        setting = f"snapshot[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{setting}: must be a table")
+        sid = item.get("id")
+        if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", sid):
+            raise ValueError(f"{setting}.id: unsafe snapshot id {sid!r}")
+        setting = f"snapshot {sid!r}"
+        if sid in ids:
+            raise ValueError(f"{setting}.id: duplicate snapshot id")
+        ids.add(sid)
+        for field_name in ("lockfiles", "warm"):
+            values = item.get(field_name)
+            if (not isinstance(values, list) or not values
+                    or any(not isinstance(v, str) or not v or "\0" in v for v in values)):
+                raise ValueError(f"{setting}.{field_name}: must be a nonempty array of nonempty strings without NUL")
+        paths = item["lockfiles"]
+        if (len(paths) != len(set(paths)) or any(
+                PureWindowsPath(p).drive or any(c in p for c in "\\*?[]")
+                or any(part in ("", ".", "..") for part in p.split("/")) for p in paths)):
+            raise ValueError(f"{setting}.lockfiles: paths must be unique canonical repository-relative paths")
+        snapshots.append(Snapshot(sid, tuple(paths), tuple(item["warm"])))
+    return tuple(snapshots)
 
 
 def parse(data: dict, roles_override: dict[str, str] | None = None) -> Manifest:
@@ -160,6 +215,18 @@ def parse(data: dict, roles_override: dict[str, str] | None = None) -> Manifest:
     if collisions:
         raise ValueError(f"mutation_step ids collide with verify, prepare or acceptance: {sorted(collisions)}")
     variables = dict(data.get("vars", {}))
+    for name in variables:
+        if name.startswith("snapshot:"):
+            raise ValueError(f"vars.{name} is reserved")
+    snapshots = _snapshots(data.get("snapshot", []))
+    ordinary = {k: v for k, v in variables.items() if k not in ("src", "build", "sha")}
+    for snapshot in snapshots:
+        _snapshot_refs(snapshot.warm, {snapshot.id}, f"snapshot {snapshot.id!r}.warm",
+                       {k: v for k, v in ordinary.items() if k != "mutant_path"}, warm=True)
+    for setting, steps in (("prepare", prepare), ("verify", verify),
+                           ("acceptance", acceptance), ("mutation_step", mutation_step)):
+        for step in steps:
+            _snapshot_refs(step.run, {s.id for s in snapshots}, f"{setting} {step.id!r}.run", ordinary)
     if any("{mutant_path}" in arg for s in verify + mutation_step + prepare + acceptance for arg in s.run):
         if variables.get("mutant_path", "") != "":
             raise ValueError("vars.mutant_path is reserved and must be empty")
@@ -177,6 +244,7 @@ def parse(data: dict, roles_override: dict[str, str] | None = None) -> Manifest:
         prepare=prepare,
         acceptance=acceptance,
         mutation_step=mutation_step,
+        snapshots=snapshots,
         phase_gates=tuple(int(n) for n in data.get("gates", {}).get("phases", [])),
         max_attempts=int(limits.get("max_attempts", 3)),
         max_infra=int(limits.get("max_infra", 3)),

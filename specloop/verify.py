@@ -14,22 +14,194 @@ or a timeout never satisfies an expected non-zero exit.
 
 import ctypes
 import functools
+import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import stat
 import subprocess
 import time
-from dataclasses import asdict, dataclass
+import uuid
+from collections.abc import Callable
+from contextlib import ExitStack
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from threading import Lock
 
 from nightshift.host_paths import tool_path
 from specloop.agents import homes_dir
-from specloop.manifest import Manifest, Step
+from specloop.manifest import Manifest, Snapshot, Step, expand
 
 CREDENTIAL_DIRS = (".codex", ".claude", ".specloop/homes", ".nightshift/homes",
                    ".ssh", ".config", ".aws", "Library/Keychains")
+
+
+@dataclass
+class SnapshotContext:
+    root: Path
+    event: Callable[..., None] = lambda *args, **kwargs: None
+    _lock: Lock = field(default_factory=Lock, repr=False)
+
+    def emit(self, kind: str, **data) -> None:
+        with self._lock:
+            self.event(kind, **data)
+
+
+def _payload_paths(root: Path, *, readonly: bool = False) -> list[Path]:
+    if not stat.S_ISDIR(root.lstat().st_mode):
+        raise ValueError("payload must be a directory")
+    paths = [root]
+    for path in paths:
+        info = path.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            paths.extend(path.iterdir())
+        elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("payload contains a link or special file")
+        if readonly and info.st_mode & 0o222:
+            raise ValueError("entry is writable")
+    return paths
+
+
+def _snapshot_entries(root: Path, *, strict_io: bool = False) -> list[tuple[Path, dict]]:
+    result = []
+    for entry in (root / "entries").iterdir():
+        try:
+            _payload_paths(entry, readonly=True)
+            data = json.loads((entry / "metadata.json").read_text())
+            if (data["schema"] == 1 and type(data["sequence"]) is int and data["sequence"] > 0
+                    and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", data["id"])
+                    and re.fullmatch(r"[0-9a-f]{64}", data["key"])
+                    and re.fullmatch(r"[0-9a-f]{40,64}", data["base_sha"])
+                    and entry.name == f'{data["sequence"]}-{data["id"]}-{data["key"]}'):
+                _payload_paths(entry / "payload", readonly=True)
+                result.append((entry, data))
+        except OSError:
+            if strict_io:  # Retention cannot establish its bound from an incomplete scan.
+                raise
+        except (ValueError, KeyError, TypeError):
+            continue
+    return result
+
+
+def _remove_snapshot_tree(root: Path) -> None:
+    # Restore directory access without following or chmodding symlinks.
+    pending = [root]
+    for parent in pending:
+        if not stat.S_ISDIR(parent.lstat().st_mode):
+            raise ValueError("snapshot cleanup target must be a directory")
+        parent.chmod(parent.lstat().st_mode | 0o700)
+        pending.extend(p for p in parent.iterdir() if stat.S_ISDIR(p.lstat().st_mode))
+    shutil.rmtree(root)
+
+
+def _retain_snapshots(context: SnapshotContext) -> None:
+    """Recover recorded deletions and keep three publications; caller holds run lock."""
+    root = context.root
+    try:
+        # Record validated deletion intent before chmod/rmtree can invalidate an
+        # entry. A crash at any later point leaves this marker for the next sync.
+        for marker in (root / "entries").glob(".prune-*"):
+            name = marker.name.removeprefix(".prune-")
+            if (re.fullmatch(r"[1-9][0-9]*-[A-Za-z0-9_-]+-[0-9a-f]{64}", name)
+                    and stat.S_ISREG(marker.lstat().st_mode)):
+                entry = root / "entries" / name
+                if entry.is_symlink() or entry.exists():
+                    _remove_snapshot_tree(entry)
+                marker.unlink()
+        for entry, _ in sorted(_snapshot_entries(root, strict_io=True), key=lambda item: item[1]["sequence"])[:-3]:
+            marker = root / "entries" / f".prune-{entry.name}"
+            marker.touch(exist_ok=False)
+            _remove_snapshot_tree(entry)
+            marker.unlink()
+    except (OSError, ValueError) as exc:
+        context.emit("snapshot_retention_failed", error=str(exc), root=str(root))
+
+
+def warm_snapshots(repo: Path, base_sha: str, m: Manifest, context: SnapshotContext) -> None:
+    """Warm only the caller's pinned trusted base, under the run lock; never prepare."""
+    if not m.snapshots:
+        return
+    root = context.root.resolve()
+    (root / "entries").mkdir(parents=True, exist_ok=True)
+    _retain_snapshots(context)
+    for old in root.glob(".staging-*"):
+        if re.fullmatch(r"\.staging-[0-9a-f]{32}", old.name) and stat.S_ISDIR(old.lstat().st_mode):
+            _remove_snapshot_tree(old)
+    for definition in m.snapshots:
+        attempt = uuid.uuid4().hex
+        stage, out = root / f".staging-{attempt}", root / "warms" / attempt
+        out.mkdir(parents=True)
+        key = None
+        details = dict(id=definition.id, base_sha=base_sha, diagnostics=str(out))
+        try:
+            src, build = stage / "src", stage / "build"
+            extract(repo, base_sha, src)
+            key = snapshot_key(src, definition)
+            if key is None:
+                raise ValueError("lockfile key unavailable")
+            if any(d["id"] == definition.id and d["key"] == key for _, d in _snapshot_entries(root)):
+                context.emit("snapshot_reused", key=key, **details)
+                continue
+            for name in ("home", "tmp", "payload"):
+                (build / name).mkdir(parents=True)
+            sb = out / "prepare.sb"
+            sb.write_text(profile(build, m, prepare=True, src=src, snapshots=context))
+            values = {**m.vars, "src": str(src), "build": str(build), "sha": base_sha,
+                      f"snapshot:{definition.id}": str(build / "payload")}
+            receipts = _run_commands([(Step("warm", definition.warm, 0, 600), sb)], values, build, out, tool_path())
+            if not receipts[0].passed:
+                raise ValueError("warm command failed")
+            _payload_paths(build / "payload")
+            entry = stage / "entry"
+            entry.mkdir()
+            (build / "payload").rename(entry / "payload")
+            sequence = max((int(p.name.split("-", 1)[0]) for p in (root / "entries").iterdir()
+                            if re.fullmatch(r"[1-9][0-9]*-[A-Za-z0-9_-]+-[0-9a-f]{64}", p.name)), default=0) + 1
+            metadata = dict(schema=1, id=definition.id, key=key, base_sha=base_sha, sequence=sequence)
+            (entry / "metadata.json").write_text(json.dumps(metadata))
+            for payload_path in reversed(_payload_paths(entry)[1:]):
+                payload_path.chmod(payload_path.stat().st_mode & ~0o222)
+            # macOS needs rename write permission; locked readers reject unfinished entries.
+            published = entry.rename(root / "entries" / f"{sequence}-{definition.id}-{key}")
+            published.chmod(published.stat().st_mode & ~0o222)
+            context.emit("snapshot_warmed", key=key, **details)
+        except BaseException as exc:
+            (out / "failure.txt").write_text(str(exc))
+            context.emit("snapshot_warm_failed", key=key, **details)
+            if not isinstance(exc, (OSError, ValueError, subprocess.SubprocessError)):
+                raise
+        else:
+            _retain_snapshots(context)
+
+
+def snapshot_key(src: Path, definition: Snapshot) -> str | None:
+    """Hash framed raw lockfiles; unavailable or symlink-traversing inputs miss."""
+    digest = hashlib.sha256(b"specloop-snapshot-v1\0")
+    try:
+        for path in sorted(definition.lockfiles):
+            parts = path.split("/")
+            if any(part in ("", ".", "..") for part in parts):
+                return None
+            with ExitStack() as stack:
+                parent = os.open(src, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                stack.callback(os.close, parent)
+                for part in parts[:-1]:
+                    parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                    stack.callback(os.close, parent)
+                fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                stack.callback(os.close, fd)
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return None
+                with os.fdopen(fd, "rb", closefd=False) as stream:
+                    content = stream.read()
+            for value in (path.encode("utf-8"), content):
+                digest.update(len(value).to_bytes(8, "big"))
+                digest.update(value)
+    except (OSError, ValueError):
+        return None
+    return digest.hexdigest()
 
 
 def _real_path(path: Path, links: frozenset[Path] = frozenset()) -> Path:
@@ -100,7 +272,7 @@ class Receipt:
 
 
 def profile(build: Path, m: Manifest, *, prepare: bool = False, home: Path | None = None,
-            src: Path | None = None) -> str:
+            src: Path | None = None, snapshots: SnapshotContext | None = None) -> str:
     # The sandbox matches real paths: /tmp/x is /private/tmp/x to it.
     build = build.resolve()
 
@@ -131,7 +303,7 @@ def profile(build: Path, m: Manifest, *, prepare: bool = False, home: Path | Non
   (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (regex #"^/dev/fd/"))
 {reads}
 {f"(deny file-read* {deny})" if deny else ""}
-"""
+""" + (f'(deny file-write* (subpath {q(str((snapshots.root / "entries").resolve()))}))\n' if snapshots else "")
 
 
 @functools.cache
@@ -156,12 +328,6 @@ def wrap(argv: list[str], sb: Path) -> list[str]:
     return argv if already_sandboxed() else ["sandbox-exec", "-f", str(sb), *argv]
 
 
-def expand(arg: str, values: dict[str, str]) -> str:
-    for k, v in values.items():
-        arg = arg.replace("{" + k + "}", v)
-    return arg
-
-
 def _make_writable(p: Path) -> None:
     if p.exists():
         subprocess.run(["chmod", "-R", "u+w", str(p)], check=False)
@@ -176,14 +342,81 @@ def extract(repo: Path, sha: str, src: Path) -> None:
     subprocess.run(["chmod", "-R", "a-w", str(src)], check=True)
 
 
-def run_steps(repo: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out: Path) -> list[Receipt]:
+@functools.cache
+def _clone_api():
+    clone = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True).clonefile
+    clone.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32]
+    clone.restype = ctypes.c_int
+    return clone
+
+
+def _clone_payload(payload: Path, destination: Path) -> None:
+    clone = _clone_api()
+    for source in _payload_paths(payload, readonly=True):
+        target = destination / source.relative_to(payload)
+        mode = source.stat().st_mode
+        if stat.S_ISDIR(mode):
+            target.mkdir()
+        elif clone(os.fsencode(source), os.fsencode(target), 0) != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code), str(target))
+        target.chmod(stat.S_IMODE(mode) | stat.S_IWUSR)
+
+
+def _consume_snapshots(src: Path, sha: str, m: Manifest, out: Path,
+                       context: SnapshotContext | None) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not m.snapshots:
+        return values
+    with (out / "snapshot-events.jsonl").open("w") as events:
+        for definition in m.snapshots:
+            destination = (out / "build" / "snapshots" / definition.id).resolve()
+            destination.parent.mkdir(exist_ok=True)
+            values[f"snapshot:{definition.id}"] = str(destination)
+            key, payload = snapshot_key(src, definition), None
+            reason = "context_unavailable" if context is None else "key_unavailable"
+            if context is not None and key is not None:
+                try:
+                    entries = list((context.root / "entries").iterdir())
+                    valid = _snapshot_entries(context.root)
+                    payload = next((p / "payload" for p, d in valid
+                                    if d["id"] == definition.id and d["key"] == key), None)
+                    reason = ("invalid" if any(re.fullmatch(rf"[1-9][0-9]*-{re.escape(definition.id)}-{key}", p.name) for p in entries)
+                              else "stale" if any(d["id"] == definition.id for _, d in valid) else "missing")
+                except FileNotFoundError:
+                    reason = "missing"
+                except (OSError, ValueError):
+                    reason = "invalid"
+            if payload is not None:
+                try:
+                    _clone_payload(payload, destination)
+                    continue
+                except (OSError, AttributeError, ValueError):
+                    reason = "clone_failed"
+            data = dict(id=definition.id, key=key, sha=sha, reason=reason, out=str(out))
+            events.write(json.dumps(dict(event="snapshot_fallback", **data)) + "\n")
+            events.flush()
+            if context is not None:
+                context.emit("snapshot_fallback", **data)
+            # Never run commands with uncertain partial output. Cleanup errors propagate.
+            if destination.exists():
+                shutil.rmtree(destination)
+            destination.mkdir()
+    return values
+
+
+def run_steps(repo: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out: Path, *,
+              snapshots: SnapshotContext | None = None) -> list[Receipt]:
     """Extract once, prepare dependencies, then run the requested offline checks."""
     src = out / "src"
     extract(repo, sha, src)
-    return run_extracted(src, sha, steps, m, out)
+    if snapshots is None:
+        return run_extracted(src, sha, steps, m, out)
+    return run_extracted(src, sha, steps, m, out, snapshots=snapshots)
 
 
-def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out: Path) -> list[Receipt]:
+def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out: Path, *,
+                  snapshots: SnapshotContext | None = None) -> list[Receipt]:
     """Prepare a fresh build from an already read-only source tree, then check it."""
     path = tool_path()
     build = out / "build"
@@ -192,15 +425,21 @@ def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out
     for d in ("home", "tmp"):
         (build / d).mkdir(parents=True)
     sb = out / "verify.sb"
-    sb.write_text(profile(build, m))
+    sb.write_text(profile(build, m, snapshots=snapshots))
     prep_sb = out / "prepare.sb"
     if m.prepare:
-        prep_sb.write_text(profile(build, m, prepare=True, src=src))
-    values = {**m.vars, "src": str(src), "build": str(build), "sha": sha}
+        prep_sb.write_text(profile(build, m, prepare=True, src=src, snapshots=snapshots))
+    values = {**m.vars, "src": str(src), "build": str(build), "sha": sha,
+              **_consume_snapshots(src, sha, m, out, snapshots)}
+    scheduled = [(s, prep_sb) for s in m.prepare] + [(s, sb) for s in steps]
+    return _run_commands(scheduled, values, build, out, path)
+
+
+def _run_commands(scheduled: list[tuple[Step, Path]], values: dict[str, str],
+                  build: Path, out: Path, path: str) -> list[Receipt]:
     env = {"PATH": path, "HOME": str(build / "home"), "TMPDIR": str(build / "tmp"),
            "LANG": "en_US.UTF-8", "COPYFILE_DISABLE": "1"}
     receipts = []
-    scheduled = [(s, prep_sb) for s in m.prepare] + [(s, sb) for s in steps]
     for step, step_sb in scheduled:
         argv = [expand(a, values) for a in step.run]
         log = out / f"{step.id}.log"
@@ -212,13 +451,13 @@ def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out
                 code = p.wait(timeout=step.timeout)
             except subprocess.TimeoutExpired:
                 code = None
-            # Nothing a step started outlives it: a prepare step's background
-            # process would otherwise keep network access into the verify steps.
-            try:
-                os.killpg(p.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            p.wait()
+            finally:
+                # Descendants must not retain network access or mutate a payload.
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                p.wait()
         tail = log.read_bytes()[-2000:].decode(errors="replace")
         passed = code is not None and code >= 0 and code == step.expect
         receipts.append(Receipt(step.id, argv, step.expect, code, passed, round(time.monotonic() - t0, 2), tail))
