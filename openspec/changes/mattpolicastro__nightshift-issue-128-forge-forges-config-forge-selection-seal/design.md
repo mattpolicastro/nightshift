@@ -137,13 +137,36 @@ through `RepoHealth.record` to announce the hold once via the existing configure
 alert path and log the repository and inspection location. This is repository
 escalation, not an item comment or `needs-human` label write.
 
-Skip all stages, including admitted publication and build revision, for this
-specific foreign-journal hold. Retain journals, claims, receipts and worktrees
-byte-for-byte; other repositories continue. Pause still prevents external
-operations. A human inspects the evidence before correcting enrollment or moving
-the foreign journal out of the active location; the program never migrates or
-deletes it. This new unsupported-state rule is separate from ordinary manifest
-health, which continues to gate only new work.
+Skip all stages, including admitted publication, build revision and completion
+delivery, for this specific foreign-journal hold. This is the explicit exception
+in the `Health gates new work only` MODIFIED requirement: retired-worker evidence
+under a Gitea enrollment leaves workflow identity unsupported, so an admitted
+run's copied manifest cannot bypass the hold. In `startup` and `poll_specloop`,
+inspect the journal location before recovery or stage dispatch; on a hold,
+record/log the error and continue to the next repository. Do not merely pass a
+`ConfigurationError` as readiness, since admitted stages deliberately bypass
+ordinary readiness failures. Do not classify all configuration errors as this
+hold or change the intake stages' health handling.
+
+The daemon retains journals, claims, receipts, pending results and worktrees
+without mutation; other repositories continue. This guard does not stop running
+jobs or the independent supervisor, which may still persist their own local
+results. Pause still prevents external operations. A human inspects the evidence
+before correcting enrollment or moving the foreign journal out of the active
+location; the program never migrates or deletes it. Manifest repair alone cannot
+release this hold. Once inspection establishes a clear location, ordinary health,
+pause, authorization and cancellation checks govern retained work on the next
+eligible poll; completed jobs are not relaunched.
+
+Parameterize `test_gitea_repo_with_engine_switch_journal_is_held` with admitted
+publication, build revision and completion delivery pending, and healthy/broken
+enrollment manifests. Assert no stage dispatch or remote operation for the held
+repository, unchanged receipts/results, independent repository progress and
+fresh eligibility checks after operator removal. Retain the existing
+`tests/test_config_resilience.py` health-bypass assertions and fixtures unchanged:
+ordinary manifest/name failures still allow admitted stages, and successful
+stages cannot clear unresolved health errors. Document the same narrow exception
+beside the admitted-run guarantees in README and the engine guide.
 
 ### Seal discovery without changing callers
 

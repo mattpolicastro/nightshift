@@ -19,7 +19,10 @@ support or a successful live enrollment.
   present. Extend seal secret discovery to every forge's two token variables.
 - Keep worker engine-switch recovery GitHub-only. An unexpected Gitea journal
   holds that entire repository and escalates through repository health, without
-  remote writes or loss of evidence.
+  remote writes or loss of evidence. Explicitly except this foreign-journal hold
+  from `Health gates new work only`: admitted publication, build revision and
+  completion delivery wait too; ordinary manifest-health failures retain their
+  existing admitted-run bypass.
 - Add read-only Gitea preflight checks for bot identity/non-admin status,
   forbidden-repository denial, complete unique labels, clone credentials and
   base-branch protection; denied protection reads are `unverified`, never green.
@@ -45,7 +48,8 @@ migration. None of the requested five preflight controls is dropped.
 - Modified `forge-interface`: daemon selection with unchanged GitHub runner
   seams, guarded Gitea calls, and accurate module-layout guidance.
 - Modified `config-resilience`: explicitly GitHub-only switch recovery and a
-  repository-wide hold for Gitea journals.
+  repository-wide hold for Gitea journals, with an explicit exception to the
+  admitted-run health bypass.
 - New `forge-seal`: trusted configuration discovery and literal forge-token scans.
 - New `forge-preflight`: independent remote and clone negative controls.
 - Modified `reviewed-pr-landing`: only GitHub enrollment authorizes GitHub landing.
@@ -54,5 +58,7 @@ migration. None of the requested five preflight controls is dropped.
 `issue-intake/Forge mediated intake`, all `pr-revision` requirements, standalone
 Gitea adapter contracts and unaffected requirements remain unchanged. The
 late-bound-runner delta allows an explicit forge while retaining default GitHub
-construction. The two recovery deltas and module-layout delta replace claims
-that would otherwise conflict with this scope.
+construction. The recovery, health-gate and module-layout deltas replace claims
+that would otherwise conflict with this scope. The foreign-journal exception
+is necessary because retired-worker evidence cannot establish Gitea workflow
+identity; a copied manifest alone cannot authorize delivery from that state.
