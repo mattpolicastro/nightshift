@@ -37,7 +37,7 @@ class FakeGitea:
         self.silent_label_writes = set()
 
     def repository(self, repo, *, labels, issues=(), pulls=(), page_size=1, facts=None):
-        """Install factual read/label routes; deliberately ignore label filters.
+        """Install factual read/write routes; deliberately ignore label/head filters.
 
         Issues may carry comments and timeline arrays; PRs may additionally
         carry reviews with nested comments. Each list paginates independently.
@@ -53,11 +53,27 @@ class FakeGitea:
             rows = None
             if call.method == "GET" and call.path == root:
                 return Reply(state["facts"])
+            if call.method == "POST" and call.path == root + "/pulls":
+                assert set(call.body) == {"title", "body", "head", "base"}
+                number = max((row["number"] for row in [*state["issues"], *state["pulls"]]), default=0) + 1
+                pr_id = max((row["id"] for row in state["pulls"]), default=0) + 1
+                identity = {"id": state["facts"].get("id", 1)}
+                web_path = "/".join(quote(part, safe="") for part in repo.split("/"))
+                created = dict(id=pr_id, number=number, state="open", merged=False, labels=[],
+                               title=call.body["title"], body=call.body["body"],
+                               head={"ref": call.body["head"], "sha": "a" * 40, "repo": identity},
+                               base={"ref": call.body["base"], "repo": identity},
+                               html_url=self.base_url + "/" + web_path + f"/pulls/{number}")
+                state["pulls"].append(created)
+                return Reply(created, status=201)
             for endpoint in ("labels", "issues", "pulls"):
                 if call.path == root + "/" + endpoint and call.method == "GET":
                     rows = state[endpoint]
-                    if endpoint != "labels" and "state" in call.query:
+                    if endpoint != "labels" and call.query.get("state", ["all"])[0] != "all":
                         rows = [row for row in rows if row["state"] == call.query["state"][0]]
+            for pr in state["pulls"]:
+                if call.method == "GET" and call.path == root + f'/pulls/{pr["number"]}':
+                    return Reply(pr)
             for issue in [*state["issues"], *state["pulls"]]:
                 detail_path = root + f'/issues/{issue["number"]}'
                 if call.method == "GET":

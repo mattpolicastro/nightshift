@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextvars import ContextVar
 import json
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from nightshift.forge import ForgeError
 from nightshift.forge.http import GiteaHTTPError, GiteaTransport
@@ -57,6 +57,7 @@ class GiteaForge:
 
         self._transport = GiteaTransport(base_url, token, opener=opener,
                                          guard=observed_guard, timeout=timeout)
+        self._base_url = urlsplit(base_url.rstrip("/"))
 
     @staticmethod
     def _repo_path(repo: str, *components: str) -> str:
@@ -234,7 +235,7 @@ class GiteaForge:
                 items.append(FeedbackItem(f'{source}:{row["id"]}', block))
         return items
 
-    def _pages(self, path: str, query=None) -> list[list[dict]]:
+    def _pages(self, path: str, query=None, *, strict: bool = True) -> list[list[dict]]:
         """Read through an empty page or refuse the entire listing.
 
         Keep queries endpoint-local and treat response links only as evidence,
@@ -247,8 +248,14 @@ class GiteaForge:
         total = None
         declared_end = False
         for page in range(1, 1001):
-            _, headers, rows = self._request(
-                "GET", path, query={**fixed_query, "page": page, "limit": 50})
+            result = self._request(
+                "GET", path, query={**fixed_query, "page": page, "limit": 50},
+                blocking_fallback=not strict)
+            if result is None:
+                # Only the transport boundary may suppress a failure. Discard
+                # partial evidence; guard and malformed-page errors still escape.
+                return []
+            _, headers, rows = result
             if not isinstance(rows, list):
                 raise ForgeError("Invalid Gitea page", transient=False)
             count = headers.get("X-Total-Count")
@@ -386,12 +393,120 @@ class GiteaForge:
                     raise ForgeError("Gitea label write verification failed", transient=False)
 
     def relabel_pr(self, repo: str, target: str | int, *, add: list[str], remove: list[str]) -> None:
-        # Branch and URL resolution is added with the PR operations.
-        if isinstance(target, str) and re.fullmatch(r"[0-9]+", target):
+        self.relabel_issue(repo, self._pr_number(repo, target), add=add, remove=remove)
+
+    def latest_pr_number(self, repo: str, branch: str, *, strict: bool = True) -> int | None:
+        if not isinstance(branch, str) or not branch:
+            raise ForgeError("Invalid Gitea branch", transient=False)
+        pages = self._pages(self._repo_path(repo, "pulls"), {"state": "all"}, strict=strict)
+        matches = []
+        for page in pages:
+            for row in page:
+                self._number(row.get("number"))
+                head = row.get("head")
+                if (not isinstance(head, dict) or not isinstance(head.get("ref"), str)
+                        or not head["ref"]):
+                    raise ForgeError("Invalid Gitea PR head", transient=False)
+                if head["ref"] == branch:
+                    matches.append(row["number"])
+        return max(matches, default=None)
+
+    def _pr_url_number(self, repo: str, target: str) -> int:
+        """Accept only an unambiguous web PR URL at our configured repository."""
+        self._repo_path(repo)  # Validate before building the expected web path.
+        try:
+            parts, base = urlsplit(target), self._base_url
+            origin = lambda url: (url.scheme.lower(), url.hostname,
+                                  url.port or (443 if url.scheme == "https" else 80))
+            prefix = base.path + "/" + "/".join(quote(part, safe="") for part in repo.split("/"))
+            match = re.fullmatch(re.escape(prefix) + r"/pulls/([1-9][0-9]*)", parts.path)
+            if (any(c.isspace() or ord(c) < 32 or 127 <= ord(c) <= 159 or c == "\\"
+                    for c in target) or "?" in target or "#" in target
+                    or parts.username is not None or parts.password is not None
+                    or parts.netloc.endswith(":") or parts.port == 0
+                    or origin(parts) != origin(base) or match is None):
+                raise ValueError
+            return int(match[1])
+        except ValueError:
+            raise ForgeError("Invalid Gitea PR URL", transient=False) from None
+
+    def _pr_number(self, repo: str, target: str | int) -> int:
+        if type(target) is int:
+            self._number(target)
+            return target
+        if not isinstance(target, str) or not target:
+            raise ForgeError("Invalid Gitea PR target", transient=False)
+        if re.fullmatch(r"[0-9]+", target):
             try:
-                target = int(target)
+                number = int(target)
             except ValueError:
                 raise ForgeError("Invalid Gitea PR number", transient=False) from None
-        if type(target) is not int:
-            raise ForgeError("Invalid Gitea PR number", transient=False)
-        self.relabel_issue(repo, target, add=add, remove=remove)
+            self._number(number)
+            return number
+        if ":" in target or target.startswith("/"):
+            return self._pr_url_number(repo, target)
+        # Branches are compared as exact refs, never used as URL destinations.
+        # Git permits hashes, Unicode whitespace and C1 characters in refs;
+        # retain the stricter URL validation only in _pr_url_number.
+        if any(ord(c) <= 32 or ord(c) == 127 or c in "\\?" for c in target):
+            raise ForgeError("Invalid Gitea PR target", transient=False)
+        found = self.latest_pr_number(repo, target)
+        if found is None:
+            raise ForgeError("Gitea PR not found", transient=False)
+        return found
+
+    def _pr_view(self, repo: str, number: int) -> dict:
+        row = self._detail(self._repo_path(repo, "pulls", self._number(number)))
+        head, base = row.get("head"), row.get("base")
+        if (row.get("state") not in ("open", "closed") or type(row.get("merged")) is not bool
+                or not isinstance(row.get("title"), str)
+                or (row.get("body") is not None and not isinstance(row["body"], str))
+                or not isinstance(row.get("html_url"), str) or not row["html_url"]
+                or not isinstance(head, dict) or not isinstance(base, dict)):
+            raise ForgeError("Invalid Gitea PR facts", transient=False)
+        for ref in (head, base):
+            identity = ref.get("repo")
+            if (not isinstance(identity, dict) or type(identity.get("id")) is not int
+                    or identity["id"] <= 0):
+                raise ForgeError("Missing Gitea PR repository identity", transient=False)
+        if (not isinstance(head.get("ref"), str) or not head["ref"]
+                or not isinstance(head.get("sha"), str)
+                or not re.fullmatch(r"[0-9a-fA-F]{40}", head["sha"])):
+            raise ForgeError("Invalid Gitea PR head", transient=False)
+        self._label_map(row.get("labels"))
+        return {"state": "MERGED" if row["merged"] else row["state"].upper(),
+                "title": row["title"], "body": row.get("body") or "", "labels": row["labels"],
+                "headRefName": head["ref"], "headRefOid": head["sha"],
+                "isCrossRepository": head["repo"]["id"] != base["repo"]["id"],
+                "url": row["html_url"], "isDraft": row["title"].startswith(self._wip_prefix)}
+
+    def pr_for_recovery(self, repo: str, number: int) -> dict:
+        return self._pr_view(repo, number)
+
+    def pr_for_admission(self, repo: str, number: int) -> dict:
+        return self._pr_view(repo, number)
+
+    def pr_for_revision(self, repo: str, number: int) -> dict:
+        return self._pr_view(repo, number)
+
+    def pr_for_publication(self, repo: str, number: int) -> dict:
+        return self._pr_view(repo, number)
+
+    def pr_for_readiness(self, repo: str, number: int) -> dict:
+        return self._pr_view(repo, number)
+
+    def pr_state_url(self, repo: str, target: str | int) -> dict:
+        view = self._pr_view(repo, self._pr_number(repo, target))
+        return {key: view[key] for key in ("state", "url")}
+
+    def create_draft_pr(self, repo: str, branch: str, base: str, title: str, body: str) -> ResponseText:
+        if (not all(isinstance(value, str) for value in (branch, base, title, body))
+                or not branch or not base):
+            raise ForgeError("Invalid Gitea draft input", transient=False)
+        if not title.startswith(self._wip_prefix):
+            title = self._wip_prefix + title
+        _, _, row = self._request("POST", self._repo_path(repo, "pulls"),
+                                  json_body={"title": title, "body": body, "head": branch, "base": base})
+        if not isinstance(row, dict) or not isinstance(row.get("html_url"), str) or not row["html_url"]:
+            raise ForgeError("Invalid Gitea created PR URL", transient=False)
+        return ResponseText(row["html_url"])

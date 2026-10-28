@@ -815,3 +815,268 @@ def test_label_guard_identity(fake, label_repo, kind, stage, stop):
     assert len(fake.calls) == stop - 1 and len(guards) == stop
     assert sum(call.method != "GET" for call in fake.calls) == (1 if stop > 11 else 0)
     assert forge._guard_error.get() is None
+
+
+PULLS_PATH = "/gitea/api/v1/repos/owner/repo/pulls"
+PR_VIEWS = ["pr_for_" + purpose for purpose in
+            ("recovery", "admission", "revision", "publication", "readiness")]
+
+
+def pull(number=7, branch="topic/work", **changes):
+    row = candidate(number, [label_row(1, "keep")], merged=False,
+                    head={"ref": branch, "sha": "a" * 40, "repo": {"id": 10}},
+                    base={"ref": "main", "repo": {"id": 10}},
+                    html_url=f"https://forge.example/gitea/owner/repo/pulls/{number}")
+    row.update(changes)
+    return row
+
+
+@pytest.mark.scenario("gitea-forge/pr-identity-and-drafts/highest-branch-pr")
+@pytest.mark.parametrize("merged", [False, True])
+def test_gitea_pr_by_branch_takes_highest_number(fake, merged):
+    rows = [pull(8), pull(99, "topic/work-more"), pull(3, state="closed"),
+            pull(24, state="closed", merged=merged), pull(50, "Topic/work"), pull(1)]
+    fake.repository("owner/repo", labels=[], pulls=rows)
+    forge = make_forge(fake)
+    assert forge.latest_pr_number("owner/repo", "topic/work") == 24
+    assert forge.latest_pr_number("owner/repo", "absent") is None
+    expected = [{"state": ["all"], "page": [str(page)], "limit": ["50"]}
+                for page in range(1, 8)]
+    assert [call.query for call in fake.calls] == expected * 2
+    assert all(call.path == PULLS_PATH and call.method == "GET" for call in fake.calls)
+
+
+@pytest.mark.scenario("gitea-forge/failure-and-guard-boundaries/transport-failure-classification")
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("status", [403, 503])
+def test_pr_lookup_transport_failure_discards_partial_match(fake, offline, strict, status):
+    fake.repository("owner/repo", labels=[], pulls=[pull()])
+    attempts = 3 if status == 503 else 1
+    fake.route("GET", PULLS_PATH, *[Reply(status=status, raw=SECRET.encode())] * attempts, page=2)
+    forge = make_forge(fake)
+    if strict:
+        with pytest.raises(ForgeError) as caught:
+            forge.latest_pr_number("owner/repo", "topic/work", strict=strict)
+        assert caught.value.transient is (status == 503)
+        assert SECRET not in "".join(traceback.format_exception(caught.value))
+    else:
+        assert forge.latest_pr_number("owner/repo", "topic/work", strict=strict) is None
+    assert len(fake.calls) == 1 + attempts
+    assert offline == ([0.1, 0.2] if status == 503 else [])
+
+
+@pytest.mark.scenario("gitea-forge/pr-identity-and-drafts/highest-branch-pr")
+@pytest.mark.scenario("gitea-forge/failure-and-guard-boundaries/transport-failure-classification")
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("second", [None, [pull(0)], [pull(2, head=None)],
+                                   [pull(2, head={"ref": None})], [pull()],
+                                   [pull(title="conflict")]])
+def test_pr_lookup_malformed_evidence_is_never_absence(fake, strict, second):
+    fake.repository("owner/repo", labels=[], pulls=[pull()])
+    fake.route("GET", PULLS_PATH, Reply(second), page=2)
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).latest_pr_number("owner/repo", "topic/work", strict=strict)
+    assert not caught.value.transient
+
+
+@pytest.mark.scenario("gitea-forge/pr-identity-and-drafts/pr-views-and-targets")
+@pytest.mark.parametrize("operation", PR_VIEWS)
+@pytest.mark.parametrize("state, merged, cross", [("open", False, False),
+                                                  ("closed", False, True), ("closed", True, False)])
+def test_pr_views_share_normalized_facts(fake, operation, state, merged, cross):
+    row = pull(state=state, merged=merged, title="WIP: café", body="Text\r\nkept")
+    row["head"]["repo"] = {"id": 20 if cross else 10, "full_name": "misleading/name"}
+    fake.repository("owner/repo", labels=[], pulls=[row])
+    assert getattr(make_forge(fake), operation)("owner/repo", 7) == {
+        "state": "MERGED" if merged else state.upper(), "title": row["title"], "body": row["body"],
+        "labels": row["labels"], "headRefName": "topic/work", "headRefOid": "a" * 40,
+        "isCrossRepository": cross, "url": row["html_url"], "isDraft": True}
+    assert [(call.method, call.path, call.query) for call in fake.calls] == [
+        ("GET", PULLS_PATH + "/7", {})]
+
+
+@pytest.mark.scenario("gitea-forge/pr-identity-and-drafts/pr-views-and-targets")
+@pytest.mark.parametrize("side", ["head", "base"])
+@pytest.mark.parametrize("identity", [None, {}, {"id": None}, {"id": True}, {"id": 0},
+                                       {"id": "10"}, {"full_name": "owner/repo"}])
+def test_pr_missing_repository_identity_is_refused(fake, side, identity):
+    row = pull()
+    row[side]["repo"] = identity
+    row["isCrossRepository"] = False  # Server hints cannot replace actual IDs.
+    fake.repository("owner/repo", labels=[], pulls=[row])
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).pr_for_admission("owner/repo", 7)
+    assert not caught.value.transient and len(fake.calls) == 1
+
+
+@pytest.mark.scenario("gitea-forge/pr-identity-and-drafts/pr-views-and-targets")
+@pytest.mark.parametrize("changes", [{"state": "unknown"}, {"merged": None}, {"title": None},
+    {"body": {}}, {"labels": None}, {"head": None}, {"base": None}, {"html_url": None},
+    {"head": {"ref": "x", "sha": "short", "repo": {"id": 10}}}])
+def test_malformed_pr_details_refused(fake, changes):
+    fake.repository("owner/repo", labels=[], pulls=[pull(**changes)])
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).pr_for_recovery("owner/repo", 7)
+    assert not caught.value.transient
+
+
+@pytest.mark.scenario("gitea-forge/pr-identity-and-drafts/pr-views-and-targets")
+@pytest.mark.parametrize("target", [7, "7", "topic/work",
+    "https://forge.example/gitea/owner/repo/pulls/7",
+    "https://FORGE.example:443/gitea/owner/repo/pulls/7"])
+def test_pr_targets_resolve_for_views_and_verified_labels(fake, target):
+    keep, ready = label_row(1, "keep"), label_row(2, "ready")
+    row = pull()
+    fake.repository("owner/repo", labels=[keep, ready], pulls=[pull(3), row])
+    forge = make_forge(fake)
+    assert forge.pr_state_url("owner/repo", target) == {"state": "OPEN", "url": row["html_url"]}
+    forge.relabel_pr("owner/repo", target, add=["ready"], remove=[])
+    assert row["labels"] == [keep, ready]
+    writes = [call for call in fake.calls if call.method != "GET"]
+    assert [(call.method, call.path, call.body) for call in writes] == [
+        ("POST", "/gitea/api/v1/repos/owner/repo/issues/7/labels", {"labels": [2]})]
+    assert fake.calls[-1].path.endswith("/issues/7/labels")
+    assert fake.calls[-1].query["page"] == ["3"]  # Complete verification after the write.
+    if target == "topic/work":
+        assert sum(call.path == PULLS_PATH for call in fake.calls) == 6
+
+
+@pytest.mark.scenario("gitea-forge/pr-identity-and-drafts/pr-views-and-targets")
+@pytest.mark.parametrize("branch", ["topic#42", "#42", "topic/work#42",
+    "topic/hello\u00a0world", "topic/hello\u2003world", "topic/hello\u2028world",
+    "topic/hello\u0085world", "topic/hello\u009fworld", "topic/café"])
+def test_pr_branch_targets_allow_git_valid_characters_for_views_and_labels(fake, branch):
+    keep, ready = label_row(1, "keep"), label_row(2, "ready")
+    row, unrelated = pull(branch=branch), pull(99, branch="topic")
+    fake.repository("owner/repo", labels=[keep, ready], pulls=[unrelated, row])
+    forge = make_forge(fake)
+    assert forge.latest_pr_number("owner/repo", branch) == 7
+    assert forge.pr_state_url("owner/repo", branch) == {"state": "OPEN", "url": row["html_url"]}
+    forge.relabel_pr("owner/repo", branch, add=["ready"], remove=[])
+    assert row["labels"] == [keep, ready] and unrelated["labels"] == [keep]
+    assert [(call.method, call.path, call.body) for call in fake.calls if call.method != "GET"] == [
+        ("POST", ROOT + "/issues/7/labels", {"labels": [2]})]
+    listings = [call for call in fake.calls if call.path == PULLS_PATH]
+    assert [call.query for call in listings] == [
+        {"state": ["all"], "page": [str(page)], "limit": ["50"]}
+        for page in range(1, 4)] * 3
+    assert fake.calls[-1].path == ROOT + "/issues/7/labels"
+    assert fake.calls[-1].query["page"] == ["3"]
+
+
+@pytest.mark.scenario("gitea-forge/pr-identity-and-drafts/pr-views-and-targets")
+@pytest.mark.parametrize("target", [0, -1, True, None, "", "0", "9" * 5000,
+    "https://foreign.example/gitea/owner/repo/pulls/7",
+    "http://forge.example/gitea/owner/repo/pulls/7",
+    "https://forge.example:444/gitea/owner/repo/pulls/7",
+    *["https://forge.example" + path for path in (
+        "/owner/repo/pulls/7", "/gitea/owner/other/pulls/7", "/gitea/owner/repo/issues/7",
+        "/gitea/owner/repo/pulls/7/", "/gitea/owner/repo/pulls/07", "/gitea/owner/repo/pulls/0",
+        "/gitea/owner/repo/pulls/7?", "/gitea/owner/repo/pulls/7#",
+        "/gitea/owner/repo/pulls/7#42",
+        "/gitea/owner/repo/pulls/%37", "/gitea/owner/repo/pulls/../7",
+        "/gitea/owner/repo/pulls/%2e%2e/7", "/gitea/owner/repo/pulls/7/files")],
+    "https://user@forge.example/gitea/owner/repo/pulls/7",
+    "https://forge.example:/gitea/owner/repo/pulls/7", "https://[broken/",
+    "https:/forge.example/gitea/owner/repo/pulls/7", "//forge.example/gitea/owner/repo/pulls/7",
+    " https://forge.example/gitea/owner/repo/pulls/7",
+    "\u00a0https://forge.example/gitea/owner/repo/pulls/7",
+    "https://forge.example/gitea/owner/repo/pulls/7\u0085",
+    "topic\\work", "topic\nwork", "topic work", "topic\x7fwork"])
+@pytest.mark.parametrize("operation", ["pr_state_url", "relabel_pr"])
+def test_invalid_pr_targets_never_dispatch(fake, target, operation):
+    with pytest.raises(ForgeError) as caught:
+        getattr(make_forge(fake), operation)("owner/repo", target,
+            **({"add": ["ready"], "remove": []} if operation == "relabel_pr" else {}))
+    assert not caught.value.transient and not fake.calls
+
+
+@pytest.mark.scenario("gitea-forge/pr-identity-and-drafts/pr-views-and-targets")
+def test_absent_branch_cannot_authorize_label_writes(fake):
+    fake.repository("owner/repo", labels=[], pulls=[pull()])
+    with pytest.raises(ForgeError, match="not found"):
+        make_forge(fake).relabel_pr("owner/repo", "absent", add=["ready"], remove=[])
+    assert len(fake.calls) == 2 and all(call.path == PULLS_PATH for call in fake.calls)
+
+
+@pytest.mark.scenario("gitea-forge/pr-identity-and-drafts/pr-views-and-targets")
+@pytest.mark.parametrize("prefix", ["", "/custom/forge"])
+def test_pr_paths_encode_repository_components_under_configured_prefix(prefix):
+    fake = FakeGitea("https://forge.example" + prefix)
+    fake.repository("a&b/r#x", labels=[])
+    forge = make_forge(fake)
+    url = forge.create_draft_pr("a&b/r#x", "topic/é", "main", "Title", "").stdout
+    assert url == fake.base_url + "/a%26b/r%23x/pulls/1"
+    assert forge.pr_state_url("a&b/r#x", url) == {"state": "OPEN", "url": url}
+    assert forge.latest_pr_number("a&b/r#x", "topic/é") == 1
+    assert [call.path for call in fake.calls] == [
+        prefix + "/api/v1/repos/a%26b/r%23x/pulls" + suffix for suffix in ("", "/1", "", "")]
+
+
+@pytest.mark.scenario("gitea-forge/pr-identity-and-drafts/draft-title-prefix")
+@pytest.mark.parametrize("prefix", ["WIP: ", "[Draft] ", "🚧 "])
+@pytest.mark.parametrize("prefixed", [False, True, "wrong-case"])
+def test_draft_prefix_is_case_sensitive_and_creation_preserves_text(fake, prefix, prefixed):
+    # The default is exercised without supplying the constructor option.
+    forge = make_forge(fake, **({} if prefix == "WIP: " else {"wip_prefix": prefix}))
+    title = (prefix if prefixed is True else prefix.lower() if prefixed else "") + "Café"
+    expected = title if title.startswith(prefix) else prefix + title
+    row = pull(title=title)
+    fake.repository("owner/repo", labels=[], pulls=[row])
+    assert forge.pr_for_revision("owner/repo", 7)["isDraft"] is title.startswith(prefix)
+    body = "Description\r\n\n  untouched ☃"
+    created = forge.create_draft_pr("owner/repo", "topic/new", "release/main", title, body)
+    assert created.stdout == "https://forge.example/gitea/owner/repo/pulls/8"
+    assert fake.calls[-1].body == {"title": expected, "body": body,
+                                    "head": "topic/new", "base": "release/main"}
+    view = forge.pr_for_revision("owner/repo", 8)
+    assert view["isDraft"] and view["title"] == expected and view["body"] == body
+    assert sum(call.method == "POST" for call in fake.calls) == 1
+
+
+@pytest.mark.scenario("gitea-forge/pr-identity-and-drafts/draft-title-prefix")
+@pytest.mark.scenario("gitea-forge/failure-and-guard-boundaries/transport-failure-classification")
+@pytest.mark.parametrize("outcome, transient", [(Reply(status=503, raw=SECRET.encode()), True),
+    (OSError(SECRET), True), (Reply(status=403, raw=SECRET.encode()), False),
+    (Reply(status=201, raw=SECRET.encode()), False), (Reply({}), False)])
+def test_draft_failure_never_repeats_create(fake, offline, outcome, transient):
+    fake.route("POST", PULLS_PATH, outcome)
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).create_draft_pr("owner/repo", "topic", "main", "Title", "Body")
+    assert caught.value.transient is transient
+    assert SECRET not in "".join(traceback.format_exception(caught.value))
+    assert len(fake.calls) == 1 and fake.calls[0].method == "POST" and not offline
+
+
+@pytest.mark.scenario("gitea-forge/failure-and-guard-boundaries/guard-exception-identity")
+@pytest.mark.parametrize("kind", ["http", "forge", "os", "pause"])
+@pytest.mark.parametrize("stage", ["lookup", "later-page", "retry", "view", "create"])
+@pytest.mark.parametrize("strict", [False, True])
+def test_pr_guard_identity_prevents_fallback(fake, kind, stage, strict):
+    error, guards = guard_error(kind), []
+    stop = 2 if stage in ("later-page", "retry") else 1
+
+    def guard():
+        guards.append(True)
+        if len(guards) == stop:
+            raise error
+
+    fake.repository("owner/repo", labels=[], pulls=[pull()])
+    if stage == "retry":
+        fake.route("GET", PULLS_PATH, Reply(status=503), page=1)
+    forge = make_forge(fake, guard=guard)
+    with pytest.raises(type(error)) as caught:
+        if stage == "create":
+            forge.create_draft_pr("owner/repo", "topic", "main", "Title", "Body")
+        elif stage == "view":
+            forge.pr_for_readiness("owner/repo", 7)
+        else:
+            forge.latest_pr_number("owner/repo", "topic/work", strict=strict)
+    assert caught.value is error and len(fake.calls) == stop - 1
+    assert len(guards) == stop and forge._guard_error.get() is None
+    # Reusing even the identical exception as a transport failure must not
+    # inherit the previous request's guard origin.
+    failure = error if kind == "http" else http.GiteaHTTPError(503, SECRET, True)
+    fake.route("GET", PULLS_PATH, failure, failure, failure, page=1)
+    assert forge.latest_pr_number("owner/repo", "topic/work", strict=False) is None
+    assert len(fake.calls) == stop + 2
