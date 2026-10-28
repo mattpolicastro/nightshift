@@ -22,6 +22,8 @@ pass without edits.
 - Preserve every existing argument, field order, pagination flag, request
   count, guard, retry, error classification and delivery ordering. Existing
   queue helper operations delegate to those helpers with the bound runner.
+  Preserve helper error fallbacks; only direct-operation failures and errors
+  escaping delegated helpers carry the unchanged-propagation guarantee.
 - Add exact-operation tests and an AST boundary test in the two new test files;
   update only the root `README.md` module-layout documentation.
 - Explicitly allow `nightshift/factory_land.py` in the temporary boundary

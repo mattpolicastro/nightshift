@@ -9,10 +9,10 @@ controls, and prevent new direct GitHub commands outside the staged boundary.
 ### Requirement: Factual forge contract
 
 `nightshift.forge` SHALL expose a structural `Forge` Protocol for current
-intake, readiness and daemon recovery operations, plus a compatible
-`ForgeError(RuntimeError)`. Its `types` module SHALL provide frozen factual
-records while permitting existing result shapes without new reads or
-normalization. Backends SHALL NOT implement authorization or lifecycle policy.
+intake, readiness and daemon recovery operations. Its `types` module SHALL
+provide frozen factual records while permitting existing result shapes without
+new reads or normalization. Backends SHALL NOT implement authorization or
+lifecycle policy.
 
 #### Scenario: Frozen records and structural implementation
 - **WHEN** a recording-runner GitHubForge or a structural fake supplies the declared operations and factual records are instantiated
@@ -20,10 +20,23 @@ normalization. Backends SHALL NOT implement authorization or lifecycle policy.
 - **THEN** records contain facts rather than trusted, authorized, actionable or ready decisions, and existing dictionary/helper result contracts remain usable
 - **THEN** `nightshift.forge.types` provides frozen issue, PR, comment, label-event and CI-check records, with frozen response-text records where the design retains parsing in core
 
+### Requirement: Forge failure compatibility
+
+`nightshift.forge` SHALL expose `ForgeError(RuntimeError)` compatible with
+`queue.GhError`. Direct-operation failures and exceptions escaping delegated
+helpers SHALL propagate unchanged. Delegation SHALL preserve each helper's
+existing error handling and fallback results without adding backend retries.
+
 #### Scenario: Transport failure compatibility
-- **WHEN** the selected runner raises a queue.GhError or a pause exception during a forge operation
-- **THEN** the same exception object propagates with unchanged message and transient classification and without a backend retry
+- **WHEN** the selected runner raises a queue.GhError or a pause exception during a direct forge operation, or that exception escapes a delegated queue helper
+- **THEN** the same exception object propagates from GitHubForge with unchanged message and transient classification where present, and without a backend retry
 - **THEN** queue.GhError remains catchable by its original name and as both ForgeError and RuntimeError, and pause remains separately identifiable
+
+#### Scenario: Delegated helper error fallbacks
+- **WHEN** a selected runner raises RuntimeError, including queue.GhError or Paused, within a delegated helper's existing RuntimeError handler
+- **THEN** issue_labels preserves labels_of's empty-set result, open_blockers retains unreadable numbers as blockers in input order, and latest_pr_number with strict=False preserves the helper's None result
+- **THEN** strict=True latest PR lookup propagates the original exception, and GitHubForge neither reconstructs suppressed exceptions nor adds retries or reads
+- **THEN** daemon recovery retains its separate captured-error re-raise after issue_labels, preventing cleanup on an unreadable label lookup
 
 ### Requirement: Exact GitHub operations
 

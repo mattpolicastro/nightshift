@@ -73,10 +73,21 @@ operations whose current text parsing must remain in core, listed below.
 
 `ForgeError(RuntimeError)` takes `(message, *, transient: bool)`. Make
 `queue.GhError` inherit it, preserving its public name, constructor, text,
-`transient` attribute and `RuntimeError` compatibility. The backend propagates
-the original exception object, including `Paused`; it does not wrap arbitrary
-exceptions, classify new failures, retry or edit Gitea's existing error class.
+`transient` attribute and `RuntimeError` compatibility. For direct operations
+and exceptions escaping delegated helpers, the backend propagates the original
+exception object, including `Paused`; it does not wrap arbitrary exceptions,
+classify new failures, retry or edit Gitea's existing error class.
 Existing `queue.GhError` catches can remain in this staged migration.
+
+Delegation preserves helper error handling, not unconditional runner-error
+propagation. `queue.labels_of` catches `RuntimeError` and returns an empty set;
+`queue.open_blockers` catches it per lookup and retains that number as blocked;
+`queue._latest_pr_number` returns `None` with `strict=False` and re-raises with
+`strict=True`. These handlers also catch `GhError` and `Paused`, both
+`RuntimeError` subclasses. GitHubForge returns those fallback values unchanged
+without trying to recover suppressed exceptions. Daemon recovery's existing
+guarded runner captures label-read errors and its core `read_labels` wrapper
+re-raises them after the helper returns; retain that protection separately.
 
 ### Operation inventory and exact argv
 
@@ -125,7 +136,8 @@ boundaries stay intact, and for PR creation so the existing `.strip()` and
 empty-URL check operate on `.stdout` in core. This frozen result carries facts
 without parsing or normalizing them; it is not a generic transport escape hatch.
 Mutation return values remain ignored as today.
-Do not turn malformed, unavailable or missing data into empty success.
+Do not introduce new empty-success fallbacks for malformed, unavailable or
+missing data; preserve the delegated helpers' existing fallbacks above.
 
 The two feedback methods deliberately reuse queue's existing trusted filtering
 and formatting. Those decisions stay implemented in queue core, never copied
@@ -224,7 +236,9 @@ selected runner as well as retaining their transcripts.
 Add `test_late_bound_runner_still_patchable` covering imports before patching,
 two successive default-runner patches and explicit injection for intake,
 readiness and daemon recovery. Test protocol conformance, frozen records,
-unchanged `GhError` propagation, malformed CI classification, pause at dispatch
+unchanged identity for direct failures and exceptions escaping helpers,
+existing helper fallbacks for `RuntimeError`, `GhError` and `Paused`, strict
+versus non-strict lookup, malformed CI classification, pause at dispatch
 and during retry/reconciliation, and compatibility of existing policy helpers.
 All additions live in the two new test files. Reuse existing fixture helpers
 where useful; do not rewrite existing assertions or fixtures.
@@ -251,6 +265,9 @@ including its tests. The boundary scan lands last, after all migrated sites.
 - Queue delegation temporarily retains provider-specific code and trust logic
   outside the backend file. The explicit allowlist records that debt; duplicating
   or relocating those helper policies would exceed this extraction.
+- A blanket runner-error propagation rule would change blocked-draft handling
+  and label-read fallbacks. Tests distinguish errors escaping helpers from
+  errors they suppress, and preserve daemon recovery's captured-error re-raise.
 - Frozen callable defaults and an unguarded backend could bypass monkeypatches
   or pause checks. Late-construction and retry tests cover those failure modes.
 - Exact argv tests cannot prove live GitHub behavior. After deployment, a human
