@@ -1,4 +1,4 @@
-"""Identified REST feedback, strict reads, and the unchanged worker boundary."""
+"""Identified REST feedback and strict reads."""
 
 import json
 from dataclasses import FrozenInstanceError
@@ -6,7 +6,6 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from nightshift import queue
-from test_revise import PrGh
 from test_specloop_spec_revision import CHANGE, poll, setup  # noqa: F401
 
 pytestmark = pytest.mark.real_trust
@@ -127,39 +126,3 @@ def test_failed_read_reaches_item_error_path_without_replacing_snapshot(
     assert path.read_text() == original
     assert commands.calls == [] and gh.comments == []
     assert "agent:revise" in gh.labels
-
-
-@pytest.mark.scenario("pr-revision/worker-feedback-compatibility/worker-timestamp-cutoff-remains")
-def test_worker_retains_cutoff_trust_latest_pr_and_strings():
-    gh = PrGh(numbers=(8, 15, 9))
-    for hour in (9, 10, 11):
-        for association in ("OWNER", "NONE", None):
-            timestamp = f"2026-10-20T{hour:02}:00:00Z"
-            item = {**record(body=f"hour {hour}"), "author": {"login": "reviewer"},
-                    "authorAssociation": association, "author_association": association,
-                    "createdAt": timestamp, "submittedAt": timestamp, "created_at": timestamp}
-            gh.comments.append(item)
-            gh.reviews.append({**item, "state": "APPROVED"})
-            gh.inline.append({**item, "path": "a.py", "line": 3})
-    assert queue.pr_feedback("owner/sample", "spec/x", "2026-10-20T10:00:00Z", runner=gh) == [
-        "**reviewer:**\n\nhour 11", "**reviewer (approved):**\n\nhour 11",
-        "**reviewer on `a.py:3`:**\n\nhour 11",
-    ]
-    assert next(call for call in gh.calls if call[:2] == ["pr", "view"])[2] == "15"
-
-
-@pytest.mark.scenario("pr-revision/worker-feedback-compatibility/worker-timestamp-cutoff-remains")
-@pytest.mark.parametrize("failed", ["list", "view", "api"])
-def test_worker_reads_remain_best_effort(failed):
-    gh = PrGh(comments=[{"authorAssociation": "OWNER", "body": "conversation"}],
-              inline=[{"author_association": "OWNER", "body": "inline"}])
-
-    def runner(args):
-        if args[0] == failed or args[1] == failed:
-            raise RuntimeError("unavailable")
-        return gh(args)
-
-    blocks = queue.pr_feedback("owner/sample", "spec/x", runner=runner)
-    expected = {"list": [], "view": ["**unknown:**\n\ninline"],
-                "api": ["**unknown:**\n\nconversation"]}
-    assert blocks == expected[failed]

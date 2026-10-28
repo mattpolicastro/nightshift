@@ -1,24 +1,4 @@
 """GitHub Issues queue via the `gh` CLI.
-
-Two pieces of state have to agree and cannot be updated atomically together:
-
-  - the **label** on GitHub says whether an issue is claimed
-  - the **claim file** on disk says where that claim's work lives
-
-A crash between the two leaves them disagreeing. `reconcile()` is the only
-thing that resolves it, and the daemon must call it at startup before claiming
-anything new. Everything else here is deliberately dumb so that reconcile has a
-small, enumerable set of states to repair.
-
-Ordering: the claim file is written **before** the label swap. Both crash
-windows are recoverable, but this one fails safer — a claim file with no
-matching label is inert litter, whereas a label with no claim file is an issue
-that looks owned by nobody.
-
-Single-daemon assumption: claiming is check-then-act against the GitHub API and
-is therefore racy between two daemons. One daemon on the host Mac is the
-design (plan: concurrency 1 cloud), so this is not defended against — it is
-recorded here so nobody later assumes otherwise.
 """
 
 from __future__ import annotations
@@ -31,11 +11,8 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-
-from . import outcomes
 
 CLAIM_DIR = Path.home() / ".nightshift" / "claims"
 
@@ -294,10 +271,6 @@ def _reconcile_intake_comment(args: list[str], *, sleep) -> str | None:
                 "--method", "PATCH", "-f", f"body={body}"], sleep=sleep)
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _list(repo: str, label: str, *, runner=_gh) -> list[Issue]:
     out = runner(
         [
@@ -331,24 +304,6 @@ def labels_of(repo: str, number: int, *, runner=_gh) -> set[str]:
     return {label["name"] for label in json.loads(out or "{}").get("labels", [])}
 
 
-def title_of(repo: str, number: int, *, runner=_gh) -> str:
-    """One issue's title, for display. Empty string if GitHub is unreachable.
-
-    Only `status` uses this, and it must degrade rather than fail: the claim
-    file already names the issue, and a number with no title is a worse answer
-    than a number with one but a much better answer than a traceback because
-    the wifi dropped.
-    """
-    try:
-        out = runner(["issue", "view", str(number), "--repo", repo, "--json", "title"])
-    except RuntimeError:
-        return ""
-    try:
-        return json.loads(out or "{}").get("title") or ""
-    except json.JSONDecodeError:
-        return ""
-
-
 #: Who may steer an agent through GitHub text. On a public repository anyone can
 #: comment, and an issue's author can edit it after it is labelled; only these
 #: associations are people the owner has given access. Anything else is dropped
@@ -361,53 +316,11 @@ def trusted(item: dict, key: str = "authorAssociation") -> bool:
     return (item.get(key) or "").upper() in TRUSTED_ASSOCIATIONS
 
 
-def comments_of(
-    repo: str, number: int, since: str | None = None, *, runner=_gh
-) -> list[str]:
-    """An issue's comments, oldest first, as `author: body` blocks.
-
-    Not decoration. `escalate()` posts its findings here specifically "so the
-    work is not repeated" — but the worker was only ever handed `title` and
-    `body`, so on a re-queue it could not see them and repeated the work
-    anyway. Observed 2026-08-04 on issue #6: the first run escalated, the
-    findings were posted, and the second run rediscovered them from scratch.
-
-    Comments are also how a human answers an escalation and how scope gets
-    amended after the issue is written. Anything posted here was invisible.
-
-    `since` filters to comments created after an ISO-8601 instant, for the
-    revise guard's "did anyone actually ask for something" question. Unset —
-    the default, and what the implement path passes — returns all of them,
-    because the whole point there is the accumulated history.
-    """
-    try:
-        out = runner(
-            ["issue", "view", str(number), "--repo", repo, "--json", "comments"]
-        )
-    except RuntimeError:
-        return []
-    found = _newer_than(json.loads(out or "{}").get("comments") or [], since, "createdAt")
-    return [b for b in (_block(c.get("author"), c.get("body")) for c in found if trusted(c)) if b]
-
-
 #: Every comment the daemon writes starts with this (`daemon.py:137`, `:406`).
 #: It authenticates AS Matt, so the author field cannot tell its own escalation
 #: write-ups apart from a human's instructions — the prefix is the only
 #: discriminator there is, and `has_instructions` depends on it.
 SELF_COMMENT_PREFIX = "**nightshift** —"
-
-
-def _newer_than(items: list[dict], since: str | None, key: str) -> list[dict]:
-    """Comments created after `since`, an ISO-8601 string. All of them if None.
-
-    String comparison, deliberately: GitHub returns Zulu ISO-8601 and so does
-    `git log --date=iso-strict-local` with TZ=UTC, which sort correctly as
-    text. Parsing two formats to compare them would add a failure mode to a
-    guard whose whole job is to be more reliable than the thing it guards.
-    """
-    if not since:
-        return items
-    return [i for i in items if (i.get(key) or "") > since]
 
 
 @dataclass(frozen=True)
@@ -479,79 +392,6 @@ def pr_feedback_items(repo: str, number: int, *, runner=_gh) -> list[FeedbackIte
         if block and has_instructions([block]):
             items.append(FeedbackItem(_feedback_id(source, record), block))
     return items
-
-
-def pr_feedback(
-    repo: str, branch: str, since: str | None = None, *, runner=_gh,
-    strict: bool = False, number: int | None = None,
-) -> list[str]:
-    """Review feedback on the branch's most recent PR, oldest first.
-
-    Three kinds, and they are three different shapes from two endpoints:
-    conversation comments and review bodies come off `gh pr view`, while the
-    INLINE comments — the ones anchored to a file and line — are only on
-    `/pulls/{n}/comments`. The inline ones are the reason this exists: they
-    carry `path` and `line`, which is exactly the anchoring a revision needs
-    and which prose in an issue has to reconstruct by hand.
-
-    Only the most recent PR for the branch. A revise that opens a new PR leaves
-    the old closed one holding the previous round's feedback, and re-feeding
-    that would make every revision re-litigate the one before it.
-
-    Specloop supplies a PR number and strict=True: failed reads must propagate
-    rather than authorize an empty revision. Worker callers remain best effort.
-    """
-    if number is None:
-        number = _latest_pr_number(repo, branch, runner=runner, strict=strict)
-    if number is None:
-        return []
-
-    blocks: list[str] = []
-    try:
-        out = runner(
-            ["pr", "view", str(number), "--repo", repo, "--json", "comments,reviews"]
-        )
-        found = json.loads(out if strict else out or "{}")
-    except RuntimeError:
-        if strict:
-            raise
-        found = {}
-
-    for c in _newer_than(found.get("comments") or [], since, "createdAt"):
-        if trusted(c):
-            blocks.append(_block(c.get("author"), c.get("body")))
-
-    for r in _newer_than(found.get("reviews") or [], since, "submittedAt"):
-        if not trusted(r):
-            continue
-        state = (r.get("state") or "").replace("_", " ").lower()
-        label = f" ({state})" if state and state != "commented" else ""
-        blocks.append(_block(r.get("author"), r.get("body"), suffix=label))
-
-    # `gh pr view` cannot reach these; only the REST endpoint has them.
-    # Slurp wraps the paginated arrays in one JSON document, even when review
-    # feedback spans multiple pages. Without it json.loads sees extra data.
-    try:
-        out = runner(["api", f"repos/{repo}/pulls/{number}/comments", "--paginate", "--slurp"])
-        pages = json.loads(out if strict else out or "[]")
-        inline = [comment for page in pages for comment in page]
-    except RuntimeError:
-        if strict:
-            raise
-        inline = []
-
-    for c in _newer_than(inline, since, "created_at"):
-        if not trusted(c, "author_association"):
-            continue
-        where = c.get("path") or ""
-        line = c.get("line") or c.get("original_line")
-        if where and line:
-            where = f"{where}:{line}"
-        blocks.append(
-            _block(c.get("user"), c.get("body"), suffix=f" on `{where}`" if where else "")
-        )
-
-    return [b for b in blocks if b]
 
 
 def _block(author: dict | None, body: str | None, suffix: str = "") -> str:
@@ -778,210 +618,6 @@ def contradictions(
     return found
 
 
-WORKFLOW_DIR = ".github/workflows"
-
-_WORKFLOW_REFUSAL_COMMENT = """\
-**nightshift** — not claimed. This issue names `.github/workflows/`, and the
-daemon's token deliberately has no `workflow` scope, so a diff touching it
-cannot be pushed.
-
-That is the design rather than a gap: an agent physically cannot edit the thing
-that judges its own work, which is what makes CI a genuinely held-out verifier.
-Granting the scope would quietly delete the property the whole review model
-rests on.
-
-**A human makes this change.** Nothing was spent finding out — this refusal
-costs one API call, where discovering it at `git push` costs a full implement
-pass, a full review and a cap slot.
-
-If the issue only MENTIONS that path without changing it, the check is a plain
-substring: reword it and re-arm.
-"""
-
-
-def touches_workflows(text: str) -> bool:
-    """Does this issue say it changes a GitHub Actions workflow?
-
-    Deliberately coarse — a substring, not an intent parser. The asymmetry
-    justifies it: a false positive costs one human re-arm, while a false
-    negative costs a full implement pass, a full review, a cap slot, and then
-    fails at `git push` anyway because the token has no `workflow` scope. That
-    is not a bug to fix by granting the scope: withholding it is what makes CI
-    a held-out verifier the agent physically cannot edit.
-
-    Reads the TITLE as well as the body: `ci: bump the workflow action` with the
-    path only in the title would otherwise walk straight past this gate into the
-    full-budget failure it exists to prevent.
-
-    **Known limit:** issue COMMENTS are not read, and `task.run` treats them as
-    authoritative — so a revise comment adding "…and update
-    `.github/workflows/ci.yml`" still fails late. Reading them here would cost
-    an API call per candidate on every poll, which is a real price for a case
-    nobody has hit yet. Recorded rather than guessed at.
-    """
-    return WORKFLOW_DIR in text
-
-
-def claim(
-    repo: str,
-    worktree_root: Path,
-    labels: Labels = Labels(),
-    *,
-    runner=_gh,
-) -> tuple[Issue, Claim] | None:
-    """Take ownership of the oldest ready issue. None if the queue is empty.
-
-    Does NOT create the worktree — that is the daemon's job. Keeping them
-    separate is what makes the crash window recoverable rather than ambiguous.
-    """
-    # `gh issue list --label` reads a search index that lags label writes by a
-    # few seconds (measured ~5s on 2026-08-02), so a just-claimed issue can
-    # still appear ready. An existing claim file is the authoritative local
-    # answer and does not depend on the index.
-    candidates = [
-        i
-        for i in ready(repo, labels, runner=runner)
-        if not claim_path(repo, i.number).exists()
-    ]
-
-    # The index says these are ready; `issue view` says what they actually
-    # carry. One extra call for the issue we are about to take — the same
-    # read-through reconcile does, for the same reason, on the path where
-    # being wrong is expensive rather than merely slow.
-    issue = None
-    for candidate in candidates:
-        present = labels_of(repo, candidate.number, runner=runner)
-        # Whichever gate the listing matched on must still be there. Checking
-        # only `ready` would let a revise through on a stale index after the
-        # label was pulled, and vice versa.
-        gate = labels.revise if candidate.revise else labels.ready
-        if gate not in present:
-            continue  # index lag: its labels have already moved on
-        clash = conflicting_labels(present, labels)
-        if clash:
-            log.warning(
-                "#%d is labelled %s as well as %s — not claiming it",
-                candidate.number,
-                ", ".join(sorted(clash)),
-                labels.ready,
-            )
-            continue
-        if touches_workflows(f"{candidate.title}\n{candidate.body}"):
-            # Refuse before spending anything. The refusal used to arrive at
-            # `git push` — after implement, after verify, after review — so a
-            # task that was never going to land spent a full budget first
-            # (sample-app #14, twice on 2026-08-08). One API call instead.
-            log.info(
-                "#%d names %s — escalating rather than claiming it",
-                candidate.number,
-                WORKFLOW_DIR,
-            )
-            outcomes.record(repo, candidate.number, title=candidate.title)
-            escalate(repo, candidate.number, _WORKFLOW_REFUSAL_COMMENT, labels,
-                     runner=runner, unclaimed=True)
-            continue
-        unmet = open_blockers(repo, blockers(candidate.body), runner=runner)
-        if unmet:
-            # Starting anyway costs a whole cycle: the worker branches off a
-            # base without the dependency, discovers it, and escalates. That
-            # happened three times on 2026-08-03/04 before this existed.
-            log.info(
-                "#%d is blocked by %s — skipping",
-                candidate.number,
-                ", ".join(f"#{n}" for n in unmet),
-            )
-            continue
-        issue = candidate
-        break
-
-    if issue is None:
-        return None
-
-    record = Claim(
-        repo=repo,
-        number=issue.number,
-        branch=issue.branch,
-        worktree=str(worktree_root / f"{repo.split('/')[-1]}-{issue.number}"),
-        started_at=_now(),
-        revise=issue.revise,
-    )
-    record.write()
-
-    try:
-        # A revise also sheds `done`: the issue is in flight again, and leaving
-        # it would make the next revise look like a contradiction to any reader
-        # (human or `contradictions()`) that has not internalised the exception
-        # in `conflicting_labels`.
-        shed = [labels.revise, labels.done] if issue.revise else [labels.ready]
-        _relabel(
-            repo, issue.number,
-            add=[labels.working], remove=shed,
-            runner=runner,
-        )
-    except RuntimeError:
-        # The swap failed, so we do not own this issue. Drop the claim file
-        # rather than leaving reconcile to infer it.
-        record.clear()
-        raise
-
-    outcomes.record(repo, issue.number, state="running", title=issue.title,
-                    pr_url="", escalated=False, reason="claimed")
-    return issue, record
-
-
-def release(repo: str, number: int, labels: Labels = Labels(), *, runner=_gh) -> None:
-    """Hand an issue back to the queue and forget where its work lived."""
-    _relabel(repo, number, add=[labels.ready], remove=[labels.working], runner=runner)
-    claim_path(repo, number).unlink(missing_ok=True)
-
-
-def escalate(
-    repo: str,
-    number: int,
-    findings: str,
-    labels: Labels = Labels(),
-    *,
-    runner=_gh,
-    unclaimed: bool = False,
-) -> None:
-    """The agent hit something a human must decide. Comment, relabel, move on.
-
-    Deliberately not a failure path: escalation is a correct outcome, and the
-    run that produced it cost real quota. The findings go on the issue so the
-    work is not repeated.
-
-    `unclaimed` is for the escalations that happen BEFORE a claim, where the
-    issue still carries its ready label rather than `working`. Removing the
-    right one matters: an issue left holding both `needs-human` and `ready` is
-    a contradiction, which `claim` refuses and `status` flags on every poll —
-    so the refusal would be correct and the issue would still nag forever.
-    Found by running the claim-time refusal against a real issue.
-    """
-    outcomes.record(repo, number, state="needs_decision", reason=findings,
-                    summary="", escalated=False, pr_url="")
-    runner(["issue", "comment", str(number), "--repo", repo, "--body", findings])
-    stale = [labels.ready, labels.revise] if unclaimed else [labels.working]
-    _relabel(
-        repo, number, add=[labels.needs_human], remove=stale, runner=runner
-    )
-    outcomes.record(repo, number, escalated=True)
-    claim_path(repo, number).unlink(missing_ok=True)
-
-
-def complete(
-    repo: str,
-    number: int,
-    pr_url: str,
-    labels: Labels = Labels(),
-    *,
-    runner=_gh,
-) -> None:
-    """A PR is open and awaiting human review. The agent's work is finished."""
-    outcomes.record(repo, number, state="awaiting_merge", pr_url=pr_url, escalated=False)
-    _relabel(repo, number, add=[labels.done], remove=[labels.working], runner=runner)
-    claim_path(repo, number).unlink(missing_ok=True)
-
-
 def in_flight(repo: str) -> tuple[list[Claim], list[str]]:
     """What a worker is on RIGHT NOW, plus the names of any unreadable claims.
 
@@ -1007,88 +643,3 @@ def in_flight(repo: str) -> tuple[list[Claim], list[str]]:
         except (json.JSONDecodeError, KeyError, TypeError, OSError):
             unreadable.append(f.name)
     return sorted(claims, key=lambda c: c.number), unreadable
-
-
-def _load_claims(repo: str) -> tuple[dict[int, Claim], list[Reconciliation]]:
-    """Read this repo's claim files. Unparseable ones are deleted, not guessed at."""
-    claims: dict[int, Claim] = {}
-    repairs: list[Reconciliation] = []
-    if not CLAIM_DIR.exists():
-        return claims, repairs
-
-    prefix = f"{repo.replace('/', '__')}#"
-    for f in sorted(CLAIM_DIR.glob(f"{prefix}*.json")):
-        try:
-            record = Claim(**json.loads(f.read_text()))
-        except (json.JSONDecodeError, KeyError, TypeError):
-            # A truncated or hand-edited claim file says nothing reliable about
-            # where work lives, so it cannot be resumed from.
-            f.unlink(missing_ok=True)
-            repairs.append(
-                Reconciliation(Repair.LITTER, 0, f"unparseable claim file {f.name}")
-            )
-            continue
-        claims[record.number] = record
-    return claims, repairs
-
-
-def reconcile(
-    repo: str,
-    labels: Labels = Labels(),
-    *,
-    runner=_gh,
-    worktree_exists=lambda p: Path(p).exists(),
-) -> list[Reconciliation]:
-    """Make labels and claim files agree. Call at startup, before claiming.
-
-    Four states, three needing repair:
-
-    | label     | claim file | worktree | action                              |
-    |-----------|------------|----------|-------------------------------------|
-    | working   | yes        | yes      | RESUMABLE — watchdog picks it up    |
-    | working   | yes        | no       | RELEASED — crashed before create    |
-    | working   | no         | –        | RELEASED — orphaned                 |
-    | absent    | yes        | –        | LITTER — delete the file            |
-
-    Releasing rather than resuming a half-created task is deliberate: a
-    worktree that does not exist has produced nothing, so re-running from
-    `agent:ready` costs one cycle and cannot double-commit.
-    """
-    claims, repairs = _load_claims(repo)
-    working = {i.number for i in _list(repo, labels.working, runner=runner)}
-
-    # `issue list --label` reads a search index that lags label writes by a few
-    # seconds. A daemon restarting straight after a crash therefore sees its own
-    # in-flight issue as NOT working, and would delete the claim file as litter —
-    # destroying the pointer to the worktree and the phase needed to recover
-    # from it. Deleting is irreversible, so every candidate for litter is
-    # re-checked against `issue view`, which reads through the index.
-    for number in sorted(set(claims) - working):
-        if labels.working in labels_of(repo, number, runner=runner):
-            working.add(number)
-
-    for number in sorted(working):
-        record = claims.get(number)
-        if record is None:
-            release(repo, number, labels, runner=runner)
-            repairs.append(
-                Reconciliation(Repair.RELEASED, number, "claimed but no claim file")
-            )
-        elif not worktree_exists(record.worktree):
-            release(repo, number, labels, runner=runner)
-            repairs.append(
-                Reconciliation(Repair.RELEASED, number, "claim file but no worktree")
-            )
-        else:
-            repairs.append(Reconciliation(Repair.RESUMABLE, number, record.worktree))
-
-    for number in sorted(claims):
-        if number not in working:
-            claims[number].clear()
-            repairs.append(
-                Reconciliation(
-                    Repair.LITTER, number, "claim file with no working label"
-                )
-            )
-
-    return repairs

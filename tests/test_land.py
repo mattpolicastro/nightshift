@@ -31,7 +31,7 @@ PR = {"number": 78, "url": URL, "state": "OPEN", "isDraft": False,
 MAIN_REF = {"ref": "refs/heads/main", "object": {"type": "commit", "sha": BASE}}
 RUN = {"change": "reviewed-change", "pr": URL, "head": HEAD,
        "status": "paused", "pause": {"reason": "human_checks"}}
-FINISH = [sys.executable, "-m", "nightshift.cli", "finish", "reviewed-change"]
+FINISH = [sys.executable, "-m", "nightshift.cli", "finish", "reviewed-change", "--expect-head", HEAD]
 FINISHED_HEAD = "c" * 40
 CONFIRM_MERGED = ["gh", "pr", "view", "78", "--repo", REPO, "--json", "number,url,state"]
 
@@ -562,7 +562,8 @@ def expect_finish_gate(runner, body="", comments=None, *, row=None, head=HEAD, d
     if row is not None:
         runner.expect(COMMENTS, comments if comments is not None else [[]])
         if row["status"] == "paused":
-            runner.expect(FINISH, subprocess.CompletedProcess(FINISH, 0, "Finished\n", ""), timeout=300)
+            runner.expect([*FINISH[:-1], head], subprocess.CompletedProcess(
+                [*FINISH[:-1], head], 0, "Finished\n", ""), timeout=300)
             runner.expect(STATUS, {**EMPTY_STATUS, "runs": [
                 {**row, "status": "done", "pause": None, "head": FINISHED_HEAD}]})
             runner.expect(VIEW, {**PR, "body": body, "headRefOid": FINISHED_HEAD})
@@ -2396,7 +2397,8 @@ def test_land_interrupted_finish_uses_existing_recovery(
     expect_finish_gate(scripted_runner, comments=[[]], row=remote["run"], head=FINISHED_HEAD)
     assert invoke(config_path, scripted_runner, URL) == 1
     assert "merge not confirmed" in capsys.readouterr().err
-    assert sum(argv == FINISH for argv, _ in scripted_runner.calls) == (1 if saved_done else 2)
+    assert sum(argv in (FINISH, [*FINISH[:-1], FINISHED_HEAD])
+               for argv, _ in scripted_runner.calls) == (1 if saved_done else 2)
 
 
 @pytest.mark.scenario("reviewed-pr-landing/done-run-continuation/retry-after-finish")

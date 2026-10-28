@@ -6,7 +6,8 @@ import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import React from 'react';
-import type { FactoryRun, FactorySnapshot } from '../shared/factory';
+import type { FactoryRun, FactorySnapshot, FactoryLandingInput, FactoryLandingSnapshot, FactoryLandInput, FactoryLandStopInput } from '../shared/factory';
+import { humanRun, landingAttempt, landingSnapshot, offer } from './factory-landing-fixtures';
 
 const run: FactoryRun = {
   change: 'factory-context', status: 'paused', tasks: { done: 1, total: 3 }, pr: '',
@@ -35,6 +36,9 @@ function view(options: {
   runs?: FactoryRun[]; client?: unknown; navigation?: unknown; getClient?: () => unknown;
   act?: (input: unknown) => Promise<unknown>;
   read?: () => Promise<FactorySnapshot>;
+  landing?: (input: FactoryLandingInput) => Promise<FactoryLandingSnapshot>;
+  land?: (input: FactoryLandInput) => Promise<unknown>;
+  stop?: (input: FactoryLandStopInput) => Promise<unknown>;
 } = {}) {
   const calls = { hosts: [] as string[], lists: 0, opened: [] as unknown[], links: [] as string[], reads: 0, actions: [] as unknown[] };
   const client = 'client' in options ? options.client : { workspaces: { list: async () => {
@@ -72,7 +76,23 @@ function view(options: {
     },
   };
   const runsRpc = {};
-  const actRpc = {};
+  const actRpc = {}, landingRpc = {}, landRpc = {}, stopRpc = {};
+  const landingReads: FactoryLandingInput[] = [], lands: FactoryLandInput[] = [], stops: FactoryLandStopInput[] = [];
+  const landing = async (input: FactoryLandingInput) => {
+    landingReads.push(input);
+    return options.landing ? options.landing(input) : {
+      version: 1, attempts: [], total: 0, diagnostics: [], offer: null, current: null,
+      truncated: false, stale: false, fetchedAt: '', error: null,
+    };
+  };
+  const land = async (input: FactoryLandInput) => {
+    lands.push(input);
+    return options.land ? options.land(input) : { version: 1, accepted: false, attempt_id: null, reason: 'No landing configured' };
+  };
+  const stop = async (input: FactoryLandStopInput) => {
+    stops.push(input);
+    return options.stop ? options.stop(input) : { version: 1, accepted: false, attempt_id: input.attempt_id, reason: 'No Stop configured' };
+  };
   const read = async () => {
     calls.reads++;
     return options.read ? options.read() : { runs: options.runs ?? [run], stale: false, fetchedAt: '', error: null };
@@ -82,7 +102,7 @@ function view(options: {
   const require = createRequire(filename);
   const exports: Props = {};
   const source = ts.transpileModule(readFileSync(filename, 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, esModuleInterop: true },
+    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, esModuleInterop: true },
   }).outputText;
   runInNewContext(source, {
     exports, setInterval: () => 1, clearInterval: () => {},
@@ -94,10 +114,17 @@ function view(options: {
         Linking: { openURL: async (url: string) => { calls.links.push(url); } },
       };
       if (name === '@getpaseo/plugin/client') return {
-        useRpc: (rpc: unknown) => rpc === runsRpc ? read : act,
+        useRpc: (rpc: unknown) => {
+          if (rpc === runsRpc) return read;
+          if (rpc === actRpc) return act;
+          if (rpc === landingRpc) return landing;
+          if (rpc === landRpc) return land;
+          if (rpc === stopRpc) return stop;
+          throw new Error('Unknown RPC descriptor');
+        },
         getPaseoClient: (id: string) => { calls.hosts.push(id); return options.getClient ? options.getClient() : client; },
       };
-      if (name === '../shared/factory') return { factoryRuns: runsRpc, factoryAct: actRpc };
+      if (name === '../shared/factory') return { factoryRuns: runsRpc, factoryAct: actRpc, factoryLanding: landingRpc, factoryLand: landRpc, factoryLandStop: stopRpc };
       return require(name);
     },
   });
@@ -129,11 +156,43 @@ function view(options: {
   async function settle() { await new Promise(resolve => setImmediate(resolve)); draw(); }
   draw();
   return {
-    calls, find, text, settle, nodes,
+    calls, landingReads, lands, stops, find, text, settle, nodes,
     async press(label: string) { const button = find(label); assert.ok(button, `Missing ${label}`); button.props.onPress(); draw(); await settle(); },
     dispose() { components.forEach(hooks => hooks.forEach(hook => hook.cleanup?.())); },
   };
 }
+
+test('paseo-runs-page/landing-refresh-integration/refresh-never-submits-an-action: navigation harness distinguishes landing RPCs', async t => {
+  let current: ReturnType<typeof landingAttempt> | null = null;
+  const page = view({ runs: [humanRun],
+    landing: async input => landingSnapshot({ offer: input.change ? offer : null, current: input.change ? current : null }),
+    land: async () => {
+      current = landingAttempt();
+      return { version: 1, accepted: true, attempt_id: current.attempt_id };
+    },
+    stop: async input => ({ version: 1, accepted: false, attempt_id: input.attempt_id, reason: 'Worker identity unavailable' }),
+  });
+  t.after(page.dispose);
+  await page.settle();
+  assert.equal(page.calls.reads, 1);
+  assert.equal(page.landingReads.length, 2);
+  assert.deepEqual(page.calls.actions, []);
+  assert.equal(page.lands.length, 0);
+  assert.equal(page.stops.length, 0);
+  assert.equal(page.calls.lists, 0);
+  await page.press(`Land ${offer.change}`);
+  assert.equal(page.lands.length, 0);
+  await page.press(`Confirm land ${offer.change}`);
+  assert.equal(page.lands.length, 1);
+  assert.equal(page.stops.length, 0);
+  await page.press(`Stop landing ${offer.change}`);
+  assert.equal(page.stops.length, 1);
+  assert.equal(page.lands.length, 1);
+  assert.deepEqual(page.calls.actions, []);
+  assert.equal(page.calls.reads, 3);
+  assert.equal(page.calls.lists, 0);
+  assert.ok(page.text().includes('Worker identity unavailable'));
+});
 
 test('Factory Details starts collapsed, renders context and links, and shares a lazy host workspace lookup', async t => {
   const page = view({ runs: [run, { ...run, change: 'second-change' }] });

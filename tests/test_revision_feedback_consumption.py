@@ -183,39 +183,6 @@ def test_authorized_selection_uses_independent_author_trust(stage_setup, tmp_pat
     assert not any("/commits/" in c[1] for c in gh.calls)
 
 
-@pytest.mark.scenario("pr-revision/worker-feedback-compatibility/worker-timestamp-cutoff-remains")
-@pytest.mark.parametrize("failure", [None, "view", "api", "list"])
-def test_worker_cutoff_and_best_effort_reads_remain_independent(failure):
-    from test_revise import PrGh
-
-    gh = PrGh(numbers=(8, 15, 9))
-    for hour in (11, 12, 13):
-        for association in ("MEMBER", "NONE", None):
-            item = {"body": f"Feedback at {hour}", "author": {"login": "reviewer"},
-                    "user": {"login": "reviewer"}, "path": "gate.py", "original_line": 12,
-                    "createdAt": f"2026-10-20T{hour}:00:00Z",
-                    "submittedAt": f"2026-10-20T{hour}:00:00Z",
-                    "created_at": f"2026-10-20T{hour}:00:00Z"}
-            if association:
-                item.update(authorAssociation=association, author_association=association)
-            gh.comments.append(item)
-            gh.reviews.append({**item, "state": "CHANGES_REQUESTED"})
-            gh.inline.append(item)
-
-    def github(args):
-        if failure and failure in args[:2]:
-            raise RuntimeError("read unavailable")
-        return gh(args)
-
-    expected = ["**reviewer:**\n\nFeedback at 13",
-                "**reviewer (changes requested):**\n\nFeedback at 13",
-                "**reviewer on `gate.py:12`:**\n\nFeedback at 13"]
-    expected = {None: expected, "view": expected[2:], "api": expected[:2], "list": []}[failure]
-    assert queue.pr_feedback("owner/sample", "spec/gate", TIP_DATE, runner=github) == expected
-    if failure not in ("list", "view"):
-        assert next(c for c in gh.calls if c[:2] == ["pr", "view"])[2] == "15"
-
-
 @pytest.mark.scenario("pr-revision/build-stage-revision/review-comments-become-tasks")
 @pytest.mark.scenario("pr-revision/consumption-based-eligibility/relabel-does-not-requeue-consumed-feedback")
 @pytest.mark.scenario("pr-revision/no-instruction-no-revision/empty-revise-refused")

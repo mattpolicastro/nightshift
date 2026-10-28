@@ -1,4 +1,5 @@
-import type { FactoryActInput, FactoryRun } from '../shared/factory';
+import type { FactoryActInput, FactoryRun, FactoryLandingOffer, FactoryLandingSnapshot,
+  FactoryLandingAttempt } from '../shared/factory';
 
 type Verb = FactoryActInput['verb'];
 const labels: Record<Verb, string> = {
@@ -95,4 +96,42 @@ export function decideFactoryAction(
     return { kind: 'confirm', request, message: `Abort ${run.change}? This cannot be undone.` };
   }
   return { kind: 'send', request };
+}
+
+export function sameLandingOffer(a: FactoryLandingOffer | null, b: FactoryLandingOffer | null): boolean {
+  return Boolean(a && b && (['change', 'pr', 'pause_id', 'head', 'since'] as const)
+    .every(field => a[field] === b[field]));
+}
+
+export function factoryLandOffer(run: FactoryRun, snapshot?: FactoryLandingSnapshot, stale = false): FactoryLandingOffer | null {
+  const offer = snapshot?.offer;
+  return !stale && snapshot && !snapshot.stale && offer && run.status === 'paused' &&
+    offer.pause_id.startsWith('human_checks:') && run.change === offer.change && run.pr === offer.pr &&
+    run.action?.pause_id === offer.pause_id && run.pause?.since === offer.since ? offer : null;
+}
+
+export type LandingNotice = {
+  id: string; change: string; text: string; terminal: boolean; updatedAt: number; messages: string[];
+};
+
+export function landingAttemptNotice(attempt: FactoryLandingAttempt): LandingNotice {
+  return {
+    id: attempt.attempt_id, change: attempt.change, terminal: attempt.outcome !== null,
+    updatedAt: attempt.updated_at, messages: [],
+    text: [`Landing ${attempt.attempt_id.slice(0, 8)}`, attempt.outcome ?? attempt.phase,
+      attempt.reason, ...attempt.diagnostics, attempt.overdue ? 'Taking longer than expected.' : ''].filter(Boolean).join(' · '),
+  };
+}
+
+// A bounded server page must never evict outcomes already seen in this session.
+export function retainLandingNotices(previous: LandingNotice[], incoming: LandingNotice[]): LandingNotice[] {
+  const retained = new Map(previous.map(notice => [notice.id, notice]));
+  for (const notice of incoming) {
+    const old = retained.get(notice.id);
+    retained.set(notice.id, old ? {
+      ...(!old.terminal && (notice.terminal || notice.updatedAt >= old.updatedAt) ? notice : old),
+      messages: [...new Set([...old.messages, ...notice.messages])],
+    } : notice);
+  }
+  return [...retained.values()];
 }

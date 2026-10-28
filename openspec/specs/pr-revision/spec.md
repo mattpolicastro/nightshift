@@ -158,14 +158,6 @@ Revision completion comments SHALL reconcile the original `revise` marker inside
 - **WHEN** a revision comment POST has an ambiguous outcome and the production retry cannot read the comment history
 - **THEN** the read error propagates without another POST, consumed IDs and the saved revision result remain intact, and subsequent recovery can reuse the original marker without another revision command
 
-### Requirement: Worker feedback compatibility
-
-The existing `queue.pr_feedback` string-returning interface and optional `since` behavior for worker callers SHALL remain unchanged by specloop's ID-based selection.
-
-#### Scenario: Worker timestamp cutoff remains
-- **WHEN** a worker caller requests PR feedback with a `since` timestamp and comments exist before, at, and after it
-- **THEN** it receives the same rendered strings strictly newer than the cutoff, with its existing trust, latest-PR, and best-effort read behavior
-
 ### Requirement: Revision health isolation
 
 Revision health checks SHALL distinguish new spec drafting from admitted-run revision and retained-result delivery. A hold SHALL preserve eligible feedback and trigger state without consuming IDs or starting another job. Runtime edits SHALL remain in `nightshift/specloop_intake.py` and `nightshift/daemon.py` with corresponding tests.

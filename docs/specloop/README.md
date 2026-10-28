@@ -520,7 +520,8 @@ not create a driver `base_fetch` pause or permit a push using a stale base.
 The Nightshift plugin now includes a **Factory** section for specloop runs,
 with paused runs first, change, status, tasks done/total and PR links. Paused
 rows use the same action headline and explanation as Slack, and offer exactly
-the verbs listed in `nightshift status --json`. Resume has an optional note
+the verbs listed in `nightshift status --json`, plus a separate confirmed Land
+control for verifiable human-check pauses. Resume has an optional note
 field (up to 2,000 characters); Accept is available for `stuck` and
 `needs_human`, Publish for `ready_to_publish`, Finish for `human_checks`, and
 Abort at every pause. Worker task rows remain read-only.
@@ -530,6 +531,52 @@ before sending either action.** Publish pushes to the recorded PR or opens a
 draft PR. After the human checks, Finish archives the change, pushes and
 marks the PR ready for review; it does not merge. Cancel sends nothing.
 The page shows each action's result and refreshes the list.
+
+### Factory landing
+
+**Land** invokes the existing reviewed-PR landing flow, including human-check
+attestation, guarded finish, CI and merge; **Finish** alone does not merge.
+Land appears only for a matching non-stale `human_checks` offer. Its dialog
+shows PR/head and asks you to confirm that you performed the human checks.
+It freezes the five fields below; opening or Cancel sends nothing. Any change
+invalidates the dialog rather than authorizing a new head. Admission and worker
+startup revalidate the same identity independently.
+
+| Offer field | Bound value |
+| --- | --- |
+| `change` | Selected run. |
+| `pr` | Canonical GitHub PR URL. |
+| `pause_id` | Published human-check pause. |
+| `head` | Full published commit SHA. |
+| `since` | Pause timestamp, including zero and fractional values. |
+
+Private plugin transport starts a detached worker through trusted host settings;
+it adds no public command or act verb and is unreachable from canonical CLI,
+daemon, intake and supervisor paths. Landing status and Stop have independent
+RPC/cache state from ordinary actions. A failed channel retains stale data;
+refresh never starts work. Progress and retained refusals/results stay in the
+originating row, or above the list when absent/folded. On a lost submission
+response, refresh status without automatic resubmission.
+
+The worker holds a per-PR flock for its lifetime without intake receipts, jobs
+inventory, escalation or manual release. Daemon pause blocks new attempts but
+leaves status and Stop available. Stop requests SIGTERM only after verifying
+worker identity, without rollback or guaranteed termination. Worker death can
+release the lock while descendants survive; Stop then refuses. Wait for them or
+terminate them manually after inspection. Each fresh attempt independently proves
+prior group drainage under the lock, even with an unchanged head or terminal
+result. Independent terminal landing is outside this lock. Follow the keyed
+[recovery cases](../landing.md#recovering-from-a-refusal), including late duplicate
+comments and unpushed archive recovery through explicit direct Finish.
+
+History shows newest 20 plus total, with current live progress separate. Overdue
+after 2400 seconds is display-only. Logs/results persist until manual pruning;
+preserve undrained-group evidence. Reading does not acknowledge or deliver,
+and jobs compaction does not apply. Display bounds do not bound storage or
+metadata scanning. See [evidence artifacts](../../plugins/nightshift/README.md#landing-evidence)
+and [landing limits](../../KNOWN-LIMITATIONS.md#factory-landing).
+
+### Ordinary Factory actions
 
 ```sh
 uv run nightshift status --json
@@ -554,8 +601,8 @@ against its last good status before calling `act`, which rechecks live state.
 Only display fields cross to the client, with home directories replaced by
 `~` and raw command errors excluded.
 
-The supported range remains `>=0.10.1 <0.13.0`, built
-against SDK 0.12.0. See the [plugin README](../../plugins/nightshift/README.md#factory)
+The supported range is `>=0.10.1 <0.14.0`, built
+against SDK 0.13.2. See the [plugin README](../../plugins/nightshift/README.md#factory)
 for usage, refresh behavior and installation.
 
 ## How the engine works

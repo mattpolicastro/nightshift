@@ -88,15 +88,3 @@ def test_a_bad_claim_file_is_reported_and_NOT_deleted(claim_dir):
     assert [c.number for c in running] == [26]
     assert unreadable == [bad.name]
     assert bad.exists(), "status must not repair"
-
-
-def test_title_of_degrades_to_empty_when_github_is_unreachable():
-    def offline(_args):
-        raise RuntimeError("gh: connection refused")
-
-    assert queue.title_of(REPO, 26, runner=offline) == ""
-
-
-def test_title_of_survives_junk_on_stdout():
-    assert queue.title_of(REPO, 26, runner=lambda _a: "not json") == ""
-    assert queue.title_of(REPO, 26, runner=lambda _a: "") == ""
