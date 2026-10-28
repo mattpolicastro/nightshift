@@ -47,6 +47,20 @@ OPERATORS = [
     ("-", re.compile(r"(?<=\w|\))\s-\s(?=[\w(])"), " + "),
     ("int", re.compile(r"(?<![\w.])([0-9]+)(?![\w.])"), None),  # k -> k+1
 ]
+C_FAMILY_SUFFIXES = {".dart", ".ts", ".swift", ".kt", ".c", ".cpp"}
+C_FAMILY_OPERATORS = [
+    ("true", re.compile(r"(?<![\w$])true(?![\w$])"), "false"),
+    ("false", re.compile(r"(?<![\w$])false(?![\w$])"), "true"),
+    ("&&", re.compile(r"(?<!&)&&(?![&=])"), "||"),
+    ("||", re.compile(r"(?<!\|)\|\|(?![|=])"), "&&"),
+    ("==", re.compile(r"(?<![=!<>])==(?![=!<>])"), "!="),
+    ("!=", re.compile(r"(?<![=!<>])!=(?![=!<>])"), "=="),
+    ("<", re.compile(r"(?<![=!<>])<(?![=!<>])"), "<="),
+    ("<=", re.compile(r"(?<![=!<>])<=(?![=!<>])"), "<"),
+    (">", re.compile(r"(?<![=!<>-])>(?![=!<>])"), ">="),
+    (">=", re.compile(r"(?<![=!<>-])>=(?![=!<>])"), ">"),
+    ("!", re.compile(r"(?<![\w$)\]}!])!(?=[ \t]*(?:[^\W\d]|[$(!]))"), ""),
+]
 SKIP = re.compile(r"^\s*(#|//|/\*|\*|import |from |using |template|static_assert)")
 PYTHON_SKIP = re.compile(r"^\s*(import |from |using |template|static_assert)")
 # A human- or agent-written claim, judged by the reviewer, that mutating this
@@ -291,6 +305,17 @@ def generate(lines: list[tuple[str, int, str]], count: int, seed: int, *,
     options = []
     for path, n, text in lines:
         if any(pattern in text for pattern in mutation_skip):
+            continue
+        if Path(path).suffix in C_FAMILY_SUFFIXES:
+            if any(quote in text for quote in "'\"`") or text.lstrip().startswith(("//", "/*", "*")):
+                continue
+            for name, rx, replacement in C_FAMILY_OPERATORS:
+                for match in rx.finditer(text):
+                    if any(match.start() < end and match.end() > start
+                           for start, end in protected[path].get(n, ())):
+                        continue
+                    new = text[:match.start()] + replacement + text[match.end():]
+                    options.append(Mutant(path, n, name, text, new))
             continue
         for name, rx, repl in OPERATORS:
             for m in rx.finditer(text):
