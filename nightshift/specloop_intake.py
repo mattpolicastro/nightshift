@@ -924,13 +924,11 @@ def revise_pending(
 
 
 def _reconcile_merge_readiness(repo: Repo, labels: queue.Labels, state_dir: Path,
-                               number: int, row: dict, publication: dict, *, runner=None) -> None:
+                               number: int, row: dict, publication: dict, *, runner=None,
+                               forge: Forge | None = None) -> None:
     """Poll one PR snapshot; reuse only assessments bound to this publication/head."""
-    gh = runner or queue._gh
-    pr = json.loads(gh([
-        "pr", "view", str(number), "--repo", repo.name, "--json",
-        "state,labels,headRefName,headRefOid,isCrossRepository,url,body",
-    ]))
+    forge = forge if forge is not None else GitHubForge(runner or queue._gh)
+    pr = forge.pr_for_readiness(repo.name, number)
     if (pr["state"] != "OPEN" or pr["isCrossRepository"] is not False
             or pr["headRefName"] != f"spec/{row['change']}" or pr["url"] != row["pr"]):
         return
@@ -951,23 +949,22 @@ def _reconcile_merge_readiness(repo: Repo, labels: queue.Labels, state_dir: Path
     if ("merge:ready" in current and (head != row["head"]
             or previous is not None and previous["head"] != head)):
         # Invalidate even an incomplete old intention before any assessment I/O.
-        gh(["pr", "edit", str(number), "--repo", repo.name, "--remove-label", "merge:ready"])
+        forge.relabel_pr(repo.name, number, add=[], remove=["merge:ready"])
         current.remove("merge:ready")
         pr["labels"] = [label for label in pr["labels"] if label["name"] != "merge:ready"]
     if matching and consistent and previous is not None and not previous["delivered"]:
-        _deliver_readiness(repo, state_dir, number, row, publication, pr, previous, runner=gh)
+        _deliver_readiness(repo, state_dir, number, row, publication, pr, previous, forge=forge)
         return
-    assessment = _readiness_assessment(repo, labels, state_dir, number, row, pr, runner=gh,
+    assessment = _readiness_assessment(repo, labels, state_dir, number, row, pr, forge=forge,
                                        publication=publication)
-    _deliver_readiness(repo, state_dir, number, row, publication, pr, assessment, runner=gh)
+    _deliver_readiness(repo, state_dir, number, row, publication, pr, assessment, forge=forge)
 
 
-def _readiness_ci(repo: Repo, number: int, *, runner=None) -> list[str]:
-    """Classify one ordinary PR-check snapshot through the string-returning runner."""
+def _readiness_ci(repo: Repo, number: int, *, runner=None, forge: Forge | None = None) -> list[str]:
+    """Classify one ordinary PR-check snapshot, retaining parsing in core."""
+    forge = forge if forge is not None else GitHubForge(runner or queue._gh)
     try:
-        raw = (runner or queue._gh)([
-            "pr", "checks", str(number), "--repo", repo.name, "--json", "name,bucket,state",
-        ])
+        raw = forge.pr_checks(repo.name, number).stdout
     except Paused:
         raise
     except (OSError, RuntimeError, subprocess.SubprocessError):
@@ -989,7 +986,7 @@ def _readiness_ci(repo: Repo, number: int, *, runner=None) -> list[str]:
 
 def _readiness_assessment(repo: Repo, labels: queue.Labels, state_dir: Path, number: int,
                           row: dict, pr: dict, *, runner=None, git_runner=None,
-                          publication: dict | None = None) -> dict:
+                          publication: dict | None = None, forge: Forge | None = None) -> dict:
     """Compose all conditions in stable order without delivering or modifying state."""
     head = pr.get("headRefOid")
     head = head if isinstance(head, str) and head.strip() else ""
@@ -998,7 +995,7 @@ def _readiness_assessment(repo: Repo, labels: queue.Labels, state_dir: Path, num
         reasons.append("head: PR head is missing or unknown")
     elif head != row.get("head"):
         reasons.append(f"head: PR head {head} does not match run head {row.get('head') or '(unknown)'}")
-    reasons.extend(_readiness_ci(repo, number, runner=runner))
+    reasons.extend(_readiness_ci(repo, number, runner=runner, forge=forge))
     reasons.extend(_readiness_evidence(row, git_runner=git_runner))
     current = {label["name"] for label in pr["labels"]}
     reasons.extend(_readiness_revision(repo, labels, state_dir, number, row, current))
@@ -1044,7 +1041,8 @@ def _validate_readiness(receipt: dict) -> None:
 
 
 def _deliver_readiness(repo: Repo, state_dir: Path, number: int, row: dict,
-                       publication: dict, pr: dict, assessment: dict, *, runner=None) -> None:
+                       publication: dict, pr: dict, assessment: dict, *, runner=None,
+                       forge: Forge | None = None) -> None:
     """Deliver against the caller's fresh PR snapshot, never a saved intention alone.
 
     Eligibility, head-change removal before assessment and polling budgets belong
@@ -1075,12 +1073,12 @@ def _deliver_readiness(repo: Repo, state_dir: Path, number: int, row: dict,
             and selected in current and opposite not in current):
         return
     _save(path, receipt)  # Atomic intent precedes every external effect.
-    gh = runner or queue._gh
+    forge = forge if forge is not None else GitHubForge(runner or queue._gh)
     if opposite in current:
-        gh(["pr", "edit", str(number), "--repo", repo.name, "--remove-label", opposite])
+        forge.relabel_pr(repo.name, number, add=[], remove=[opposite])
     if selected not in current:
-        gh(["pr", "edit", str(number), "--repo", repo.name, "--add-label", selected])
-    _comment(repo.name, number, row["change"], receipt["body"], runner=gh, action="approval",
+        forge.relabel_pr(repo.name, number, add=[selected], remove=[])
+    _comment(repo.name, number, row["change"], receipt["body"], forge=forge, action="approval",
              kind="pr", round_id="merge-readiness")
     if paused():
         raise Paused()
@@ -1325,7 +1323,7 @@ def publish_pending(
     if not isinstance(status.get("runs"), list):
         raise specloop_client.SpecloopError("status returned no runs list")
     runs = {run["change"]: run for run in status["runs"]}
-    gh = runner or queue._gh
+    forge = GitHubForge(runner or queue._gh)
 
     def publish(admission_path):
         admission = json.loads(admission_path.read_text())
@@ -1347,15 +1345,12 @@ def publish_pending(
             if (pause["reason"] == "human_checks" and receipt["delivered"] is True
                     and receipt.get("result", {}).get("outcome") == "published"):
                 _reconcile_merge_readiness(repo, labels, state_dir, int(admission_path.stem),
-                                           run, receipt, runner=gh)
+                                           run, receipt, forge=forge)
             return None
         if pause["reason"] == "human_checks" and receipt is None:
             return None  # No daemon publication to recover.
         number = int(admission_path.stem)
-        pr = json.loads(gh([
-            "pr", "view", str(number), "--repo", repo.name, "--json",
-            "state,labels,headRefName,isCrossRepository,url",
-        ]))
+        pr = forge.pr_for_publication(repo.name, number)
         current = {label["name"] for label in pr["labels"]}
         if (pr["state"] != "OPEN" or pr["isCrossRepository"]
                 or pr["headRefName"] != f"spec/{change}" or pr["url"] != run["pr"]
@@ -1392,10 +1387,10 @@ def publish_pending(
                 "- " + (json.dumps(reason, ensure_ascii=False) if isinstance(reason, dict) else reason)
                 for reason in result.get("reasons", [])
             )
-        _comment(repo.name, number, change, body, runner=gh, action="publish", kind="pr",
+        _comment(repo.name, number, change, body, forge=forge, action="publish", kind="pr",
                  round_id=receipt.get("round_id"))
         if result["outcome"] == "refused":
-            gh(["pr", "edit", str(number), "--repo", repo.name, "--add-label", labels.needs_human])
+            forge.relabel_pr(repo.name, number, add=[labels.needs_human], remove=[])
         receipt["delivered"] = True
         _save(path, receipt)
         return result

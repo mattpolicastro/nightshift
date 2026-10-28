@@ -2,6 +2,7 @@
 
 from dataclasses import FrozenInstanceError, fields
 import json
+import subprocess
 from typing import Literal
 from unittest.mock import Mock, call
 
@@ -19,6 +20,10 @@ import test_specloop_approval as approval_tests
 import test_specloop_spec_revision as spec_revision_tests
 from test_specloop_build_revision import BuildCommands
 from test_revision_feedback_state import LegacyGh, legacy_receipt, CUTOFF
+from merge_readiness_fixtures import local_run
+from test_merge_readiness_polling import polling
+import test_merge_readiness_polling as polling_tests
+from test_specloop_publication import setup as publication_setup
 
 
 class StructuralFake:
@@ -734,3 +739,162 @@ def test_approval_head_binding_uses_supplied_forge(intake_forge, tmp_path):
     forge.relabel_pr.assert_called_once_with("o/r", 7, add=[], remove=["spec:approved"])
     assert "<!-- nightshift:approval:change:2 -->" in forge.create_comment.call_args.args[-1]
     assert json.loads((tmp_path / "approvals/o__r/7.json").read_text()) == {"event": 2, "head": "old"}
+
+
+@pytest.mark.scenario("forge-interface/readiness-request-budget/cached-and-ci-blocked-polls")
+@pytest.mark.parametrize("supplied_forge", [False, True])
+@pytest.mark.parametrize("response,reason", [
+    ("not JSON", "malformed check results"), (None, "malformed check results"),
+    ("null", "malformed check results"), ("{}", "malformed check results"),
+    ("[null]", "malformed check results"), ("[{}]", "malformed check results"),
+    ('[{"name":"CI","bucket":"pass","state":null}]', "malformed check results"),
+    ('[{"name":" ","bucket":"pass","state":"DONE"}]', "malformed check results"),
+    ("[]", "checks are not green; require at least one pass and only pass or skipping buckets"),
+    ('[{"name":"CI","bucket":"fail","state":"DONE"}]',
+     "checks are not green; require at least one pass and only pass or skipping buckets"),
+    ('[{"name":"CI","bucket":"pass","state":"DONE"}]', None),
+    (OSError("unavailable"), "checks unavailable; green CI could not be established"),
+    (queue.GhError("bad JSON upstream", transient=False), "checks unavailable; green CI could not be established"),
+    (subprocess.TimeoutExpired("gh", 30), "checks unavailable; green CI could not be established"),
+    (Paused(), "paused"),
+])
+def test_readiness_ci_forge_preserves_classification(monkeypatch, response, reason, supplied_forge):
+    monkeypatch.setattr(queue, "_gh", Mock(side_effect=AssertionError("unbound runner")))
+    runner = Mock(side_effect=response) if isinstance(response, Exception) else Mock(return_value=response)
+    forge = Mock(spec_set=Forge)
+    if isinstance(response, Exception):
+        forge.pr_checks.side_effect = response
+    else:
+        forge.pr_checks.return_value = ResponseText(response)
+    kwargs = {"forge": forge} if supplied_forge else {"runner": runner}
+    if supplied_forge:
+        monkeypatch.setattr(intake, "GitHubForge", Mock(side_effect=AssertionError("unexpected backend")))
+    if reason == "paused":
+        with pytest.raises(Paused) as caught:
+            intake._readiness_ci(Repo("o/r"), 7, **kwargs)
+        assert caught.value is response
+    else:
+        assert intake._readiness_ci(Repo("o/r"), 7, **kwargs) == ([] if reason is None else [f"CI: {reason}"])
+    assert forge.mock_calls == ([call.pr_checks("o/r", 7)] if supplied_forge else [])
+    assert runner.call_args_list == ([] if supplied_forge else [
+        call(["pr", "checks", "7", "--repo", "o/r", "--json", "name,bucket,state"])])
+
+
+@pytest.mark.scenario("forge-interface/late-bound-runners/default-runner-remains-patchable")
+@pytest.mark.scenario("forge-interface/readiness-request-budget/cached-and-ci-blocked-polls")
+@pytest.mark.parametrize("entry", ["publish", "reconcile"])
+@pytest.mark.parametrize("blocker", [None, "human", "CI"])
+def test_readiness_each_poll_binds_runner_and_preserves_budget(monkeypatch, polling, tmp_path, entry, blocker):
+    e = polling
+    if blocker == "human":
+        e.gh.pr["body"] = "## Checks a human must make\n- [ ] manual check"
+    elif blocker == "CI":
+        e.gh.checks = []
+    e.poll()
+    saved, publication = e.path.read_bytes(), e.publication_path.read_bytes()
+    forbidden = Mock(side_effect=AssertionError("unbound transport"))
+    status = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps({"version": 1, "runs": [e.row]}), ""))
+    for attempt in range(3):
+        e.gh.operations.clear()
+
+        def dispatch(args):
+            monkeypatch.setattr(queue, "_gh", forbidden)
+            return e.gh(args)
+
+        runner = Mock(side_effect=dispatch)
+        monkeypatch.setattr(queue, "_gh", runner if attempt < 2 else forbidden)
+        forge = Mock(spec_set=Forge, wraps=GitHubForge(runner))
+        constructor = Mock(return_value=forge)
+        monkeypatch.setattr(intake, "GitHubForge", constructor)
+        kwargs = {"runner": runner} if attempt == 2 else {}
+        if entry == "publish":
+            assert intake.publish_pending(e.repo, queue.Labels(), tmp_path, specloop_runner=status, **kwargs) == []
+        else:
+            intake._reconcile_merge_readiness(e.repo, queue.Labels(), tmp_path, 1, e.row, e.publication, **kwargs)
+        constructor.assert_called_once_with(runner)
+        assert forge.mock_calls == [call.pr_for_readiness("owner/repo", 1)] + (
+            [call.pr_checks("owner/repo", 1)] if blocker == "CI" else [])
+        assert runner.call_args_list == [call([
+            "pr", "view", "1", "--repo", "owner/repo", "--json",
+            "state,labels,headRefName,headRefOid,isCrossRepository,url,body",
+        ])] + ([call(["pr", "checks", "1", "--repo", "owner/repo", "--json", "name,bucket,state"])]
+               if blocker == "CI" else [])
+        assert e.path.read_bytes() == saved and e.publication_path.read_bytes() == publication
+    forbidden.assert_not_called()
+    assert status.call_args_list == ([call(["specloop", "status", "--json"],
+        capture_output=True, text=True, check=False)] * 3 if entry == "publish" else [])
+
+
+@pytest.mark.scenario("forge-interface/readiness-request-budget/readiness-delivery-unchanged")
+@pytest.mark.parametrize("case", ["head", "pending-head", "inconsistent", "incomplete", "ci-green"])
+def test_readiness_delivery_through_one_forge(monkeypatch, polling, case):
+    e = polling
+    forge = Mock(spec_set=Forge, wraps=GitHubForge(e.gh))
+    constructor = Mock(return_value=forge)
+    monkeypatch.setattr(intake, "GitHubForge", constructor)
+    # Retain the existing exact transcripts, receipt, local-state and comment assertions.
+    if case in ("head", "pending-head"):
+        polling_tests.test_new_head_removes_ready_label(e, case == "pending-head")
+    elif case == "inconsistent":
+        polling_tests.test_label_or_identity_change_refreshes_assessment(e, "both")
+    elif case == "incomplete":
+        polling_tests.test_incomplete_same_head_delivery_reuses_intention(e, monkeypatch)
+    else:
+        polling_tests.test_ci_blocked_assessment_is_reassessed_until_green(e)
+    assert constructor.call_count == len(e.calls)
+    operations = [c[0] for c in forge.mock_calls]
+    assert operations.count("pr_for_readiness") == len(e.calls)
+    assert set(operations) <= {"pr_for_readiness", "pr_checks", "relabel_pr",
+                               "comment_pages", "create_comment", "update_comment"}
+
+
+@pytest.mark.scenario("forge-interface/late-bound-runners/default-runner-remains-patchable")
+@pytest.mark.scenario("issue-intake/forge-mediated-intake/existing-workflows-retain-transcripts")
+@pytest.mark.parametrize("refused", [False, True])
+def test_publication_forge_late_binding_and_recovery(monkeypatch, publication_setup, tmp_path, refused):
+    repo, gh, commands = publication_setup
+    if refused:
+        commands.publish_result = {"version": 1, "outcome": "refused", "reasons": ["held"]}
+    forbidden = Mock(side_effect=AssertionError("unbound transport"))
+    path = tmp_path / "publications/owner__sample/8.json"
+    for attempt in range(3):
+        def dispatch(args):
+            monkeypatch.setattr(queue, "_gh", forbidden)
+            result = gh(args)
+            if attempt < 2 and (args[:2] == ["pr", "comment"] or "PATCH" in args):
+                raise queue.GhError("response lost", transient=True)
+            return result
+
+        runner = Mock(side_effect=dispatch)
+        monkeypatch.setattr(queue, "_gh", runner if attempt < 2 else forbidden)
+        forge = Mock(spec_set=Forge, wraps=GitHubForge(runner))
+        constructor = Mock(return_value=forge)
+        monkeypatch.setattr(intake, "GitHubForge", constructor)
+        errors = []
+        intake.publish_pending(repo, queue.Labels(), tmp_path, specloop_runner=commands,
+            on_error=lambda n, exc: errors.append(exc), **({"runner": runner} if attempt == 2 else {}))
+        constructor.assert_called_once_with(runner)
+        receipt = json.loads(path.read_text())
+        assert bool(receipt.get("delivered")) is (attempt == 2)
+        assert bool(errors) is (attempt < 2)
+        body = gh.comments[-1]["body"]
+        expected = [call.pr_for_publication(repo.name, 8), call.comment_pages(repo.name, 8),
+                    call.create_comment(repo.name, 8, "pr", body) if attempt == 0 else
+                    call.update_comment(repo.name, gh.comments[-1]["id"], body)]
+        if refused and attempt == 2:
+            expected += [call.relabel_pr(repo.name, 8, add=["needs-human"], remove=[])]
+        assert forge.mock_calls == expected
+        comment_id = gh.comments[-1]["id"]
+        argv = [
+            ["pr", "view", "8", "--repo", "owner/sample", "--json",
+             "state,labels,headRefName,isCrossRepository,url"],
+            ["api", "repos/owner/sample/issues/8/comments", "--paginate", "--slurp"],
+            ["pr", "comment", "8", "--repo", "owner/sample", "--body", body] if attempt == 0 else
+            ["api", f"repos/owner/sample/issues/comments/{comment_id}", "--method", "PATCH", "-f", f"body={body}"],
+        ]
+        if refused and attempt == 2:
+            argv += [["pr", "edit", "8", "--repo", "owner/sample", "--add-label", "needs-human"]]
+        assert runner.call_args_list == [call(args) for args in argv]
+    forbidden.assert_not_called()
+    assert len(commands.publications) == 1
+    assert not (tmp_path / "merge-readiness/owner__sample/8.json").exists()
