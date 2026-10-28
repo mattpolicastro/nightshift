@@ -1,0 +1,49 @@
+# Trusted template: copy outside the repository and replace project/toolchain
+# paths and provider settings. Requires a committed pubspec.lock.
+# Scenario coverage reporting is project-specific and is not configured here.
+[run]
+repo = "/path/to/dart-project"
+change = "example-change"
+branch = "spec/example-change"
+
+[roles]
+implement = "codex"
+review = "codex"
+
+[profiles.codex]
+adapter = "codex"
+model = "gpt-6-astra"
+effort = "high"
+
+[paths]
+allowed = ["lib/**", "test/**"]
+frozen = ["openspec/**", "pubspec.yaml", "pubspec.lock"]
+
+[vars]
+dart_sdk = "/path/to/dart-sdk"
+
+[gates]
+evidence = true
+mutation_paths = ["lib/**"]
+mutation_steps = ["dart-analyze", "dart-tests"]
+mutation_invalid_steps = ["dart-analyze"]
+
+[[prepare]]
+id = "dart-dependencies"
+# Paths are positional arguments, never interpolated into shell source.
+# Isolated HOME holds the package cache shared by this preparation and checks.
+run = ["/bin/sh", "-c", 'cp -R "$1/." "$2" && chmod -R u+w "$2" && cd "$2" && "$3" pub get --enforce-lockfile',
+       "dart-prepare", "{src}", "{build}/project", "{dart_sdk}/bin/dart"]
+timeout = 600
+
+[[verify]]
+id = "dart-analyze"
+run = ["/bin/sh", "-c", 'cd "$1" && exec "$2" analyze',
+       "dart-analyze", "{build}/project", "{dart_sdk}/bin/dart"]
+timeout = 300
+
+[[verify]]
+id = "dart-tests"
+run = ["/bin/sh", "-c", 'cd "$1" && exec "$2" test',
+       "dart-tests", "{build}/project", "{dart_sdk}/bin/dart"]
+timeout = 900

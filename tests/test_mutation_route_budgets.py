@@ -163,6 +163,7 @@ def test_budget_snapshot_is_immutable_and_missing_receipt_uses_ceiling():
 @pytest.mark.scenario("parallel-evidence-mutants/baseline-step-time-boxes/parallel-mutants-respect-time-box")
 @pytest.mark.parametrize("stage,prepared", [
     ("dependencies", True), ("configure", True), ("build", True), ("test", False), ("test", True),
+    ("dart-analyze", False), ("dart-analyze", True),
 ])
 def test_routed_timeout_stops_process_group_and_later_steps(tmp_path, monkeypatch, source, stage, prepared):
     monkeypatch.setattr(evidence, "MIN_MUTANT_SECONDS", 1.0)
@@ -171,7 +172,8 @@ def test_routed_timeout_stops_process_group_and_later_steps(tmp_path, monkeypatc
     preparation = (target,) if stage == "dependencies" else (
         (manifest.Step("dependencies", ("/usr/bin/true",), timeout=100),) if prepared else ())
     checks = (later,) if stage == "dependencies" else (target, later)
-    m = replace(source, prepare=preparation, mutation_step=checks,
+    m = replace(source, mutation_invalid_steps=(stage,) if stage == "dart-analyze" else source.mutation_invalid_steps,
+                prepare=preparation, mutation_step=checks,
                 mutation_steps=tuple(s.id for s in checks), mutation_parallel=2,
                 mutation_routes=(manifest.MutationRoute(("calc.py",), tuple(s.id for s in checks)),))
     original = deepcopy(m)

@@ -299,7 +299,7 @@ def non_python_added_lines(source, path):
 
 
 @pytest.mark.scenario("mutation-selection/prose-is-never-mutated/non-python-comment-lines-excluded")
-@pytest.mark.parametrize("suffix", ["cpp", "js", "ts", "jsx", "tsx", "css", "other"])
+@pytest.mark.parametrize("suffix", ["cc", "js", "jsx", "tsx", "css", "other"])
 def test_non_python_blocks_exclude_bare_prose_before_sampling(suffix):
     path = f"src/example.{suffix}"
     source = ('  # True 10\n'
@@ -330,7 +330,7 @@ def test_non_python_blocks_exclude_bare_prose_before_sampling(suffix):
 
 
 @pytest.mark.scenario("mutation-selection/prose-is-never-mutated/non-python-comment-lines-excluded")
-@pytest.mark.parametrize("path", ["src/example.cpp", "src/example.tsx"])
+@pytest.mark.parametrize("path", ["src/example.cc", "src/example.tsx"])
 def test_empty_block_does_not_absorb_code_before_the_next_block(path):
     source = ('/**/\n'
               'value = 10;\n'
@@ -364,7 +364,7 @@ def test_empty_block_does_not_absorb_code_before_the_next_block(path):
     ('/* opening 10\nbare prose 20\n*/ // trailing comment 30\n*/\n', {2}),
     ('value = "unterminated 10\npattern = / 20\ntext = ` ${ 30\n', {1, 2, 3}),
 ])
-@pytest.mark.parametrize("path", ["src/example.cpp", "src/example.tsx"])
+@pytest.mark.parametrize("path", ["src/example.cc", "src/example.tsx"])
 def test_unsupported_non_python_forms_add_no_protected_range(source, eligible_lines, path):
     lines = non_python_added_lines(source, path)
     mutants = evidence.generate(lines, 100, 1, sources={path: source})
@@ -380,7 +380,7 @@ def test_unsupported_non_python_forms_add_no_protected_range(source, eligible_li
 
 @pytest.mark.scenario("mutation-selection/prose-is-never-mutated/non-python-comment-lines-excluded")
 @pytest.mark.scenario("mutation-selection/committed-source-context/unchanged-context-determines-eligibility")
-@pytest.mark.parametrize("path", ["src/example.cpp", "src/example.ts"])
+@pytest.mark.parametrize("path", ["src/example.cc", "src/example.js"])
 @pytest.mark.parametrize("change_code", [False, True])
 def test_gather_uses_committed_block_boundaries_across_hunks(
         committed_project, tmp_path, monkeypatch, path, change_code):
@@ -423,3 +423,202 @@ def test_gather_uses_committed_block_boundaries_across_hunks(
         assert ev.mutants == [] and ev.score is None
         assert ev.skipped == "no mutable lines added under mutation_paths"
     assert (repo / path).read_text() == dirty
+
+
+@pytest.mark.scenario("mutation-selection/extension-operator-selection/dart-operator-directions")
+@pytest.mark.scenario("mutation-selection/extension-operator-selection/suffix-dispatch-and-token-boundaries")
+@pytest.mark.parametrize("suffix", ["dart", "ts", "swift", "kt", "c", "cpp"])
+def test_c_family_operators_for_dart_files(suffix):
+    cases = [("true", "false", "true"), ("false", "true", "false"),
+             ("a&&b", "a||b", "&&"), ("a||b", "a&&b", "||"),
+             ("a==b", "a!=b", "=="), ("a!=b", "a==b", "!="),
+             ("a<b", "a<=b", "<"), ("a<=b", "a<b", "<="),
+             ("a>b", "a>=b", ">"), ("a>=b", "a>b", ">="),
+             ("!ready", "ready", "!"), ("!(ready)", "(ready)", "!"),
+             ("!!ready", "!ready", "!"), ("! \t_ready", " \t_ready", "!"),
+             ("!$ready", "$ready", "!"), ("!é", "é", "!")]
+    blocked = ["trueValue false_ _true $false true$ étrue falseé true0 0false",
+               "a===b a!==b a<=>b a<<b a>>b a>>>b a->b a=>b a->=b",
+               "a<<=b a>>=b a=<b a!<b a>!=b a=!=b a!==b",
+               "a&&&b a||||b a&&=b a||=b", "value! $! )! ]! }! !42 !",
+               "42 a + b a - b True False a and b a or b",
+               "if ready:\n    return None"]
+    source = "\n".join(before for before, _, _ in cases) + "\n" + "\n".join(blocked)
+    path = f"src/example.{suffix}"
+    mutants = select(source, path=path)
+    assert sorted((m.line, m.before, m.after, m.op) for m in mutants) == [
+        (n, before, after, op) for n, (before, after, op) in enumerate(cases, 1)]
+    assert [op for op, _, _ in evidence.C_FAMILY_OPERATORS] == [case[2] for case in cases[:11]]
+
+
+@pytest.mark.scenario("mutation-selection/extension-operator-selection/suffix-dispatch-and-token-boundaries")
+@pytest.mark.parametrize("suffix", ["js", "tsx", "cc", "DART"])
+def test_unsupported_suffixes_keep_exact_legacy_selection(suffix):
+    source = 'text = "True"\nvalue = 10\na < b\n!ready\ntrue\n'
+    mutants = select(source, path=f"src/example.{suffix}", seed=7)
+    assert [(m.line, m.op, m.after) for m in mutants] == [
+        (3, "<", "a <= b"), (1, "True", 'text = "False"'), (2, "int", "value = 11")]
+
+
+@pytest.mark.scenario("mutation-selection/extension-operator-selection/python-operators-remain-unchanged")
+@pytest.mark.scenario("mutation-selection/prose-is-never-mutated/python-docstrings-and-comments-excluded")
+@pytest.mark.scenario("mutation-selection/prose-is-never-mutated/python-runtime-strings-retain-their-meaning")
+@pytest.mark.scenario("mutation-selection/control-flow-candidate-compatibility/mixed-operators-retain-stable-spreading")
+@pytest.mark.parametrize("path", ["src/example.py", "src/example.pyi"])
+@pytest.mark.parametrize("seed,expected", [
+    (0, [(3, "False", "other = True"), (12, "True", "        return False"),
+         (11, "negate-condition", "    if not ready:  # True 99"), (7, "-", "sub = a + b"),
+         (4, "<=", "compare = a < b"), (5, "and", "logic = a or b"),
+         (9, "int", 'text = "# 21"'), (6, "+", "add = a - b"), (2, "True", "flag = False"),
+         (13, "int", "    return 8"), (8, "int", "number = 11")]),
+    (7, [(9, "int", 'text = "# 21"'), (13, "int", "    return 8"),
+         (5, "and", "logic = a or b"), (12, "drop-return", "        pass"),
+         (11, "negate-condition", "    if not ready:  # True 99"), (6, "+", "add = a - b"),
+         (3, "False", "other = True"), (2, "True", "flag = False"),
+         (8, "int", "number = 11"), (4, "<=", "compare = a < b"), (7, "-", "sub = a + b")]),
+])
+def test_python_operators_unchanged(path, seed, expected):
+    source = ('"""True 90"""\nflag = True\nother = False\ncompare = a <= b\n'
+              'logic = a and b\nadd = a + b\nsub = a - b\nnumber = 10\ntext = "# 20"\n'
+              'def f(ready):\n    if ready:  # True 99\n        return True\n    return 7\n')
+    for count in (1, 3, 100):
+        mutants = select(source, path=path, seed=seed, count=count)
+        assert mutants == [evidence.Mutant(path, n, op, source.splitlines()[n - 1], after)
+                           for n, op, after in expected[:count]]
+
+
+@pytest.mark.scenario("mutation-selection/c-family-quote-line-exclusion/quoted-lines-are-excluded")
+@pytest.mark.scenario("mutation-selection/c-family-comment-line-exclusion/existing-skips-and-empty-pools-are-preserved")
+@pytest.mark.scenario("mutation-selection/c-family-comment-line-exclusion/prefixes-and-complete-blocks-are-protected")
+@pytest.mark.scenario("mutation-selection/control-flow-candidate-compatibility/existing-exclusions-cover-new-operators")
+@pytest.mark.scenario("mutation-selection/control-flow-candidate-compatibility/mixed-operators-retain-stable-spreading")
+@pytest.mark.parametrize("suffix", ["dart", "ts", "swift", "kt", "c", "cpp"])
+def test_c_family_exclusions_precede_sampling(suffix):
+    excluded = ['true; s = "text";', "false; s = 'text';", 'true; s = `text`;',
+                'true; // "', "false; /* ' */", r'true; \"',
+                'val s = """${"""true"""}"""', ' \t// true', '  /* false */', ' * a<b',
+                '/* opening', 'true a<b', '*/', '/**/', '/** true */', 'cosmetic = true;',
+                'if ready:', '    return None']
+    source = '\n'.join(excluded + ['return true && a<b;', '!ready;'])
+    path = f"src/example.{suffix}"
+    lines = candidates(source, path)
+    for seed in (0, 1, 7):
+        for count in (1, 100):
+            mutants = evidence.generate(lines, count, seed, sources={path: source},
+                                        mutation_skip=("cosmetic",))
+            assert mutants == evidence.generate(lines[-2:], count, seed, sources={path: source})
+            assert len(mutants) == min(count, 2)
+            assert len({(m.path, m.line) for m in mutants}) == len(mutants)
+            for mut in mutants:
+                assert mut.before == source.splitlines()[mut.line - 1]
+                assert mut.op in {"true", "&&", "<", "!"}
+
+
+@pytest.mark.scenario("mutation-selection/prose-is-never-mutated/non-python-tracking-stays-line-level")
+@pytest.mark.parametrize("source,eligible", [
+    ('value; // true\n', {1}), ('value; /* true */\n', {1}),
+    ('value /* true */;\n', {1}), ('{/* true */}\n', {1}),
+    ('value; /* true\nfalse\n*/\n', {1, 2}), ('/* true\nfalse\na<b\n', {2, 3}),
+    ('/* true\nfalse\n*/ a<b\na>b\n*/\n', {2, 4}),
+    ('/* true\nfalse\nend a<b */}\n*/\n', {2, 3}),
+    ('/* true */ /* second\nfalse\n*/\n', {2}),
+    ('/* true\nfalse\n*/ // a<b\n*/\n', {2}),
+    ('true; "unterminated\na/b<c\nfalse; ` ${\n', {2}),
+])
+@pytest.mark.parametrize("suffix", ["dart", "ts", "swift", "kt", "c", "cpp"])
+def test_c_family_unsupported_blocks_remain_line_level(source, eligible, suffix):
+    path = f"src/example.{suffix}"
+    mutants = evidence.generate(non_python_added_lines(source, path), 100, 1, sources={path: source})
+    assert {m.line for m in mutants} == eligible
+
+
+@pytest.mark.scenario("mutation-selection/control-flow-candidate-compatibility/existing-exclusions-cover-new-operators")
+@pytest.mark.scenario("mutation-selection/prose-is-never-mutated/non-python-comment-lines-excluded")
+@pytest.mark.parametrize("suffix", ["dart", "ts", "swift", "kt", "c", "cpp"])
+def test_c_family_added_line_exclusions(suffix):
+    path = f"src/example.{suffix}"
+    source = ('# true\n// true\n/* true */\n* true\nimport true\nfrom true\n'
+              'using true\ntemplate true\nstatic_assert(true);\nreturn true;\n')
+    diff = (f'+++ b/{path}\n@@ -0,0 +1,10 @@\n'
+            + ''.join('+' + line + '\n' for line in source.splitlines())
+            + f'+++ b/outside.{suffix}\n@@ -0,0 +1 @@\n+true\n')
+    lines = evidence.added_lines(diff, M.mutation_paths)
+    assert lines == [(path, 10, 'return true;')]
+    assert evidence.generate(lines, 100, 1, sources={path: source}) == [
+        evidence.Mutant(path, 10, "true", 'return true;', 'return false;')]
+
+
+@pytest.mark.scenario("mutation-selection/c-family-quote-line-exclusion/other-lines-remain-eligible")
+@pytest.mark.scenario("mutation-selection/c-family-comment-line-exclusion/prefixes-and-complete-blocks-are-protected")
+@pytest.mark.scenario("mutation-selection/c-family-comment-line-exclusion/existing-skips-and-empty-pools-are-preserved")
+@pytest.mark.scenario("mutation-selection/prose-is-never-mutated/non-python-comment-lines-excluded")
+@pytest.mark.parametrize("suffix,context", [
+    ("dart", 'var s = "${ready ? "true" : "false"}";'),
+    ("kt", 'val s = """${"""true"""}"""'), ("ts", 'const ratio = a / b;'),
+    ("swift", 'let ratio = a / b'), ("c", 'int ratio = a / b;'), ("cpp", 'auto ratio = a / b;'),
+])
+@pytest.mark.parametrize("mode", ["mutable", "automatic", "configured"])
+@pytest.mark.parametrize("uncovered", [False, True])
+def test_c_family_committed_context_and_empty_pools(
+        committed_project, tmp_path, monkeypatch, suffix, context, mode, uncovered):
+    path = f"src/example.{suffix}"
+    before = context + '\n/* unchanged\nold true\nunchanged\nold a<b\n*/\nflag = false;\n'
+    after = before.replace('old ', 'new ')
+    if mode != "automatic":
+        after = after.replace('flag = false;', 'flag = true;')
+    repo, base, head = committed_project({path: before}, {path: after})
+    diff = seal.git(repo, "diff", "--unified=0", base, head).decode()
+    assert diff.count('@@ -') == (2 if mode == "automatic" else 3)
+    assert f'+{context}\n' not in diff and '/*' not in diff and '*/' not in diff
+    (repo / path).parent.mkdir(parents=True)
+    dirty = 'true\ntrue\ntrue\ntrue\n/*\ntrue\ntrue\n*/\n'
+    (repo / path).write_text(dirty)
+    forbid_execution(monkeypatch)
+    executed = []
+
+    def mutate(source_repo, revision, mutants, effective, out):
+        assert mode == "mutable", "empty pools must not start mutation execution"
+        assert source_repo == repo and revision == head
+        executed.extend(mutants)
+        for mut in mutants:
+            mut.result = "killed"
+        return True
+
+    monkeypatch.setattr(evidence, "mutate", mutate)
+    m = replace(M, mutation_skip=("flag",) if mode == "configured" else ())
+    out = tmp_path / "out"
+    ev = evidence.gather(repo, base, head, ["covered", "missing"] if uncovered else ["covered"],
+                         {"covered"}, m, out, 1)
+    expected = ([evidence.Mutant(path, 7, "true", "flag = true;", "flag = false;", "killed")]
+                if mode == "mutable" else [])
+    assert ev.mutants == executed == expected
+    assert ev.skipped == ("" if expected else "no mutable lines added under mutation_paths")
+    assert ev.score == (1.0 if expected else None) and not ev.unmeasured and not ev.baseline_failed
+    assert ev.covered == ["covered"] and ev.uncovered == (["missing"] if uncovered else [])
+    assert ev.passed(1.0) is (not uncovered)
+    saved = json.loads((out / "evidence.json").read_text())
+    assert saved["score"] == ev.score and saved["skipped"] == ev.skipped
+    assert (repo / path).read_text() == dirty
+
+
+@pytest.mark.scenario("mutation-selection/control-flow-candidate-compatibility/analysis-failures-still-propagate")
+@pytest.mark.scenario("mutation-selection/c-family-comment-line-exclusion/existing-skips-and-empty-pools-are-preserved")
+@pytest.mark.parametrize("path,source", [("src/example.dart", 'true; "skip"'),
+                                        ("src/example.py", 'if skip:'),
+                                        ("src/example.pyi", 'if skip:')])
+def test_extension_analysis_failures_precede_exclusions(tmp_path, monkeypatch, path, source):
+    forbid_execution(monkeypatch)
+    for sources in ({}, {path: source}) if path.endswith((".py", ".pyi")) else ({},):
+        with pytest.raises(ValueError, match=path):
+            evidence.generate(candidates(source, path), 1, 1, sources=sources, mutation_skip=("skip",))
+
+    def git(repo, *args):
+        if args[0] == "diff":
+            return f'+++ b/{path}\n@@ -0,0 +1 @@\n+{source}\n'.encode()
+        raise RuntimeError("missing committed source")
+
+    monkeypatch.setattr(evidence, "git", git)
+    with pytest.raises(ValueError, match=path):
+        evidence.gather(tmp_path, "base", "head", [], set(), replace(M, mutation_skip=("skip",)),
+                        tmp_path / "out", 1)
+    assert not (tmp_path / "out/evidence.json").exists()

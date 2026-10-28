@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from specloop import verify
+from specloop.manifest import DEFAULT_MUTATION_INVALID_STEPS as BUILD_STEPS
 from specloop.manifest import Manifest, Step, matches
 from specloop.seal import git
 
@@ -45,6 +46,20 @@ OPERATORS = [
     ("+", re.compile(r"(?<=\w|\))\s\+\s(?=[\w(])"), " - "),
     ("-", re.compile(r"(?<=\w|\))\s-\s(?=[\w(])"), " + "),
     ("int", re.compile(r"(?<![\w.])([0-9]+)(?![\w.])"), None),  # k -> k+1
+]
+C_FAMILY_SUFFIXES = {".dart", ".ts", ".swift", ".kt", ".c", ".cpp"}
+C_FAMILY_OPERATORS = [
+    ("true", re.compile(r"(?<![\w$])true(?![\w$])"), "false"),
+    ("false", re.compile(r"(?<![\w$])false(?![\w$])"), "true"),
+    ("&&", re.compile(r"(?<!&)&&(?![&=])"), "||"),
+    ("||", re.compile(r"(?<!\|)\|\|(?![|=])"), "&&"),
+    ("==", re.compile(r"(?<![=!<>])==(?![=!<>])"), "!="),
+    ("!=", re.compile(r"(?<![=!<>])!=(?![=!<>])"), "=="),
+    ("<", re.compile(r"(?<![=!<>])<(?![=!<>])"), "<="),
+    ("<=", re.compile(r"(?<![=!<>])<=(?![=!<>])"), "<"),
+    (">", re.compile(r"(?<![=!<>-])>(?![=!<>])"), ">="),
+    (">=", re.compile(r"(?<![=!<>-])>=(?![=!<>])"), ">"),
+    ("!", re.compile(r"(?<![\w$)\]}!])!(?=[ \t]*(?:[^\W\d]|[$(!]))"), ""),
 ]
 SKIP = re.compile(r"^\s*(#|//|/\*|\*|import |from |using |template|static_assert)")
 PYTHON_SKIP = re.compile(r"^\s*(import |from |using |template|static_assert)")
@@ -291,6 +306,17 @@ def generate(lines: list[tuple[str, int, str]], count: int, seed: int, *,
     for path, n, text in lines:
         if any(pattern in text for pattern in mutation_skip):
             continue
+        if Path(path).suffix in C_FAMILY_SUFFIXES:
+            if any(quote in text for quote in "'\"`") or text.lstrip().startswith(("//", "/*", "*")):
+                continue
+            for name, rx, replacement in C_FAMILY_OPERATORS:
+                for match in rx.finditer(text):
+                    if any(match.start() < end and match.end() > start
+                           for start, end in protected[path].get(n, ())):
+                        continue
+                    new = text[:match.start()] + replacement + text[match.end():]
+                    options.append(Mutant(path, n, name, text, new))
+            continue
         for name, rx, repl in OPERATORS:
             for m in rx.finditer(text):
                 # Comments and non-Python spans end at EOL; valid Python needs a
@@ -323,7 +349,6 @@ def generate(lines: list[tuple[str, int, str]], count: int, seed: int, *,
     return picked
 
 
-BUILD_STEPS = ("configure", "build")
 # A mutant gets this many times the baseline's duration per step (at least
 # MIN_MUTANT_SECONDS): a mutant that hangs is caught by its timeout instead of
 # holding the gate for the step's full ceiling (15 minutes for Nightshift's
@@ -399,7 +424,7 @@ def _mutate_one(number: int, mut: Mutant, baseline_src: Path, head: str,
         narrowed = any("{mutant_path}" in arg for s in steps for arg in s.run)
         uses_path = narrowed or any("{mutant_path}" in arg for s in m.prepare for arg in s.run)
         phases = [(mutant_out, mut.path), (mutant_out / "confirmation", "")] if narrowed else [(mutant_out, "")]
-        invalid_steps = set(BUILD_STEPS) | {s.id for s in m.prepare}
+        invalid_steps = set(m.mutation_invalid_steps) | {s.id for s in m.prepare}
         for run_out, path in phases:
             if run_out != mutant_out:
                 run_dirs.append(run_out)

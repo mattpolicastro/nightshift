@@ -279,7 +279,7 @@ def test_evidence_links_resolve_and_commands_remain_separate():
 def test_evidence_citations_and_pending_human_rollout_are_reviewable():
     _, section = guide_evidence()
     references = dict(re.findall(r"\[((?:issue|PR) #\d+)\]\(([^)]+)\)", section))
-    expected = {"issue": (4, 21, 31, 33, 73), "PR": (27, 44, 48, 63, 64)}
+    expected = {"issue": (4, 21, 31, 33, 73, 133), "PR": (27, 44, 48, 63, 64)}
     assert set(references) == {f"{kind} #{n}" for kind, nums in expected.items() for n in nums}
     for label, url in references.items():
         kind, number = label.split(" #")
