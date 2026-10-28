@@ -154,7 +154,8 @@ def test_warm_sandbox_and_stored_payload(warming, monkeypatch, tmp_path):
     m = replace(m, deny_read=(str(secret),), writable=(str(tmp_path),))
     script = 'chmod u+w "$1" && exit 91; touch "$1/new" && exit 92; '
     script += f'cat "{secret}" && exit 93; touch "{tmp_path}/outside" && exit 94; ' + SUCCESS
-    verify.warm_snapshots(repo, commit(script), m, context)
+    sha = commit(script)
+    verify.warm_snapshots(repo, sha, m, context)
     assert events[-1][0] == "snapshot_warmed"
     entry, _ = verify._snapshot_entries(context.root)[0]
     for prepare in (False, True):
@@ -164,3 +165,11 @@ def test_warm_sandbox_and_stored_payload(warming, monkeypatch, tmp_path):
                      ["/usr/bin/touch", str(entry / "payload/new")], ["/bin/rm", "-rf", str(entry)]):
             assert subprocess.run(verify.wrap(argv, sb), capture_output=True).returncode != 0
     assert not (tmp_path / "outside").exists()
+    probe = ('chmod u+w "$1/dependency" && exit 91; touch "$1/new" && exit 92; '
+             'rm -rf "$1" && exit 93; touch "$2/private"')
+    argv = ("/bin/sh", "-c", probe, "sh", str(entry / "payload"), "{snapshot:deps}")
+    m = replace(m, prepare=(manifest.Step("prepare-probe", argv, 0, 10),),
+                verify=(manifest.Step("verify-probe", argv, 0, 10),))
+    receipts = verify.run_steps(repo, sha, m.verify, m, tmp_path / "consumer", snapshots=context)
+    assert verify.ok(receipts, m.prepare + m.verify), verify.summary(receipts)
+    assert (entry / "payload/dependency").read_text() == "base"

@@ -307,14 +307,81 @@ def extract(repo: Path, sha: str, src: Path) -> None:
     subprocess.run(["chmod", "-R", "a-w", str(src)], check=True)
 
 
-def run_steps(repo: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out: Path) -> list[Receipt]:
+@functools.cache
+def _clone_api():
+    clone = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True).clonefile
+    clone.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32]
+    clone.restype = ctypes.c_int
+    return clone
+
+
+def _clone_payload(payload: Path, destination: Path) -> None:
+    clone = _clone_api()
+    for source in _payload_paths(payload, readonly=True):
+        target = destination / source.relative_to(payload)
+        mode = source.stat().st_mode
+        if stat.S_ISDIR(mode):
+            target.mkdir()
+        elif clone(os.fsencode(source), os.fsencode(target), 0) != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code), str(target))
+        target.chmod(stat.S_IMODE(mode) | stat.S_IWUSR)
+
+
+def _consume_snapshots(src: Path, sha: str, m: Manifest, out: Path,
+                       context: SnapshotContext | None) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not m.snapshots:
+        return values
+    with (out / "snapshot-events.jsonl").open("w") as events:
+        for definition in m.snapshots:
+            destination = (out / "build" / "snapshots" / definition.id).resolve()
+            destination.parent.mkdir(exist_ok=True)
+            values[f"snapshot:{definition.id}"] = str(destination)
+            key, payload = snapshot_key(src, definition), None
+            reason = "context_unavailable" if context is None else "key_unavailable"
+            if context is not None and key is not None:
+                try:
+                    entries = list((context.root / "entries").iterdir())
+                    valid = _snapshot_entries(context.root)
+                    payload = next((p / "payload" for p, d in valid
+                                    if d["id"] == definition.id and d["key"] == key), None)
+                    reason = ("invalid" if any(re.fullmatch(rf"[1-9][0-9]*-{re.escape(definition.id)}-{key}", p.name) for p in entries)
+                              else "stale" if any(d["id"] == definition.id for _, d in valid) else "missing")
+                except FileNotFoundError:
+                    reason = "missing"
+                except (OSError, ValueError):
+                    reason = "invalid"
+            if payload is not None:
+                try:
+                    _clone_payload(payload, destination)
+                    continue
+                except (OSError, AttributeError, ValueError):
+                    reason = "clone_failed"
+            data = dict(id=definition.id, key=key, sha=sha, reason=reason, out=str(out))
+            events.write(json.dumps(dict(event="snapshot_fallback", **data)) + "\n")
+            events.flush()
+            if context is not None:
+                context.emit("snapshot_fallback", **data)
+            # Never run commands with uncertain partial output. Cleanup errors propagate.
+            if destination.exists():
+                shutil.rmtree(destination)
+            destination.mkdir()
+    return values
+
+
+def run_steps(repo: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out: Path, *,
+              snapshots: SnapshotContext | None = None) -> list[Receipt]:
     """Extract once, prepare dependencies, then run the requested offline checks."""
     src = out / "src"
     extract(repo, sha, src)
-    return run_extracted(src, sha, steps, m, out)
+    if snapshots is None:
+        return run_extracted(src, sha, steps, m, out)
+    return run_extracted(src, sha, steps, m, out, snapshots=snapshots)
 
 
-def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out: Path) -> list[Receipt]:
+def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out: Path, *,
+                  snapshots: SnapshotContext | None = None) -> list[Receipt]:
     """Prepare a fresh build from an already read-only source tree, then check it."""
     path = tool_path()
     build = out / "build"
@@ -323,11 +390,12 @@ def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out
     for d in ("home", "tmp"):
         (build / d).mkdir(parents=True)
     sb = out / "verify.sb"
-    sb.write_text(profile(build, m))
+    sb.write_text(profile(build, m, snapshots=snapshots))
     prep_sb = out / "prepare.sb"
     if m.prepare:
-        prep_sb.write_text(profile(build, m, prepare=True, src=src))
-    values = {**m.vars, "src": str(src), "build": str(build), "sha": sha}
+        prep_sb.write_text(profile(build, m, prepare=True, src=src, snapshots=snapshots))
+    values = {**m.vars, "src": str(src), "build": str(build), "sha": sha,
+              **_consume_snapshots(src, sha, m, out, snapshots)}
     scheduled = [(s, prep_sb) for s in m.prepare] + [(s, sb) for s in steps]
     return _run_commands(scheduled, values, build, out, path)
 
