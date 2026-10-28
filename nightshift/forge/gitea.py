@@ -8,7 +8,8 @@ from urllib.parse import quote
 
 from nightshift.forge import ForgeError
 from nightshift.forge.http import GiteaHTTPError, GiteaTransport
-from nightshift.queue import Issue
+from nightshift.forge.types import ResponseText
+from nightshift.queue import FeedbackItem, Issue, _block, has_instructions
 
 
 class GiteaForge:
@@ -65,10 +66,11 @@ class GiteaForge:
         return "/api/v1/repos/" + "/".join(
             quote(part, safe="") for part in (*repo.split("/"), *components))
 
-    def _request(self, method: str, path: str, *, query=None, json_body=None):
+    def _request(self, method: str, path: str, *, query=None, json_body=None,
+                 blocking_fallback: bool = False):
         """The sole transport boundary; guard origin takes priority over type.
 
-        Future suppression/reconciliation belongs in the genuine HTTP-error
+        Suppression/reconciliation belongs in the genuine HTTP-error
         branch below, before translation, never around a broad exception catch.
         """
         scope = self._guard_error.set(None)
@@ -77,9 +79,160 @@ class GiteaForge:
         except GiteaHTTPError as error:
             if self._guard_error.get() is error:
                 raise
+            if blocking_fallback:
+                return None
             raise ForgeError("Gitea request failed", transient=error.transient) from None
         finally:
             self._guard_error.reset(scope)
+
+    @staticmethod
+    def _login(user: object) -> str | None:
+        login = user.get("login") if isinstance(user, dict) else None
+        return login if isinstance(login, str) and login.strip() else None
+
+    def _association(self, user: object) -> str:
+        login = self._login(user)
+        return "OWNER" if (login is not None and login.casefold() in self._trusted_logins
+                           and login.casefold() != self._bot_login) else "NONE"
+
+    def _is_bot(self, user: object) -> bool:
+        login = self._login(user)
+        return login is not None and login.casefold() == self._bot_login
+
+    def _record(self, row: dict) -> dict:
+        record = dict(row)
+        record.pop("authorAssociation", None)
+        record["author_association"] = self._association(row.get("user"))
+        record["user"] = {"login": self._login(row.get("user"))}
+        if row.get("body") is not None and not isinstance(row["body"], str):
+            raise ForgeError("Invalid Gitea record body", transient=False)
+        record["body"] = row.get("body") or ""
+        return record
+
+    def _detail(self, path: str) -> dict:
+        _, _, row = self._request("GET", path)
+        if not isinstance(row, dict):
+            raise ForgeError("Invalid Gitea detail", transient=False)
+        return row
+
+    def issue_author(self, repo: str, number: int) -> dict:
+        return self._record(self._detail(self._repo_path(repo, "issues", self._number(number))))
+
+    def comment_pages(self, repo: str, number: int) -> list[list[dict]]:
+        pages = self._pages(self._repo_path(repo, "issues", self._number(number), "comments"))
+        return [[self._record(row) for row in page] for page in pages]
+
+    def issue_for_draft(self, repo: str, number: int) -> dict:
+        row = self.issue_author(repo, number)
+        if row.get("state") not in ("open", "closed") or not isinstance(row.get("title"), str):
+            raise ForgeError("Invalid Gitea issue facts", transient=False)
+        self._label_map(row.get("labels"))
+        comments = [{"id": comment["id"], "body": comment["body"],
+                     "author": comment["user"],
+                     "authorAssociation": comment["author_association"],
+                     "createdAt": comment.get("created_at"),
+                     "updatedAt": comment.get("updated_at")}
+                    for page in self.comment_pages(repo, number) for comment in page
+                    if not self._is_bot(comment["user"])]
+        return {"state": row["state"].upper(), "title": row["title"], "body": row["body"],
+                "labels": row["labels"], "author": row["user"],
+                "authorAssociation": row["author_association"], "comments": comments}
+
+    def repository(self, repo: str) -> dict:
+        return self._detail(self._repo_path(repo))
+
+    def collaborator_response(self, repo: str, login: str) -> ResponseText:
+        raise ForgeError("Gitea membership operations are unsupported", transient=False)
+
+    def organization_member_response(self, owner: str, login: str) -> ResponseText:
+        raise ForgeError("Gitea membership operations are unsupported", transient=False)
+
+    def open_blockers(self, repo: str, numbers: list[int]) -> list[int]:
+        blocking = []
+        for number in numbers:
+            result = self._request("GET", self._repo_path(repo, "issues", self._number(number)),
+                                   blocking_fallback=True)
+            row = result[2] if result is not None else None
+            if not isinstance(row, dict) or row.get("state") != "closed":
+                blocking.append(number)
+        return blocking
+
+    def label_event_pages(self, repo: str, number: int) -> list[list[dict]]:
+        pages = self._pages(self._repo_path(repo, "issues", self._number(number), "timeline"))
+        events = []
+        for page in pages:
+            for row in page:
+                if row.get("type") != "label":
+                    continue
+                label = row.get("label")
+                if (not isinstance(label, dict) or not isinstance(label.get("name"), str)
+                        or not label["name"].strip() or self._login(row.get("user")) is None
+                        or type(row.get("removed")) is not bool
+                        or not isinstance(row.get("created_at"), str) or not row["created_at"]):
+                    raise ForgeError("Invalid Gitea label event", transient=False)
+                events.append({"id": row["id"], "event": "unlabeled" if row["removed"] else "labeled",
+                               "actor": {"login": self._login(row["user"])},
+                               "author_association": self._association(row["user"]),
+                               "label": label, "created_at": row["created_at"]})
+        return [sorted(events, key=lambda event: event["id"])] if events else []
+
+    def pr_feedback_records(self, repo: str, number: int) -> list[tuple[str, dict]]:
+        conversation = [row for page in self.comment_pages(repo, number) for row in page]
+        path = self._repo_path(repo, "pulls", self._number(number), "reviews")
+        reviews = [self._record(row) for page in self._pages(path) for row in page]
+        inline = [row for review in reviews
+                  for page in self._pages(path + "/" + str(review["id"]) + "/comments")
+                  for row in page]
+        records = []
+        seen: dict[tuple[str, int], dict] = {}
+        for source, rows in (("conversation", conversation), ("review", reviews), ("inline", inline)):
+            for row in rows:
+                key = (source, row["id"])
+                if key in seen:
+                    if json.dumps(seen[key], sort_keys=True) != json.dumps(row, sort_keys=True):
+                        raise ForgeError("Conflicting Gitea feedback", transient=False)
+                    continue
+                seen[key] = dict(row)
+                if source == "inline":
+                    row = self._record(row)
+                if row["author_association"] != "OWNER":
+                    continue
+                if source == "review":
+                    state = row.get("state")
+                    if not isinstance(state, str) or not state:
+                        raise ForgeError("Invalid Gitea review state", transient=False)
+                    row["state"] = {"COMMENT": "COMMENTED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}.get(
+                        state.upper(), state.upper())
+                elif source == "inline":
+                    if row.get("path") is not None and not isinstance(row["path"], str):
+                        raise ForgeError("Invalid Gitea inline path", transient=False)
+                    for field in ("line", "original_line", "position"):
+                        value = row.get(field)
+                        if value is not None and (type(value) is not int or value < 0):
+                            raise ForgeError("Invalid Gitea inline location", transient=False)
+                    # Gitea calls its inline location position; retain the wire field too.
+                    if "line" not in row and "position" in row:
+                        row["line"] = row["position"]
+                records.append((source, row))
+        return records
+
+    def pr_feedback_items(self, repo: str, number: int) -> list[FeedbackItem]:
+        items = []
+        for source, row in self.pr_feedback_records(repo, number):
+            suffix = ""
+            if source == "review":
+                state = row["state"].replace("_", " ").lower()
+                suffix = f" ({state})" if state and state != "commented" else ""
+            elif source == "inline":
+                where = row.get("path") or ""
+                line = row.get("line") or row.get("original_line")
+                if where and line:
+                    where = f"{where}:{line}"
+                suffix = f" on `{where}`" if where else ""
+            block = _block(row["user"], row["body"], suffix=suffix)
+            if block and has_instructions([block]):
+                items.append(FeedbackItem(f'{source}:{row["id"]}', block))
+        return items
 
     def _pages(self, path: str, query=None) -> list[list[dict]]:
         """Read through an empty page or refuse the entire listing.

@@ -208,6 +208,272 @@ def test_guard_origin_does_not_leak_to_later_transport_error(fake, nested):
     assert forge._guard_error.get() is None
 
 
+STAMP = "2026-10-20T12:00:00Z"
+ROOT = "/gitea/api/v1/repos/owner/repo"
+
+
+def authored(identity=1, login="Alice", body="Change λ\n\nKeep 🦉", **extra):
+    return dict(id=identity, user={"login": login} if login is not None else None,
+                body=body, author_association="OWNER", authorAssociation="OWNER",
+                created_at=STAMP, updated_at=STAMP, **extra)
+
+
+@pytest.mark.scenario("gitea-forge/standalone-adapter/membership-is-unsupported")
+@pytest.mark.parametrize("method", ["collaborator_response", "organization_member_response"])
+def test_membership_is_explicitly_unsupported(fake, method):
+    def guard():
+        pytest.fail("Unsupported membership must not dispatch")
+    with pytest.raises(ForgeError, match="unsupported") as caught:
+        getattr(make_forge(fake, guard=guard), method)("owner/repo", "Alice")
+    assert not caught.value.transient and not fake.calls
+
+
+@pytest.mark.scenario("gitea-forge/allowlist-identity-projection/allowlist-alone-determines-trust")
+@pytest.mark.parametrize("login, association", [("aLiCe", "OWNER"), ("Mallory", "NONE"),
+                                               (None, "NONE"), ("Robot", "NONE"),
+                                               ("rObOt", "NONE"), ("ROBOT", "NONE")])
+def test_gitea_trust_from_allowlist_only(fake, login, association):
+    row = authored(login=login, state="APPROVED", submitted_at=STAMP)
+    server_claim = "NONE" if association == "OWNER" else "OWNER"
+    row.update(author_association=server_claim, authorAssociation=server_claim)
+    issue = candidate(1, [], user=row["user"], author_association=server_claim,
+                      authorAssociation=server_claim, comments=[row], reviews=[{**row, "comments": [row]}])
+    fake.repository("owner/repo", labels=[], pulls=[issue],
+                    facts={"owner": {"login": "Mallory", "type": "User"}, "permissions": {"admin": True}})
+    forge = make_forge(fake, trusted_logins=["Alice", "Robot"])
+    assert forge.repository("owner/repo")["owner"]["login"] == "Mallory"
+    assert forge.issue_author("owner/repo", 1)["author_association"] == association
+    comment = forge.comment_pages("owner/repo", 1)[0][0]
+    assert comment["author_association"] == association
+    assert "authorAssociation" not in comment
+    draft = forge.issue_for_draft("owner/repo", 1)
+    assert draft["authorAssociation"] == association
+    if login is not None and login.casefold() == "robot":
+        assert draft["comments"] == []  # No daemon body prefix was supplied.
+    else:
+        assert draft["comments"][0]["authorAssociation"] == association
+    records = forge.pr_feedback_records("owner/repo", 1)
+    assert [source for source, _ in records] == (["conversation", "review", "inline"]
+                                               if association == "OWNER" else [])
+    assert all(record["author_association"] == "OWNER" for _, record in records)
+
+
+@pytest.mark.scenario("gitea-forge/allowlist-identity-projection/allowlist-alone-determines-trust")
+def test_absent_user_cannot_borrow_server_author_identity(fake):
+    row = authored(author={"login": "Alice"})
+    del row["user"]
+    issue = candidate(1, [], author={"login": "Alice"}, author_association="OWNER", comments=[row])
+    fake.repository("owner/repo", labels=[], issues=[issue])
+    forge = make_forge(fake)
+    assert forge.issue_author("owner/repo", 1)["author_association"] == "NONE"
+    assert forge.comment_pages("owner/repo", 1)[0][0]["author_association"] == "NONE"
+    assert forge.issue_for_draft("owner/repo", 1)["comments"][0]["authorAssociation"] == "NONE"
+
+
+def label_event(identity=1, **extra):
+    return dict(id=identity, type="label", label={"name": "ready"}, user={"login": "Alice"},
+                removed=False, created_at=STAMP) | extra
+
+
+@pytest.mark.scenario("gitea-forge/label-timeline-evidence/label-actions-and-actors")
+def test_timeline_actions_sorted_and_projected(fake):
+    rows = [label_event(4, user={"login": "ROBOT"}),
+            {"id": 2, "type": "comment", "body": "Alice applied ready"},
+            label_event(3, removed=True, user={"login": "Mallory"}, author_association="OWNER"),
+            label_event(1, user={"login": "aLiCe"})]
+    fake.repository("owner/repo", labels=[], issues=[candidate(1, [], timeline=rows)], page_size=2)
+    path = ROOT + "/issues/1/timeline"
+    fake.route("GET", path, Reply([rows[0], *rows[2:]]), page=2)
+    pages = make_forge(fake, trusted_logins=["Alice", "Robot"]).label_event_pages("owner/repo", 1)
+    assert [row for page in pages for row in page] == [
+        {"id": identity, "event": action, "actor": {"login": actor},
+         "author_association": trust, "label": {"name": "ready"}, "created_at": STAMP}
+        for identity, action, actor, trust in [(1, "labeled", "aLiCe", "OWNER"),
+                                               (3, "unlabeled", "Mallory", "NONE"),
+                                               (4, "labeled", "ROBOT", "NONE")]]
+    assert [call.query for call in fake.calls] == [
+        {"page": [str(page)], "limit": ["50"]} for page in (1, 2, 3)]
+    assert all(call.path == path for call in fake.calls)
+
+
+@pytest.mark.scenario("gitea-forge/label-timeline-evidence/unknown-label-evidence")
+@pytest.mark.parametrize("patch", [{"id": None}, {"id": True}, {"id": 0}, {"id": "2"},
+    {"user": None}, {"user": {}}, {"user": {"login": ""}}, {"user": {"login": True}},
+    {"label": None}, {"label": {}}, {"label": {"name": ""}}, {"label": {"name": 1}},
+    {"removed": None}, {"removed": "false"}, {"removed": 0}, {"created_at": None},
+    {"id": 1, "removed": True}])
+def test_invalid_timeline_evidence_refused(fake, patch):
+    rows = [label_event(), label_event(2, **patch)]
+    fake.repository("owner/repo", labels=[], issues=[candidate(1, [], timeline=rows)])
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).label_event_pages("owner/repo", 1)
+    assert not caught.value.transient and len(fake.calls) in (2, 3)
+
+
+@pytest.mark.scenario("gitea-forge/issue-and-feedback-records/draft-facts-and-blockers")
+def test_issue_draft_repository_and_blocker_facts(fake):
+    labels = [label_row(1, "ready")]
+    comments = [authored(), authored(2, "Robot", "Bot without prefix"), authored(3, None)]
+    issue = candidate(1, labels, user={"login": "Alice"}, comments=comments)
+    facts = {"id": 80, "name": "repo", "owner": {"login": "Mallory"}, "default_branch": "main"}
+    fake.repository("owner/repo", labels=labels, issues=[issue, candidate(2, []),
+                     {**candidate(3, []), "state": "closed"}], facts=facts)
+    forge = make_forge(fake)
+    assert forge.open_blockers("owner/repo", []) == [] and not fake.calls
+    assert forge.repository("owner/repo") == facts
+    draft = forge.issue_for_draft("owner/repo", 1)
+    assert {key: draft[key] for key in ("state", "title", "body", "labels")} == {
+        "state": "OPEN", "title": "Issue 1", "body": "Details", "labels": labels}
+    assert [(c["id"], c["authorAssociation"], c["createdAt"]) for c in draft["comments"]] == [
+        (1, "OWNER", STAMP), (3, "NONE", STAMP)]
+    assert forge.open_blockers("owner/repo", [3, 2, 1, 2]) == [2, 1, 2]
+
+
+@pytest.fixture
+def feedback_repo(fake):
+    rows = [authored(i, body=body, state="COMMENT", submitted_at=STAMP, path="src/λ.py", position=4)
+            for i, body in enumerate(("Change λ\n\nKeep 🦉", "  ", "**nightshift** — escalation"), 1)]
+    rows += [authored(4, "Mallory"), authored(5, "rObOt"), authored(6, None)]
+    rows[0]["state"] = "REQUEST_CHANGES"
+    reviews = [dict(row, comments=[dict(item) for item in rows] if row["id"] == 1 else []) for row in rows]
+    # Untrusted reviewers can have trusted inline replies; read every review.
+    reviews[3]["comments"] = [dict(rows[0]), authored(7, path="old.py", line=None, original_line=9)]
+    issue = candidate(1, [], comments=rows, reviews=reviews)
+    fake.repository("owner/repo", labels=[], pulls=[issue], page_size=2)
+    return issue
+
+
+@pytest.mark.scenario("gitea-forge/issue-and-feedback-records/complete-identified-feedback")
+def test_complete_feedback_records_and_existing_format(fake, feedback_repo):
+    from nightshift.queue import FeedbackItem, _feedback_id
+
+    forge = make_forge(fake, trusted_logins=["Alice", "Robot"])
+    records = forge.pr_feedback_records("owner/repo", 1)
+    assert [_feedback_id(source, row) for source, row in records] == [
+        "conversation:1", "conversation:2", "conversation:3", "review:1", "review:2", "review:3",
+        "inline:1", "inline:2", "inline:3", "inline:7"]
+    assert all(row["submitted_at" if source == "review" else "created_at"] == STAMP
+               and row["updated_at"] == STAMP for source, row in records)
+    assert [row["body"] for _, row in records].count("  ") == 3
+    assert forge.pr_feedback_items("owner/repo", 1) == [
+        FeedbackItem("conversation:1", "**Alice:**\n\nChange λ\n\nKeep 🦉"),
+        FeedbackItem("review:1", "**Alice (changes requested):**\n\nChange λ\n\nKeep 🦉"),
+        FeedbackItem("inline:1", "**Alice on `src/λ.py:4`:**\n\nChange λ\n\nKeep 🦉"),
+        FeedbackItem("inline:7", "**Alice on `old.py:9`:**\n\nChange λ\n\nKeep 🦉")]
+    assert all(call.method == "GET" and call.query["limit"] == ["50"] for call in fake.calls)
+    assert {call.path for call in fake.calls} == {ROOT + "/issues/1/comments", ROOT + "/pulls/1/reviews",
+                     *(ROOT + f"/pulls/1/reviews/{i}/comments" for i in range(1, 7))}
+    assert all(any(call.path == path and call.query["page"] != ["1"] for call in fake.calls)
+               for path in (ROOT + "/issues/1/comments", ROOT + "/pulls/1/reviews",
+                            ROOT + "/pulls/1/reviews/1/comments", ROOT + "/pulls/1/reviews/4/comments"))
+
+
+@pytest.mark.scenario("gitea-forge/issue-and-feedback-records/complete-identified-feedback")
+@pytest.mark.parametrize("endpoint", ["issues/1/comments", "pulls/1/reviews", "pulls/1/reviews/1/comments"])
+@pytest.mark.parametrize("failure", ["transport", "missing-id", "conflict", "malformed-page"])
+@pytest.mark.parametrize("method", ["pr_feedback_records", "pr_feedback_items"])
+def test_feedback_partial_reads_refused(fake, feedback_repo, endpoint, failure, method):
+    row = dict(feedback_repo["comments"][0])
+    if failure == "missing-id":
+        row.pop("id")
+        reply = Reply([row])
+    elif failure == "conflict":
+        row["body"] = "Edited"
+        reply = Reply([row])
+    elif failure == "malformed-page":
+        reply = Reply({"secret": SECRET})
+    else:
+        reply = Reply(status=503, raw=SECRET.encode())
+    fake.route("GET", ROOT + "/" + endpoint, reply, reply, reply, page=2)
+    with pytest.raises(ForgeError) as caught:
+        getattr(make_forge(fake), method)("owner/repo", 1)
+    assert caught.value.transient is (failure == "transport")
+    assert SECRET not in "".join(traceback.format_exception(caught.value))
+    assert fake.calls[-1].path == ROOT + "/" + endpoint
+
+
+@pytest.mark.scenario("gitea-forge/issue-and-feedback-records/complete-identified-feedback")
+@pytest.mark.parametrize("change", [{"body": "different"}, {"created_at": "later"},
+                                    {"user": {"login": "Alice", "id": 900}}])
+def test_conflicting_inline_identity_across_reviews_refused(fake, feedback_repo, change):
+    feedback_repo["reviews"][3]["comments"][0].update(change)
+    with pytest.raises(ForgeError, match="Conflicting"):
+        make_forge(fake).pr_feedback_records("owner/repo", 1)
+
+
+@pytest.mark.scenario("gitea-forge/issue-and-feedback-records/complete-identified-feedback")
+@pytest.mark.parametrize("body", [None, "", "  ", "**nightshift** — escalation", "Act"])
+def test_blank_feedback_baselines_and_commented_review_format(fake, body):
+    row = authored(body=body, state="COMMENT", submitted_at=STAMP, path="file.py", line=2)
+    issue = candidate(1, [], comments=[row], reviews=[{**row, "comments": [row]}])
+    fake.repository("owner/repo", labels=[], pulls=[issue])
+    forge = make_forge(fake)
+    records = forge.pr_feedback_records("owner/repo", 1)
+    assert [source for source, _ in records] == ["conversation", "review", "inline"]
+    assert all(record["body"] == (body or "") for _, record in records)
+    items = forge.pr_feedback_items("owner/repo", 1)
+    assert [item.id for item in items] == (["conversation:1", "review:1", "inline:1"] if body == "Act" else [])
+    if items:
+        assert items[1].block == "**Alice:**\n\nAct"
+
+
+@pytest.mark.scenario("gitea-forge/issue-and-feedback-records/complete-identified-feedback")
+@pytest.mark.parametrize("source, patch", [("conversation", {"body": []}),
+    ("review", {"state": None}), ("review", {"state": []}),
+    ("inline", {"path": []}), ("inline", {"position": True}), ("inline", {"line": "2"})])
+def test_malformed_eligible_feedback_refused(fake, feedback_repo, source, patch):
+    row = {"conversation": feedback_repo["comments"][0], "review": feedback_repo["reviews"][0],
+           "inline": feedback_repo["reviews"][0]["comments"][0]}[source]
+    row.update(patch)
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).pr_feedback_items("owner/repo", 1)
+    assert not caught.value.transient
+
+
+@pytest.mark.scenario("gitea-forge/issue-and-feedback-records/draft-facts-and-blockers")
+def test_drafting_requires_complete_comment_pages(fake):
+    fake.repository("owner/repo", labels=[], issues=[candidate(1, [], comments=[authored()])])
+    fake.route("GET", ROOT + "/issues/1/comments", Reply(status=403), page=2)
+    with pytest.raises(ForgeError):
+        make_forge(fake).issue_for_draft("owner/repo", 1)
+
+
+@pytest.mark.scenario("gitea-forge/failure-and-guard-boundaries/transport-failure-classification")
+@pytest.mark.parametrize("reply, attempts", [(Reply(status=503, raw=SECRET.encode()), 3),
+    (Reply(status=403, raw=SECRET.encode()), 1), (OSError(SECRET), 3),
+    (Reply(raw=SECRET.encode()), 1), (Reply({}), 1), (Reply({"state": True}), 1)])
+def test_unreadable_blockers_retained_in_input_order(fake, offline, reply, attempts):
+    fake.repository("owner/repo", labels=[], issues=[{**candidate(1, []), "state": "closed"}])
+    for number in (3, 2):
+        fake.route("GET", ROOT + f"/issues/{number}", *([reply] * attempts))
+    assert make_forge(fake).open_blockers("owner/repo", [3, 1, 2]) == [3, 2]
+    assert [call.path for call in fake.calls] == [ROOT + "/issues/3"] * attempts + [
+        ROOT + "/issues/1"] + [ROOT + "/issues/2"] * attempts
+    assert offline == ([0.1, 0.2] * 2 if attempts == 3 else [])
+
+
+@pytest.mark.scenario("gitea-forge/failure-and-guard-boundaries/guard-exception-identity")
+@pytest.mark.parametrize("kind", ["http", "forge", "os", "pause"])
+@pytest.mark.parametrize("stop", [1, 2, 3])
+def test_blocker_guards_never_become_fallback(fake, kind, stop):
+    error = guard_error(kind)
+    calls = []
+
+    def guard():
+        calls.append(True)
+        if len(calls) == stop:
+            raise error
+
+    fake.route("GET", ROOT + "/issues/1", Reply(status=503), Reply(status=503))
+    forge = make_forge(fake, guard=guard)
+    with pytest.raises(type(error)) as caught:
+        forge.open_blockers("owner/repo", [1, 2])
+    assert caught.value is error and len(fake.calls) == stop - 1
+    assert forge._guard_error.get() is None
+    fake.route("GET", ROOT + "/issues/2", *([error if kind == "http" else Reply(status=503)] * 3))
+    assert forge.open_blockers("owner/repo", [2]) == [2]
+
+
 @pytest.mark.scenario("gitea-forge/complete-endpoint-pagination/short-intermediate-page")
 def test_short_pages_and_queries_remain_endpoint_local(fake):
     forge = make_forge(fake)

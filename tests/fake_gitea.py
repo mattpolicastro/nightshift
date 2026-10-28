@@ -36,22 +36,42 @@ class FakeGitea:
         self.repositories = {}
         self.silent_label_writes = set()
 
-    def repository(self, repo, *, labels, issues=(), pulls=(), page_size=1):
-        """Install stateful label/poll routes; deliberately ignore label filters."""
+    def repository(self, repo, *, labels, issues=(), pulls=(), page_size=1, facts=None):
+        """Install factual read/label routes; deliberately ignore label filters.
+
+        Issues may carry comments and timeline arrays; PRs may additionally
+        carry reviews with nested comments. Each list paginates independently.
+        """
         self.repositories[repo] = dict(labels=labels, issues=list(issues),
-                                       pulls=list(pulls), page_size=page_size)
+                                       pulls=list(pulls), page_size=page_size,
+                                       facts=facts if facts is not None else {"name": repo.split("/")[1]})
 
     def _state_reply(self, call, page):
         for repo, state in self.repositories.items():
             root = urlsplit(self.base_url).path + "/api/v1/repos/" + "/".join(
                 quote(part, safe="") for part in repo.split("/"))
             rows = None
+            if call.method == "GET" and call.path == root:
+                return Reply(state["facts"])
             for endpoint in ("labels", "issues", "pulls"):
                 if call.path == root + "/" + endpoint and call.method == "GET":
                     rows = state[endpoint]
                     if endpoint != "labels" and "state" in call.query:
                         rows = [row for row in rows if row["state"] == call.query["state"][0]]
             for issue in [*state["issues"], *state["pulls"]]:
+                detail_path = root + f'/issues/{issue["number"]}'
+                if call.method == "GET":
+                    if call.path == detail_path:
+                        return Reply(issue)
+                    for endpoint in ("comments", "timeline"):
+                        if call.path == detail_path + "/" + endpoint:
+                            rows = issue.get(endpoint, [])
+                    review_path = root + f'/pulls/{issue["number"]}/reviews'
+                    if call.path == review_path:
+                        rows = issue.get("reviews", [])
+                    for review in issue.get("reviews", []):
+                        if call.path == review_path + f'/{review["id"]}/comments':
+                            rows = review.get("comments", [])
                 path = root + f'/issues/{issue["number"]}/labels'
                 if call.method == "GET" and call.path == path:
                     rows = issue["labels"]
