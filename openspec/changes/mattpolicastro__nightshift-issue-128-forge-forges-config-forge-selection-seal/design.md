@@ -22,8 +22,9 @@ or query every enrolled `owner/name` as GitHub. No applicable `AGENTS.md` was fo
 
 ## Goals / Non-Goals
 
-Implement the requested configuration, dispatch, token isolation, secret scan and
-five preflight controls in five sessions of approximately 300 changed lines each,
+Implement configuration, adapter construction, a Gitea dispatch hold, token
+isolation, secret scan and five preflight controls in five sessions of
+approximately 300 changed lines each,
 including tests and small documentation edits. Preserve current assertions and
 public runner calls. All automated validation uses temporary state, fake HTTP
 openers and injected subprocesses, without credentials or live services.
@@ -32,8 +33,10 @@ Do not extend the Forge protocol, alter adapters, implement Gitea-specific intak
 policy, change revision snapshots/consumption, or add transition intent/recovery.
 In particular, a newer authorized revision-label application does not introduce
 a new hold on an earlier saved round. Existing round completion and preservation
-of the newer trigger remain unchanged. General Gitea transition gaps are recorded
-as limitations, not “fixed” by weakening that contract.
+of the newer trigger remain unchanged. Gitea daemon stages remain disabled until
+a later change supplies missing authorization and delivery guarantees;
+documentation alone is not a safe retry mechanism. Existing GitHub stages and
+revision recovery are unchanged.
 
 ## Decisions
 
@@ -56,7 +59,7 @@ known field is a config error. Engine validation still runs first.
 | `token_env` | `GH_TOKEN` | Required nonempty environment-variable name |
 | `land_token_env` | Empty, meaning no declared landing variable | Required nonempty environment-variable name, distinct from `token_env` |
 | `bot_login` | Empty | Required nonblank string |
-| `trusted_logins` | Empty list | Empty list (trust nobody by default) |
+| `trusted_logins` | Empty list | Empty list (adapter projects nobody as trusted; daemon stages disabled for every allowlist) |
 | `forbidden_probe` | Empty; legacy daemon probe stays effective | Empty; preflight fails until configured |
 | `wip_prefix` | `WIP: ` | `WIP: `; explicitly empty is invalid |
 
@@ -85,14 +88,16 @@ Only the repository loop in `nightshift/cli.py` daemon status changes: before
 ready/blocker/contradiction queries, print `<repo>: not queried (gitea)` and skip
 Gitea rows. Retain liveness, alerts, jobs, GitHub output and return codes.
 
-### Daemon selection and guards
+### Adapter selection and mandatory Gitea dispatch hold
 
 Add `forge_for(repo, *, cfg, runner=None, guard=None)` in `nightshift/daemon.py`.
 For GitHub it returns `GitHubForge(runner or queue._gh)`, with no eager requests.
 For Gitea it reads exactly `os.environ[definition.token_env]` and constructs the
 existing `GiteaForge` with the configured URL, bot, trusted logins and prefix;
 that adapter constructs the transport. Missing/empty tokens produce a sanitized
-repository-local configuration failure, never fallback to `GH_TOKEN` or `gh`.
+configuration failure, never fallback to `GH_TOKEN` or `gh`. This factory is
+tested directly for both kinds without dispatching a request; Gitea polling
+does not call it or read bot credentials because the dispatch hold runs first.
 
 At daemon entry, before heartbeat, startup recovery, notifications or child
 dispatch, reject presence of any nonempty configured `land_token_env` key in
@@ -103,22 +108,49 @@ when paused or using `--once`. It does not prohibit a human preflight process
 from possessing its own credentials, and preflight never sends a landing token.
 
 For GitHub, do not call the factory merely to pass its result into intake: retain
-the exact existing `action(..., runner=gh, ...)` and error-reporting calls. Add
-optional keyword-only `forge=None` to the four stage entry points in
-`nightshift/specloop_intake.py`, replacing only unconditional construction with
-`forge if forge is not None else GitHubForge(runner or queue._gh)`. Existing
-helpers already pass that object onward. Supply `forge=` only on Gitea paths,
-including `report_failure` and publication/readiness; no constructor-spy changes.
-The `Late bound runners` delta makes that optional explicit-forge path legal
-without changing either existing runner scenario or `Forge mediated intake`.
+the exact existing `action(..., runner=gh, ...)` and error-reporting calls,
+intake-local construction, late-bound runner tests and constructor spies. Leave
+`nightshift/specloop_intake.py` unchanged. Explicit Gitea forwarding into its four
+stages is dropped from this change, not hidden behind an opt-in flag.
 
-Use a small daemon-local delegating guard around the Gitea object to check pause
-before and after each logical Forge call, and pass the same guard into the
-adapter for every transport attempt and reconciliation. Preserve exception
-identity and add no retries. The post-call check is necessary when the last
-accepted write creates pause: its receipt must remain pending. Keep existing
-guards on engine, launcher and git operations. No new rich-text recognition is
-introduced anywhere in intake.
+At the start of each repository iteration in `startup` and `poll_specloop`, after
+the existing pause check and before readiness, recovery or stage execution,
+resolve its forge kind. Every Gitea row is skipped with a nontransient
+`ConfigurationError`: `Gitea daemon stages disabled: authorization and durable
+label transitions are not implemented`. Use `RepoHealth.record` and logging,
+never item failure reporting or a forge comment. Supply a local health tracker
+when direct `startup` receives none, so direct reconciliation also escalates.
+Inspect foreign journals as below before selecting the diagnostic. A clear
+journal location leaves this general dispatch hold in place.
+
+The hold covers drafting, approval/admission, spec and build revisions,
+publication/readiness, pending result delivery and failure reporting. Neither a
+healthy manifest, configured bot token, nonempty allowlist, successful preflight,
+existing receipt nor an already-admitted run bypasses it. Do not pass the error
+as ordinary readiness: admitted stages deliberately bypass readiness failures.
+Other repositories continue; existing global job reaping and the independent
+supervisor may still persist local results, but no held repository's intake
+receipt, feedback consumption, git operation or remote label/comment changes.
+Existing GitHub pause/engine/git/launcher guards remain unchanged.
+
+This is necessary for two concrete reasons. `_label_actor_association` trusts
+matching User ownership without consulting the adapter's NONE association, so
+an empty `trusted_logins` does not enforce a core trust boundary. Gitea's label
+transition deletes before adding; an accepted DELETE of `spec:approved` with a
+lost response can make a refused admission undiscoverable before `needs-human`
+is added. Fixing either requires out-of-scope policy or durable intent. A future
+enabling change must establish both contracts and their interruption tests;
+adding logins or retrying a poll cannot enable the stages in this version.
+
+Add `test_gitea_daemon_stages_are_disabled`: run startup and repeated polls with
+empty and nonempty allowlists, an unlisted owner actor, pending approval,
+successful revision/publication/admission receipts, and healthy/broken manifests.
+Make all Gitea stage/failure/recovery calls and forge-network/child dispatch fail the
+test if reached; retain fixture labels and receipt bytes across restart. Include
+a fake configured to accept a label DELETE then lose its response, asserting
+that no DELETE is attempted at all. Mixed-repo fixtures prove unchanged GitHub
+progress. Stub the existing alert sender and assert its health escalation
+separately. This tests prevention, not newly implemented transition recovery.
 
 ### GitHub-only retired-worker recovery
 
@@ -132,37 +164,34 @@ For a Gitea row inspect only the existing local journal location
 `STATE_DIR / 'engine-switch' / repo.name.replace('/', '__')` for direct `*.json`
 entries. Any such entry, including completed or malformed journals, holds the
 entire repository without parsing/replaying it. An unreadable location also
-holds; an absent directory is clear. Use a nontransient `ConfigurationError`
+holds; an absent directory is clear only of foreign evidence, not eligible for
+Gitea dispatch. Use a nontransient `ConfigurationError`
 through `RepoHealth.record` to announce the hold once via the existing configured
 alert path and log the repository and inspection location. This is repository
 escalation, not an item comment or `needs-human` label write.
 
-Skip all stages, including admitted publication, build revision and completion
-delivery, for this specific foreign-journal hold. This is the explicit exception
-in the `Health gates new work only` MODIFIED requirement: retired-worker evidence
-under a Gitea enrollment leaves workflow identity unsupported, so an admitted
-run's copied manifest cannot bypass the hold. In `startup` and `poll_specloop`,
-inspect the journal location before recovery or stage dispatch; on a hold,
-record/log the error and continue to the next repository. Do not merely pass a
-`ConfigurationError` as readiness, since admitted stages deliberately bypass
-ordinary readiness failures. Do not classify all configuration errors as this
-hold or change the intake stages' health handling.
+The foreign-journal diagnostic takes precedence over the general Gitea dispatch
+hold and names the inspection location. The `Health gates new work only`
+MODIFIED requirement excepts all Gitea dispatch from admitted delivery; the
+foreign-journal hold gives an additional reason, not an alternative route to
+enable stages. Do not classify ordinary GitHub configuration errors as this hold
+or change the intake stages' health handling.
 
 The daemon retains journals, claims, receipts, pending results and worktrees
 without mutation; other repositories continue. This guard does not stop running
 jobs or the independent supervisor, which may still persist their own local
 results. Pause still prevents external operations. A human inspects the evidence
 before correcting enrollment or moving the foreign journal out of the active
-location; the program never migrates or deletes it. Manifest repair alone cannot
-release this hold. Once inspection establishes a clear location, ordinary health,
-pause, authorization and cancellation checks govern retained work on the next
-eligible poll; completed jobs are not relaunched.
+location; the program never migrates or deletes it. Manifest repair cannot
+release either Gitea hold. Clearing a journal removes only that diagnostic:
+the Gitea dispatch hold remains and completed jobs are not relaunched. Changing
+a row to GitHub is not a supported migration or recovery procedure.
 
 Parameterize `test_gitea_repo_with_engine_switch_journal_is_held` with admitted
 publication, build revision and completion delivery pending, and healthy/broken
-enrollment manifests. Assert no stage dispatch or remote operation for the held
+enrollment manifests. Assert no stage dispatch or forge operation for the held
 repository, unchanged receipts/results, independent repository progress and
-fresh eligibility checks after operator removal. Retain the existing
+continued dispatch refusal after operator removal. Retain the existing
 `tests/test_config_resilience.py` health-bypass assertions and fixtures unchanged:
 ordinary manifest/name failures still allow admitted stages, and successful
 stages cannot clear unresolved health errors. Document the same narrow exception
@@ -268,8 +297,9 @@ occurrence; existing tests replace every such occurrence, even in comments.
 
 Correct the root layout, enrollment/recovery, preflight and status passages and
 the engine guide's enrollment/recovery statements. Add specific limitation lines
-for core marker lookup accepting human marker copies, unsupported membership
-authorization paths, nondurable multi-write label transitions, title-prefix
+for disabled Gitea stages, the core owner shortcut bypassing adapter allowlists,
+unsupported membership authorization, nondurable multi-write label transitions
+that can lose their trigger, core marker lookup accepting human marker copies, title-prefix
 drafts, exact-rule protection evidence, credential-helper evidence and remaining
 GitHub-only CLI/plugin paths. Preserve Gitea adapter ownership guarantees: the
 gap is core lookup/reconciliation policy, not permission to edit human comments.
@@ -286,12 +316,15 @@ intervening TOML literally; fences, HTML and indentation have no semantic role.
 - Shared state keys still omit forge identity; rejecting cross-forge owner/name
   collisions is deliberately stricter than supporting them. No migration is
   attempted for old state after an operator changes a repository's forge.
-- Gitea authorization still invokes unsupported membership operations for some
-  actors, and core marked-comment lookup can be confused by human copies. Config
-  and preflight do not certify end-to-end Gitea intake. These remain #122 gaps.
-- Multi-write Gitea label transitions retain their existing ordering and recovery
-  limitations. GitHub-only switch recovery avoids exporting its journal contract
-  to an incompatible transition sequence. Ordinary revision rules stay intact.
+- Gitea daemon execution and selected-forge stage forwarding are explicitly
+  deferred. Config/preflight can prepare an installation but cannot activate it;
+  this avoids the proven allowlist bypass and lost-transition failure without
+  adding forbidden intake policy or recovery machinery. Core marker ownership
+  remains a separate #122 gap. No user-configurable bypass is provided.
+- Multi-write Gitea label transitions retain their existing ordering in the
+  standalone adapter, which the daemon never invokes for held rows. GitHub-only
+  switch recovery and ordinary revision rules stay intact. Human label
+  reapplication does not introduce a new conflict hold on GitHub rounds.
 - Preflight cannot prove that a 404 target exists, that protection rules are
   sufficient, or that a matching credential username proves token ownership.
   A protection 403 remains explicitly unverified and blocks a clean result.
@@ -312,5 +345,5 @@ config suites. This drafting change itself modifies only its OpenSpec directory.
 
 ## Human checks
 
-- [ ] Run `nightshift preflight --config <absolute-config-path>` against the real Gitea instance using the daemon's clone and bot environment; record the forge/repositories and redacted results, independently confirm the forbidden probe exists, and treat protection `unverified` as an outstanding failure.
+- [ ] Run `nightshift preflight --config <absolute-config-path>` against the real Gitea instance using the daemon's clone and bot environment; record the forge/repositories and redacted results, independently confirm the forbidden probe exists, and treat protection `unverified` as an outstanding failure. A clean result supplies evidence only; Gitea daemon stages remain disabled.
 - [ ] Inspect the real base-branch protection policy and the clone credential helper's bot account; confirm the human landing-token variables are absent from the daemon service environment, and that the supervisor selects the same forge config and intended credential sources. Record these live enrollment checks without exposing token values; CI does not prove them.

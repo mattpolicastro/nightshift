@@ -53,5 +53,5 @@ prerequisites SHALL remain valid.
 
 #### Scenario: Limits and live checks are explicit
 - **WHEN** an operator reads README, KNOWN-LIMITATIONS and the engine guide
-- **THEN** they can distinguish configured Gitea dispatch and negative controls from complete intake support, including core marker ownership, membership authorization and label-transition recovery gaps
-- **THEN** docs identify GitHub-only command boundaries, Gitea journal holds, supervisor config/credential provisioning, protection and credential evidence limits, and the pending real-instance preflight check
+- **THEN** they can distinguish Gitea configuration and negative controls from disabled daemon execution, including the core owner shortcut bypassing allowlists, unsupported membership authorization, lost-trigger label transitions and core marker ownership gaps
+- **THEN** docs identify GitHub-only command boundaries, unconditional Gitea dispatch holds and additional foreign-journal diagnostics, supervisor config/credential provisioning, protection and credential evidence limits, and the pending real-instance preflight check
