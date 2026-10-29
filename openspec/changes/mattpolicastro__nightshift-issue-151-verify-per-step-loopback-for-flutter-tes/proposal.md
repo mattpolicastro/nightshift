@@ -8,7 +8,7 @@ This is issue #151, blocked by #135, part of #122 (Gitea plan E1, Phase 3). The 
 
 - Add optional boolean `Step.loopback`, default false, preserving older manifests, positional construction, env handling and ignored unknown keys.
 - For opted-in verification-mode steps, retain the default network denial, add the measured inbound/outbound localhost TCP allowances, then deny outbound TCP to every loopback-reachable port found by a fresh IPv4/IPv6 listener snapshot immediately before that step launches.
-- Fail before launching the affected command if listener discovery or application of the new profile cannot be trusted. Never fall back to unrestricted localhost or unsandboxed execution.
+- Fail before launching the affected command if listener discovery or application of the new profile cannot be trusted. Distinguish sandbox/supervisor startup failures from actual command results through a private control channel: a wrapper exit cannot satisfy `expect` or become a mutant kill. Retain diagnostics and propagate setup errors without fabricated receipts. Never fall back to unrestricted localhost or unsandboxed execution.
 - Keep ordinary verify profiles byte-for-byte unchanged and preserve preparation, credentials, source protection, environment isolation and existing test assertions. Add unit and real Seatbelt integration coverage.
 - Correct affected passages of `README.md`, `KNOWN-LIMITATIONS.md` and `docs/specloop/README.md`, including the snapshot's timing limits and pending human Flutter validation.
 

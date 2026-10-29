@@ -6,12 +6,22 @@ Preserve independent evidence executions while applying the configured loopback 
 
 ### Requirement: Per execution loopback policy
 
-Evidence steps SHALL retain loopback through timeout copies and use fresh launch-time policies in baselines, mutants and confirmations. Executions SHALL NOT share mutable profiles or cached listener snapshots. Setup errors SHALL propagate through existing worker-error handling without fabricated test results or successful partial evidence. Routing, concurrency, preparation, budgets, executed-command classifications, receipts and cleanup SHALL otherwise remain unchanged.
+Evidence steps SHALL retain loopback through timeout copies and use fresh, private launch-time policies for every baseline, mutant and confirmation. Setup and result-channel errors SHALL propagate without fabricated receipts, mutant judgments or successful partial evidence. Only confirmed command results SHALL enter classification. Routing, concurrency, preparation, budgets, receipt schemas, scoring and cleanup SHALL otherwise remain unchanged.
 
 #### Scenario: Evidence phases use fresh policies
 - **WHEN** opted-in steps are copied with evidence timeouts and executed in distinct baseline, mutant or confirmation build directories, including concurrent runs using the same step IDs
 - **THEN** the flag is retained, every opted-in command takes its own snapshot and uses its own profile path, and unflagged and prepare commands retain their original profiles
 - **THEN** setup failure produces no fabricated test receipt or mutant kill and propagates under existing worker-error rules, preserving cleanup and all unchanged evidence assertions
+
+#### Scenario: Sandbox failure after baseline cannot kill a mutant
+- **WHEN** a baseline passes and sandbox startup fails with wrapper exit 65 in a mutant or its confirmation, at concurrency one or two
+- **THEN** `test_loopback_sandbox_startup_failure_is_not_mutant_kill` verifies that RuntimeError propagates, the affected mutant remains unjudged instead of killed, survived, invalid or timed out, and no receipt is invented for its unexecuted command regardless of expect
+- **THEN** gather produces no successful partial evidence, earlier diagnostics remain, active workers finish under existing rules and worker cleanup precedes baseline cleanup
+- **THEN** a genuine unexpected command exit 65 under a valid profile still kills a mutant whose step is not configured as invalid, preserving existing scoring rules
+
+#### Scenario: Baseline sandbox failure dispatches no mutants
+- **WHEN** an opted-in baseline cannot start its sandboxed command, including when its expected exit matches the wrapper failure
+- **THEN** the setup error propagates without an affected-step receipt or mutant dispatch, and baseline cleanup retains completed receipts and diagnostics
 
 ## MODIFIED Requirements
 

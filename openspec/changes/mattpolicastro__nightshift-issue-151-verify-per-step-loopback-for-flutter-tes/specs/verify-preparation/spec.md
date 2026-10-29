@@ -51,7 +51,7 @@ Immediately before each opted-in verification launch, the harness SHALL take a f
 
 ### Requirement: Loopback setup fails closed
 
-Discovery or profile-setup failure, an enclosing sandbox or a missing launch-time resolver SHALL block the opted-in verification command and later commands. The harness SHALL retain a step-specific diagnostic and completed receipts, raise a contextual setup error and fabricate no command result or mutation kill. It SHALL never substitute empty discovery or unrestricted/unsandboxed execution for a failed snapshot. A documented lsof no-match result SHALL count as successful empty discovery.
+Opted-in steps SHALL fail closed on discovery, profile, sandbox or launch-channel failure. The harness SHALL preserve diagnostics and completed receipts, raise RuntimeError and stop later commands without inventing a command outcome. Only confirmed command outcomes from a trusted supervisor in the same sandbox SHALL enter receipts; wrapper exits, command output and preflight success SHALL NOT authorize them. Defaults and preparation SHALL remain unchanged.
 
 #### Scenario: Snapshot failure prevents execution
 - **WHEN** discovery cannot start, is denied access, exceeds five seconds, reports errors with partial output, returns an unsupported failure status, cannot decode or parse its output, or the resulting profile cannot be generated or written
@@ -63,6 +63,18 @@ Discovery or profile-setup failure, an enclosing sandbox or a missing launch-tim
 - **THEN** execution is refused before launching the command rather than relying on the enclosing sandbox or the shared verify profile
 - **THEN** ordinary unflagged steps retain their existing nested-sandbox behavior
 
+#### Scenario: Sandbox startup failure cannot satisfy expected exit
+- **WHEN** sandbox-exec fails before command execution, including profile compilation exit 65 with either matching `expect = 65` or nonmatching `expect = 0`, or the supervisor cannot exec the command
+- **THEN** `test_loopback_sandbox_startup_failure_is_not_command_exit` verifies a contextual RuntimeError regardless of expected exit, no affected-command execution or receipt, no later commands, retained previous receipts and wrapper diagnostics, and process-group and descriptor cleanup
+- **THEN** missing, malformed or broken control records also raise setup errors rather than accepting a wrapper status or stdout/stderr text as a command result
+
+#### Scenario: Actual command outcomes retain their meaning
+- **WHEN** the opted-in command has confirmed startup and exits 65, exits on a signal, or exceeds its execution deadline
+- **THEN** `test_loopback_command_exit_retains_expected_exit_semantics` verifies that a genuine exit 65 passes only with expect 65, an unexpected exit or signal remains a command failure, and a confirmed running-command timeout retains exit null
+- **THEN** only trusted complete command-result records with successful wrapper completion authorize integer exits, a deadline before confirmed startup is a setup error, and wrapper failure without a completed result remains infrastructure failure
+- **THEN** the command receives its original argv, cwd and configured env without the private control descriptor, the supervisor ignores candidate Python startup configuration, and command output resembling control messages cannot fabricate an outcome
+- **THEN** receipt schema, one execution timeout budget, cleanup and all unflagged-step behavior remain unchanged
+
 ### Requirement: Real loopback enforcement evidence
 
 Automated integration coverage SHALL exercise the real launch path, listener discovery and sandbox-exec policy using Python sockets without requiring Flutter or live services. It SHALL demonstrate both permitted own-port communication and refusal of a healthy pre-existing listener. Unsupported hosts or nested sandboxes SHALL produce explicit skips, while eligible-host policy failures SHALL fail the test.
@@ -71,3 +83,8 @@ Automated integration coverage SHALL exercise the real launch path, listener dis
 - **WHEN** `test_loopback_sandbox_allows_own_port_and_blocks_existing_listener` starts a reachable listener before launching an opted-in step on an eligible macOS host
 - **THEN** the child binds an ephemeral IPv4 loopback port, listens, connects back and exchanges data successfully, while connecting to the still-healthy pre-existing listener receives a sandbox permission denial
 - **THEN** IPv6-only and wildcard pre-existing listeners receive exclusion probes where supported, a non-macOS or nested-sandbox run skips explicitly, and a skipped probe is not reported as enforcement evidence
+
+#### Scenario: Real sandbox rejection is a setup error
+- **WHEN** an eligible macOS integration test launches an opted-in step through the real runner with malformed profile text and expect 65, followed by a separate valid-profile run whose command deliberately exits 65
+- **THEN** sandbox compilation failure raises a setup error with retained diagnostics, leaves the command sentinel absent and produces no affected receipt, while the valid-profile command runs and passes with its genuine exit 65
+- **THEN** non-macOS or nested-sandbox hosts skip explicitly, and unexpected failures on eligible hosts fail the test
