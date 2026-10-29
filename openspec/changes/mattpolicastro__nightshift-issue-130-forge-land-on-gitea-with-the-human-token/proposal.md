@@ -11,6 +11,7 @@ Issue #129 supplies explicit Gitea publication and finish, but `nightshift.land`
 - Wait on combined status for the exact head SHA, then request a merge commit pinned by `head_commit_id` and confirm `merged` before success.
 - Migrate Factory Land's GitHub command definitions into the landing operation boundary and remove `nightshift/factory_land.py` from the #126 AST allowlist. Preserve its existing confirmation and execution isolation.
 - Update `docs/landing.md` and add offline regressions, including the four issue-named tests.
+- Amend `specloop-documentation`'s Explicit forge command guidance to replace its GitHub-only terminal landing guarantee with the #130 support boundary in `docs/landing.md`. Preserve publication guidance and the disabled daemon, arming and Factory UI boundaries without editing the shared guides.
 
 Implementation scope is `nightshift/land.py`, `nightshift/factory_land.py`, `docs/landing.md`, tests and specs. No daemon, `specloop/`, plugin, shared forge implementation, service or configuration-schema changes. Factory UI eligibility remains unchanged; this is not a Gitea Land-button rollout. Merge remains explicitly human initiated. Automatic landing, rebase, protection bypasses, alternate base branches, live-service tests by default and credential provisioning are out of scope.
 
@@ -27,3 +28,4 @@ Avoid the concurrent work files named in the design, including `README.md`, `KNO
 - `reviewed-pr-landing`: broaden the existing operator and identity contracts to Gitea; qualify GitHub-specific authentication, update and merge operations while retaining every other landing gate.
 - `factory-landing-jobs`: replace the old restriction on landing implementation changes with the shared operation boundary, preserving confirmed handoff semantics.
 - `forge-interface`: retire the Factory worker's temporary argv exception and describe the landing guide as the current scoped documentation. Other staged exceptions remain unchanged.
+- `specloop-documentation`: amend Explicit forge command guidance so the landing guide supersedes historical GitHub-only terminal landing wording while retaining engine publication/finish guidance and all unrelated boundaries.
