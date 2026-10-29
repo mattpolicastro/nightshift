@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from html import escape
 import json
@@ -18,7 +18,7 @@ import re
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
 from . import config, queue
@@ -132,6 +132,7 @@ class Operations:
     sleep: Callable[[float], None]
     monotonic: Callable[[], float]
     deadline: float | None = None
+    forge: LandingForge = field(default_factory=lambda: GitHubLandingForge())
 
     def remaining(self) -> float:
         """One absolute budget, retained across CI rounds and update observation."""
@@ -189,6 +190,204 @@ class Operations:
         return value
 
 
+class LandingForge(Protocol):
+    """Named landing transport operations; policy remains in the gate helpers.
+
+    Receive the current Operations on every call so deadline replacements apply
+    to every dispatch. There is no arbitrary-command operation on this boundary.
+    """
+
+    def resolve_repo(self, operations: Operations) -> dict[str, Any]: ...
+
+    def read_pr(self, identity: Identity, operations: Operations) -> dict[str, Any]: ...
+
+    def read_main(self, identity: Identity, operations: Operations) -> dict[str, Any]: ...
+
+    def request_update(
+        self, identity: Identity, expected_head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+    def read_commit(self, identity: Identity, head: str, operations: Operations) -> dict[str, Any]: ...
+
+    def read_comments(self, identity: Identity, operations: Operations, *, stage: str) -> list[Any]: ...
+
+    def read_actor(self, operations: Operations) -> dict[str, Any]: ...
+
+    def edit_source(
+        self, identity: Identity, source: CheckSource, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+    def create_attestation(self, identity: Identity, body: str, operations: Operations) -> dict[str, Any]: ...
+
+    def edit_attestation(
+        self, identity: Identity, comment_id: int, body: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+    def compare(self, identity: Identity, head: str, base: str, operations: Operations) -> dict[str, Any]: ...
+
+    def checks(
+        self, identity: Identity, head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+    def merge(
+        self, identity: Identity, head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+    def confirm_merge(self, identity: Identity, operations: Operations) -> dict[str, Any]: ...
+
+
+class GitHubLandingForge:
+    """The existing GitHub transcript, executed by the caller's injected runner."""
+
+    def resolve_repo(self, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(
+            ["gh", "repo", "view", "--json", "nameWithOwner"],
+            stage="repository resolution",
+        )
+
+    def read_pr(self, identity: Identity, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(
+            ["gh", "pr", "view", str(identity.number), "--repo", identity.repo,
+             "--json", PR_FIELDS],
+            stage=f"PR read for {identity.url}",
+        )
+
+    def read_main(self, identity: Identity, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(
+            ["gh", "api", f"repos/{identity.repo}/git/ref/heads/main"],
+            stage=f"read existing main branch in {identity.repo}",
+        )
+
+    def request_update(
+        self, identity: Identity, expected_head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        return operations.run(
+            ["gh", "api", "--method", "PUT",
+             f"repos/{identity.repo}/pulls/{identity.number}/update-branch",
+             "-f", f"expected_head_sha={expected_head}"],
+            stage="branch update", allowed_returncodes=None,
+        )
+
+    def read_commit(self, identity: Identity, head: str, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(
+            ["gh", "api", f"repos/{identity.repo}/commits/{head}"],
+            stage="branch update parent inspection",
+        )
+
+    def read_comments(self, identity: Identity, operations: Operations, *, stage: str) -> list[Any]:
+        return operations.read_json_array(
+            ["gh", "api", f"repos/{identity.repo}/issues/{identity.number}/comments",
+             "--paginate", "--slurp"],
+            stage=stage,
+        )
+
+    def read_actor(self, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(["gh", "api", "user"], stage="authenticated actor lookup")
+
+    def edit_source(
+        self, identity: Identity, source: CheckSource, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        endpoint = (f"repos/{identity.repo}/pulls/{identity.number}"
+                    if source.comment_id is None
+                    else f"repos/{identity.repo}/issues/comments/{source.comment_id}")
+        return operations.run(
+            ["gh", "api", "--method", "PATCH", endpoint, "-f", f"body={source.body}"],
+            stage=f"record human checks in {source.reference}; rerun land to recover",
+        )
+
+    def create_attestation(self, identity: Identity, body: str, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(
+            ["gh", "api", "--method", "POST",
+             f"repos/{identity.repo}/issues/{identity.number}/comments", "-f", f"body={body}"],
+            stage="attestation create",
+        )
+
+    def edit_attestation(
+        self, identity: Identity, comment_id: int, body: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        return operations.run(
+            ["gh", "api", "--method", "PATCH", f"repos/{identity.repo}/issues/comments/{comment_id}",
+             "-f", f"body={body}"],
+            stage=f"attestation update for comment {comment_id}; rerun land to recover",
+        )
+
+    def compare(self, identity: Identity, head: str, base: str, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(
+            ["gh", "api", f"repos/{identity.repo}/compare/{base}...{head}"],
+            stage="initial base ancestry check",
+        )
+
+    def checks(
+        self, identity: Identity, head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        return operations.run(
+            ["gh", "pr", "checks", str(identity.number), "--repo", identity.repo,
+             "--json", "name,bucket,state,link"],
+            stage="CI checks", allowed_returncodes=(0, 1, 8),
+        )
+
+    def merge(
+        self, identity: Identity, head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        return operations.run(
+            ["gh", "pr", "merge", str(identity.number), "--repo", identity.repo,
+             "--merge", "--match-head-commit", head],
+            stage="merge request",
+        )
+
+    def confirm_merge(self, identity: Identity, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(
+            ["gh", "pr", "view", str(identity.number), "--repo", identity.repo,
+             "--json", "number,url,state"],
+            stage="merged-state confirmation",
+        )
+
+
+def read_confirmed_remote_head(pr: str, read_json: Callable[[list[str]], Any]) -> str:
+    """Factory's standalone identity read, retaining its caller's 20s boundary."""
+    data = read_json(["gh", "pr", "view", pr, "--json", "url,headRefOid"])
+    if (not isinstance(data, dict) or data.get("url") != pr
+            or not isinstance(data.get("headRefOid"), str) or not _SHA.fullmatch(data["headRefOid"])):
+        raise Refusal("fresh PR identity is unreadable or contradictory")
+    return data["headRefOid"].lower()
+
+
+ConfirmedCommand = Literal["pr", "status", "read", "mutation", "finish", "unknown"]
+
+
+def classify_confirmed_command(
+    argv: list[str], *, repo: str, number: str, change: str, head: str,
+) -> ConfirmedCommand:
+    """Recognize only exact pre-finish shapes for the confirmed GitHub target.
+
+    Classification grants no permission: Factory must still inspect the actual
+    responses and revalidate all five confirmation fields before each mutation.
+    """
+    view = ["gh", "pr", "view", number, "--repo", repo, "--json", PR_FIELDS]
+    status = [sys.executable, "-m", "nightshift.cli", "status", "--json"]
+    finish = [sys.executable, "-m", "nightshift.cli", "finish", change, "--expect-head", head]
+    if argv == view:
+        return "pr"
+    if argv == status:
+        return "status"
+    if argv in (["gh", "api", f"repos/{repo}/git/ref/heads/main"],
+                ["gh", "api", f"repos/{repo}/issues/{number}/comments", "--paginate", "--slurp"],
+                ["gh", "api", "user"]):
+        return "read"
+    if len(argv) == len(finish) and argv[:-1] == finish[:-1] and argv[-1].lower() == head:
+        return "finish"
+    if (len(argv) == 7 and argv[:3] == ["gh", "api", "--method"]
+            and argv[5] == "-f" and argv[6].startswith("body=")):
+        endpoint = argv[4]
+        if (argv[3] == "POST" and endpoint == f"repos/{repo}/issues/{number}/comments"
+                or argv[3] == "PATCH" and (
+                    endpoint == f"repos/{repo}/pulls/{number}"
+                    or re.fullmatch(rf"repos/{re.escape(repo)}/issues/comments/[1-9][0-9]*", endpoint)
+                    is not None)):
+            return "mutation"
+    return "unknown"
+
+
 def _positive_timeout(value: str) -> float:
     try:
         seconds = float(value)
@@ -243,10 +442,7 @@ def resolve_identity(pr: str, repo: str | None, operations: Operations) -> Ident
     if re.fullmatch(r"[0-9]+", pr):
         number = _number(pr)
         if explicit_repo is None:
-            data = operations.read_json(
-                ["gh", "repo", "view", "--json", "nameWithOwner"],
-                stage="repository resolution",
-            )
+            data = operations.forge.resolve_repo(operations)
             explicit_repo = _repo_name(data.get("nameWithOwner"))
         return Identity(explicit_repo, number)
     identity = _url_identity(pr)
@@ -273,11 +469,7 @@ def enrolled_repo(cfg: config.Config, identity: Identity) -> config.Repo:
 
 
 def read_pr(identity: Identity, operations: Operations) -> PullRequest:
-    data = operations.read_json(
-        ["gh", "pr", "view", str(identity.number), "--repo", identity.repo,
-         "--json", PR_FIELDS],
-        stage=f"PR read for {identity.url}",
-    )
+    data = operations.forge.read_pr(identity, operations)
     if (_url_identity(data.get("url")) != identity
             or type(data.get("number")) is not int or data["number"] != identity.number):
         raise Refusal("GitHub returned a contradictory PR identity")
@@ -296,10 +488,7 @@ def read_pr(identity: Identity, operations: Operations) -> PullRequest:
 
 
 def read_main(identity: Identity, operations: Operations) -> str:
-    data = operations.read_json(
-        ["gh", "api", f"repos/{identity.repo}/git/ref/heads/main"],
-        stage=f"read existing main branch in {identity.repo}",
-    )
+    data = operations.forge.read_main(identity, operations)
     obj = data.get("object")
     if (data.get("ref") != "refs/heads/main" or not isinstance(obj, dict)
             or obj.get("type") != "commit" or not isinstance(obj.get("sha"), str)
@@ -329,12 +518,7 @@ def update_branch(
     base = read_main(identity, operations)
     lost_response: Refusal | None = None
     try:
-        result = operations.run(
-            ["gh", "api", "--method", "PUT",
-             f"repos/{identity.repo}/pulls/{identity.number}/update-branch",
-             "-f", f"expected_head_sha={expected_head}"],
-            stage="branch update", allowed_returncodes=None,
-        )
+        result = operations.forge.request_update(identity, expected_head, operations)
     except Refusal as exc:
         if not isinstance(exc.__cause__, (OSError, subprocess.SubprocessError)):
             raise
@@ -370,10 +554,7 @@ def update_branch(
             if observed.draft:
                 raise Refusal("PR became draft during branch update")
             if observed.head != expected_head:
-                commit = operations.read_json(
-                    ["gh", "api", f"repos/{identity.repo}/commits/{observed.head}"],
-                    stage="branch update parent inspection",
-                )
+                commit = operations.forge.read_commit(identity, observed.head, operations)
                 parents = commit.get("parents")
                 if (commit.get("sha") != observed.head or not isinstance(parents, list)
                         or len(parents) != 2
@@ -465,11 +646,7 @@ def read_comments(
     identity: Identity, operations: Operations, *, stage: str = "publication comment discovery",
 ) -> list[dict[str, Any]]:
     """Slurp all REST pages into one JSON document; never use a partial history."""
-    pages = operations.read_json_array(
-        ["gh", "api", f"repos/{identity.repo}/issues/{identity.number}/comments",
-         "--paginate", "--slurp"],
-        stage=stage,
-    )
+    pages = operations.forge.read_comments(identity, operations, stage=stage)
     comments = []
     for page in pages:
         if not isinstance(page, list):
@@ -534,7 +711,7 @@ def validate_human_checks(sources: tuple[CheckSource, ...], *, checks_done: bool
 
 
 def read_actor(operations: Operations) -> str:
-    data = operations.read_json(["gh", "api", "user"], stage="authenticated actor lookup")
+    data = operations.forge.read_actor(operations)
     login = data.get("login")
     if not isinstance(login, str) or not login or any(char.isspace() for char in login):
         raise Refusal("authenticated actor lookup: malformed or missing login")
@@ -555,16 +732,10 @@ def prepare_human_checks(
     for source in sources:
         updated = source.completed()
         if updated.body != source.body:
-            endpoint = (f"repos/{pr.identity.repo}/pulls/{pr.identity.number}"
-                        if source.comment_id is None
-                        else f"repos/{pr.identity.repo}/issues/comments/{source.comment_id}")
             # One full-source PATCH, with raw text fields preserving newlines.
             # Stop on failure without rollback or blind retry: the next operator
             # invocation reads actual remote state, including ambiguous writes.
-            operations.run(
-                ["gh", "api", "--method", "PATCH", endpoint, "-f", f"body={updated.body}"],
-                stage=f"record human checks in {source.reference}; rerun land to recover",
-            )
+            operations.forge.edit_source(pr.identity, updated, operations)
         completed.append(updated)
     return CheckSnapshot(pr.head, tuple(completed), actor)
 
@@ -613,11 +784,7 @@ def record_attestation(
     comment_id = lookup()
     if comment_id is None:
         try:
-            response = operations.read_json(
-                ["gh", "api", "--method", "POST",
-                 f"repos/{identity.repo}/issues/{identity.number}/comments", "-f", f"body={body}"],
-                stage="attestation create",
-            )
+            response = operations.forge.create_attestation(identity, body, operations)
             # Even exit zero can leave an unusable acknowledgement. Resolve
             # that through the same full-history lookup as a transport error.
             if (not isinstance(response.get("body"), str)
@@ -633,11 +800,7 @@ def record_attestation(
                 raise Refusal(f"{exc}; attestation could not be reconciled; rerun land to recover") from exc
             # The remote create may have succeeded. Reuse its known ID; never
             # issue a second POST in this invocation, even if it was rejected.
-    operations.run(
-        ["gh", "api", "--method", "PATCH", f"repos/{identity.repo}/issues/comments/{comment_id}",
-         "-f", f"body={body}"],
-        stage=f"attestation update for comment {comment_id}; rerun land to recover",
-    )
+    operations.forge.edit_attestation(identity, comment_id, body, operations)
 
 
 def refresh_run(
@@ -753,10 +916,7 @@ def continue_landing(
 
 def incorporates_base(identity: Identity, head: str, base: str, operations: Operations) -> bool:
     """Compare the recorded base to the pinned head, failing closed on bad data."""
-    comparison = operations.read_json(
-        ["gh", "api", f"repos/{identity.repo}/compare/{base}...{head}"],
-        stage="initial base ancestry check",
-    )
+    comparison = operations.forge.compare(identity, head, base, operations)
     ancestor = comparison.get("merge_base_commit")
     status = comparison.get("status")
     if (status not in ("ahead", "identical", "behind", "diverged")
@@ -824,11 +984,7 @@ def wait_for_ci(
     try:
         while True:
             check_head()
-            result = operations.run(
-                ["gh", "pr", "checks", str(identity.number), "--repo", identity.repo,
-                 "--json", "name,bucket,state,link"],
-                stage="CI checks", allowed_returncodes=(0, 1, 8),
-            )
+            result = operations.forge.checks(identity, expected_head, operations)
             check_head()
             if ci_is_green(result):
                 return
@@ -856,21 +1012,13 @@ def after_ci(
     identity = pr.identity
     merge_error: Refusal | None = None
     try:
-        operations.run(
-            ["gh", "pr", "merge", str(identity.number), "--repo", identity.repo,
-             "--merge", "--match-head-commit", snapshot.head],
-            stage="merge request",
-        )
+        operations.forge.merge(identity, snapshot.head, operations)
     except Refusal as exc:
         # Never repeat the mutation: the server may have completed it already.
         merge_error = exc
 
     try:
-        result = operations.read_json(
-            ["gh", "pr", "view", str(identity.number), "--repo", identity.repo,
-             "--json", "number,url,state"],
-            stage="merged-state confirmation",
-        )
+        result = operations.forge.confirm_merge(identity, operations)
         if (type(result.get("number")) is not int or result["number"] != identity.number
                 or _url_identity(result.get("url")) != identity):
             raise Refusal("merged-state confirmation: contradictory PR identity")
@@ -891,9 +1039,12 @@ def main(
     argv: list[str] | None = None, *, runner: Runner | None = None,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    forge: LandingForge | None = None,
 ) -> int:
     args = parser().parse_args(argv)
     operations = Operations(subprocess.run if runner is None else runner, sleep, monotonic)
+    if forge is not None:
+        operations.forge = forge
     try:
         cfg = load_config(args.config)
         identity = resolve_identity(args.pr, args.repo, operations)

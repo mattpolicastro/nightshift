@@ -123,11 +123,10 @@ def read_run_status(change: str) -> Any:
 
 
 def read_remote_head(pr: str) -> str:
-    data = _read_json_command(["gh", "pr", "view", pr, "--json", "url,headRefOid"])
-    if (not isinstance(data, dict) or data.get("url") != pr
-            or not isinstance(data.get("headRefOid"), str) or not _SHA.fullmatch(data["headRefOid"])):
-        raise Refusal("fresh PR identity is unreadable or contradictory")
-    return data["headRefOid"].lower()
+    try:
+        return land.read_confirmed_remote_head(pr, _read_json_command)
+    except land.Refusal as exc:
+        raise Refusal(str(exc)) from exc
 
 
 def validate_offer(
@@ -180,51 +179,34 @@ class ConfirmedRunner:
     def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if self.finished:
             return self.runner(argv, **kwargs)
-        repo, number = self.repo, self.number
-        view = ["gh", "pr", "view", number, "--repo", repo, "--json", land.PR_FIELDS]
-        status = [sys.executable, "-m", "nightshift.cli", "status", "--json"]
-        finish = [sys.executable, "-m", "nightshift.cli", "finish", self.offer.change,
-                  "--expect-head", self.offer.head]
-        reads = [view, status, ["gh", "api", f"repos/{repo}/git/ref/heads/main"],
-                 ["gh", "api", f"repos/{repo}/issues/{number}/comments", "--paginate", "--slurp"],
-                 ["gh", "api", "user"]]
-        is_finish = (len(argv) == len(finish) and argv[:-1] == finish[:-1]
-                     and argv[-1].lower() == self.offer.head)
-        mutation = is_finish
-        if (len(argv) == 7 and argv[:3] == ["gh", "api", "--method"]
-                and argv[5] == "-f" and argv[6].startswith("body=")):
-            endpoint = argv[4]
-            mutation = (
-                argv[3] == "POST" and endpoint == f"repos/{repo}/issues/{number}/comments"
-            ) or (argv[3] == "PATCH" and (
-                endpoint == f"repos/{repo}/pulls/{number}"
-                or re.fullmatch(rf"repos/{re.escape(repo)}/issues/comments/[1-9][0-9]*", endpoint)
-                is not None
-            ))
+        command = land.classify_confirmed_command(
+            argv, repo=self.repo, number=self.number,
+            change=self.offer.change, head=self.offer.head,
+        )
         try:
-            if mutation:
+            if command in ("mutation", "finish"):
                 if not self.pr_read or not self.status_read:
                     raise Refusal("confirmed landing requires actual initial PR and run responses")
                 validate_offer(self.offer, read_status=self.read_status,
                                remote_head=self.remote_head, pause_file=self.pause_file)
-            elif argv not in reads:
+            elif command not in ("pr", "status", "read"):
                 raise Refusal("unknown pre-finish landing command shape; refusing execution")
             result = self.runner(argv, **kwargs)
-            if result.returncode == 0 and argv in (view, status):
+            if result.returncode == 0 and command in ("pr", "status"):
                 data = json.loads(result.stdout)
-                if argv == status:
+                if command == "status":
                     if offer_from_status(data, self.offer.change) != self.offer:
                         raise Refusal("stale landing confirmation: actual run response changed")
                     self.status_read = True
                 else:
                     if (not isinstance(data, dict) or not isinstance(data.get("url"), str)
                             or data["url"].lower() != self.offer.pr.lower()
-                            or type(data.get("number")) is not int or data["number"] != int(number)
+                            or type(data.get("number")) is not int or data["number"] != int(self.number)
                             or not isinstance(data.get("headRefOid"), str)
                             or data["headRefOid"].lower() != self.offer.head):
                         raise Refusal("stale landing confirmation: actual PR response changed")
                     self.pr_read = True
-            if is_finish:
+            if command == "finish":
                 self.finished = True
             return result
         except (Refusal, ValueError, TypeError, RecursionError) as exc:
