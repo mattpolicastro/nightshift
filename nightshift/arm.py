@@ -268,7 +268,8 @@ def read_pr_context(repository: str, *, runner=None) -> ConcurrentContext:
     The two reads are a best-effort snapshot: an absent metadata row is unknown,
     not evidence that a PR is unrelated. Keep earlier pages on lookup failure.
     """
-    files, helper_notes = critic.open_pr_files(repository, "", runner=runner)
+    # Arming retains its GitHub host routing; this is not a run manifest target.
+    files, helper_notes = critic._github_open_pr_files(repository, "", runner=runner)
     notes = list(helper_notes)
     identities: dict[int, int | None] = {}
     parts = repository.split("/")

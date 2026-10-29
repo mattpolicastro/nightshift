@@ -133,8 +133,8 @@ def test_pagination_renames_own_branch_and_explicit_host(review):
                                       {"filename": "README.md"}],
              ("pulls/101/files", 1): [{"filename": "README.md"}]}
     pages.update({(f"pulls/{n}/files", 1): [] for n in range(4, 101)})
-    runner = FakeRunner(pages, host="github.example.test")
-    files, notes = critic.open_pr_files("github.example.test/org/repo/", "spec/effective", runner=runner)
+    runner = FakeRunner(pages, host="github.com")
+    files, notes = critic.open_pr_files("github.com/org/repo/", "spec/effective", runner=runner)
     assert notes == []
     assert list(files) == ["README.md", "old.py", "src/new.py", "z.py"]
     assert files == {"README.md": sorted([label(2), label(3), label(101)]),

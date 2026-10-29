@@ -10,6 +10,7 @@ import pytest
 from nightshift.cli import main
 
 from specloop import agents, cli, critic, manifest, openspec, propose, state
+from test_specloop_critic_gitea import ROOT, Reply, gitea, pr
 
 
 CLEAN = "spec-critic/ordered-proposal-gates/clean-draft-receives-the-extra-review"
@@ -38,6 +39,7 @@ INFEASIBLE = {"contradictions": [
     {"task": "1.1", "problem": "Required helper is frozen", "evidence": "manifest.toml:9"},
 ], "risks": []}
 REAL_IN_FLIGHT = propose.in_flight
+REAL_OPEN_PR_FILES = critic.open_pr_files
 
 
 def git(repo, *args):
@@ -217,7 +219,8 @@ def test_critic_blocking_finding_triggers_one_redraft(env):
 
 
 @pytest.mark.scenario(BOTH)
-def test_critic_receives_in_flight_and_open_pr_files(env, monkeypatch):
+@pytest.mark.parametrize("backend", ["github", "gitea"])
+def test_critic_receives_in_flight_and_open_pr_files(env, monkeypatch, gitea, backend):
     # Use the real reader so production paths survive its existing parser.
     run = state.Run.for_change("other-change")
     run.state.status = "running"
@@ -236,6 +239,24 @@ def test_critic_receives_in_flight_and_open_pr_files(env, monkeypatch):
     env.pr_files = {"src/remote.py": ["#7 https://github.com/org/repo/pull/7"],
                     "tests/test_remote.py": ["#8 https://github.com/org/repo/pull/8"],
                     "README.md": ["#7 https://github.com/org/repo/pull/7"]}
+    if backend == "gitea":
+        env.m = replace(env.m, github="forge.example/org/repo")
+        env.pr_files = {path: [labels[0].replace("https://github.com/org/repo/pull/",
+                                               "https://forge.example/gitea/org/repo/pulls/")]
+                        for path, labels in env.pr_files.items()}
+        gitea.route("GET", ROOT + "pulls", Reply([pr(7), pr(8)]), page=1)
+        gitea.route("GET", ROOT + "pulls", Reply([]), page=2)
+        for number in (7, 8):
+            rows = [{"filename": path} for path, labels in env.pr_files.items()
+                    if labels[0].startswith(f"#{number} ")]
+            gitea.route("GET", ROOT + f"pulls/{number}/files", Reply(rows), page=1)
+            gitea.route("GET", ROOT + f"pulls/{number}/files", Reply([]), page=2)
+
+        def lookup(github, branch):
+            env.lookups.append((github, branch))
+            return REAL_OPEN_PR_FILES(github, branch)
+
+        monkeypatch.setattr(critic, "open_pr_files", lookup)
     agent = Script(env, bodies=(INITIAL, CORRECTED), feasibility=(PASS, PASS), critics=(BLOCKED, PASS))
     d = agent.draft()
     prompts = agent.prompts("critic")
@@ -244,7 +265,8 @@ def test_critic_receives_in_flight_and_open_pr_files(env, monkeypatch):
         assert f'"{path}": [\n    "other-change"' in prompts[0]
     for path, labels in env.pr_files.items():
         assert json.dumps(path) in prompts[0] and labels[0] in prompts[0]
-    assert env.lookups == [("org/repo", f"spec/{CHANGE}")]
+    assert env.lookups == [(env.m.github, f"spec/{CHANGE}")]
+    assert len(gitea.calls) == (6 if backend == "gitea" else 0)
     assert not (d.problems or d.contradictions)
 
 

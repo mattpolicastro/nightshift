@@ -185,9 +185,11 @@ None of these follow-ups establishes live validation or a completed host rollout
   `mutation_skip` patterns are available as case-sensitive literal whole-line
   substring exclusions before sampling; styles are not automatically excluded
   ([PR #48](https://github.com/mattpolicastro/nightshift/pull/48)).
-- **GitHub-only automation:** the automated front door and publication use
+- **GitHub-only automation:** the automated daemon front door and publication use
   GitHub. Local drafting and verification do not require a GitHub host; they
-  do not provide automated intake or publication for other hosts.
+  do not provide automated intake or publication for other hosts. Explicit engine
+  publish/finish and Factory confirmations now support configured Gitea; see
+  [engine setup](docs/specloop/README.md#explicit-forge-publication).
   Gitea daemon stages and pending delivery are disabled for every allowlist:
   core's owner shortcut bypasses adapter allowlists, and multi-write label
   transitions can lose their trigger after an accepted DELETE with a lost response.
@@ -202,7 +204,7 @@ None of these follow-ups establishes live validation or a completed host rollout
   trigger if the DELETE succeeds but its response is lost. Core marker lookup
   and reconciliation can accept human marker copies; the standalone adapter
   still restricts comment updates to bot-owned comments. Drafts use a title
-  prefix rather than native draft state. These gaps keep drafting, admission,
+  prefix rather than native draft state. These gaps keep daemon drafting, admission,
   revisions, publication and pending delivery unconditionally disabled.
   Foreign-journal inspection adds a diagnostic, not an alternative enabling
   path. GitHub execution and saved revision-round guarantees are unchanged.
@@ -215,8 +217,19 @@ None of these follow-ups establishes live validation or a completed host rollout
   scope. Real-instance preflight, protection-policy and bot-helper inspection
   remain pending human checks, not CI proof of live workflows. See the
   [enrollment checks](README.md#quickstart) and [supervisor provisioning](README.md#host-path-setup).
-- **GitHub-only command boundaries:** landing, arming, the engine's PR commands
-  and plugin GitHub paths have not migrated to Gitea. Gitea enrollment cannot
+- **Explicit Gitea publication risks:** finish's GET then title-only PATCH can
+  overwrite an intervening human edit. There is no conflict detection; read-back
+  proves only the resulting title, not preservation of concurrent edits.
+  Critic's 30-second socket timeout and 120-second request-start cutoff are not
+  elapsed-time bounds: slowly arriving bodies can overrun both. Lookup before
+  create cannot prevent duplicate PRs from concurrent creators or late visibility
+  after an ambiguous POST; inspect remote effects before retrying. The first real
+  WIP PR creation and finish prefix removal, plus live Paseo confirmation/Cancel,
+  remain pending human checks in the design, not CI evidence
+  ([issue #129](https://github.com/mattpolicastro/nightshift/issues/129)).
+- **GitHub-only command boundaries:** landing, arming and unrelated plugin GitHub
+  paths have not migrated to Gitea. Explicit engine publish/finish and critic
+  context use the manifest-selected forge. Gitea enrollment cannot
   authorize GitHub landing; daemon status skips its queue queries. Named GitHub
   definitions still use ambient `gh` authentication and host selection.
 - **Config:**

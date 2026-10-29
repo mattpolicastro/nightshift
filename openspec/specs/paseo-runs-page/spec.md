@@ -75,15 +75,12 @@ without changing action availability, order, accessibility, or behavior.
 
 ### Requirement: Confirmation button presentation
 
-Confirmation controls SHALL use the same padded, rounded, minimum 44-by-44
-button treatment as run actions. Confirm SHALL be primary for Publish and
-Finish and destructive for Abort; Cancel SHALL be outlined. Existing messages,
-labels, roles, disabled conditions, and confirmation semantics SHALL remain
-unchanged, including no send before confirmation and no send on Cancel.
+Confirmation controls SHALL keep padded, rounded, minimum 44-by-44 buttons. Confirm SHALL be primary for Publish/Finish and destructive for Abort; Cancel SHALL be outlined. Publish/Finish messages SHALL follow Forge publication confirmation. All other messages, labels, roles, disabled conditions and confirmation semantics SHALL remain unchanged, including no send before confirmation or on Cancel.
 
 #### Scenario: Confirmation styles preserve the action gate
 - **WHEN** Publish, Finish, or Abort is pressed
-- **THEN** its existing confirmation appears without sending an action, Confirm has the appropriate primary or destructive rendered style, and Cancel has the outlined rendered style
+- **THEN** its confirmation appears without sending an action, Confirm has the appropriate primary or destructive rendered style, and Cancel has the outlined rendered style
+- **THEN** only the Publish/Finish warning text changes; Abort, accessibility labels, minimum targets, theme colors and disabled conditions remain unchanged
 - **WHEN** Cancel is pressed, or the action is reopened and Confirm is pressed
 - **THEN** Cancel sends nothing, and Confirm dispatches only the existing authorized request with existing pending-action guards
 
@@ -105,6 +102,17 @@ SHALL remain unchanged. An empty navigation row SHALL be omitted.
 - **WHEN** Details is collapsed, reopened, or closed after workspace loading, or URLs/workspace/navigation support are absent
 - **THEN** Open PR appears exactly when its PR exists, the other two controls appear only while Details is open and their existing conditions hold, and the row is absent when no items are visible
 - **THEN** grouping causes no additional workspace lookup or RPC and the existing Details fields, events, and command remain available when expanded
+
+### Requirement: External links open outside Paseo
+
+Every forge link the plugin renders, on Factory and on the attention page,
+SHALL open through the SDK's `openExternalUrl`, never react-native `Linking`.
+On the desktop app `Linking.openURL` becomes `window.open`, which Electron
+shows as a bare in-app window with no browser controls.
+
+#### Scenario: Links reach the system browser
+- **WHEN** Open PR, Open change on GitHub, or an attention task's Open on GitHub is pressed
+- **THEN** its URL is passed to `openExternalUrl`, and a rejected open shows the existing error
 
 ### Requirement: Status chip presentation
 
@@ -301,3 +309,17 @@ Factory SHALL validate PR and context origins against one allowlist loaded from 
 - **WHEN** the file has a valid extra origin followed or preceded by any invalid line, including HTTP, a path, trailing slash, query, fragment, credentials, surrounding whitespace, noncanonical origin spelling or inline comment
 - **THEN** all extras are ignored for that load, valid GitHub PR/context links still load, extra-forge PRs fail the read and extra-forge context links are blanked
 - **THEN** missing, unreadable, empty and comment-only files also allow GitHub only, and a formerly valid file becoming invalid does not retain its previous extra origins for fresh validation
+
+### Requirement: Forge publication confirmation
+
+Factory Publish and Finish SHALL warn that they push to the forge selected by the run manifest, including before a PR exists. They SHALL retain confirmation before dispatch, no send on Cancel, existing action availability, pause binding and duplicate/pending guards. Display URLs SHALL NOT select the write destination. GitHub-only Land and existing display-origin validation SHALL remain unchanged.
+
+#### Scenario: Confirmation works before a PR exists
+- **WHEN** Publish or Finish is selected for an eligible run with no PR URL or with a GitHub PR
+- **THEN** the warning is `<Action> <change>? This pushes to the forge selected by the run manifest.` and opening or cancelling it sends no action
+- **THEN** confirmation sends only the existing authorized act request, with its pause identity and pending/duplicate protections, without new host fields or lookups
+
+#### Scenario: Gitea uses the shared action path
+- **WHEN** a displayed run has a configured Gitea PR and its allowed Publish or Finish action is confirmed
+- **THEN** the same manifest-based warning precedes the unchanged literal `nightshift act` invocation and the engine selects and validates the forge
+- **THEN** Finish removes the Gitea WIP prefix through the engine and does not merge; Gitea has no usable Land action and display configuration does not authorize writes
