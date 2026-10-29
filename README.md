@@ -219,7 +219,17 @@ model/endpoint tables, concurrency, task caps and phase budgets are inert, with
 sorted key-only ignored-setting notes. They do not configure manifests or
 providers. See [manifest templates and CLI outcomes](docs/specloop/command-json.md).
 
-Each unpaused poll checks regular-file status and validates the template before
+Omitting `repos.forge` always selects legacy GitHub. An explicit selection must
+exactly match a named forge table; repository names must be unique across all
+forges, ignoring case. See [config.example.toml](config.example.toml) for the
+forge fields and Gitea defaults. Named GitHub retains ambient `gh` authentication
+and host selection. Gitea configuration does not enable daemon execution or
+authorize GitHub landing.
+Every declared `land_token_env` variable must be absent from the daemon's
+environment, even when empty or belonging to an unused forge. Service, one-shot
+and direct recovery/poll entry points refuse before side effects if it is present.
+
+For GitHub-kind repositories, each unpaused poll checks regular-file status and validates the template before
 new work. Symlinks to regular files work; directories, FIFOs and devices are
 rejected before reading. Missing, unreadable or invalid templates, including an
 omitted manifest path, report repository-local health: healthy repositories
@@ -229,13 +239,24 @@ Repair the file at the same path to retry on a later poll. Adding or changing
 a config entry requires a daemon restart; malformed config TOML, invalid engines
 and empty or wrongly typed manifest values still fail configuration loading.
 
-Admitted runs continue publication and build-stage revisions using their copied
+For GitHub-kind repositories, admitted runs continue publication and build-stage revisions using their copied
 manifest and recorded branch. Existing jobs can finish and be collected; delivery
 needing the damaged template waits with its successful result retained. Pause
 and stopped-job holds still apply. See [enrollment recovery](docs/specloop/README.md#enrollment-recovery)
 ([issue #13](https://github.com/mattpolicastro/nightshift/issues/13)).
 
-On unpaused startup and polls after a worker-to-specloop switch, orphaned
+Gitea is an explicit exception to this health bypass: all daemon stages and
+pending delivery remain disabled, including admitted publication and build revisions.
+Authorization and durable label transitions are not implemented; a populated
+allowlist, healthy manifest or passing preflight cannot enable execution.
+Any direct JSON journal in `~/.nightshift/engine-switch/<owner>__<repo>/`, or an
+unreadable location, produces a more specific repository health escalation.
+Inspect the retained journals, claims and worktrees before correcting enrollment
+or moving foreign journals out of that location. Clearing it does not enable
+Gitea dispatch; changing the forge to GitHub is not a supported migration.
+Global job reaping and independent supervisors retain their local behavior.
+
+On unpaused startup and polls after a GitHub worker-to-specloop switch, orphaned
 `agent:working` issues with no claim or surviving worktree return to `agent:ready`,
 with a `needs_decision` recovery outcome. Surviving worker branches/worktrees are
 preserved for human inspection: an issue comment gives the phase and location,
@@ -359,6 +380,30 @@ Direct Python operation needs no worker OAuth, endpoint models or worker
 verification string. Manifest providers and verification retain their own
 requirements; [bundled service startup](#enabling-the-daemon) has extra guards.
 
+For configured Gitea forges, read-only preflight checks the nonadmin bot identity,
+a forbidden repository's 404, complete unique labels, exact base protection and
+the clone's matching HTTP(S) origin and credential-helper username. Git calls
+use the clone and supplied environment, disable prompts and time out after ten
+seconds; passwords and helper diagnostics are never printed. Helpers are
+operator-configured executables and may access their own storage or network.
+GitHub token/probe prerequisites still apply even to Gitea-only configurations.
+
+A clean preflight cannot enable Gitea drafting, admission, revisions, publication
+or pending delivery. Core authorization and durable label-transition recovery
+remain prerequisites, regardless of allowlists or cleared foreign journals.
+The pending human enrollment check is to run
+`nightshift preflight --config /absolute/path/to/config.toml` with the daemon's clone
+and bot environment against the real instance. Independently confirm the
+forbidden repository exists, then inspect the actual protection policy and
+helper's bot account. A protection 403 remains
+an `unverified` failure; an exact rule does not establish policy adequacy, and a
+matching username does not prove password ownership or scope. Confirm landing
+tokens are absent from the daemon and [provision the supervisor](#host-path-setup)
+separately. Record only redacted live results; CI fixtures do not prove live
+enrollment. See [Gitea limitations](KNOWN-LIMITATIONS.md),
+[issue #128](https://github.com/mattpolicastro/nightshift/issues/128) and
+[issue #122](https://github.com/mattpolicastro/nightshift/issues/122).
+
 ## Documentation
 
 | file | what's in it |
@@ -387,12 +432,12 @@ Modules are under `nightshift/`; directory paths are repository-relative.
 | Module | Responsibility |
 | --- | --- |
 | `cli.py`, `config.py`, `preflight.py` | Commands, enrollment and front-door checks |
-| `daemon.py`, `specloop_intake.py`, `specloop_job.py` | Polling, durable jobs and delivery |
+| `daemon.py`, `specloop_intake.py`, `specloop_job.py` | Forge selection and dispatch holds; core policy, durable jobs and delivery |
 | `specloop_client.py`, `specloop_attention.py` | Independent engine CLI and attention adapter |
 | `forge/__init__.py`, `forge/types.py` | Forge protocol and factual records |
 | `forge/github.py` | GitHub operations and queue-helper delegation through the selected runner |
 | `forge/gitea.py` | Standalone Gitea front-door operations over `forge/http.py` |
-| `queue.py` | Retained GitHub transport, retries and shared queue policy; daemon owns safe leftover recovery |
+| `queue.py` | Retained GitHub transport, retries and shared queue policy; daemon owns GitHub-only leftover recovery |
 | `outcomes.py`, `trace.py`, `mirror.py` | Historical outcomes, transcripts and optional import utility |
 | `specloop/` | Build engine, supervisor, verification and evidence gates |
 | `tests/` | Regression checks; run `uv run pytest` |
@@ -401,7 +446,11 @@ The forge boundary is staged ([issue #126](https://github.com/mattpolicastro/nig
 intake, merge-readiness and daemon engine-switch recovery use named operations;
 authorization, receipts and workflow decisions remain in core. Landing migration
 is future work (#130). The standalone `forge/gitea.py` backend is implemented over
-`forge/http.py`; Gitea enrollment and daemon integration remain future work.
+`forge/http.py`. Configuration, adapter construction and read-only preflight are
+separate from disabled Gitea daemon execution. Worker recovery remains GitHub-only;
+the narrow landing enrollment guard does not implement Gitea landing.
+See [issue #128](https://github.com/mattpolicastro/nightshift/issues/128) and
+[issue #122](https://github.com/mattpolicastro/nightshift/issues/122).
 
 ## Usage
 
@@ -480,6 +529,17 @@ launchd reads no shell configuration, and there is no hot reload.
 win over inherited values for downstream settings. `bin/specloop-serve` does
 not source that file; provide its Python settings in the service environment.
 Candidate files and manifest env files do not configure the harness resolver.
+
+For forge-secret scanning, a custom daemon `--config` path also requires
+`NIGHTSHIFT_FORGE_CONFIG` set to the same **absolute path** in the independent
+supervisor's process environment. Otherwise sealing uses the checkout's default
+`config.toml`; an absent default contributes no forge definitions. Invalid
+selected files block sealing. Provision the supervisor's bot credential sources
+separately: the frozen `bin/specloop-serve` does not source the daemon env file.
+Discovery parses that trusted env file without executing it or exporting values.
+See the [seal credential limits](docs/specloop/README.md#how-the-engine-works)
+before relying on detection of human landing tokens. No service restart or
+credential provisioning is automatic.
 
 **Bundled service startup is still fixed.** Both unchanged wrappers use
 `$HOME/Projects/nightshift` and `/opt/homebrew/bin/uv`. `bin/nightshift-daemon`
@@ -746,6 +806,7 @@ and [landing recovery](docs/landing.md#recovering-from-a-refusal).
 
 `nightshift daemon status` reports daemon liveness, alerts, active background jobs and
 repository ready/blocked counts and lists, including contradiction diagnostics.
+Gitea rows print `not queried (gitea)` without GitHub queue queries.
 Worker working counts, claim/phase/transcript lines and the off-subscription
 model report are removed; other status behavior and exit codes are unchanged.
 Use `nightshift jobs --all` for job history and `nightshift status` for independent

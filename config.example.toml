@@ -47,7 +47,7 @@ base = "main"
 # Historical clone-path compatibility; the manifest's run.repo selects the
 # build checkout. Omitted dir retains ~/Projects/<repo-name> for utilities.
 # dir = "~/Projects/nightshift-clones/sample"
-
+# forge = "tea"  # exact named definition; omission always means legacy GitHub
 # Relative manifest paths resolve beside config.toml; ~ expands. Loading does
 # not require the file to exist. Missing or unusable manifests hold only that
 # repository's new work; repair at the same path is retried on a later poll.
@@ -129,3 +129,20 @@ spec_review = "spec:review"
 spec_approved = "spec:approved"
 # agent:revise is fixed: on a specloop PR it requests spec or build revision,
 # depending on whether the change has been admitted.
+
+# Optional named forge; uncomment the whole table to configure it. This does
+# not enable Gitea daemon execution. Store credentials only in the environment.
+# [[forges]]
+# name = "tea"
+# kind = "gitea"
+# url = "https://forge.example/gitea"  # installation root, without /api/v1
+# token_env = "GITEA_BOT_TOKEN"
+# land_token_env = "GITEA_LAND_TOKEN"  # distinct human credential variable
+# bot_login = "nightshift-bot"
+# trusted_logins = []  # default; no trusted users
+# forbidden_probe = "owner/private-repo"  # real off-limits repository
+# wip_prefix = "WIP: "  # default; cannot be empty
+# Named GitHub tables require name and kind = "github"; defaults are
+# url = "https://github.com", token_env = "GH_TOKEN", empty land_token_env,
+# bot_login and forbidden_probe. GitHub still uses ambient gh authentication
+# and host selection; these fields do not enable credential or host routing.

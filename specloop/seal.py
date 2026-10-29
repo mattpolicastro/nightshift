@@ -14,9 +14,11 @@ import os
 import stat
 import subprocess
 import tempfile
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from nightshift import config
 from specloop.manifest import Manifest, matches
 
 MAX_FILE = 2 * 1024 * 1024
@@ -193,6 +195,39 @@ def seal(repo: Path, work: Path, base: str, m: Manifest, message: str, secrets: 
 def credential_values(extra_env: dict[str, str] | None = None) -> list[str]:
     """Literal token values a diff must never contain."""
     values = []
+    # Only the supervisor's process environment selects this trusted source.
+    # extra_env and candidate cwd/contents cannot redirect configuration reads.
+    override = os.environ.get("NIGHTSHIFT_FORGE_CONFIG")
+    if override is not None and (not override.strip() or not Path(override).is_absolute()):
+        raise ValueError("NIGHTSHIFT_FORGE_CONFIG must be a nonempty absolute path")
+    path = Path(override) if override is not None else config.DEFAULT_PATH
+    try:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            if override is not None:
+                raise
+            raw = {}
+        else:
+            raw = tomllib.loads(path.read_text())
+        forges = config.parse_forges(raw)
+        # stat explicitly: exists() can hide permission errors. A dangling
+        # symlink is an existing, invalid source, not an absent optional file.
+        try:
+            config.ENV_FILE.lstat()
+        except FileNotFoundError:
+            file_env = {}
+        else:
+            config.ENV_FILE.stat()
+            file_env = config.parse_env_file()
+    except (OSError, ValueError):
+        # Paths, TOML contents and underlying exception messages may be secrets.
+        raise ValueError("cannot discover forge credentials: invalid trusted config or env file") from None
+    for forge in forges:
+        for key in (forge.token_env, forge.land_token_env):
+            for source in (extra_env or {}, os.environ, file_env):
+                if key and (value := source.get(key)) and value not in values:
+                    values.append(value)
 
     def walk(x):
         if isinstance(x, dict):
@@ -211,4 +246,4 @@ def credential_values(extra_env: dict[str, str] | None = None) -> list[str]:
         v = (extra_env or {}).get(k) or os.environ.get(k)
         if v and len(v) >= 16:
             values.append(v)
-    return values
+    return list(dict.fromkeys(values))

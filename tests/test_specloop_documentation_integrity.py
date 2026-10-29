@@ -143,8 +143,15 @@ def heading_ids(markdown):
     "specloop-documentation/worker-retirement-guidance/existing-installation-is-checked-before-merge"
 )
 @pytest.mark.parametrize("path", (*DOCS, "docs/specloop/command-json.md"))
+@pytest.mark.scenario("forge-configuration/bounded-enrollment-guidance/limits-and-live-checks-are-explicit")
+@pytest.mark.scenario("specloop-documentation/gitea-readiness-evidence-limits/preflight-does-not-enable-execution")
+@pytest.mark.scenario("specloop-documentation/configuration-resilience-guidance/operator-repairs-enrollment")
+@pytest.mark.scenario("specloop-documentation/configuration-resilience-guidance/operator-understands-names-and-limits")
 def test_relative_documentation_links_resolve_including_heading_fragments(path):
     document = ROOT / path
+    if path in DOCS:
+        targets = {target for _, target in LINK.findall(document.read_text())}
+        assert {f"{REPOSITORY}/issues/128", f"{REPOSITORY}/issues/122"} <= targets
     links = 0
     for _, target in LINK.findall(document.read_text()):
         url = urlsplit(target)

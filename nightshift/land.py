@@ -263,7 +263,8 @@ def load_config(path: Path) -> config.Config:
 
 
 def enrolled_repo(cfg: config.Config, identity: Identity) -> config.Repo:
-    matches = [repo for repo in cfg.repos if _repo_name(repo.name) == identity.repo]
+    matches = [repo for repo in cfg.repos if _repo_name(repo.name) == identity.repo
+               and cfg.forge_for(repo).kind == "github"]
     if not matches:
         raise Refusal(f"repository {identity.repo} is not enrolled in configuration")
     if len(matches) != 1:

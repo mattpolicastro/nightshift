@@ -347,3 +347,15 @@ An uncertain PUT result SHALL use the existing exact ordered two-parent check an
 - **WHEN** the head stays unchanged until the shared deadline or a reconciliation read fails, returns invalid metadata, or reveals a closed or draft PR
 - **THEN** landing refuses without another PUT or merge and reports the original uncertain-response error with the reconciliation cause
 - **THEN** command time and capped sleeps consume the original deadline across CI rounds, with no reset, extra grace period or read after expiry
+
+### Requirement: GitHub kind enrollment boundary
+
+`enrolled_repo` SHALL count only rows with no forge selection or a selected
+forge of kind github when authorizing GitHub landing. The function SHALL retain
+its existing identity and ambiguity diagnostics. No other landing behavior or
+mutation boundary SHALL change.
+
+#### Scenario: Gitea enrollment grants no GitHub authority
+- **WHEN** landing resolves a GitHub PR whose owner/name appears only in a Gitea enrollment
+- **THEN** it refuses as not enrolled before any mutation, even if the names match exactly
+- **THEN** legacy and explicitly GitHub-kind rows remain eligible for all existing gates, and existing invalid-identity and ambiguous-enrollment assertions still pass

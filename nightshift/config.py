@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from .queue import Labels
 
@@ -69,6 +71,75 @@ DEFAULT_CLONE_ROOT = Path.home() / "Projects"
 
 
 @dataclass(frozen=True)
+class ForgeConfig:
+    name: str
+    kind: str
+    url: str = "https://github.com"
+    token_env: str = "GH_TOKEN"
+    land_token_env: str = ""
+    bot_login: str = ""
+    trusted_logins: list[str] = field(default_factory=list)
+    forbidden_probe: str = ""
+    wip_prefix: str = "WIP: "
+
+
+def parse_forges(raw: dict) -> list[ForgeConfig]:
+    """Parse only forge tables, without enrollment, environment or secret reads."""
+    tables = raw.get("forges", [])
+    if not isinstance(tables, list):
+        raise ValueError("forges must be an array of tables")
+    result: list[ForgeConfig] = []
+    for table in tables:
+        if not isinstance(table, dict):
+            raise ValueError("forges entry must be a table")
+        for key in ("name", "kind"):
+            if key not in table:
+                raise ValueError(f"forges.{key} is required")
+        definition = ForgeConfig(**{f.name: table[f.name] for f in fields(ForgeConfig)
+                                    if f.name in table})
+        for f in fields(ForgeConfig):
+            value = getattr(definition, f.name)
+            valid = (isinstance(value, list) and all(isinstance(v, str) and v.strip() for v in value)
+                     if f.name == "trusted_logins" else isinstance(value, str))
+            if not valid:
+                raise ValueError(f"forges.{f.name} has invalid type or value")
+        if not definition.name.strip() or any(f.name == definition.name for f in result):
+            raise ValueError("forges.name must be nonblank and unique")
+        if definition.kind not in ("github", "gitea"):
+            raise ValueError("forges.kind must be github or gitea")
+        if not definition.wip_prefix:
+            raise ValueError("forges.wip_prefix must not be empty")
+        required = []
+        if definition.kind == "gitea":
+            required += ["url", "token_env", "land_token_env", "bot_login"]
+        for key in required:
+            if key not in table or not getattr(definition, key).strip():
+                raise ValueError(f"forges.{key} must be nonblank and supplied")
+        for key in ("token_env", "land_token_env"):
+            value = getattr(definition, key)
+            if (key == "token_env" or value) and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+                raise ValueError(f"forges.{key} must be an environment variable name")
+        if definition.kind == "gitea" and definition.token_env == definition.land_token_env:
+            raise ValueError("forges.land_token_env must differ from token_env")
+        try:
+            url = definition.url
+            parts = urlsplit(url)
+            if (not parts.hostname or parts.username is not None or parts.password is not None
+                    or parts.netloc.endswith(":") or parts.port == 0 or "?" in url or "#" in url
+                    or any(c.isspace() or ord(c) < 32 or 127 <= ord(c) <= 159 or c == "\\"
+                           for c in url + unquote(parts.path))
+                    or ".." in unquote(parts.path).split("/")
+                    or parts.scheme not in ("https", "http")
+                    or (parts.scheme == "http" and parts.hostname.lower() not in ("localhost", "127.0.0.1", "::1"))
+                    or parts.path.rstrip("/").endswith("/api/v1")):
+                raise ValueError
+        except ValueError:
+            raise ValueError("forges.url must be a valid instance root URL") from None
+        result.append(definition)
+    return result
+
+
+@dataclass(frozen=True)
 class Repo:
     name: str
     # Inert constructor compatibility for historical shared utilities.
@@ -80,6 +151,7 @@ class Repo:
     concurrency: int = 1
     engine: str = "specloop"
     manifest: Path | None = None
+    forge: str | None = None
 
     def __post_init__(self) -> None:
         _validate_engine(self.name, self.engine)
@@ -153,6 +225,15 @@ class Config:
     # Historical compatibility only; configuration cannot enable mirroring.
     mirror_to_paseo: bool = field(default=False, init=False)
     notes: list[str] = field(default_factory=list)
+    forges: list[ForgeConfig] = field(default_factory=list)
+
+    def forge_for(self, repo: Repo) -> ForgeConfig:
+        if repo.forge is None:
+            return ForgeConfig(name="", kind="github")
+        for definition in self.forges:
+            if definition.name == repo.forge:
+                return definition
+        raise ValueError("repos.forge must reference an exact configured forge name")
 
 
 def _validate_engine(name: str, engine: str) -> None:
@@ -172,7 +253,22 @@ def load(path: Path | None = None) -> Config:
     # Reject retired/unknown engines before interpreting any legacy settings
     # or manifest paths, even when the invalid enrollment appears last.
     for repo in raw.get("repos", []):
-        _validate_engine(repo["name"], repo.get("engine", "specloop"))
+        _validate_engine(repo.get("name"), repo.get("engine", "specloop"))
+
+    forges = parse_forges(raw)
+    names: set[str] = set()
+    for repo in raw.get("repos", []):
+        name = repo.get("name")
+        if (not isinstance(name, str) or len(name.split("/")) != 2
+                or any(part in ("", ".", "..") for part in name.split("/"))
+                or any(c.isspace() or ord(c) < 32 or c == "\\" for c in name)):
+            raise ValueError("invalid repository identity")
+        if name.casefold() in names:
+            raise ValueError("ambiguous enrollment: repository names must be unique across forges")
+        names.add(name.casefold())
+        if "forge" in repo and (not isinstance(repo["forge"], str) or not repo["forge"].strip()
+                                or not any(f.name == repo["forge"] for f in forges)):
+            raise ValueError("repos.forge must reference an exact configured forge name")
 
     daemon = raw.get("daemon", {})
     labels = raw.get("labels", {})
@@ -185,6 +281,7 @@ def load(path: Path | None = None) -> Config:
                 dir=r.get("dir", ""),
                 engine=r.get("engine", "specloop"),
                 manifest=_manifest_path(r, path.parent),
+                forge=r.get("forge"),
             )
             for r in raw.get("repos", [])
         ],
@@ -205,6 +302,7 @@ def load(path: Path | None = None) -> Config:
         slack_webhook=_webhook(raw.get("notify", {})),
         forbidden_probe=daemon.get("forbidden_probe", ""),
         notes=_obsolete_notes(raw),
+        forges=forges,
     )
     for note in cfg.notes:
         log.warning("%s", note)

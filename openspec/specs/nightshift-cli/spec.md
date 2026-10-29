@@ -71,3 +71,15 @@ Daemon-side callers whose existing requirements prescribe specloop invocations w
 - **WHEN** intake, background revision, attention and deploy status paths receive alias output with one stdout JSON document and a stderr rename notice
 - **THEN** their existing specloop argv remain unchanged and their parsers accept that one document under the existing success, structured-refusal and error contracts without treating the notice as JSON or a failure
 - **THEN** existing request identity, feedback-file and round-ID boundaries, timeouts, stale handling and deploy safeguards remain unchanged
+
+### Requirement: Forge aware daemon status
+
+Daemon status SHALL query GitHub only for rows with implicit GitHub or an
+explicit GitHub-kind forge. It SHALL list Gitea rows as `not queried (gitea)`.
+The change SHALL remain confined to that repository filter, preserving liveness,
+alerts, jobs, GitHub details and exit codes.
+
+#### Scenario: Gitea status is explicitly unqueried
+- **WHEN** daemon status reads mixed GitHub and Gitea enrollment
+- **THEN** each Gitea row prints `not queried (gitea)` and invokes no ready, blocker or contradiction query
+- **THEN** GitHub rows retain existing counts, details and diagnostics, with no remote writes

@@ -62,6 +62,7 @@ def labels(pipeline, number):
 @pytest.mark.scenario("config-resilience/worker-switch-reconciliation/switch-recovers-working-issues")
 @pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/recovery-preserves-interrupted-work")
 def test_engine_switch_recovers_working_issues(switched, tmp_path, monkeypatch):
+    monkeypatch.setattr(daemon, "forge_for", lambda *a, **k: pytest.fail("GitHub must retain its runner path"))
     orphan = working(switched, 1, tmp_path)
     orphan.clear()
     missing = working(switched, 2, tmp_path)
@@ -205,7 +206,8 @@ def test_completed_recovery_checks_current_evidence(switched, tmp_path, state):
 @pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/recovery-preserves-interrupted-work")
 @pytest.mark.parametrize("manifest", ["absent", "missing", "invalid"])
 @pytest.mark.parametrize("startup_first", [False, True])
-def test_recovery_without_healthy_manifest(switched, tmp_path, manifest, startup_first):
+def test_recovery_without_healthy_manifest(switched, tmp_path, manifest, startup_first, monkeypatch):
+    monkeypatch.setattr(daemon, "forge_for", lambda *a, **k: pytest.fail("GitHub must retain its runner path"))
     claim = working(switched, 1, tmp_path)
     good = tmp_path / "healthy.toml"
     good.write_bytes(switched.repo.manifest.read_bytes())
@@ -246,6 +248,7 @@ def test_recovery_without_healthy_manifest(switched, tmp_path, manifest, startup
 @pytest.mark.parametrize("failure", ["claim", "list", "labels", "comments"])
 @pytest.mark.parametrize("startup_first", [False, True])
 def test_unknown_recovery_retains_evidence_and_isolates_intake(switched, tmp_path, failure, startup_first, monkeypatch):
+    monkeypatch.setattr(daemon, "forge_for", lambda *a, **k: pytest.fail("GitHub must retain its runner path"))
     claim = working(switched, 1, tmp_path, survives=True)
     if failure == "claim":
         claim.path.write_text("{unreadable")
@@ -386,6 +389,7 @@ def recovery_writes(pipeline):
 def test_remote_write_failure_recovers_on_restart(
     switched, tmp_path, monkeypatch, survives, operation, applied,
 ):
+    monkeypatch.setattr(daemon, "forge_for", lambda *a, **k: pytest.fail("GitHub must retain its runner path"))
     claim = working(switched, 1, tmp_path, survives=survives)
     # Keep the released issue available for assertions across later polls.
     monkeypatch.setattr(daemon.specloop_intake, "propose_pending", lambda *a, **k: None)

@@ -174,9 +174,40 @@ None of these follow-ups establishes live validation or a completed host rollout
 - **GitHub-only automation:** the automated front door and publication use
   GitHub. Local drafting and verification do not require a GitHub host; they
   do not provide automated intake or publication for other hosts.
+  Gitea daemon stages and pending delivery are disabled for every allowlist:
+  core's owner shortcut bypasses adapter allowlists, and multi-write label
+  transitions can lose their trigger after an accepted DELETE with a lost response.
+  Foreign engine-switch journals require inspection; clearing them, repairing
+  manifests or passing preflight does not enable execution
+  ([issue #128](https://github.com/mattpolicastro/nightshift/issues/128),
+  [issue #122](https://github.com/mattpolicastro/nightshift/issues/122)).
+- **Deferred Gitea workflow guarantees:** core authorization's User-owner
+  shortcut bypasses adapter allowlists; organization/team membership
+  authorization is unsupported. Label transitions lack durable intent/recovery:
+  deleting `spec:approved` before adding `needs-human` can lose the discovery
+  trigger if the DELETE succeeds but its response is lost. Core marker lookup
+  and reconciliation can accept human marker copies; the standalone adapter
+  still restricts comment updates to bot-owned comments. Drafts use a title
+  prefix rather than native draft state. These gaps keep drafting, admission,
+  revisions, publication and pending delivery unconditionally disabled.
+  Foreign-journal inspection adds a diagnostic, not an alternative enabling
+  path. GitHub execution and saved revision-round guarantees are unchanged.
+- **Gitea evidence limits:** preflight's forbidden 404 cannot establish that the
+  repository exists; a human must independently confirm it. Protection evidence
+  proves only an exact base rule exists, not adequate policy; wildcard-only rules
+  and denied reads remain unverified failures. Clone helpers run with disabled
+  prompts and ten-second subprocess bounds, but may use their own storage or
+  network. A matching username does not independently prove password account or
+  scope. Real-instance preflight, protection-policy and bot-helper inspection
+  remain pending human checks, not CI proof of live workflows. See the
+  [enrollment checks](README.md#quickstart) and [supervisor provisioning](README.md#host-path-setup).
+- **GitHub-only command boundaries:** landing, arming, the engine's PR commands
+  and plugin GitHub paths have not migrated to Gitea. Gitea enrollment cannot
+  authorize GitHub landing; daemon status skips its queue queries. Named GitHub
+  definitions still use ambient `gh` authentication and host selection.
 - **Config:**
   - Manifest failures now hold new drafting/admission/spec re-drafting locally;
-    admitted publication/build revisions continue. Worker leftovers are released
+    admitted GitHub publication/build revisions continue. GitHub worker leftovers are released
     or preserved for human inspection, and new names include the owner
     ([issue #13](https://github.com/mattpolicastro/nightshift/issues/13)). See
     [enrollment recovery](docs/specloop/README.md#enrollment-recovery).
@@ -248,7 +279,12 @@ real-host Stop/evidence inspection remain human checks, not fixture evidence.
 ## Other known gaps
 
 - Agents can read credential files; diffs containing their literal values are
-  refused.
+  refused when those values are available to seal discovery. Forge scans cover
+  declared bot/landing variables in supplied/process environments and the trusted
+  env file, including unused forges. Inaccessible keychain-only credentials cannot
+  be detected; discovery does not retrieve them or inject landing tokens into the
+  daemon. Custom supervisor config paths and bot credential sources require
+  [operator provisioning](README.md#host-path-setup).
 - Quota is handled by detecting a usage-limit error, not read ahead of time.
 
 ## Platform assumptions

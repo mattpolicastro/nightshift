@@ -31,6 +31,27 @@ are inert, with key-only ignored-setting notes; no manifest is generated from th
 See [enrollment and preparation](../../README.md#enroll-a-repository) and the
 [CLI contract](command-json.md).
 
+Forge selection defaults to GitHub independently of named table order. Optional
+`repos.forge` selects an exact name; owner/repository collisions across forges
+are rejected ignoring case. See [forge configuration](../../config.example.toml).
+Gitea enrollment grants no GitHub landing authority; daemon status reports it
+as `not queried (gitea)`. Gitea daemon execution remains deferred.
+
+Gitea preflight provides read-only bot, forbidden-repository, label, exact
+protection-rule and clone credential-username evidence. It cannot enable
+drafting, admission, revisions, publication or pending delivery, even with a
+populated allowlist or cleared foreign journal: core authorization and durable
+label-transition recovery are still missing. The GitHub token/probe checks
+remain prerequisites. Follow the [preflight and human enrollment checks](../../README.md#quickstart)
+with the real instance, daemon clone and bot environment; CI uses fake services
+and helpers and cannot establish live enrollment. Protection `unverified` is a
+failure, and matching helper usernames prove neither password ownership nor
+scope. Provision the independent supervisor's config and credential sources
+via [host setup](../../README.md#host-path-setup); frozen-wrapper prerequisites
+still apply. The [deferred Gitea gaps](../../KNOWN-LIMITATIONS.md) are tracked in
+[issue #128](https://github.com/mattpolicastro/nightshift/issues/128) and
+[issue #122](https://github.com/mattpolicastro/nightshift/issues/122).
+
 | Label | Stage and action |
 | --- | --- |
 | `spec:draft` or `agent:ready` on an issue | Draft its title, body and comments into an OpenSpec change. |
@@ -244,7 +265,7 @@ for intake and delivery, and `nightshift pause <change>` /
 
 ### Enrollment recovery
 
-Each unpaused poll validates the enrollment template, checking regular-file
+For GitHub-kind repositories, each unpaused poll validates the enrollment template, checking regular-file
 status before opening it. Symlinks to regular files are supported; directories,
 FIFOs and devices are rejected without reading. Missing, unreadable or invalid
 templates, or an omitted manifest path, cause repository-local health failures.
@@ -259,14 +280,26 @@ changing configuration requires a daemon restart; there is no hot reload.
 Malformed config TOML, invalid engines and empty or wrongly typed manifest
 values remain configuration-loading errors.
 
-Admitted runs continue publication and build-stage revisions with their copied
+For GitHub-kind repositories, admitted runs continue publication and build-stage revisions with their copied
 manifest and recorded branch, even if enrollment becomes unhealthy. Durable run
 state counts as admission even while its notification is pending. Existing jobs
 can finish and be collected; delivery needing an unavailable manifest-derived
 source path retains the successful result until repair, without re-drafting.
 Authorization, publication checks, pause and stopped-job holds still apply.
 
-Worker-to-specloop recovery runs before new intake on unpaused startup and polls,
+Gitea is excluded from that health bypass: drafting, admission, revisions,
+publication and pending delivery all remain disabled, including admitted work.
+Neither manifest repair, trusted logins nor passing preflight enables stages.
+The daemon reports a repository health hold, retaining triggers, receipts and
+feedback consumption. A direct JSON journal under
+`~/.nightshift/engine-switch/<owner>__<repo>/`, even completed or malformed, or an
+unreadable location requires human inspection. The daemon never replays, migrates
+or deletes that evidence. Moving the journal out of the active location removes
+only that diagnostic; Gitea dispatch stays disabled across restart. Changing the
+forge to GitHub is not a recovery procedure. Global job reaping and independent
+supervisors can still persist local results.
+
+GitHub-only worker-to-specloop recovery runs before new intake on unpaused startup and polls,
 even with an unhealthy manifest. Orphaned `agent:working` issues with no claim or
 surviving worktree return to `agent:ready` with a `needs_decision` outcome.
 Surviving branches/worktrees are preserved for human inspection, with their
@@ -1056,6 +1089,25 @@ example `auth = "~/.codex-api/auth.json"` for API credits created with
 subscription profile in a role's chain, and the role moves to it when the
 subscription is usage-limited or unavailable. The seal refuses diffs that
 contain any `~/.codex*/auth.json` value.
+
+Seal discovery also reads every declared forge's `token_env` and
+`land_token_env`, including unused forges, from the supplied environment, the
+supervisor process environment and `~/.config/nightshift/env`. Every distinct
+nonempty value is protected, including short and shadowed values. Existing
+fixed-name and profile-auth scans retain their length filters. Refusal reports
+affected paths, never token values.
+
+Only the supervisor's process `NIGHTSHIFT_FORGE_CONFIG` selects a custom forge
+config; it must be a nonempty absolute path. Otherwise discovery uses
+`nightshift.config.DEFAULT_PATH`, allowing an absent default. Invalid selected
+config or unreadable credential files block sealing. Candidate files and manifest
+environment values cannot redirect selection, and enrollment is not loaded.
+For a custom daemon `--config`, operators must provision the same path and bot
+credential sources in the independent supervisor; see [host setup](../../README.md#host-path-setup).
+The frozen `bin/specloop-serve` does not source the daemon env file. Discovery
+parses it without shell execution or environment injection. It cannot detect
+unavailable secrets, including human tokens held only in a keychain; it does
+not retrieve them. Never inject landing tokens into the daemon just for scanning.
 
 Spike S1 probed, from the harness itself, that each session can write only its
 workspace and has no network. The claude adapter with `qwen3-coder-next` on the
