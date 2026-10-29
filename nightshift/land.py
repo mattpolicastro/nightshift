@@ -1,7 +1,7 @@
 """Explicit operator entry point for landing an enrolled, reviewed PR.
 
 Human checks, run completion, and bounded CI/base synchronization precede a
-head-conditioned merge, whose result must be confirmed by GitHub.
+head-conditioned merge, whose result must be confirmed by the selected forge.
 """
 
 from __future__ import annotations
@@ -598,13 +598,53 @@ class GiteaLandingForge:
             operations.remaining()
         return subprocess.CompletedProcess([], 0, "", "")
 
-    def _unavailable(self, *args: Any, **kwargs: Any) -> Any:
-        # Subsequent implementation tasks add CI and merge operations.
-        # Until then no inherited GitHub operation may authorize a Gitea action.
-        raise Refusal("Gitea landing operation is not yet implemented")
+    def checks(
+        self, identity: Identity, head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            evidence = self._adapter(operations).checks_for_sha(identity.repo, head)
+        except (ForgeError, ValueError):
+            raise Refusal("CI checks: Gitea status evidence is unreadable") from None
+        finally:
+            operations.remaining()
+        # The adapter validates the exact SHA and every combined-status page.
+        # Its factual projection omits links; normalize only here, preserving
+        # the strict GitHub check schema in ci_is_green.
+        checks = [{**check, "link": ""} for check in json.loads(evidence.stdout)]
+        if not checks:
+            return subprocess.CompletedProcess([], 1, "", "no checks reported")
+        return subprocess.CompletedProcess([], 0, json.dumps(checks), "")
 
-    resolve_repo = checks = _unavailable
-    merge = confirm_merge = _unavailable
+    def merge(
+        self, identity: Identity, head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            self._transport(operations).request(
+                "POST", f"/api/v1/repos/{identity.repo}/pulls/{identity.number}/merge",
+                json_body={"Do": "merge", "head_commit_id": head},
+            )
+        except GiteaHTTPError as exc:
+            detail = f" (HTTP {exc.status})" if exc.status is not None else ""
+            raise Refusal(f"merge request: Gitea request failed{detail}") from None
+        except ValueError:
+            raise Refusal("merge request: invalid Gitea request") from None
+        finally:
+            operations.remaining()
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    def confirm_merge(self, identity: Identity, operations: Operations) -> dict[str, Any]:
+        data = self._read_json(
+            f"/api/v1/repos/{identity.repo}/pulls/{identity.number}", operations,
+            stage="merged-state confirmation",
+        )
+        # A closed PR alone is not evidence of merging, and merged=true on an
+        # open/unknown state is contradictory. Do not coerce truthy values.
+        if data.get("merged") is not True or data.get("state") != "closed":
+            raise Refusal("merged-state confirmation: Gitea PR is not confirmed merged")
+        return {"number": data.get("number"), "url": data.get("html_url"), "state": "MERGED"}
+
+    def resolve_repo(self, operations: Operations) -> dict[str, Any]:
+        raise Refusal("Gitea landing requires a full configured PR URL")
 
 
 def read_confirmed_remote_head(pr: str, read_json: Callable[[list[str]], Any]) -> str:

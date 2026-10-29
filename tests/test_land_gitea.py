@@ -1422,3 +1422,408 @@ def test_gitea_base_moving_during_observation_requires_separate_update(
     assert land.continue_landing(pr, None, land.CheckSnapshot(HEAD, (), None), ops, timeout=60) == 0
     assert checked == [(SUCCESSOR, 160, 59), (FINISHED_HEAD, 160, 59)]
     assert sum(req.get_method() == "POST" for req, _ in opener.calls) == 2
+
+
+def status_path(head=HEAD, page=1):
+    return f"{ROOT}/api/v1/repos/{REPO}/commits/{head}/status?page={page}&limit=50"
+
+
+def combined(state="success", *, head=HEAD, rows=None, count=None):
+    rows = [{"id": 1, "state": state}] if rows is None else rows
+    return {"sha": head, "state": state, "total_count": len(rows) if count is None else count,
+            "statuses": rows}
+
+
+def expect_status(opener, state="success", *, head=HEAD, empty=False, timeout=30):
+    count = 0 if empty else 1
+    if count:
+        opener.expect("GET", status_path(head), combined(state, head=head), timeout=timeout)
+    opener.expect("GET", status_path(head, 2 if count else 1),
+                  combined(state, head=head, rows=[], count=count), timeout=timeout)
+
+
+def expect_ci(opener, remote, state="success", *, empty=False, timeout=30):
+    opener.expect("GET", PR_PATH, remote, timeout=timeout)
+    expect_status(opener, state, head=remote["head"]["sha"], empty=empty, timeout=timeout)
+    opener.expect("GET", PR_PATH, remote, timeout=timeout)
+
+
+@pytest.mark.scenario("gitea-landing/exact-head-combined-ci/combined-states-control-progress")
+@pytest.mark.parametrize("state,bucket", [
+    ("success", "pass"), ("pending", "pending"), ("failure", "fail"),
+    ("error", "fail"), ("warning", "fail"), ("skipped", "skipping"),
+])
+def test_gitea_combined_mapping_and_local_link_normalization(
+    config_path, scripted_runner, opener, state, bucket,
+):
+    identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
+    expect_status(opener, state)
+    result = ops.forge.checks(identity, HEAD, ops)
+    assert json.loads(result.stdout) == [
+        {"name": "Gitea combined status", "bucket": bucket, "state": state, "link": ""}]
+    if bucket == "fail":
+        with pytest.raises(land.Refusal, match="fail"):
+            land.ci_is_green(result)
+    else:
+        assert land.ci_is_green(result) is (bucket == "pass")
+    # Normalization belongs only to Gitea; missing GitHub links still refuse.
+    github = subprocess.CompletedProcess([], 0, json.dumps([
+        {"name": "test", "bucket": "pass", "state": "SUCCESS"}]), "")
+    with pytest.raises(land.Refusal, match="malformed check result"):
+        land.ci_is_green(github)
+
+
+@pytest.mark.scenario("gitea-landing/exact-head-combined-ci/combined-states-control-progress")
+@pytest.mark.parametrize("state", ["success", "pending", "skipped", "empty", "failure", "error", "warning"])
+def test_gitea_ci_combined_states_control_polling(config_path, scripted_runner, opener, state):
+    identity, ops, clock = bounded_operations(config_path, scripted_runner, opener)
+    expect_ci(opener, PR, "pending" if state == "empty" else state, empty=state == "empty")
+    if state in {"failure", "error", "warning"}:
+        with pytest.raises(land.Refusal, match="fail"):
+            land.wait_for_ci(identity, HEAD, ops)
+        assert clock.sleeps == []
+    else:
+        waiting = state != "success"
+        if waiting:
+            expect_ci(opener, PR)
+        land.wait_for_ci(identity, HEAD, ops)
+        assert clock.sleeps == ([10] if waiting else [])
+    assert all(req.get_method() == "GET" for req, _ in opener.calls)
+    assert not scripted_runner.calls
+
+
+@pytest.mark.scenario("gitea-landing/exact-head-combined-ci/combined-states-control-progress")
+@pytest.mark.scenario("gitea-landing/exact-head-combined-ci/ci-uncertainty-and-deadline-refuse")
+@pytest.mark.parametrize("state", ["pending", "skipped", "empty"])
+def test_gitea_ci_waiting_expires_without_new_dispatch(config_path, scripted_runner, opener, state):
+    identity, ops, clock = bounded_operations(config_path, scripted_runner, opener, budget=7)
+    expect_ci(opener, PR, "success" if state == "empty" else state, empty=state == "empty", timeout=7)
+    reason = "no CI checks were reported" if state == "empty" else "shared CI deadline expired"
+    with pytest.raises(land.Refusal, match=reason):
+        land.wait_for_ci(identity, HEAD, ops)
+    assert clock.sleeps == [7]
+    assert all(req.get_method() == "GET" for req, _ in opener.calls)
+
+
+@pytest.mark.scenario("gitea-landing/exact-head-combined-ci/ci-uncertainty-and-deadline-refuse")
+@pytest.mark.parametrize("evidence", [
+    None, [], {}, b"not JSON", combined(head=SUCCESSOR), {**combined(), "sha": "short"},
+    {**combined(), "state": "unknown"}, {**combined(), "state": True},
+    {**combined(), "total_count": True}, {**combined(), "total_count": -1},
+    {**combined(), "statuses": None}, combined(rows=[None]),
+    combined(rows=[{"id": 1, "state": "unknown"}]), combined(rows=[{"state": "success"}]),
+])
+def test_gitea_malformed_status_refuses(config_path, scripted_runner, opener, evidence):
+    identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
+    opener.expect("GET", PR_PATH, PR)
+    opener.expect("GET", status_path(), evidence)
+    with pytest.raises(land.Refusal, match="CI checks: Gitea status evidence is unreadable"):
+        land.wait_for_ci(identity, HEAD, ops)
+    assert len(opener.calls) == 2 and not scripted_runner.calls
+
+
+@pytest.mark.scenario("gitea-landing/exact-head-combined-ci/ci-uncertainty-and-deadline-refuse")
+@pytest.mark.parametrize("problem", [
+    "sha", "state", "count", "incomplete", "repeat", "conflict", "header-count", "terminal-next",
+    "success-with-pending", "success-with-failure", "success-with-only-skipped",
+])
+def test_gitea_inconsistent_status_pages_refuse(config_path, scripted_runner, opener, problem):
+    identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
+    first = combined()
+    second = combined(rows=[], count=1)
+    headers = None
+    if problem == "sha":
+        second["sha"] = SUCCESSOR
+    elif problem == "state":
+        second["state"] = "pending"
+    elif problem == "count":
+        second["total_count"] = 2
+    elif problem == "incomplete":
+        first["total_count"] = second["total_count"] = 2
+    elif problem in {"repeat", "conflict"}:
+        second["statuses"] = [{"id": 1, "state": "success" if problem == "repeat" else "failure"}]
+    elif problem == "header-count":
+        headers = {"X-Total-Count": "2"}
+    elif problem == "terminal-next":
+        headers = {"X-Next-Page": "3"}
+    elif problem.startswith("success-with-"):
+        first["statuses"][0]["state"] = problem.removeprefix("success-with-").removeprefix("only-")
+    opener.expect("GET", PR_PATH, PR)
+    opener.expect("GET", status_path(), first)
+    opener.expect("GET", status_path(page=2), second, headers=headers)
+    with pytest.raises(land.Refusal, match="CI checks: Gitea status evidence is unreadable"):
+        land.wait_for_ci(identity, HEAD, ops)
+    assert len(opener.calls) == 3
+
+
+@pytest.mark.scenario("gitea-landing/exact-head-combined-ci/combined-states-control-progress")
+def test_gitea_success_requires_complete_pages(config_path, scripted_runner, opener):
+    identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
+    opener.expect("GET", PR_PATH, PR)
+    opener.expect("GET", status_path(), combined(count=2))
+    opener.expect("GET", status_path(page=2), combined(rows=[{"id": 2, "state": "skipped"}], count=2))
+    opener.expect("GET", status_path(page=3), combined(rows=[], count=2))
+    opener.expect("GET", PR_PATH, PR)
+    land.wait_for_ci(identity, HEAD, ops)
+
+
+@pytest.mark.scenario("gitea-landing/exact-head-combined-ci/ci-uncertainty-and-deadline-refuse")
+@pytest.mark.parametrize("bracket", ["before", "after"])
+@pytest.mark.parametrize("change", ["head", "wip", "closed"])
+def test_gitea_ci_head_brackets(config_path, scripted_runner, opener, bracket, change):
+    identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
+    if bracket == "after":
+        opener.expect("GET", PR_PATH, PR)
+        expect_status(opener)
+    patch = {"head": {"sha": SUCCESSOR}} if change == "head" else (
+        {"title": "Draft: changed"} if change == "wip" else {"state": "closed"})
+    opener.expect("GET", PR_PATH, {**PR, **patch})
+    with pytest.raises(land.Refusal):
+        land.wait_for_ci(identity, HEAD, ops)
+    assert all(req.get_method() == "GET" for req, _ in opener.calls)
+
+
+@pytest.mark.scenario("gitea-landing/exact-head-combined-ci/ci-uncertainty-and-deadline-refuse")
+@pytest.mark.parametrize("expiry", ["dispatch", "body", "retry", "page", "after-bracket"])
+def test_gitea_ci_requests_share_deadline(config_path, scripted_runner, opener, monkeypatch, expiry):
+    identity, ops, clock = bounded_operations(config_path, scripted_runner, opener, budget=2)
+    opener.expect("GET", PR_PATH, PR, timeout=2)
+    path, facts = status_path(), combined()
+    if expiry in {"page", "after-bracket"}:
+        opener.expect("GET", path, facts, timeout=2)
+        path, facts = status_path(page=2), combined(rows=[], count=1)
+    if expiry == "after-bracket":
+        opener.expect("GET", path, facts, timeout=2)
+        path, facts = PR_PATH, PR
+    if expiry == "retry":
+        monkeypatch.setattr(http, "sleep", lambda _: clock.sleep(2))
+        response = URLError("private lost response")
+    elif expiry == "body":
+        response = addinfourl(BytesIO(json.dumps(facts).encode()), Message(), path, 200)
+        read = response.read
+        def expired_body():
+            clock.sleep(2)
+            return read()
+        monkeypatch.setattr(response, "read", expired_body)
+    else:
+        def expired_dispatch():
+            clock.sleep(2)
+            return facts
+        response = expired_dispatch
+    opener.expect("GET", path, response, timeout=2)
+    with pytest.raises(land.Refusal, match="shared CI deadline expired"):
+        land.wait_for_ci(identity, HEAD, ops)
+    assert all(req.get_method() == "GET" for req, _ in opener.calls)
+
+
+@pytest.mark.scenario("gitea-landing/exact-head-combined-ci/ci-uncertainty-and-deadline-refuse")
+def test_gitea_ci_retry_and_pages_consume_original_budget(config_path, scripted_runner, opener, monkeypatch):
+    identity, ops, clock = bounded_operations(config_path, scripted_runner, opener, budget=5)
+    opener.expect("GET", PR_PATH, PR, timeout=5)
+    opener.expect("GET", status_path(), URLError("lost"), timeout=5)
+    monkeypatch.setattr(http, "sleep", lambda _: clock.sleep(1))
+    def first_page():
+        clock.sleep(1)
+        return combined()
+    opener.expect("GET", status_path(), first_page, timeout=4)
+    opener.expect("GET", status_path(page=2), combined(rows=[], count=1), timeout=3)
+    opener.expect("GET", PR_PATH, PR, timeout=3)
+    land.wait_for_ci(identity, HEAD, ops)
+    assert ops.remaining() == 3
+
+
+MERGE_PATH = PR_PATH + "/merge"
+MERGED = {"number": 78, "html_url": URL, "state": "closed", "merged": True}
+
+
+def expect_ready_to_merge(opener, runner, *, mode="direct", update=False):
+    """Script every gate through final main comparison using real operations."""
+    initial = {**PR, "body": "", "title": "Draft: reviewed" if mode == "finish" else PR["title"]}
+    initial_status = status() if mode == "finish" else status(None)
+    head = FINISHED_HEAD if mode == "finish" else HEAD
+    final_status = status(status="done", pause=None, head=head) if mode == "finish" else initial_status
+    remote = {**PR, "body": "", "head": {"sha": head}}
+    opener.expect("GET", PR_PATH, initial).expect("GET", MAIN_PATH, MAIN)
+    runner.expect(STATUS, initial_status)
+    if mode == "finish":
+        pages(opener)
+    runner.expect(STATUS, initial_status)
+    opener.expect("GET", PR_PATH, initial)
+    if mode == "finish":
+        pages(opener)
+        runner.expect(FINISH, {}, timeout=300)
+        runner.expect(STATUS, final_status)
+        opener.expect("GET", PR_PATH, remote)
+    opener.expect("GET", MAIN_PATH, MAIN)
+    opener.expect("GET", commit_path(head), commit_facts(head, *([] if update else [BASE])))
+    if update:
+        expect_branch_update(opener, {}, head=head)
+        remote = {**remote, "head": {"sha": SUCCESSOR}}
+        opener.expect("GET", PR_PATH, remote)
+        opener.expect("GET", commit_path(SUCCESSOR), commit_facts(SUCCESSOR, head, BASE))
+        head = SUCCESSOR
+    expect_ci(opener, remote)
+    runner.expect(STATUS, final_status)
+    opener.expect("GET", PR_PATH, remote)
+    if mode == "finish":
+        pages(opener)
+    opener.expect("GET", MAIN_PATH, MAIN)
+    return head
+
+
+@pytest.mark.scenario("gitea-landing/pinned-confirmed-gitea-merge/merge-is-pinned-and-confirmed")
+@pytest.mark.scenario("reviewed-pr-landing/head-conditioned-merge/verified-pr-merged")
+@pytest.mark.parametrize("mode", ["direct", "finish"])
+@pytest.mark.parametrize("update", [False, True])
+@pytest.mark.parametrize("ack", [b"", URLError("private lost acknowledgement"), TimeoutError("private timeout"), b"bad JSON"])
+def test_land_gitea_merge_pinned_to_head(config_path, scripted_runner, opener, capsys, mode, update, ack):
+    head = expect_ready_to_merge(opener, scripted_runner, mode=mode, update=update)
+    opener.expect("POST", MERGE_PATH, ack, status=204, body={"Do": "merge", "head_commit_id": head})
+    opener.expect("GET", PR_PATH, MERGED)
+    clock = FakeClock()
+    assert land.main([URL, "--config", str(config_path)], runner=scripted_runner, opener=opener,
+                     sleep=clock.sleep, monotonic=clock.monotonic) == 0
+    output = capsys.readouterr()
+    assert output.out.endswith(f"Merged {URL}\n") and output.err == ""
+    assert "deploy" not in output.out.lower()
+    merges = [req for req, _ in opener.calls if req.full_url == MERGE_PATH]
+    assert len(merges) == 1
+    assert json.loads(merges[0].data) == {"Do": "merge", "head_commit_id": head}
+    assert all(req.get_header("Authorization") == "token process-human-secret" for req, _ in opener.calls)
+    assert sum(argv == FINISH for argv, _ in scripted_runner.calls) == (mode == "finish")
+
+
+@pytest.mark.scenario("gitea-landing/pinned-confirmed-gitea-merge/unconfirmed-merge-refuses")
+@pytest.mark.scenario("reviewed-pr-landing/head-conditioned-merge/merge-not-confirmed")
+@pytest.mark.parametrize("problem", [
+    "protection", "head-race", "unreadable", "lost-confirmation", "bad-json", "not-object", "open", "closed",
+    "missing-merged", "string-merged", "integer-merged", "null-merged", "unknown-state", "open-merged",
+    "missing-state", "wrong-number", "bool-number", "wrong-url", "wrong-origin", "missing-url",
+])
+def test_gitea_unconfirmed_merge_refuses_once(config_path, scripted_runner, opener, capsys, problem):
+    head = expect_ready_to_merge(opener, scripted_runner, mode="finish", update=True)
+    response, code = {}, 200
+    confirmation = dict(MERGED)
+    if problem in {"protection", "head-race"}:
+        response, code = b"private rejection", 403 if problem == "protection" else 409
+        confirmation.update(state="open", merged=False)
+    elif problem in {"open", "closed"}:
+        confirmation.update(state=problem, merged=False)
+    elif problem == "missing-merged":
+        del confirmation["merged"]
+    elif problem in {"string-merged", "integer-merged", "null-merged"}:
+        confirmation["merged"] = {"string-merged": "true", "integer-merged": 1, "null-merged": None}[problem]
+    elif problem in {"unknown-state", "open-merged", "missing-state"}:
+        confirmation["state"] = {"unknown-state": "merged", "open-merged": "open", "missing-state": None}[problem]
+    elif problem in {"wrong-number", "bool-number"}:
+        confirmation["number"] = 79 if problem == "wrong-number" else True
+    elif problem in {"wrong-url", "wrong-origin", "missing-url"}:
+        confirmation["html_url"] = {"wrong-url": URL.replace("78", "79"),
+                                    "wrong-origin": URL.replace("forge.example", "other.example"),
+                                    "missing-url": None}[problem]
+    opener.expect("POST", MERGE_PATH, response, status=code, body={"Do": "merge", "head_commit_id": head})
+    if problem == "lost-confirmation":
+        for _ in range(3):
+            opener.expect("GET", PR_PATH, URLError("private lost confirmation"))
+    else:
+        result = b"private bad JSON" if problem == "bad-json" else [] if problem == "not-object" else confirmation
+        opener.expect("GET", PR_PATH, result, status=403 if problem == "unreadable" else 200)
+    clock = FakeClock()
+    assert land.main([URL, "--config", str(config_path)], runner=scripted_runner, opener=opener,
+                     sleep=clock.sleep, monotonic=clock.monotonic) == 1
+    output = capsys.readouterr()
+    assert "Merged " not in output.out
+    assert "merge not confirmed" in output.err and "do not reset a done run" in output.err
+    assert "private" not in output.err
+    if problem in {"protection", "head-race"}:
+        assert f"HTTP {code}" in output.err
+    assert sum(req.full_url == MERGE_PATH for req, _ in opener.calls) == 1
+
+
+@pytest.mark.scenario("gitea-landing/pinned-confirmed-gitea-merge/unconfirmed-merge-refuses")
+@pytest.mark.scenario("gitea-landing/pinned-confirmed-gitea-merge/merge-is-pinned-and-confirmed")
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_gitea_merge_and_confirmation_have_separate_timeouts(config_path, scripted_runner, opener, capsys, confirmed):
+    identity, ops, clock = bounded_operations(config_path, scripted_runner, opener, budget=1)
+    def lost_merge():
+        clock.now += 30
+        return TimeoutError("lost")
+    def slow_confirmation():
+        clock.now += 30
+        return MERGED if confirmed else {**MERGED, "merged": False}
+    opener.expect("POST", MERGE_PATH, lost_merge, body={"Do": "merge", "head_commit_id": HEAD}, timeout=30)
+    opener.expect("GET", PR_PATH, slow_confirmation, timeout=30)
+    args = (land.PullRequest(identity, HEAD, False, ""), None, land.CheckSnapshot(HEAD, (), None), ops)
+    if confirmed:
+        assert land.after_ci(*args) == 0
+        assert capsys.readouterr().out == f"Merged {URL}\n"
+    else:
+        with pytest.raises(land.Refusal, match="do not reset a done run"):
+            land.after_ci(*args)
+        assert "Merged " not in capsys.readouterr().out
+    assert clock.now == 160 and clock.sleeps == []
+
+
+@pytest.mark.scenario("gitea-landing/exact-head-combined-ci/main-movement-requires-fresh-ci")
+@pytest.mark.parametrize("stable_round", [2, 3, None])
+def test_gitea_main_movement_requires_fresh_ci_and_caps_rounds(config_path, scripted_runner, opener, capsys, stable_round):
+    identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
+    bases = [BASE, OTHER_BASE, "1" * 40, "2" * 40]
+    heads = [HEAD, SUCCESSOR, FINISHED_HEAD]
+    remote = {**PR, "body": ""}
+    rounds = stable_round or 3
+    for index in range(rounds):
+        baseline = {**MAIN, "commit": {"id": bases[index]}}
+        opener.expect("GET", MAIN_PATH, baseline)
+        if index == 0:
+            opener.expect("GET", commit_path(HEAD), commit_facts(HEAD, BASE))
+        else:
+            expect_branch_update(opener, {}, head=heads[index - 1], base=bases[index])
+            remote = {**remote, "head": {"sha": heads[index]}}
+            opener.expect("GET", PR_PATH, remote)
+            opener.expect("GET", commit_path(heads[index]), commit_facts(heads[index], heads[index - 1], bases[index]))
+        expect_ci(opener, remote)
+        scripted_runner.expect(STATUS, status(None))
+        opener.expect("GET", PR_PATH, remote)
+        final_base = bases[index] if index + 1 == stable_round else bases[index + 1]
+        opener.expect("GET", MAIN_PATH, {**MAIN, "commit": {"id": final_base}})
+    pr = land.PullRequest(identity, HEAD, False, "")
+    snapshot = land.CheckSnapshot(HEAD, (land.CheckSource(""),), None)
+    if stable_round:
+        opener.expect("POST", MERGE_PATH, {}, body={"Do": "merge", "head_commit_id": heads[rounds - 1]})
+        opener.expect("GET", PR_PATH, MERGED)
+        assert land.continue_landing(pr, None, snapshot, ops, timeout=60) == 0
+    else:
+        with pytest.raises(land.Refusal, match="refusing a fourth round"):
+            land.continue_landing(pr, None, snapshot, ops, timeout=60)
+        assert "Merged " not in capsys.readouterr().out
+    assert sum(req.full_url == UPDATE_PATH for req, _ in opener.calls) == rounds - 1
+    checked = [req.full_url for req, _ in opener.calls if "/status?" in req.full_url]
+    assert checked == [status_path(head, page) for head in heads[:rounds] for page in (1, 2)]
+
+
+@pytest.mark.scenario("gitea-landing/exact-head-combined-ci/main-movement-requires-fresh-ci")
+@pytest.mark.scenario("gitea-landing/exact-head-combined-ci/ci-uncertainty-and-deadline-refuse")
+def test_gitea_new_round_never_resets_ci_deadline(config_path, scripted_runner, opener):
+    identity, ops, clock = bounded_operations(config_path, scripted_runner, opener, budget=15)
+    remote = {**PR, "body": ""}
+    opener.expect("GET", MAIN_PATH, MAIN, timeout=15)
+    opener.expect("GET", commit_path(HEAD), commit_facts(HEAD, BASE), timeout=15)
+    expect_ci(opener, remote, "pending", timeout=15)
+    expect_ci(opener, remote, timeout=5)
+    scripted_runner.expect(STATUS, status(None), timeout=5)
+    opener.expect("GET", PR_PATH, remote, timeout=5)
+    moved = {**MAIN, "commit": {"id": OTHER_BASE}}
+    opener.expect("GET", MAIN_PATH, moved, timeout=5)
+    opener.expect("GET", MAIN_PATH, moved, timeout=5)
+    expect_branch_update(opener, {}, base=OTHER_BASE, timeout=5)
+    remote = {**remote, "head": {"sha": SUCCESSOR}}
+    opener.expect("GET", PR_PATH, remote, timeout=5)
+    opener.expect("GET", commit_path(SUCCESSOR), commit_facts(SUCCESSOR, HEAD, OTHER_BASE), timeout=5)
+    expect_ci(opener, remote, "pending", timeout=5)
+    pr = land.PullRequest(identity, HEAD, False, "")
+    snapshot = land.CheckSnapshot(HEAD, (land.CheckSource(""),), None)
+    with pytest.raises(land.Refusal, match="shared CI deadline expired"):
+        land.continue_landing(pr, None, snapshot, ops, timeout=15)
+    assert clock.sleeps == [10, 5]
+    assert sum(req.get_method() == "POST" for req, _ in opener.calls) == 1
