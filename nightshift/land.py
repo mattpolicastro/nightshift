@@ -132,6 +132,18 @@ class LandingRun:
     pause_reason: str | None
 
 
+@dataclass(frozen=True)
+class CIExclusion:
+    """A round's exact-head/base evidence, to attest before final validation."""
+
+    head: str
+    base: str
+    workflow: str
+    paths: tuple[str, ...]
+    patterns: tuple[tuple[str, ...], ...]
+    grace: float = 0
+
+
 @dataclass
 class Operations:
     """Single process and clock boundary, shared by command helpers.
@@ -1421,6 +1433,27 @@ def record_attestation(
             lines.extend([f"Source: {source.reference}",
                           *[f"- [x] {escape(check.text, quote=False)}" for check in source.checks], ""])
     body = "\n".join([*lines, marker])
+    _upsert_attestation(identity, marker, body, operations)
+
+
+def record_ci_attestation(
+    identity: Identity, exclusion: CIExclusion, operations: Operations,
+) -> None:
+    actor = read_actor(operations)
+    marker = f"<!-- nightshift:land-ci:{identity.number}:{exclusion.head}:{exclusion.base} -->"
+    lines = [f"{queue.SELF_COMMENT_PREFIX} CI not required: docs-only", "",
+             f"@{escape(actor, quote=False)} recorded the CI exclusion through `land`.",
+             f"PR: {escape(identity.url, quote=False)}", f"Head: `{exclusion.head}`",
+             f"Base: `{exclusion.base}`", f"Workflow: {escape(exclusion.workflow, quote=False)}",
+             f"Patterns: {escape(json.dumps(exclusion.patterns), quote=False)}",
+             "Changed paths:", *[f"- {escape(path, quote=False)}" for path in exclusion.paths],
+             f"Observed grace: {exclusion.grace:g}s", "", marker]
+    _upsert_attestation(identity, marker, "\n".join(lines), operations)
+
+
+def _upsert_attestation(
+    identity: Identity, marker: str, body: str, operations: Operations,
+) -> None:
 
     def lookup() -> int | None:
         return select_attestation(read_comments(
@@ -1549,10 +1582,17 @@ def continue_landing(
             snapshot = replace(snapshot, head=pr.head)
         # Retain the immediately pre-update base even if main moved while the
         # asynchronous update was being observed. Only a new round adopts it.
-        wait_for_ci(pr.identity, snapshot.head, bounded, timeout=timeout)
+        exclusion = wait_for_ci(pr.identity, snapshot.head, bounded, timeout=timeout,
+                                base_sha=baseline)
         pr, run = revalidate_landing_inputs(
             pr.identity, run, snapshot, bounded, require_done=True,
         )
+        if exclusion is not None:
+            record_ci_attestation(pr.identity, exclusion, bounded)
+            pr, run = revalidate_landing_inputs(
+                pr.identity, run, snapshot, bounded, require_done=True,
+            )
+            print("CI not required: docs-only")
         observed_base = read_main(pr.identity, bounded)
         if observed_base == baseline:
             return after_ci(pr, run, snapshot, bounded)
@@ -1606,11 +1646,15 @@ def ci_is_green(result: subprocess.CompletedProcess[str]) -> bool:
 
 def wait_for_ci(
     identity: Identity, expected_head: str, operations: Operations, *, timeout: float | None = None,
-) -> None:
-    """Require green checks bracketed by reads of the same reviewed head."""
+    base_sha: str | None = None,
+) -> CIExclusion | None:
+    """Require green checks or a fresh, bounded proof of workflow exclusion."""
     if timeout is None:
         timeout = operations.remaining()
     awaiting_registration = False
+    registered = False
+    first_empty: float | None = None
+    exclusion = None
 
     def check_head() -> None:
         pr = read_pr(identity, operations)
@@ -1626,8 +1670,31 @@ def wait_for_ci(
             result = operations.forge.checks(identity, expected_head, operations)
             check_head()
             if ci_is_green(result):
-                return
+                return None
             awaiting_registration = _checks_not_registered(result)
+            empty = awaiting_registration or json.loads(result.stdout) == []
+            if not empty:
+                # Even skipped-only or pending checks permanently win over
+                # exclusion for this head; later empty polls cannot undo it.
+                registered = True
+            elif base_sha is not None and not registered:
+                if first_empty is None:
+                    # Evidence work consumes grace and the shared deadline.
+                    # It must precede the first registration sleep.
+                    first_empty = operations.monotonic()
+                    check_head()
+                    paths = operations.forge.changed_paths(identity, operations)
+                    workflow = (operations.forge.ci_workflow(identity, base_sha, operations)
+                                if paths else None)
+                    check_head()
+                    patterns = ignored_paths(workflow[1]) if workflow else None
+                    if paths and workflow and patterns and all_paths_ignored(paths, patterns):
+                        exclusion = CIExclusion(expected_head, base_sha, workflow[0], paths, patterns)
+                elif exclusion is not None:
+                    grace = operations.monotonic() - first_empty
+                    operations.remaining()
+                    if grace >= CI_POLL_INTERVAL:
+                        return replace(exclusion, grace=grace)
             operations.poll_sleep()
     except _CIDeadlineExpired as exc:
         if awaiting_registration:

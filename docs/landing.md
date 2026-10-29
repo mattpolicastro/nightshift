@@ -286,15 +286,16 @@ is reconciled by observing the head and parents without a second PUT.
 
 On GitHub, CI is read with `gh pr checks --json name,bucket,state,link` for the
 explicit PR/repository, bracketed by head reads. Gitea reads combined status for
-the exact head SHA, as detailed below. At least one check must pass and every
+the exact head SHA, as detailed below. Unless the docs-only exclusion below is
+established and attested, at least one check must pass and every
 other check must pass or be skipping (neutral/skipped). Pending, empty, or
 entirely skipped results wait within the shared budget; failures, cancellations,
 malformed results, and unknown classifications refuse. Every new head needs
-fresh CI. Check sources, run state, and head are revalidated before finish and
+fresh checks or its own proven exclusion. Check sources, run state, and head are revalidated before finish and
 before merge; new or unticked checks, changed checklist text, a replacement
 publication, or unexpected head changes require another operator decision.
 
-After green CI and final input validation, `main` is read again. A move starts
+After green CI or an attested exclusion and final input validation, `main` is read again. A move starts
 another round and update against a fresh base; the prior round's base remains
 fixed even during asynchronous update observation. Three successive moves
 produce two intervening updates and a refusal with all observed movements,
@@ -308,6 +309,83 @@ On either forge, exit zero and `Merged <PR URL>` mean a subsequent read confirme
 merged state. Queue admission alone returns nonzero. A lost merge response succeeds
 only when that read confirms the merge. The command does not deploy or print a
 deploy command hint. Operational refusals exit 1; invalid syntax exits 2.
+
+### Docs-only CI exclusion
+
+[Issue #136](https://github.com/mattpolicastro/nightshift/issues/136) permits
+landing when the recorded base workflow proves CI intentionally excludes every
+changed path. The complete, nonempty PR file list must be available, including
+deleted paths and both names of renames. Eligibility comes from base policy,
+not file extensions alone, the PR body, local files or the head's workflow.
+A mixed Markdown/code PR under `**.md` still needs CI.
+
+At the pinned base SHA, the selected forge's workflow directory must contain
+exactly one regular YAML workflow, named `ci.yml` or `ci.yaml`: GitHub uses
+`.github/workflows`, Gitea uses `.gitea/workflows`, without fallback to another
+directory. All Gitea evidence reads use the configured origin and human token.
+This supported trigger example excludes root and nested Markdown:
+
+```yaml
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  pull_request:
+    paths-ignore: ['**.md']
+```
+
+The narrow physical-line grammar accepts one column-zero `on:` (optionally
+quoted), two-space `pull_request:` and optional `push:` headings, and four-space
+`paths-ignore`, `branches` or `branches-ignore` fields without duplicates.
+Lists use quoted strings in brackets or six-space `- 'value'` lines; branch
+lists also accept simple unquoted names/globs such as `main`. Every declared
+event must ignore every changed path. Blank lines and whole-line comments are
+allowed. Other events/fields, inline comments, tabs, escapes, aliases, anchors,
+tags and multiline scalars are unsupported. Missing, incomplete, ambiguous or
+unsupported evidence retains ordinary CI waiting.
+
+Globs match whole case-sensitive repository-relative paths: `*` excludes `/`,
+`**` includes `/`, and `**/` matches zero or more directory components.
+Thus `*.md` covers only root files while `**.md` covers nested files too.
+Negation, `?`, character classes, braces, backslash escapes, absolute paths and
+traversal patterns are unsupported. Multiple workflows cannot establish this
+exclusion even if one ignores all paths.
+
+Proof starts after the first valid head-bracketed empty poll, before sleeping.
+A later empty poll must finish at least 10 seconds later within the original
+CI budget. Both GitHub's recognized missing-registration response and validated
+empty arrays qualify, as does Gitea's proven empty combined status. No timeout
+is extended and short budgets cannot shorten the grace. Any registered check
+permanently disables the exception for that head during this invocation:
+pending waits, failing/cancelled refuses, skipped-only waits, and passing checks
+use the ordinary gate even if later polls would be empty. Finish/update
+successors and new base rounds require fresh proof and grace.
+
+After validating inputs, landing records a separate populated CI comment,
+validates inputs again, and prints `CI not required: docs-only`. This means CI
+was excluded, not that checks passed. The comment identifies the authenticated
+actor, PR URL, full head/base SHAs, workflow path, patterns, changed paths and
+observed grace. Inspect its marker:
+
+```text
+<!-- nightshift:land-ci:<pr>:<head sha>:<base sha> -->
+```
+
+This comment is required even with no human checklist and regardless of
+`--checks-done`; `No human checks listed` still applies and no empty human
+attestation is invented. Listed human-check evidence remains separate, retaining
+its pre-finish head. Gitea requires an allowlisted non-bot actor for the CI
+comment too. The final base comparison, three-round limit, protected pinned
+merge and merged-state confirmation still apply. Server protection may reject a
+required check that the workflow never schedules; landing does not override it.
+
+Sequential retries update a unique trusted same-head/base CI marker. Actor
+failure, duplicate/untrusted markers and unreconciled writes block merge.
+An ambiguous create searches all comment pages and never repeats its POST in
+that invocation. The existing late-POST cross-invocation limitation and
+`duplicate-markers` recovery below apply to both kinds of attestation. An older
+CI comment is historical head/base evidence, not proof of merge or permission
+for a later invocation to skip its fresh gates.
 
 ## Gitea update, exact-head CI, and merge requests
 
@@ -345,8 +423,9 @@ GET /api/v1/repos/owner/repo/commits/H/status
 
 It does not use PR-latest, branch, merge-ref or Actions-job evidence. `success`
 maps to pass, `pending` to pending, `failure`/`error`/`warning` to fail, and
-`skipped` to skipping. Proven absence and skipped-only results cannot pass;
-unknown states, wrong SHAs and malformed/inconsistent pages refuse. Every new
+`skipped` to skipping. Proven absence can use the established and attested
+docs-only exclusion; otherwise it waits, as do skipped-only results.
+Unknown states, wrong SHAs and malformed/inconsistent pages refuse. Every new
 head needs fresh CI within the same 1800-second default, ten-second capped polls
 and three-round budget described above. Source/run revalidation and the final
 main comparison still apply.
@@ -452,3 +531,10 @@ observed the first real landing:
   URL and merge SHA without secrets in the operator's review record. These live
   checks remain pending; CI fixtures cannot establish real permissions or merge
   behavior, and do not complete the separate #129 live publication checks.
+- [ ] A human reviews and lands the next real Markdown-only PR for #136.
+  Confirm no checks register, observe the grace, and inspect the output and
+  separate CI attestation's reason, paths, workflow and exact head/base.
+- [ ] Inspect that PR's resulting merge commit and protection outcome; record
+  its URL and merge SHA in the review record. For Gitea, also verify live
+  workflow filtering and human-token permissions. These scheduling, permission
+  and merge checks remain pending; offline tests cannot complete them.
