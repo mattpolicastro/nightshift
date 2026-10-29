@@ -712,6 +712,29 @@ def _tasks_path(repo: Path, head: str, change: str) -> str:
     return archived[-1] if archived else live
 
 
+def _gitea_ready(target: ForgeTarget, pr: str) -> None:
+    forge = target.forge
+    assert forge is not None and target.definition is not None
+    number = forge._pr_url_number(target.repository, pr)
+    path = forge._repo_path(target.repository, "pulls", str(number))
+    title = forge._detail(path).get("title")
+    if not isinstance(title, str):
+        raise ForgeError("Invalid Gitea PR title", transient=False)
+    prefix = target.definition.wip_prefix
+    intended = title.removeprefix(prefix)
+    if not intended or intended.startswith(prefix):
+        raise ForgeError("Gitea PR title would remain empty or WIP", transient=False)
+    if intended == title:
+        return  # This fresh read also reconciles an interrupted finish.
+    try:
+        forge._request("PATCH", path, json_body={"title": intended})
+    except ForgeError:
+        # A lost response may hide an accepted write. Never replay PATCH here.
+        pass
+    if forge._detail(path).get("title") != intended:
+        raise ForgeError("Gitea PR title readiness could not be verified", transient=True)
+
+
 def _finish(args, run: Run) -> int:
     st = run.state
     if not (st.status == "paused" and st.pause and st.pause.reason == "human_checks"):
@@ -740,7 +763,8 @@ def _finish(args, run: Run) -> int:
         return 1
     # Validate before the archive's internal push as well as the external push.
     # Preserve direct finish's exception contract; act renders the same reason.
-    remote = _remote(ctx)
+    target = _forge_target(ctx.m.github) if ctx.m.github else None
+    remote = _remote(ctx, target)
     if task_path == ctx.tasks_path:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp) / "w"
@@ -752,18 +776,21 @@ def _finish(args, run: Run) -> int:
     # The branch itself records the archive durably. Retry external operations
     # from that commit without requiring a separate state write to have survived.
     _push(ctx.repo, remote, ctx.ref)
-    try:
-        _gh("pr", "ready", st.pr, "-R", ctx.m.github)
-    except (RuntimeError, OSError, subprocess.TimeoutExpired):
-        # A lost response (or a prior interrupted finish) can leave it ready.
-        ready = False
+    if target is not None and target.forge is not None:
+        _gitea_ready(target, st.pr)
+    else:
         try:
-            ready = _gh("pr", "view", st.pr, "-R", ctx.m.github,
-                        "--json", "isDraft", "--jq", ".isDraft") == "false"
+            _gh("pr", "ready", st.pr, "-R", ctx.m.github)
         except (RuntimeError, OSError, subprocess.TimeoutExpired):
-            pass
-        if not ready:
-            raise
+            # A lost response (or a prior interrupted finish) can leave it ready.
+            ready = False
+            try:
+                ready = _gh("pr", "view", st.pr, "-R", ctx.m.github,
+                            "--json", "isDraft", "--jq", ".isDraft") == "false"
+            except (RuntimeError, OSError, subprocess.TimeoutExpired):
+                pass
+            if not ready:
+                raise
     st.status, st.pause = "done", None
     run.save()
     run.event("finished", head=ctx.head(), pr=st.pr)

@@ -986,7 +986,7 @@ def test_status_after_partial_finish(admitted, template, tmp_path, monkeypatch, 
         pytest.fail("status must not mutate run data, load credentials, or retry publication")
 
     monkeypatch.setattr(cli.openspec, "archive", archive)
-    monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
+    monkeypatch.setattr(cli, "_remote", lambda ctx, target=None: "unused")
     monkeypatch.setattr(cli, "_push", fail_push)
     monkeypatch.setattr(cli, "_gh", no_mutation)
     assert "network unavailable" in act(capfd, run, "finish", code=1)["detail"]
