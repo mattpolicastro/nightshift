@@ -103,7 +103,9 @@ engine = "specloop"
             assert not pipeline.issues[10 + attempt]["labels"]
             change = pipeline.prs[20 + attempt]["headRefName"].removeprefix("spec/")
             assert pipeline.runs[change]["status"] == "running"
-    assert len(messages) == 1 and "token" not in messages[0]
+    # The temp path can contain the change name (e.g. "...-human-token") inside a build;
+    # only text outside the test's own paths could leak a credential.
+    assert len(messages) == 1 and "token" not in messages[0].replace(str(tmp_path), "")
     assert "owner/bad" in messages[0] and "manifest" in messages[0]
     assert not health.item_failures
     for pipeline in pipelines[:-1]:
