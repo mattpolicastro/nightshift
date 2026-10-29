@@ -1,11 +1,14 @@
 """Independent, read-only checklist review of a proposed OpenSpec change."""
 
 import json
+import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
 
+from nightshift.forge import ForgeError
+from nightshift.forge.gitea import GiteaForge
 from specloop import agents, feasibility, verify
 from specloop.manifest import Manifest
 
@@ -97,6 +100,121 @@ Context limitations:
 
 def _sorted_map(files: dict[str, list[str]]) -> dict[str, list[str]]:
     return {path: sorted(set(labels)) for path, labels in sorted(files.items())}
+
+
+def _gitea_open_pr_files(forge: GiteaForge, repository: str,
+                         branch: str) -> tuple[dict[str, list[str]], list[str]]:
+    """Collect advisory evidence through confined requests, retaining partial reads."""
+    files: dict[str, list[str]] = {}
+    notes: list[str] = []
+
+    def note(scope, reason):
+        message = f"{scope} incomplete: {reason}."
+        if message not in notes:
+            notes.append(message)
+
+    def text(value):
+        return value if isinstance(value, str) and value else None
+
+    def pr_record(row, scope):
+        if (not isinstance(row, dict) or type(row.get("number")) is not int
+                or row["number"] <= 0 or not text(row.get("html_url"))
+                or not isinstance(row.get("head"), dict) or not text(row["head"].get("ref"))):
+            note(scope, "malformed Gitea PR")
+            return None
+        head = row["head"]
+        repo = head.get("repo")
+        name = text(repo.get("full_name")) if isinstance(repo, dict) else None
+        if "repo" not in head or (repo is not None and name is None):
+            note(f"Open PR #{row['number']} context", "malformed head repository")
+        return row["number"], row["html_url"], head["ref"], name.casefold() if name else None
+
+    def file_record(row, scope):
+        if not isinstance(row, dict):
+            note(scope, "malformed Gitea file")
+            return None
+        current, previous = text(row.get("filename")), text(row.get("previous_filename"))
+        if current is None or ("previous_filename" in row and previous is None):
+            note(scope, "malformed Gitea file")
+        # A malformed sibling field must not erase a valid renamed path.
+        return (current, previous) if current or previous else None
+
+    def records(components, scope, normalize, query=None):
+        seen, signatures = {}, set()
+        total, declared_end = None, False
+        for page in range(1, 1001):
+            try:
+                _, headers, rows = forge._request(
+                    "GET", forge._repo_path(repository, *components),
+                    query={**(query or {}), "page": page, "limit": 50})
+            except (ForgeError, ValueError):
+                note(scope, "Gitea request failed")
+                return
+            if not isinstance(rows, list):
+                note(scope, "malformed Gitea page")
+                return
+            problem = None
+            ids = set()
+            for row in rows:
+                record = normalize(row, scope)
+                if record is None:
+                    continue
+                key = record[0]
+                if key is not None:
+                    ids.add(key)
+                    if key in seen:
+                        if seen[key] != record:
+                            problem = "conflicting Gitea record"
+                        continue
+                    seen[key] = record
+                yield record
+            # Validate after consuming valid records so metadata cannot erase evidence.
+            count = headers.get("X-Total-Count")
+            if count is not None:
+                try:
+                    if not re.fullmatch(r"[0-9]+", count):
+                        raise ValueError
+                    current_total = int(count)
+                    if total is not None and current_total != total:
+                        problem = "inconsistent Gitea total"
+                    total = current_total
+                except ValueError:
+                    problem = "invalid Gitea pagination metadata"
+            next_page = headers.get("X-Next-Page")
+            if next_page is not None and next_page not in ("", "0", str(page + 1)):
+                problem = "invalid Gitea next page"
+            # Repeated Link fields are evidence only; never request their URLs.
+            has_next = next_page == str(page + 1) or any(re.search(
+                r';\s*rel\s*=\s*(?:"[^\"]*\bnext\b[^\"]*"|next\b)', link, re.IGNORECASE)
+                for link in headers.get_all("Link", []))
+            if total is not None and (len(seen) > total or (not rows and len(seen) != total)):
+                problem = "inconsistent Gitea total"
+            if (not rows and has_next) or (rows and declared_end):
+                problem = "inconsistent Gitea termination"
+            declared_end = next_page in ("", "0")
+            if declared_end and has_next:
+                problem = "inconsistent Gitea termination"
+            signature = frozenset(ids)
+            if rows and signature in signatures:
+                problem = "repeated Gitea page"
+            signatures.add(signature)
+            if problem:
+                note(scope, problem)
+                return
+            if not rows:
+                return
+        note(scope, "Gitea pagination limit reached (1000 pages)")
+
+    for number, url, ref, head_repo in records(("pulls",), "Open PR list", pr_record,
+                                               {"state": "open"}):
+        if ref == branch and head_repo == repository.casefold():
+            continue
+        label = f"#{number} {url}"
+        for paths in records(("pulls", str(number), "files"), f"Open PR #{number} files", file_record):
+            for path in paths:
+                if path is not None:
+                    files.setdefault(path, []).append(label)
+    return _sorted_map(files), notes
 
 
 def open_pr_files(github: str, branch: str, *, runner=None) -> tuple[dict[str, list[str]], list[str]]:
