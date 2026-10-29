@@ -683,14 +683,14 @@ def test_all_concurrent_sources_preserve_attribution(concurrent_checkout, monkey
             [{"filename": p} for p in paths if p != "docs/old.md"]
             + [{"filename": "docs/new.md", "previous_filename": "docs/old.md"}],
     })
-    original = arm.critic.open_pr_files
+    original = arm.critic._github_open_pr_files
     helper_calls = []
 
     def open_pr_files(repository, branch, *, runner):
         helper_calls.append((repository, branch, runner))
         return original(repository, branch, runner=runner)
 
-    monkeypatch.setattr(arm.critic, "open_pr_files", open_pr_files)
+    monkeypatch.setattr(arm.critic, "_github_open_pr_files", open_pr_files)
     context = arm.collect_concurrent("org/repo", root, [target], cache)
     overlaps = arm.concurrent_overlaps(target, root, context)
     assert set(overlaps) == {

@@ -189,7 +189,8 @@ def service(admitted, tmp_path, monkeypatch):
 
 @pytest.mark.scenario("run-actions/publish-only-to-the-named-repository/malformed-expected-head-rejected")
 @pytest.mark.parametrize("entry", [main, cli.main])
-@pytest.mark.parametrize("sha", ["", "HEAD", "abc123", "a" * 39, "a" * 41, "g" * 40, "a" * 40 + "\n"])
+@pytest.mark.parametrize("sha", ["", "HEAD", "abc123", "a" * 39, "a" * 41, "g" * 40, "a" * 40 + "\n",
+                                 "a" * 40 + " ", "refs/heads/main"])
 def test_malformed_head_is_parser_error(entry, sha, monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "dispatch", lambda _: pytest.fail("malformed input dispatched"))
     with pytest.raises(SystemExit) as error:

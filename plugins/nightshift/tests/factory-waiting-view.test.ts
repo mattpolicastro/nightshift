@@ -178,7 +178,7 @@ test('paseo-runs-page/human-pause-waiting-time/waiting-text-preserves-the-existi
   for (const verb of ['publish', 'finish', 'abort']) {
     await press(`${verb[0].toUpperCase()}${verb.slice(1)} human-pause`);
     const message = verb === 'abort' ? 'Abort human-pause? This cannot be undone.'
-      : `${verb[0].toUpperCase()}${verb.slice(1)} human-pause? This pushes to GitHub.`;
+      : `${verb[0].toUpperCase()}${verb.slice(1)} human-pause? This pushes to the forge selected by the run manifest.`;
     assert.ok(page.nodes().some(node => node.props.accessibilityRole === 'alert' && page.text(node.children) === message));
     assert.equal(page.find('Resume human-pause')!.props.disabled, true);
     const cancel = (view: Page) => view.nodes().find(node => node.type === 'Pressable' && view.text(node.children) === 'Cancel')!;

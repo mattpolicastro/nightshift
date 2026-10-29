@@ -50,8 +50,10 @@ Three things follow, and they are the whole design:
 on pull requests. The GitHub token is a fine-grained PAT deliberately issued
 *without* the Workflows permission, so an agent physically cannot modify the
 checks that judge its work — the guarantee rests on the credential, not on the
-agent's good behaviour. A task that genuinely needs a CI change fails its push
-and escalates, which is correct.
+agent's good behaviour. A task that genuinely needs a CI change is refused
+and escalates, which is correct. The engine also refuses changes under
+`.gitea/workflows/`, `.github/workflows/` and `.forgejo/` before publication
+on either forge; this local guard does not establish Gitea server permissions.
 
 **Review is a separate session.** Specloop gives an independent reviewer the
 spec and sealed diff. Trusted verification runs outside the implementing agent.
@@ -225,6 +227,21 @@ forges, ignoring case. See [config.example.toml](config.example.toml) for the
 forge fields and Gitea defaults. Named GitHub retains ambient `gh` authentication
 and host selection. Gitea configuration does not enable daemon execution or
 authorize GitHub landing.
+
+Explicit engine publication instead selects from manifest `[run] github`:
+`owner/repo` or `github.com/owner/repo` retains GitHub; `forge.example/owner/repo`
+must uniquely match a configured Gitea URL hostname, independently of `repos.forge`.
+Provision the process's absolute `NIGHTSHIFT_FORGE_CONFIG` path (otherwise the
+checkout's `config.toml`) and selected bot `token_env`; the credentials file
+`~/.config/nightshift/env` wins over process values, even when empty. Neither
+landing tokens nor manifest step/env values are authentication fallbacks.
+Git push needs separate git credentials. Gitea requires one HTTP(S) origin
+matching scheme, host, effective port, URL prefix and case-sensitive repository;
+SSH and local origins refuse. Publish creates a WIP-title PR; finish archives,
+pushes, removes the prefix by title PATCH and verifies it by read-back, without
+merging or native draft state. Follow [explicit forge publication](docs/specloop/README.md#explicit-forge-publication)
+for commands, retries and limits ([issue #129](https://github.com/mattpolicastro/nightshift/issues/129)).
+
 Every declared `land_token_env` variable must be absent from the daemon's
 environment, even when empty or belonging to an unused forge. Service, one-shot
 and direct recovery/poll entry points refuse before side effects if it is present.
@@ -388,7 +405,7 @@ seconds; passwords and helper diagnostics are never printed. Helpers are
 operator-configured executables and may access their own storage or network.
 GitHub token/probe prerequisites still apply even to Gitea-only configurations.
 
-A clean preflight cannot enable Gitea drafting, admission, revisions, publication
+A clean preflight cannot enable Gitea daemon drafting, admission, revisions, publication
 or pending delivery. Core authorization and durable label-transition recovery
 remain prerequisites, regardless of allowlists or cleared foreign journals.
 The pending human enrollment check is to run
@@ -793,7 +810,10 @@ agent sessions or change task execution.
 The page's **Factory** section lists specloop runs, those waiting on you first, with
 one button per action that fits each pause (resume with a note, accept, publish,
 finish, abort), plus separate **Land** at a verifiable `human_checks` pause.
-Finish archives, pushes and marks ready without merging. Land invokes existing
+Publish and Finish require confirmation and use the manifest-selected forge,
+including configured Gitea. Finish archives, pushes and marks ready without merging.
+Provision config, bot and git credentials in the Paseo host process as described
+in [Factory setup](plugins/nightshift/README.md#factory). Land remains GitHub-only and invokes existing
 landing through an explicit confirmation that human checks were performed.
 The dialog freezes change, PR, pause ID, published head and pause timestamp;
 changes invalidate it instead of silently rebinding. Private plugin transport

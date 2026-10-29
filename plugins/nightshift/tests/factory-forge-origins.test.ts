@@ -6,6 +6,8 @@ import { createFactory } from '../server/factory';
 import { createFactoryLanding } from '../server/factory-landing';
 import { resolveForgeOriginsFile, resolveHostPaths } from '../server/host-paths';
 import type { FactoryRun } from '../shared/factory';
+import { decideFactoryAction } from '../client/factory-model';
+import { styleView } from './factory-style-harness';
 
 const forge = 'https://forge.example.test', github = 'https://github.com';
 const unavailable = { message: 'Factory status is unavailable on this host. Try again shortly.' };
@@ -16,6 +18,47 @@ const row = (pr = `${github}/owner/repo/pull/7`, link = ''): FactoryRun => ({
   action: { kind: 'action', headline: '', why: '', command: '', actions: ['resume'] },
 });
 const response = (value: unknown) => ({ code: 0, stdout: JSON.stringify(value) });
+
+test('manifest-selected publication uses the existing confirmation and transport', async t => {
+  for (const pr of ['', `${github}/owner/repo/pull/7`, `${forge}/owner/repo/pulls/7`]) {
+    const scenario = pr.startsWith(forge)
+      ? 'paseo-runs-page/forge-publication-confirmation/gitea-uses-the-shared-action-path'
+      : 'paseo-runs-page/forge-publication-confirmation/confirmation-works-before-a-pr-exists';
+    for (const verb of ['publish', 'finish'] as const) await t.test(`${scenario}: ${verb} ${pr}`, async t => {
+      const h = fixture(t);
+      h.write(forge);
+      const run = row(pr);
+      run.action = { ...run.action!, actions: [verb], pause_id: `${verb}:7` };
+      const calls: string[][] = [];
+      const service = createFactory(async args => {
+        calls.push(args);
+        return response(args[0] === 'status' ? { version: 1, runs: [run] }
+          : { version: 1, outcome: 'done', verb, detail: 'Completed' });
+      }, () => 0, h.home);
+      const snapshot = await service.read();
+      assert.equal(snapshot.runs[0].pr, pr);
+      const request = { change: run.change, verb, expect: `${verb}:7` };
+      const label = verb === 'publish' ? 'Publish' : 'Finish';
+      const message = `${label} ${run.change}? This pushes to the forge selected by the run manifest.`;
+      assert.deepEqual(decideFactoryAction(snapshot.runs[0], verb), { kind: 'confirm', request, message });
+      assert.deepEqual(decideFactoryAction(snapshot.runs[0], verb, '', true), { kind: 'send', request });
+      const page = styleView(snapshot.runs, { act: input => service.act(input) });
+      t.after(() => { page.dispose(); service.dispose(); });
+      await page.settle();
+      await page.press(`${label} ${run.change}`);
+      assert.ok(page.nodes().some(node => node.props.accessibilityRole === 'alert' && page.text(node.children) === message));
+      await page.press(page.nodes().find(node => node.type === 'Pressable' && page.text(node.children) === 'Cancel')!);
+      assert.deepEqual(page.actions, []);
+      assert.deepEqual(calls, [['status', '--json']]);
+      await page.press(`${label} ${run.change}`);
+      await page.press(`Confirm ${verb} ${run.change}`);
+      assert.deepEqual(page.actions, [request]);
+      assert.deepEqual(calls, [['status', '--json'], ['act', run.change, verb, `--expect=${verb}:7`, '--json']]);
+      assert.deepEqual(page.lands, []);
+    });
+  }
+});
+
 function fixture(t: TestContext) {
   const home = mkdtempSync(`${tmpdir()}/forge-origins-`), file = `${home}/origins`;
   const saved = process.env;

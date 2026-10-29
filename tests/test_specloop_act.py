@@ -331,7 +331,7 @@ def test_direct_push_holds_lock_against_act_abort(admitted, monkeypatch, capfd, 
         assert "locked" in act(capfd, run, "abort", code=1)["detail"]
         assert (run.dir / "state.json").read_bytes() == before
 
-    monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
+    monkeypatch.setattr(cli, "_remote", lambda ctx, target=None: "unused")
     monkeypatch.setattr(cli, "_push", push)
     # The fake transport supplies an unchanged base before publication.
     monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
@@ -656,6 +656,7 @@ def test_direct_accept_preserves_abort_that_wins_lock(admitted, monkeypatch, cap
         assert (run.dir / name).read_bytes() == contents
 
 
+@pytest.mark.scenario("run-actions/publish-only-to-the-named-repository/local-origin-compatibility-is-github-only")
 def test_publish_and_finish_use_existing_transitions(admitted, tmp_path, monkeypatch, capfd):
     run, source = admitted
     remote = tmp_path / "remote.git"
@@ -715,7 +716,7 @@ def test_publish_failure_returns_refused_json(admitted, monkeypatch, capfd):
     run, _ = admitted
     run.pause("ready_to_publish")
     before = asdict(run.state)
-    monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
+    monkeypatch.setattr(cli, "_remote", lambda ctx, target=None: "unused")
     # The fake transport supplies an unchanged base before the failing push.
     monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
 
@@ -732,11 +733,12 @@ def publication_pr(url, repository="example/repo"):
             "repo": {"full_name": repository} if repository else None}, "base": {"ref": "main"}}
 
 
+@pytest.mark.scenario("specloop-forge/manifest-forge-selection/github-stays-compatible")
 @pytest.mark.parametrize("fork_count", [0, 30])
 @pytest.mark.parametrize("interruption", ["response_lost", "before_save"])
 @pytest.mark.parametrize("retry_command", ["act", "publish"])
 @pytest.mark.parametrize("admitted", ["example/repo", "github.com/example/repo",
-                                     "github.example.com/Example/Repo"], indirect=True)
+                                     "github.com/Example/Repo"], indirect=True)
 def test_publish_recovers_unrecorded_pr(admitted, tmp_path, monkeypatch, capfd, interruption,
                                        retry_command, fork_count):
     run, source = admitted
@@ -843,7 +845,7 @@ def test_publish_ignores_unrelated_pr(admitted, monkeypatch, capfd, repository, 
         return url
 
     monkeypatch.setattr(cli, "_gh", gh)
-    monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
+    monkeypatch.setattr(cli, "_remote", lambda ctx, target=None: "unused")
     monkeypatch.setattr(cli, "_push", lambda *args: None)
     # PR matching uses a fake transport with an unchanged base.
     monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
@@ -984,7 +986,7 @@ def test_status_after_partial_finish(admitted, template, tmp_path, monkeypatch, 
         pytest.fail("status must not mutate run data, load credentials, or retry publication")
 
     monkeypatch.setattr(cli.openspec, "archive", archive)
-    monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
+    monkeypatch.setattr(cli, "_remote", lambda ctx, target=None: "unused")
     monkeypatch.setattr(cli, "_push", fail_push)
     monkeypatch.setattr(cli, "_gh", no_mutation)
     assert "network unavailable" in act(capfd, run, "finish", code=1)["detail"]
@@ -1131,6 +1133,7 @@ def test_publish_without_github_repository_is_refused_with_its_reason(admitted, 
     assert asdict(run.state) == before
 
 
+@pytest.mark.scenario("run-actions/publish-only-to-the-named-repository/fork-still-pointing-upstream")
 @pytest.mark.parametrize("origin", ["https://github.com/upstream/repo.git", "git@github.com:upstream/repo.git",
                                     "https://github.example.com/example/repo.git"])
 def test_publish_to_an_origin_of_another_repository_is_refused(admitted, monkeypatch, capfd, origin):

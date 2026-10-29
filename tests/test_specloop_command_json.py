@@ -732,7 +732,7 @@ def test_publish_json(template, monkeypatch, capfd, tmp_path, json_mode, hook_ex
     hook = hooks / "pre-push"
     hook.write_text(f"#!/bin/sh\necho 'pre-push progress'\nexit {hook_exit}\n")
     hook.chmod(0o755)
-    monkeypatch.setattr(cli, "_remote", lambda ctx: str(remote))
+    monkeypatch.setattr(cli, "_remote", lambda ctx, target=None: str(remote))
     calls = []
 
     def gh(*args):
@@ -837,7 +837,7 @@ def test_publish_failure_is_json_and_remains_ready(template, monkeypatch, capfd,
     assert main(admission(path, "--skip-feasibility", "--json", *(["--pr", pr] if pr else []))) == 0
     capfd.readouterr()
     Run.for_change(CHANGE).pause("ready_to_publish")
-    monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
+    monkeypatch.setattr(cli, "_remote", lambda ctx, target=None: "unused")
     # This transport fake models an unchanged base before the failing push.
     monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
 

@@ -42,7 +42,7 @@ command's own reason as the outcome's `detail`, not a generic refusal.
 
 ### Requirement: Publish only to the named repository
 
-`publish` and `finish` SHALL refuse, without pushing, when the manifest names no GitHub repository, or when the source clone's `origin` is a hosted URL for a different repository than the manifest names. A local-path origin SHALL be accepted. With optional `--expect-head SHA`, `finish` SHALL also verify the run branch head after locked reload and refuse mismatch or unreadable head before archiving or any finish side effect.
+Publish and finish SHALL refuse without pushing when the manifest's github value is absent or origin identifies another repository. GitHub SHALL retain local-path origin acceptance; Gitea SHALL require Full Gitea origin match. With optional --expect-head SHA, finish SHALL verify the run branch head after locked reload and refuse mismatch or unreadable head before archiving or any finish side effect.
 
 #### Scenario: Fork still pointing upstream
 - **WHEN** a run is ready to publish, its manifest names `owner/fork`, and the source clone's origin is `github.com/upstream/project`
@@ -62,6 +62,11 @@ command's own reason as the outcome's `detail`, not a generic refusal.
 - **WHEN** canonical or alias finish is given an expected head other than a full 40-hex SHA
 - **THEN** argument parsing exits 2 before dispatch or run mutation
 - **THEN** full hex input is compared case-insensitively without treating a prefix or symbolic ref as a confirmed head
+
+#### Scenario: Local origin compatibility is GitHub only
+- **WHEN** GitHub and configured Gitea runs supply local-path origins
+- **THEN** GitHub retains existing acceptance, but Gitea refuses before archive, push or API write because the path cannot establish its configured HTTP origin
+- **THEN** an absent manifest repository retains the existing missing-GitHub-repository diagnostic and act refusal detail on every path
 
 ### Requirement: Canonical command hints
 

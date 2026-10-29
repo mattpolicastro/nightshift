@@ -344,7 +344,7 @@ def test_publish_then_finish(env, monkeypatch, tmp_path):
         return {}
 
     monkeypatch.setattr(cli, "_ctx", lambda r: ctx_for(r, m, a))
-    monkeypatch.setattr(cli, "_remote", lambda ctx: str(github))
+    monkeypatch.setattr(cli, "_remote", lambda ctx, target=None: str(github))
     monkeypatch.setattr(cli, "_gh", gh)
     monkeypatch.setattr(openspec, "archive", archive)
     assert main(["publish", "c"]) == 0

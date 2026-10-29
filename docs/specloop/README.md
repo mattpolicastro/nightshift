@@ -31,7 +31,7 @@ are inert, with key-only ignored-setting notes; no manifest is generated from th
 See [enrollment and preparation](../../README.md#enroll-a-repository) and the
 [CLI contract](command-json.md).
 
-Forge selection defaults to GitHub independently of named table order. Optional
+Daemon forge selection defaults to GitHub independently of named table order. Optional
 `repos.forge` selects an exact name; owner/repository collisions across forges
 are rejected ignoring case. See [forge configuration](../../config.example.toml).
 Gitea enrollment grants no GitHub landing authority; daemon status reports it
@@ -39,7 +39,7 @@ as `not queried (gitea)`. Gitea daemon execution remains deferred.
 
 Gitea preflight provides read-only bot, forbidden-repository, label, exact
 protection-rule and clone credential-username evidence. It cannot enable
-drafting, admission, revisions, publication or pending delivery, even with a
+daemon drafting, admission, revisions, publication or pending delivery, even with a
 populated allowlist or cleared foreign journal: core authorization and durable
 label-transition recovery are still missing. The GitHub token/probe checks
 remain prerequisites. Follow the [preflight and human enrollment checks](../../README.md#quickstart)
@@ -336,7 +336,7 @@ can finish and be collected; delivery needing an unavailable manifest-derived
 source path retains the successful result until repair, without re-drafting.
 Authorization, publication checks, pause and stopped-job holds still apply.
 
-Gitea is excluded from that health bypass: drafting, admission, revisions,
+Gitea is excluded from that health bypass: daemon drafting, admission, revisions,
 publication and pending delivery all remain disabled, including admitted work.
 Neither manifest repair, trusted logins nor passing preflight enables stages.
 The daemon reports a repository health hold, retaining triggers, receipts and
@@ -597,6 +597,51 @@ intact and returns a retryable error. Restore base access and retry
 `nightshift publish <change>`; the daemon can retry on a later poll. This does
 not create a driver `base_fetch` pause or permit a push using a stale base.
 
+### Explicit forge publication
+
+The manifest's `run.github` selects the engine destination: `owner/repo` and
+`github.com/owner/repo` retain GitHub behavior and argv. For Gitea, set it to
+`forge.example/owner/repo`; that hostname must uniquely match a Gitea URL in
+[forge configuration](../../config.example.toml). Multiple definitions on the
+same host refuse even with different ports or prefixes; `repos.forge` does not
+route these commands. The host field is a hostname, not a URL or port selector.
+
+Set `NIGHTSHIFT_FORGE_CONFIG` in the actual process environment to a nonblank
+absolute TOML path, or use the checkout's default `config.toml`. Provision the
+selected `token_env` bot token in `~/.config/nightshift/env` or the process:
+the file wins even when its value is empty. There is no landing-token or
+manifest step/env fallback. Git fetch/push uses separate git credentials.
+Gitea requires exactly one HTTP(S) origin with matching scheme, hostname,
+effective port, encoded URL prefix and case-sensitive owner/repository, allowing
+an optional terminal `.git`. Explicit default ports are equivalent; SSH, scp
+and local origins cannot prove the configured installation identity and refuse.
+
+After existing base preparation and checks, use:
+
+```sh
+uv run nightshift publish <change>
+uv run nightshift finish <change>
+```
+
+Complete the PR's human checks before finish. Publication refuses changes under
+`.gitea/workflows/`, `.github/workflows/` or `.forgejo/` on either forge before
+push or PR writes. Gitea publish reuses an exact existing PR or creates a
+WIP-prefixed title, not native draft state. Finish archives and pushes, removes
+one configured WIP prefix with a title-only PATCH and reads back the result;
+it does not merge. Inspect remote effects before retrying an ambiguous create
+failure: lookup-before-create cannot prevent concurrent or late-visible duplicates.
+Title edits between GET and PATCH can be overwritten without conflict detection;
+verification proves only the resulting title. Critic uses 30-second socket
+timeouts and a 120-second request-start cutoff, not elapsed-time bounds: slow
+response bodies can overrun both. See [remaining risks](../../KNOWN-LIMITATIONS.md#open-gaps)
+and [issue #129](https://github.com/mattpolicastro/nightshift/issues/129).
+
+These explicit commands and critic reads do not enable Gitea daemon drafting,
+admission, revisions, publication or pending delivery. Arming and Land remain
+GitHub-only. Read-only preflight is not execution authorization. First real
+WIP publication and finish prefix removal, and live Paseo presentation, remain
+pending human checks in the approved design; CI fixtures do not prove them.
+
 ## Paseo Factory section and `nightshift act`
 
 The Nightshift plugin now includes a **Factory** section for specloop runs,
@@ -608,11 +653,16 @@ field (up to 2,000 characters); Accept is available for `stuck` and
 `needs_human`, Publish for `ready_to_publish`, Finish for `human_checks`, and
 Abort at every pause. Worker task rows remain read-only.
 
-**Publish and Finish both push to GitHub, so Paseo asks for confirmation
-before sending either action.** Publish pushes to the recorded PR or opens a
-draft PR. After the human checks, Finish archives the change, pushes and
-marks the PR ready for review; it does not merge. Cancel sends nothing.
-The page shows each action's result and refreshes the list.
+**Publish and Finish push to the forge selected by the run manifest, so Paseo
+asks for confirmation before either action**, even before a PR exists. Cancel
+sends nothing. GitHub retains draft/ready behavior; configured Gitea creates a
+WIP-title PR and finish removes that prefix after archive/push and verifies the
+title. Finish does not merge. Provision config/bot environment and separate git
+credentials in the Paseo host process using [engine setup](#explicit-forge-publication).
+Factory's display-origin allowlist does not route or authorize writes: only
+HTTPS root `/owner/repo/pulls/N` Gitea PRs display. Engine-supported HTTP loopback
+or URL-prefix installations may require direct CLI use. Land remains GitHub-only;
+confirmation enables no daemon stage. The page shows results and refreshes.
 
 ### Factory landing
 
