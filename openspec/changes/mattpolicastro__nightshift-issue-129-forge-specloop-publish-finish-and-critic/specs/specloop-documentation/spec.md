@@ -18,8 +18,18 @@ README.md and docs/specloop/README.md SHALL explain manifest-host selection, tru
 #### Scenario: Explicit commands do not enable the daemon
 - **WHEN** an operator compares forge configuration, preflight and engine instructions
 - **THEN** the docs distinguish WIP-title drafts and finish's title PATCH/read-back from native draft state or merging
-- **THEN** all Gitea daemon stages and pending delivery stay disabled, and arming, landing and unmigrated plugin paths retain their boundaries
+- **THEN** all Gitea daemon stages and pending delivery stay disabled, and arming, landing and unrelated plugin paths retain their boundaries
 - **THEN** existing base preparation and recovery, frozen wrappers, enrollment examples and issue #135 per-step env guidance remain intact
+
+### Requirement: Factory forge action guidance
+
+The plugin README and engine guide SHALL describe Factory Publish/Finish as confirmed calls to the shared engine's manifest-selected forge. They SHALL explain Gitea WIP behavior, host credential setup and existing display restrictions, preserve GitHub-only Land and disabled Gitea daemon execution, and state that Finish does not merge.
+
+#### Scenario: Factory operator understands the destination
+- **WHEN** an operator reads Factory's action table, confirmation and act guidance
+- **THEN** it describes GitHub or configured Gitea publication according to the manifest, WIP-title creation and prefix removal on finish, with confirmation before either push and no send on Cancel
+- **THEN** it explains Paseo-host config/bot and git credential provisioning, links engine setup, and distinguishes the display-origin allowlist from write routing
+- **THEN** HTTPS/root-path display restrictions remain explicit, engine-supported HTTP loopback or prefixed URLs may need direct CLI use, and Land and daemon restrictions remain intact
 
 ### Requirement: Gitea operation limitations
 
@@ -33,7 +43,7 @@ KNOWN-LIMITATIONS.md SHALL state that finish can overwrite a concurrent human ti
 
 ### Requirement: Forge guidance integrity
 
-Documentation checks SHALL validate scoped structure, relative links and command examples using deterministic physical-line rules and real parsers, without exact explanatory-prose assertions. Missing or ambiguous boundaries SHALL block validation. Existing assertions SHALL be preserved, with only explicitly named fixture-input migrations for changed host selection.
+Documentation checks SHALL validate scoped structure, relative links and command examples using deterministic physical-line rules and real parsers, without exact explanatory-prose assertions. Missing or ambiguous boundaries SHALL block validation. Existing assertions SHALL be preserved, with only explicitly named host-fixture and Factory confirmation-expectation migrations.
 
 #### Scenario: Examples remain structurally valid
 - **WHEN** touched documentation examples and links are validated

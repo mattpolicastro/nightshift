@@ -26,6 +26,14 @@ recovery, expected-head checks, critic snapshot reuse and once-prefixed risks.
 The `spec-critic/Concurrent file context` delta changes only forge selection,
 backend completeness and Gitea timing promises. The documentation deltas
 qualify existing blanket publication limitations; no daemon hold is removed.
+The `run-actions/Publish only to the named repository` delta limits its existing
+local-origin allowance to GitHub: a local path cannot prove Gitea origin identity.
+It preserves all four existing finish/target scenarios and the missing-repository
+refusal wording. Factory's server already forwards `act` publish/finish to this
+engine, so engine support necessarily reaches those explicit UI actions.
+The `paseo-runs-page/Confirmation button presentation` delta changes only the
+publication warning; its preservation of messages would otherwise contradict
+the new destination. All other presentation and interaction guarantees remain.
 
 ## Goals / Non-Goals
 
@@ -35,8 +43,11 @@ behavior and `gh` argument bytes unchanged. Refuse protected workflow changes
 on both forges before publication effects.
 
 Implementation may edit `specloop/cli.py`, `specloop/critic.py`, focused tests,
-spec deltas, and affected passages in `README.md`, `KNOWN-LIMITATIONS.md` and
-`docs/specloop/README.md`. Helpers stay in those Python modules. Do not edit
+spec deltas, `plugins/nightshift/client/factory-model.ts`'s publication
+confirmation, and affected passages in `README.md`, `KNOWN-LIMITATIONS.md`,
+`docs/specloop/README.md` and `plugins/nightshift/README.md`. The narrow Factory
+addition resolves the shared-engine behavior exposed by the critic; it is not
+a general plugin migration. Helpers stay in the two Python modules. Do not edit
 `nightshift/land.py`, daemon implementation, `nightshift/forge/`, service
 wrappers or type baselines. Do not add a Forge Protocol method, hard HTTP read
 deadlines, native drafts, title conflict detection or a publication journal.
@@ -220,14 +231,36 @@ claim that slow live responses are forcibly interrupted.
 
 ### 7. Documentation, regression preservation and verification
 
-Update the three allowed operator documents wherever this change invalidates
+Update the four scoped operator documents wherever this change invalidates
 claims, especially the engine-PR-command limitation and blanket Gitea
 publication holds. Say **daemon** when describing those retained holds.
 Explain manifest-host selection, unique host matching, trusted config/env
 sources, HTTP(S) full-origin checks, separate git credentials, all workflow
 prefixes, WIP finish, title races, slow responses and ambiguous-create retries.
 Cite issue #129 until an implementation PR is known. Do not rewrite unrelated
-sections or claim changes to arming, landing or plugin-specific GitHub paths.
+sections or claim changes to arming, landing or unrelated plugin GitHub paths.
+
+In `plugins/nightshift/client/factory-model.ts:decideFactoryAction`, use the
+same warning for both publication verbs and all hosts, including a run with no
+PR yet: `<Action> <change>? This pushes to the forge selected by the run manifest.`
+The status projection has no authoritative manifest host, so do not infer the
+write destination from a displayed PR/context URL or add RPC fields/reads.
+Keep Abort's warning and all labels, roles, styling, pause identity, availability,
+no-send-before-confirmation, Cancel and duplicate/pending guards unchanged.
+`plugins/nightshift/server/factory.ts` already forwards literal `act` argv;
+retain that implementation and test it without changing the transport.
+
+Update the plugin README's Factory action table, confirmation paragraph and
+`nightshift act` caller guidance, plus the engine guide's Factory paragraph.
+Explain manifest-host routing, Gitea WIP publish/title finish, no merge, and
+provisioning config/bot environment and git credentials in the Paseo host
+process. Link to the shared engine setup rather than duplicating CLI examples.
+The existing Factory origin allowlist is a separate display restriction, not
+forge selection or write authorization. Its HTTPS and root `/owner/repo/pulls/N`
+shape restrictions remain: engine-supported HTTP loopback or URL-prefix Gitea
+installations may require direct CLI use because their PRs cannot be displayed.
+Do not promise all engine-supported URLs work in Factory. Land remains GitHub-only;
+no daemon stage is enabled by a Factory confirmation.
 Preserve README's GitHub credential restriction while explaining the engine's
 new pre-push refusal; do not imply the Gitea guard is a server permission.
 
@@ -246,15 +279,41 @@ Check simple relative Markdown links against disk; ambiguous link syntax in
 the selected passage blocks validation. Avoid new multiline executable examples
 or raw `[[repos]]` guide blocks, preserving existing whole-guide extraction.
 
-Preserve every existing assertion. The intentional host-policy migration is
-the explicit-host fixture in `tests/test_specloop_critic_context.py`: replace
-the `github.example.test` input/expected-host fixture value with `github.com`,
-keeping argv, attribution, pagination and other assertions. Add separate
-non-GitHub configured/unknown-host tests. Minimal context/runner fixtures in
+Preserve every existing assertion, with these explicit input/expected-text
+migrations required by the changed contracts:
+
+- In `tests/test_specloop_act.py:test_publish_recovers_unrecorded_pr`, replace
+  only the parameter `github.example.com/Example/Repo` with
+  `github.com/Example/Repo`. Keep the other repository parameters and mixed-case
+  owner/repo spelling. Keep all combinations of `fork_count` (0/30),
+  `interruption` (`response_lost`/`before_save`) and `retry_command`
+  (`act`/`publish`). Preserve full lookup/create argv assertions, page counts,
+  failed-final-page refusal, unchanged saved state, one-create/PR-reuse checks,
+  pushed-ref equality, JSON/status/action assertions and repeated-publish refusal.
+  The host now selects GitHub under the new policy; it must not be configured
+  as Gitea or bypass target selection to retain the old arbitrary-host behavior.
+- In `tests/test_specloop_critic_context.py`, replace the explicit-host
+  `github.example.test` input/expected-host fixture value with `github.com`,
+  keeping argv, attribution, pagination and all other assertions.
+- Update only the expected Publish/Finish warning text or matching pattern in
+  `plugins/nightshift/tests/factory-client.test.ts`, `factory-style.test.ts`,
+  `factory-waiting-view.test.ts` and `factory-view.test.ts` to the new warning.
+  Preserve every assertion, including exact rendered-message checks, styles,
+  accessibility, Cancel, duplicate dispatch, pause identity, notices and refresh
+  counts. Abort expectations stay unchanged. Add configured-Gitea and no-PR
+  cases using existing model/rendered harnesses; retain GitHub cases.
+
+Add separate non-GitHub configured/unknown-host tests. Minimal context/runner fixtures in
 publication tests may supply the new target/diff facts or stub the new local
 guard in tests solely about transport failures; do not remove existing checks
 or make production validation optional. New real git fixtures exercise the
 guard independently, including rename/deletion and unusual filenames.
+
+For documentation link checks in the plugin README, select the exact unique
+physical `## Factory` heading through the next column-zero `## ` or `# `
+heading. Apply the same fail-closed relative-link rule as the engine passage;
+no fence, HTML or indentation parsing and no new command extraction are needed
+for this prose/table edit. Keep existing plugin examples and their checks.
 
 Required tests are `test_publish_on_gitea_opens_wip_pr`,
 `test_finish_on_gitea_drops_wip_prefix`, `test_publish_refuses_workflow_paths`,
@@ -263,10 +322,14 @@ Use existing FakeGitea/openers and state helpers where practical, with no live
 service dependency. Each task runs its focused regressions. Final acceptance
 is `uv run pytest` and `uv run python scripts/check_types.py`, with no new
 type errors, skips hiding failures, assertion removals or baseline increases.
+For the narrow TypeScript change also run the plugin's `npm test` and
+`npm run typecheck` in the isolated build copy described in its README;
+installation artifacts must not modify source. No live Gitea/Paseo service is
+required for automated confirmation, transport or documentation coverage.
 
 Six tasks are used to keep each session near or below 300 changed lines:
 selection/origin, publication, finish, critic pagination, critic dispatch/timing,
-and documentation. Pagination and timing have distinct failure modes and
+and operator-facing confirmation/guidance. Pagination and timing have distinct failure modes and
 test seams; combining them would recreate the oversized critic task.
 
 ## Risks / Trade-offs
@@ -296,6 +359,9 @@ test seams; combining them would recreate the oversized critic task.
   redacted results. CI cannot prove this real publish; leave it pending until
   performed. Do not enable daemon stages as part of this check.
 - Read the changed operator passages and verify issue/reference links on the
-  live host. Confirm the title-race and slow-response wording is clear and
+  live host. In Paseo, inspect the updated Publish/Finish confirmation for a
+  configured Gitea run, including Cancel, and verify its warning is readable.
+  Automated rendered tests cannot establish live-host presentation. Confirm
+  the title-race and slow-response wording is clear and
   existing daemon restrictions remain explicit. These human checks are not
   implementing-agent tasks.

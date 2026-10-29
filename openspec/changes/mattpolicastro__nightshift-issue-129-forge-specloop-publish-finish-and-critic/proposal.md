@@ -21,12 +21,20 @@ GitHub behavior.
 - Collect critic PR files through forge-specific readers. Gitea uses 30-second
   socket timeouts and starts no request after 120 seconds; a slowly arriving
   response can overrun both numbers. Preserve partial evidence and warnings.
-- Update affected passages in `README.md`, `KNOWN-LIMITATIONS.md` and
-  `docs/specloop/README.md`, including credential setup, daemon restrictions,
-  title-edit races, timeout limits and the pending first real publish check.
+- Update affected passages in `README.md`, `KNOWN-LIMITATIONS.md`,
+  `docs/specloop/README.md` and `plugins/nightshift/README.md`, including
+  credential setup, daemon restrictions, title-edit races, timeout limits and
+  the pending first real publish check.
+- Make Factory's Publish/Finish confirmation describe the manifest-selected
+  forge; those actions already invoke the shared engine. Preserve confirmation
+  gates, action argv, display allowlists and GitHub-only Land.
+- Migrate publication recovery and critic explicit-host fixtures to
+  `github.com`, retaining mixed-case repository coverage and every recovery,
+  pagination, reuse and argv assertion. Migrate only the Factory confirmation
+  expectations invalidated by its new wording.
 
 Out of scope: daemon execution or authorization changes, `nightshift/land.py`,
-landing/arming/plugin migration, native Gitea draft state, title conflict
+landing/arming and other plugin migration, native Gitea draft state, title conflict
 detection, durable publication transactions, and changes to `nightshift/forge/`
 or its HTTP read-deadline behavior. No service rollout is implied.
 
@@ -34,6 +42,10 @@ or its HTTP read-deadline behavior. No service rollout is implied.
 
 - **ADDED `specloop-forge`:** manifest selection, full Gitea origin validation,
   workflow refusal, draft publication and verified WIP completion.
+- **MODIFIED `run-actions`:** retain GitHub local-origin compatibility while
+  requiring full Gitea origin identity and preserving finish head gates.
+- **MODIFIED `paseo-runs-page`:** accurate forge publication confirmation with
+  unchanged styling, Cancel and dispatch protections.
 - **MODIFIED `spec-critic`:** backend-specific context completeness and Gitea
   request scheduling/socket limits. Replace arbitrary explicit GitHub-host
   routing with the manifest selection contract.
