@@ -17,7 +17,8 @@ BODY = ("**Scope:** `docs/shared.md`\n**What to do:** Edit.\n"
 
 
 def issue(number, **extra):
-    return {"id": number, "number": number, "body": BODY, "state": "open", "labels": [DRAFT], **extra}
+    return {"id": number, "number": number, "body": BODY, "state": "open",
+            "labels": [DRAFT], "pull_request": None, **extra}
 
 
 def pages(fake, endpoint, *replies):

@@ -31,6 +31,31 @@ def arming_io(configured, monkeypatch, issue_body):
     assert all(r.closed for r in fake.responses)
 
 
+@pytest.mark.scenario("issue-arming/gitea-arming-context/issue-facts-preserve-uncertainty")
+def test_arm_gitea_reads_issue_with_null_pull_request(arming_io, capsys):
+    fake, rows, args, _ = arming_io
+    assert rows[0]["pull_request"] is None
+    assert arm.main([*args, "--check", "76"]) == 0
+    output = capsys.readouterr().out
+    assert "lookup failed" not in output
+    assert "#76: " in output
+    assert all(call.method == "GET" for call in fake.calls)
+    assert rows[0]["labels"] == [{"id": 2, "name": "bug"}]
+
+
+@pytest.mark.scenario("issue-arming/gitea-arming-context/issue-facts-preserve-uncertainty")
+def test_arm_gitea_rejects_pr_backed_issue():
+    fake = FakeGitea()
+    fake.repository("Owner/Repo", labels=[], pulls=[
+        dict(id=1, number=1, body="", state="open", labels=[])])
+    facet = arm._GiteaArmingForge(arm.GiteaForge(
+        fake.base_url, "fake-token", bot_login="Robot", trusted_logins=[], opener=fake))
+    with pytest.raises(arm.IssueLookupError, match="Issue #1 lookup failed"):
+        facet.read_issue("Owner/Repo", 1)
+    assert len(fake.calls) == 1
+    assert fake.calls[0].path.endswith("/issues/1")
+
+
 @pytest.mark.scenario("issue-arming/verified-gitea-arming-writes/every-write-is-read-back")
 @pytest.mark.scenario("issue-arming/verified-gitea-arming-writes/silent-or-unreadable-mutation-fails")
 @pytest.mark.scenario("issue-arming/verified-gitea-arming-writes/lost-response-is-reconciled-once")

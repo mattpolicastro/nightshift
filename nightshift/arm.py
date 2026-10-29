@@ -721,7 +721,7 @@ class _GiteaArmingForge:
 
     @staticmethod
     def _issue(row: dict, number: int) -> Issue:
-        if "pull_request" in row or row.get("state") not in ("open", "closed"):
+        if row.get("pull_request") is not None or row.get("state") not in ("open", "closed"):
             raise ValueError
         data = {**row, "stateReason": row.get("state_reason")}
         if "body" in data and data["body"] is None:
@@ -736,7 +736,7 @@ class _GiteaArmingForge:
             rows = self.forge._label_candidates(repository, "spec:draft", "issues")
             # Normalize the entire strict snapshot before exposing any candidates.
             candidates = [self._issue(row, row["number"]) for row in rows
-                          if "pull_request" not in row]
+                          if row.get("pull_request") is None]
         except (ForgeError, IssueLookupError, ValueError, TypeError):
             return [], ["Armed Gitea issues could not be read completely."]
         issues, notes = [], []
