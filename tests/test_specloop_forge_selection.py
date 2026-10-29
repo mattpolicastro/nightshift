@@ -8,6 +8,7 @@ import pytest
 from nightshift import config
 from nightshift.cli import main
 from specloop import cli, seal
+from specloop.critic import open_pr_files
 from test_specloop_act import act, admitted
 from test_specloop_command_json import BRANCH, CHANGE, TASKS, git, template
 
@@ -160,6 +161,11 @@ def test_invalid_selection_refuses(destination, configured, monkeypatch, capfd, 
         env.unlink()
         env.mkdir()
     assert "Gitea" in refuses(destination, command, capfd) or failure in ("relative", "blank")
+    # The admission template stubs critic.open_pr_files; exercise the real dispatcher.
+    files, notes = open_pr_files("forge.example/example/repo", BRANCH,
+                                runner=lambda *a, **kw: pytest.fail("GitHub fallback"))
+    assert files == {} and len(notes) == 1 and "unavailable" in notes[0]
+    assert not any(secret in notes[0] for secret in ("SECRET", "file-land", "process-bot", "ambient-gh"))
 
 
 @pytest.mark.scenario("specloop-forge/manifest-forge-selection/invalid-selection-refuses")
@@ -170,6 +176,9 @@ def test_unknown_manifest_host_has_no_github_fallback(destination, capfd, comman
     run.manifest_path.write_text(run.manifest_path.read_text().replace("forge.example", host))
     expected = "exactly one configured Gitea forge" if host == "unknown.example" else "invalid manifest repository"
     assert expected in refuses(destination, command, capfd)
+    files, notes = open_pr_files(f"{host}/example/repo", BRANCH,
+                                runner=lambda *a, **kw: pytest.fail("GitHub fallback"))
+    assert files == {} and len(notes) == 1 and expected in notes[0]
 
 
 @pytest.mark.scenario("specloop-forge/full-gitea-origin-match/port-or-scheme-mismatch-refuses")

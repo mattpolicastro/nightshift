@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from nightshift.forge import ForgeError
@@ -102,8 +103,13 @@ def _sorted_map(files: dict[str, list[str]]) -> dict[str, list[str]]:
     return {path: sorted(set(labels)) for path, labels in sorted(files.items())}
 
 
+class _LookupBudgetExhausted(Exception):
+    """Stop scheduling requests without discarding already returned evidence."""
+
+
 def _gitea_open_pr_files(forge: GiteaForge, repository: str,
-                         branch: str) -> tuple[dict[str, list[str]], list[str]]:
+                         branch: str, *, guard: Callable[[], None] | None = None
+                         ) -> tuple[dict[str, list[str]], list[str]]:
     """Collect advisory evidence through confined requests, retaining partial reads."""
     files: dict[str, list[str]] = {}
     notes: list[str] = []
@@ -143,6 +149,8 @@ def _gitea_open_pr_files(forge: GiteaForge, repository: str,
         seen, signatures = {}, set()
         total, declared_end = None, False
         for page in range(1, 1001):
+            if guard is not None:
+                guard()
             try:
                 _, headers, rows = forge._request(
                     "GET", forge._repo_path(repository, *components),
@@ -205,22 +213,48 @@ def _gitea_open_pr_files(forge: GiteaForge, repository: str,
                 return
         note(scope, "Gitea pagination limit reached (1000 pages)")
 
-    for number, url, ref, head_repo in records(("pulls",), "Open PR list", pr_record,
-                                               {"state": "open"}):
-        if ref == branch and head_repo == repository.casefold():
-            continue
-        label = f"#{number} {url}"
-        for paths in records(("pulls", str(number), "files"), f"Open PR #{number} files", file_record):
-            for path in paths:
-                if path is not None:
-                    files.setdefault(path, []).append(label)
+    try:
+        for number, url, ref, head_repo in records(("pulls",), "Open PR list", pr_record,
+                                                   {"state": "open"}):
+            if ref == branch and head_repo == repository.casefold():
+                continue
+            label = f"#{number} {url}"
+            for paths in records(("pulls", str(number), "files"), f"Open PR #{number} files", file_record):
+                for path in paths:
+                    if path is not None:
+                        files.setdefault(path, []).append(label)
+        # Even a terminal/failed response can overrun the scheduling cutoff.
+        if guard is not None:
+            guard()
+    except _LookupBudgetExhausted:
+        notes.append("Open PR context incomplete: 120-second lookup budget exhausted.")
     return _sorted_map(files), notes
 
 
 def open_pr_files(github: str, branch: str, *, runner=None) -> tuple[dict[str, list[str]], list[str]]:
-    """Collect filenames only, retaining partial results under a bounded API budget."""
+    """Select manifest context; Gitea limits request starts, not elapsed reads."""
     if not github:
         return {}, []
+    # Local import avoids the CLI/proposal/critic import cycle.
+    from specloop.cli import PublishTarget, _forge_target
+
+    deadline = time.monotonic() + 120
+
+    def guard():
+        if time.monotonic() >= deadline:
+            raise _LookupBudgetExhausted
+
+    try:
+        target = _forge_target(github, guard=guard)
+    except PublishTarget as exc:
+        return {}, [f"Open PR context unavailable: {exc}."]
+    if target.forge is not None:
+        return _gitea_open_pr_files(target.forge, target.repository, branch, guard=guard)
+    return _github_open_pr_files(github, branch, runner=runner)
+
+
+def _github_open_pr_files(github: str, branch: str, *, runner=None) -> tuple[dict[str, list[str]], list[str]]:
+    """Legacy GitHub pagination and clamped subprocess timeouts."""
     runner = runner or subprocess.run
     parts = github.rstrip("/").split("/")
     if len(parts) not in (2, 3) or not all(parts):

@@ -5,6 +5,7 @@ import socket
 import pytest
 
 from fake_gitea import FakeGitea, Reply
+from nightshift import config
 from nightshift.forge import http
 from nightshift.forge.gitea import GiteaForge
 from specloop import critic
@@ -26,7 +27,7 @@ def label(number):
 
 
 @pytest.fixture
-def collect(monkeypatch):
+def gitea(tmp_path, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("Collector must use confined requests through the in-process opener")
 
@@ -34,15 +35,31 @@ def collect(monkeypatch):
     monkeypatch.setattr(socket, "create_connection", forbidden)
     monkeypatch.setattr(GiteaForge, "_pages", forbidden)
     monkeypatch.setattr(http, "sleep", lambda _: None)
+    fake = FakeGitea()
+    path = tmp_path / "forges.toml"
+    path.write_text('[[forges]]\nname = "test"\nkind = "gitea"\n'
+                    f'url = "{fake.base_url}"\ntoken_env = "CRITIC_TEST_BOT"\n'
+                    'land_token_env = "CRITIC_TEST_LAND"\n'
+                    'bot_login = "Robot"\ntrusted_logins = []\n')
+    monkeypatch.setenv("NIGHTSHIFT_FORGE_CONFIG", str(path))
+    monkeypatch.setenv("CRITIC_TEST_BOT", "test-token")
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / "absent-env")
+    monkeypatch.setattr(http, "build_opener", lambda: fake)
+    return fake
+
+
+@pytest.fixture
+def collect(gitea):
+    fake = gitea
 
     def run(pages):
-        fake = FakeGitea()
         for (endpoint, page), result in pages.items():
             reply = result if isinstance(result, (Reply, Exception)) else Reply(result)
             fake.route("GET", ROOT + endpoint, reply, reply, reply, page=page)
-        forge = GiteaForge(fake.base_url, "test-token", trusted_logins=[], bot_login="Robot", opener=fake)
-        files, notes = critic._gitea_open_pr_files(forge, "org/repo", "proposal")
+        files, notes = critic.open_pr_files("forge.example/org/repo", "proposal",
+                                            runner=lambda *a, **kw: pytest.fail("GitHub fallback"))
         for call in fake.calls:
+            assert call.timeout == 30
             assert call.method == "GET" and call.body is None
             assert call.path.startswith(ROOT)
             assert call.query == {"page": call.query["page"], "limit": ["50"],
@@ -56,6 +73,7 @@ def collect(monkeypatch):
 
 
 @pytest.mark.scenario(SHORT)
+@pytest.mark.scenario("spec-critic/concurrent-file-context/pagination-renames-and-own-branch")
 @pytest.mark.parametrize("metadata", [False, True])
 @pytest.mark.parametrize("head_repo", [None, "missing", {}, {"full_name": 7}])
 def test_critic_reads_gitea_pr_files(collect, head_repo, metadata):

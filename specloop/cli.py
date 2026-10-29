@@ -473,7 +473,8 @@ def _forge_target(github: str, *, guard: Callable[[], None] | None = None) -> Fo
         if not token.strip():
             raise PublishTarget("selected Gitea forge has no bot credential")
         forge = GiteaForge(definition.url, token, trusted_logins=definition.trusted_logins,
-                           bot_login=definition.bot_login, wip_prefix=definition.wip_prefix, guard=guard)
+                           bot_login=definition.bot_login, wip_prefix=definition.wip_prefix,
+                           guard=guard, timeout=30)
         return ForgeTarget(repository, forge, definition)
     except PublishTarget:
         raise
