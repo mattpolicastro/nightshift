@@ -103,7 +103,7 @@ test('paseo-runs-page/buttons-fit-the-pause/publish-needs-confirmation: publish 
     assert.equal(pending.kind, 'confirm');
     assert.deepEqual(requests, []);
     if (pending.kind !== 'confirm') assert.fail('Expected a confirmation');
-    assert.match(pending.message, /pushes to GitHub/);
+    assert.match(pending.message, /pushes to the forge selected by the run manifest/);
     assert.ok(pending.message.includes(run.change));
     // Dismissing the prompt sends nothing; pressing again still needs acceptance.
     assert.equal(press().kind, 'confirm');

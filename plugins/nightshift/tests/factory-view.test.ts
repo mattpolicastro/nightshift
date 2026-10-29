@@ -518,7 +518,7 @@ test('factory-finished-runs/visible-action-results/action-result-follows-a-finis
       assert.deepEqual(page.calls.actions, [], 'opening confirmation does not send');
       assert.equal(page.calls.reads, 1, 'opening confirmation does not refresh');
       assertActionNotice(page, 'notice-target', verb === 'finish'
-        ? 'Finish notice-target? This pushes to GitHub.' : 'Abort notice-target? This cannot be undone.', true);
+        ? 'Finish notice-target? This pushes to the forge selected by the run manifest.' : 'Abort notice-target? This cannot be undone.', true);
 
       pendingRefresh = new Promise(resolve => { completeRefresh = resolve; });
       await page.press(`Confirm ${verb} notice-target`);

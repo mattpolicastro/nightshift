@@ -23,8 +23,8 @@ current pause in the ordinary action group; Land is a separate confirmed control
 | --- | --- |
 | Resume | Continue from a phase gate or another resumable pause, optionally with a note of up to 2,000 characters for the next attempt. |
 | Accept | Accept the paused task's verified candidate at a `stuck` or `needs_human` pause. |
-| Publish | At `ready_to_publish`, push the branch to GitHub and update the recorded PR, or open a draft PR. |
-| Finish | At `human_checks`, after completing the PR's human checks, archive the change, push to GitHub and mark the PR ready for review. |
+| Publish | At `ready_to_publish`, push to the manifest-selected GitHub or configured Gitea forge and update the recorded PR, or open a draft PR (WIP-title on Gitea). |
+| Finish | At `human_checks`, after completing the PR's human checks, archive, push to the manifest-selected forge and mark ready (remove and verify the Gitea WIP title prefix). |
 | Abort | Stop a paused run. Available at every pause; a `secret` pause otherwise needs inspection by hand. |
 
 Each row also has **Details**, collapsed initially. Open it to see the change
@@ -41,9 +41,17 @@ several match, the most recently active one opens. If workspace lookup fails,
 the host lacks the required methods, or no workspace matches, the button is
 absent and the other details remain available.
 
-**Publish and Finish both push to GitHub, so the page asks for confirmation
-before sending either action.** Cancel sends nothing. Finish does not merge
-the PR. After an action, the page shows the result and refreshes the list.
+**Publish and Finish push to the forge selected by the run manifest, so the
+page asks for confirmation before either action**, including before a PR exists.
+Cancel sends nothing. Provision `NIGHTSHIFT_FORGE_CONFIG`, the selected bot token
+and separate git credentials in the Paseo host process; follow
+[shared engine setup](../../docs/specloop/README.md#explicit-forge-publication).
+Gitea uses WIP titles rather than native drafts; finish verifies prefix removal.
+The display-origin allowlist neither selects the forge nor authorizes writes.
+Gitea PR display requires HTTPS and root `/owner/repo/pulls/N` paths; supported
+engine HTTP loopback or URL-prefix installations may require direct CLI use.
+Land remains GitHub-only, and confirmation enables no Gitea daemon stage.
+Finish does not merge the PR. After an action, the page shows the result and refreshes the list.
 Resume and Accept leave further execution to the `nightshift serve` supervisor.
 These controls apply to specloop runs; Nightshift worker tasks remain read-only.
 
@@ -162,7 +170,8 @@ refused. For example:
 
 Confirmation belongs to the Paseo page: direct `nightshift act` calls do not
 prompt before publishing or finishing. Callers must obtain confirmation
-before invoking either GitHub-pushing action.
+before invoking either action's push to the manifest-selected forge. The engine selects and
+validates the destination; a displayed PR URL does not select it.
 
 The Factory server runs the fixed host checkout's `uv run --no-sync nightshift`
 with an argument array, never a shell. It accepts only a change in the last

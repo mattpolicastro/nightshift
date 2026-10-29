@@ -90,7 +90,7 @@ export function decideFactoryAction(
     ...(run.action?.pause_id ? { expect: run.action.pause_id } : {}),
   };
   if ((verb === 'publish' || verb === 'finish') && !confirmed) {
-    return { kind: 'confirm', request, message: `${labels[verb]} ${run.change}? This pushes to GitHub.` };
+    return { kind: 'confirm', request, message: `${labels[verb]} ${run.change}? This pushes to the forge selected by the run manifest.` };
   }
   if (verb === 'abort' && !confirmed) {
     return { kind: 'confirm', request, message: `Abort ${run.change}? This cannot be undone.` };

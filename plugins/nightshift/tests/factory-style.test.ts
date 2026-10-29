@@ -461,8 +461,8 @@ test('action buttons are styled by role', async t => {
 test('confirmation buttons preserve the action gate', async t => {
   await t.test('paseo-runs-page/confirmation-button-presentation/confirmation-styles-preserve-the-action-gate', async t => {
     const cases = [
-      { verb: 'publish', pause: 'ready_to_publish:7', message: 'Publish styled-run? This pushes to GitHub.' },
-      { verb: 'finish', pause: 'human_checks:7', message: 'Finish styled-run? This pushes to GitHub.' },
+      { verb: 'publish', pause: 'ready_to_publish:7', message: 'Publish styled-run? This pushes to the forge selected by the run manifest.' },
+      { verb: 'finish', pause: 'human_checks:7', message: 'Finish styled-run? This pushes to the forge selected by the run manifest.' },
       { verb: 'abort', pause: 'stuck:7', message: 'Abort styled-run? This cannot be undone.' },
     ] as const;
     for (const { verb, pause, message } of cases) await t.test(verb, async t => {
