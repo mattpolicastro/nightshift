@@ -462,6 +462,11 @@ class GiteaForge:
     def _read_labels(self, path: str) -> dict[str, int]:
         return self._label_map([row for page in self._pages(path) for row in page])
 
+    def _read_issue_labels(self, path: str) -> dict[str, int]:
+        # Gitea returns all issue labels and ignores pagination parameters.
+        _, _, rows = self._request("GET", path)
+        return self._label_map(rows)
+
     def _resolve_labels(self, repo: str, names: Iterable[str]) -> dict[str, int]:
         labels = self._read_labels(self._repo_path(repo, "labels"))
         for name in names:
@@ -503,14 +508,14 @@ class GiteaForge:
 
     def issue_labels(self, repo: str, number: int) -> set[str]:
         path = self._repo_path(repo, "issues", self._number(number), "labels")
-        return set(self._read_labels(path))
+        return set(self._read_issue_labels(path))
 
     def relabel_issue(self, repo: str, number: int, *, add: list[str], remove: list[str]) -> None:
         path = self._repo_path(repo, "issues", self._number(number), "labels")
         labels = self._resolve_labels(repo, [*add, *remove])
         if set(add) & set(remove):
             raise ForgeError("Overlapping Gitea label changes", transient=False)
-        current = set(self._read_labels(path).values())
+        current = set(self._read_issue_labels(path).values())
         for adding, names in ((False, remove), (True, add)):
             for name in sorted(set(names)):
                 label_id = labels[name]
@@ -520,7 +525,7 @@ class GiteaForge:
                     self._request("POST", path, json_body={"labels": [label_id]})
                 else:
                     self._request("DELETE", path + "/" + str(label_id))
-                current = set(self._read_labels(path).values())
+                current = set(self._read_issue_labels(path).values())
                 if (label_id in current) != adding:
                     raise ForgeError("Gitea label write verification failed", transient=False)
 
