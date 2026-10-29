@@ -10,7 +10,7 @@ from test_land import (
     CHECKS, CONFIRM_MERGED, FINISHED_HEAD, HEAD, PR, REPO, RUN, URL,
     VIEW, FakeClock, assert_guarded_merge, ci_check, config_path, expect_ci_entry,
     expect_ci_poll, expect_finish_gate, expect_initial_run, expect_round_end,
-    expect_round_start, expect_round_update, invoke_ci, merge_command,
+    expect_round_start, expect_round_update, expect_unavailable_proof, invoke_ci, merge_command,
     no_live_processes, scripted_runner,
 )
 
@@ -18,11 +18,13 @@ from test_land import (
 MISSING = subprocess.CompletedProcess(CHECKS, 1, "", "no checks reported on branch archive")
 
 
-def expect_response(runner, response=MISSING, *, pr=PR, timeout=30):
+def expect_response(runner, response=MISSING, *, pr=PR, timeout=30, proof=True):
     runner.expect(VIEW, pr, timeout=timeout)
     runner.expect(CHECKS, response, timeout=timeout)
     if not isinstance(response, Exception) and response.returncode in (0, 1, 8):
         runner.expect(VIEW, pr, timeout=timeout)
+    if proof and response is MISSING:
+        expect_unavailable_proof(runner, pr=pr, timeout=timeout)
 
 
 def expect_finished_entry(runner, timeout=30):
@@ -57,7 +59,7 @@ def test_land_refuses_when_no_checks_appear_before_deadline(config_path, scripte
     clock = FakeClock()
     pr = expect_finished_entry(scripted_runner, timeout=25)
     for remaining in (25, 15, 5):
-        expect_response(scripted_runner, pr=pr, timeout=remaining)
+        expect_response(scripted_runner, pr=pr, timeout=remaining, proof=remaining == 25)
     assert invoke_ci(config_path, scripted_runner, clock, timeout=25) == 1
     assert capsys.readouterr().err == (
         f"land: no CI checks were reported for head {FINISHED_HEAD} within 25s; "
@@ -171,7 +173,7 @@ def test_registration_rounds_and_commands_share_budget(
     else:
         for remaining in (12, 2):
             if waiting == "missing":
-                expect_response(scripted_runner, pr=pr, timeout=remaining)
+                expect_response(scripted_runner, pr=pr, timeout=remaining, proof=remaining == 12)
             else:
                 expect_ci_poll(scripted_runner, [ci_check("pending")], code=8,
                                pr=pr, timeout=remaining)

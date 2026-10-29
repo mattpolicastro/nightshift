@@ -91,6 +91,9 @@ def test_land_github_argv_unchanged(config_path, scripted_runner, capsys, enroll
                       *(["--checks-done"] if checks_done else [])], runner=scripted_runner,
                      sleep=clock.sleep, monotonic=clock.monotonic) == code
     assert scripted_runner.calls == expected
+    assert not any(argv == ["gh", "api", f"repos/{REPO}/pulls/78"]
+                   or any("nightshift:land-ci:" in arg for arg in argv)
+                   for argv, _ in scripted_runner.calls)
     assert not scripted_runner.steps
     assert clock.sleeps == ([10] if case in {"update", "ci-refusal"} else [])
     output = capsys.readouterr()
