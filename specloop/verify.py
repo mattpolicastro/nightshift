@@ -32,7 +32,7 @@ from threading import Lock
 
 from nightshift.host_paths import tool_path
 from specloop.agents import homes_dir
-from specloop.manifest import Manifest, Snapshot, Step, expand
+from specloop.manifest import Manifest, Snapshot, Step, expand, validate_env
 
 CREDENTIAL_DIRS = (".codex", ".claude", ".specloop/homes", ".nightshift/homes",
                    ".ssh", ".config", ".aws", "Library/Keychains")
@@ -437,10 +437,13 @@ def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out
 
 def _run_commands(scheduled: list[tuple[Step, Path]], values: dict[str, str],
                   build: Path, out: Path, path: str) -> list[Receipt]:
-    env = {"PATH": path, "HOME": str(build / "home"), "TMPDIR": str(build / "tmp"),
-           "LANG": "en_US.UTF-8", "COPYFILE_DISABLE": "1"}
+    base_env = {"PATH": path, "HOME": str(build / "home"), "TMPDIR": str(build / "tmp"),
+                "LANG": "en_US.UTF-8", "COPYFILE_DISABLE": "1"}
     receipts = []
     for step, step_sb in scheduled:
+        configured = validate_env(step.env, f"step {step.id!r}")
+        expanded = {key: expand(value, values) for key, value in configured.items()}
+        env = {**base_env, **validate_env(expanded, f"step {step.id!r}")}
         argv = [expand(a, values) for a in step.run]
         log = out / f"{step.id}.log"
         t0 = time.monotonic()

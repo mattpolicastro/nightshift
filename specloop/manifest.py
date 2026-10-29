@@ -31,6 +31,7 @@ class Step:
     run: tuple[str, ...]
     expect: int = 0
     timeout: int = 300
+    env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,20 @@ def _pattern(p: str) -> str:
     return p
 
 
+def validate_env(raw, setting: str) -> dict[str, str]:
+    """Validate a step environment without exposing configured values in errors."""
+    if not isinstance(raw, dict):
+        raise ValueError(f"{setting}.env: must be a table")
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key or "=" in key or "\0" in key:
+            raise ValueError(f"{setting}.env: invalid environment key")
+        if key in ("PATH", "HOME", "TMPDIR"):
+            raise ValueError(f"{setting}.env[{key!r}]: reserved for the harness")
+        if not isinstance(value, str) or "\0" in value:
+            raise ValueError(f"{setting}.env[{key!r}]: must be a string without NUL")
+    return dict(raw)
+
+
 def _steps(raw, setting: str = "step") -> tuple[Step, ...]:
     if raw is not None and not isinstance(raw, list):
         raise ValueError(f"{setting}: must be an array of step tables")
@@ -113,8 +128,9 @@ def _steps(raw, setting: str = "step") -> tuple[Step, ...]:
         run = s.get("run")
         if not isinstance(run, list) or not run or not all(isinstance(a, str) for a in run):
             raise ValueError(f"{setting} {s['id']!r}: run must be a non-empty argv list")
+        env = validate_env(s.get("env", {}), f"{setting} {s['id']!r}")
         try:
-            steps.append(Step(s["id"], tuple(run), int(s.get("expect", 0)), int(s.get("timeout", 300))))
+            steps.append(Step(s["id"], tuple(run), int(s.get("expect", 0)), int(s.get("timeout", 300)), env))
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{setting} {s['id']!r}: invalid expect or timeout") from exc
     ids = [s.id for s in steps]
@@ -203,11 +219,11 @@ def parse(data: dict, roles_override: dict[str, str] | None = None) -> Manifest:
     limits = data.get("limits", {})
     sandbox = data.get("sandbox", {})
     paths = data["paths"]
-    verify = _steps(data.get("verify"))
+    verify = _steps(data.get("verify"), "verify")
     if not verify:
         raise ValueError("at least one verify step is required")
-    prepare = _steps(data.get("prepare"))
-    acceptance = _steps(data.get("acceptance"))
+    prepare = _steps(data.get("prepare"), "prepare")
+    acceptance = _steps(data.get("acceptance"), "acceptance")
     if {s.id for s in prepare} & {s.id for s in verify + acceptance}:
         raise ValueError("prepare step ids must not duplicate verify or acceptance step ids")
     mutation_step = _steps(data.get("mutation_step"), "mutation_step")
@@ -227,7 +243,10 @@ def parse(data: dict, roles_override: dict[str, str] | None = None) -> Manifest:
                            ("acceptance", acceptance), ("mutation_step", mutation_step)):
         for step in steps:
             _snapshot_refs(step.run, {s.id for s in snapshots}, f"{setting} {step.id!r}.run", ordinary)
-    if any("{mutant_path}" in arg for s in verify + mutation_step + prepare + acceptance for arg in s.run):
+            _snapshot_refs(tuple(step.env.values()), {s.id for s in snapshots},
+                           f"{setting} {step.id!r}.env", ordinary)
+    if any("{mutant_path}" in arg for s in verify + mutation_step + prepare + acceptance
+           for arg in (*s.run, *s.env.values())):
         if variables.get("mutant_path", "") != "":
             raise ValueError("vars.mutant_path is reserved and must be empty")
         variables["mutant_path"] = ""

@@ -185,7 +185,7 @@ JSON carries `specloop` beside historical worker
 below. Daemon quota pacing for these runs remains separate work.
 
 Optional manifest `[[prepare]]` steps fetch dependencies before offline
-verification. They have the same `id`, argv-list `run`, `expect` and `timeout`
+verification. They have the same `id`, argv-list `run`, `expect`, `timeout` and `env`
 fields as `[[verify]]`. After candidate extraction, they run in order from the
 build directory, under their own sandbox allowing network but confining writes
 to that directory and denying credential-directory reads. The extracted
@@ -194,6 +194,55 @@ writes. Receipts and logs accompany verification, and an unexpected exit or
 timeout fails verification before later steps run. Commands are trusted;
 use a frozen lockfile for reproducible fetching. See the
 [pnpm preparation example](prepare.md).
+
+All four command kinds (`prepare`, `verify`, `acceptance`, `mutation_step`)
+accept an optional `env` table, defaulting to `{}`
+([issue #135](https://github.com/mattpolicastro/nightshift/issues/135)). Keys
+must be nonempty, case-sensitive strings without `=` or NUL; values must be
+strings without NUL, including empty strings. Values use the same literal
+substitution as argv: `[vars]`, `{src}`, `{build}`, `{sha}` and available
+`{snapshot:<id>}` paths. Keys and sibling env entries are not substitution
+variables; unknown ordinary placeholders, `$NAME` and shell syntax stay literal.
+
+Each command gets a fresh fixed environment plus its expanded entries, with
+no additions carried to other steps and no inherited host variables or
+credentials. `PATH` (the harness tool path), `HOME` (`{build}/home`) and
+`TMPDIR` (`{build}/tmp`) cannot be overridden, even with empty or identical
+values. Other fixed defaults, `LANG=en_US.UTF-8` and `COPYFILE_DISABLE=1`, may
+be overridden explicitly. Environment paths grant no additional filesystem
+access; sandbox, network, receipt and execution rules remain unchanged.
+`{mutant_path}` receives the existing mutation context or an empty default in
+ordinary/full runs. An env-only reference does not enable mutation narrowing;
+keep the placeholder in argv when narrowing is needed.
+
+This fragment demonstrates matching argv and env substitutions for each kind:
+
+<!-- step-env-example:start -->
+```toml
+[vars]
+env_mode = "offline"
+
+[[prepare]]
+id = "env-prepare"
+run = ["/usr/bin/printf", "%s\n", "{build}/cache", "{env_mode}"]
+env = { CACHE_DIR = "{build}/cache", MODE = "{env_mode}" }
+
+[[verify]]
+id = "env-verify"
+run = ["/usr/bin/printf", "%s\n", "{build}/cache", "{env_mode}"]
+env = { CACHE_DIR = "{build}/cache", MODE = "{env_mode}" }
+
+[[acceptance]]
+id = "env-acceptance"
+run = ["/usr/bin/printf", "%s\n", "{build}/cache", "{env_mode}"]
+env = { CACHE_DIR = "{build}/cache", MODE = "{env_mode}" }
+
+[[mutation_step]]
+id = "env-mutation"
+run = ["/usr/bin/printf", "%s\n", "{build}/cache", "{env_mode}"]
+env = { CACHE_DIR = "{build}/cache", MODE = "{env_mode}" }
+```
+<!-- step-env-example:end -->
 
 ### Retirement rollout
 
@@ -846,7 +895,8 @@ the manifest's paths. Its `[[mutation_step]]` uses that trusted selector and
 keeps the existing interpreter, environment and pytest options. Normal
 verification, negative-control and coverage commands stay intact.
 Mutation-only steps use the verify-step shape (`id`, argv `run`, `expect`
-defaulting to `0`, and `timeout` defaulting to `300` seconds); they do not join
+defaulting to `0`, `timeout` defaulting to `300` seconds, and `env` defaulting
+to `{}`); they do not join
 normal verification, preparation, acceptance or coverage.
 Give mutation-only steps IDs distinct from verify, prepare and acceptance IDs.
 Route `paths` and `steps` are nonempty arrays; each step ID must be defined
