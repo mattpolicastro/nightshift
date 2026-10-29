@@ -13,11 +13,12 @@ token. A credential test without a thing that must FAIL is not a test.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass, fields
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
-from .config import Config
+from .config import Config, ForgeConfig, Repo
 from .forge.http import GiteaHTTPError, GiteaTransport
 
 
@@ -110,7 +111,67 @@ def _base_protection(client, path: str, base: str) -> tuple[bool, str]:
                 else "unverified — exact base protection record required")
 
 
-def _gitea_checks(cfg: Config, env: dict[str, str], transport_factory) -> list[Check]:
+def _clone_identity(repo: Repo, forge: ForgeConfig, env: dict[str, str], credential_runner) -> tuple[bool, str]:
+    """Inspect one origin and helper response without retaining secret evidence."""
+    failure = (False, "unverified — matching origin and bot clone credentials required")
+    # Pass only the supplied environment; helpers must never prompt an operator.
+    child_env = {**env, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "",
+                 "SSH_ASKPASS": "", "GCM_INTERACTIVE": "Never"}
+    try:
+        git = ["git", "-C", str(repo.clone_dir())]
+        remote = credential_runner(git + ["remote", "get-url", "--all", "origin"],
+                                   input="", env=child_env, timeout=10,
+                                   capture_output=True, text=True, check=False)
+        origin = remote.stdout.removesuffix("\n")
+        if (remote.returncode or not origin
+                or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in origin)):
+            return failure
+        actual, expected = urlsplit(origin), urlsplit(forge.url)
+        path = expected.path.rstrip("/") + "/" + quote(repo.name, safe="/")
+        if (actual.scheme not in ("http", "https") or actual.scheme != expected.scheme
+                or actual.netloc.casefold() != expected.netloc.casefold()
+                or actual.username is not None or actual.password is not None
+                or actual.query or actual.fragment or "?" in origin or "#" in origin
+                or actual.path not in (path, path + ".git")):
+            return failure
+        # Git decodes URL host/path before helper lookup, skipping leading path
+        # slashes before decoding. Looking up the escaped spelling can select a
+        # different account when credential.useHttpPath is enabled.
+        host = unquote(actual.netloc, errors="strict")
+        credential_path = unquote(actual.path.lstrip("/"), errors="strict")
+        if any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in host + credential_path):
+            return failure
+        request = f"protocol={actual.scheme}\nhost={host}\npath={credential_path}\n\n"
+        filled = credential_runner(
+            git + ["credential", "fill"], input=request, env=child_env,
+            timeout=10, capture_output=True, text=True, check=False,
+        )
+        if filled.returncode:
+            return failure
+        seen: set[str] = set()
+        username = ""
+        has_password = False
+        # Physical LF-delimited fields, with an optional final blank terminator.
+        # Keep only password presence, never persist or report helper output.
+        for line in filled.stdout.removesuffix("\n").removesuffix("\n").split("\n"):
+            key, separator, value = line.partition("=")
+            if (not separator or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_\[\]-]*", key)
+                    or key in seen or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+                return failure
+            seen.add(key)
+            if key == "username":
+                username = value
+            elif key == "password":
+                has_password = bool(value)
+        if not username or not has_password or username.casefold() != forge.bot_login.casefold():
+            return failure
+        return True, "clone resolves configured bot username; credential ownership and scope not proven"
+    except Exception:
+        # Timeout exceptions may include stdout/stderr and credential material.
+        return failure
+
+
+def _gitea_checks(cfg: Config, env: dict[str, str], transport_factory, credential_runner) -> list[Check]:
     checks = []
     required = {getattr(cfg.labels, f.name) for f in fields(cfg.labels)} | {"merge:ready", "merge:blocked"}
     for forge in cfg.forges:
@@ -135,14 +196,17 @@ def _gitea_checks(cfg: Config, env: dict[str, str], transport_factory) -> list[C
             name = prefix + " " + repo.name
             checks.append(_gitea_check(name + " labels", lambda: _complete_labels(client, path, required)))
             checks.append(_gitea_check(name + " protection", lambda: _base_protection(client, path, repo.base)))
+            ok, detail = _clone_identity(repo, forge, env, credential_runner)
+            checks.append(Check(name + " clone identity", ok, detail))
     return checks
 
 
 def run(cfg: Config, env: dict[str, str], *, runner=None, transport_factory=None,
-        deep: bool = False) -> list[Check]:
+        credential_runner=None, deep: bool = False) -> list[Check]:
     """Everything that should be true before the daemon is left alone.
 
     transport_factory(url, token) supplies a GiteaTransport-compatible client.
+    credential_runner supplies subprocess.run-compatible, bounded git calls.
     Gitea credentials come only from env; GitHub retains its ambient gh runner.
     """
     checks: list[Check] = []
@@ -191,7 +255,8 @@ def run(cfg: Config, env: dict[str, str], *, runner=None, transport_factory=None
             )
         )
 
-    checks.extend(_gitea_checks(cfg, env, transport_factory or GiteaTransport))
+    checks.extend(_gitea_checks(cfg, env, transport_factory or GiteaTransport,
+                               credential_runner or subprocess.run))
 
     if deep:
         checks.append(Check("deep", True, "worker probes are retired; no model probes run"))

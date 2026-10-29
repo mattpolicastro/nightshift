@@ -207,20 +207,31 @@ def test_deep_help_describes_the_retired_probe(capsys):
 @pytest.mark.scenario("forge-preflight/complete-unique-labels/complete-map-establishes-labels")
 @pytest.mark.scenario("forge-preflight/complete-unique-labels/invalid-or-incomplete-map-fails")
 @pytest.mark.scenario("forge-preflight/base-protection-evidence/protection-is-established-or-remains-unverified")
+@pytest.mark.scenario("forge-preflight/clone-credential-identity/clone-resolves-the-bot")
+@pytest.mark.scenario("forge-preflight/clone-credential-identity/wrong-or-unavailable-clone-identity-fails")
 @pytest.mark.parametrize("control, outcome", [
     (None, "pass"), ("token", "missing"), ("token", "empty"), ("transport", "invalid"),
+    (None, "bare-origin"), (None, "terminator"), (None, "equals"),
     *[("identity", value) for value in ("admin", "wrong", "missing", "missing-login", "numeric", "malformed", 401)],
     *[("forbidden probe", value) for value in ("absent", 200, 401, 403, 500, "connection")],
     *[("labels", value) for value in ("missing", "duplicate", "conflict", "repeat", "later-error",
                                      "bound", "malformed", "boolean-id", "bad-page")],
     *[("protection", value) for value in (403, 404, 500, "mismatch", "missing", "malformed", "bad-json")],
+    *[("clone identity", value) for value in (
+        "origin-missing", "origin-host", "origin-prefix", "origin-repo", "origin-port", "origin-scheme",
+        "origin-ssh", "origin-userinfo", "origin-query", "origin-fragment", "origin-newline",
+        "origin-duplicate", "origin-conflict", "origin-failure", "origin-timeout", "origin-unavailable",
+        "fill-failure", "fill-timeout", "fill-unavailable", "wrong-user", "no-user", "no-password",
+        "empty-user", "empty-password", "duplicate-user", "duplicate-password", "duplicate-extra",
+        "malformed", "empty-output", "empty-key", "bad-key", "blank-middle", "carriage-return", "nul",
+    )],
 ])
 def test_preflight_gitea_negative_controls(monkeypatch, capsys, caplog, control, outcome):
     definitions = [config.ForgeConfig(
-        name=name, kind="gitea", url=f"https://{name}.example/install", token_env=f"{name}_BOT",
+        name=name, kind="gitea", url=f"https://{name}.example:8443/install", token_env=f"{name}_BOT",
         land_token_env=f"{name}_LAND", bot_login="Robot", forbidden_probe="private/no#access",
     ) for name in ("first", "second")]
-    repositories = [Repo(name=f"{f.name}/café#repo", forge=f.name, base="release/v1#tag")
+    repositories = [Repo(name=f"{f.name}/café#repo", forge=f.name, base="release/v1#tag", dir=f"/fixture/{f.name}/bot clone")
                     for f in definitions]
     configuration = Config(
         repos=[Repo(name=SANDBOX), Repo(name="explicit/github", forge="github"), *repositories],
@@ -286,7 +297,54 @@ def test_preflight_gitea_negative_controls(monkeypatch, capsys, caplog, control,
         pytest.fail("unexpected network or subprocess")
     monkeypatch.setattr(http, "build_opener", no_network)
     monkeypatch.setattr(subprocess, "run", no_network)
-    made, github = [], []
+    made, github, git_calls = [], [], []
+    def credentials(args, **kwargs):
+        repo = next(r for r in repositories if str(r.clone_dir()) == args[2])
+        forge = configuration.forge_for(repo)
+        path = "install/" + quote(repo.name, safe="/") + ("" if outcome == "bare-origin" else ".git")
+        origin = f"https://{forge.name}.example:8443/{path}"
+        lookup_path = "install/" + repo.name + ("" if outcome == "bare-origin" else ".git")
+        remote = args[3:] == ["remote", "get-url", "--all", "origin"]
+        assert args == ["git", "-C", str(repo.clone_dir()), *(
+            ["remote", "get-url", "--all", "origin"] if remote else ["credential", "fill"])]
+        assert kwargs == dict(
+            input="" if remote else f"protocol=https\nhost={forge.name}.example:8443\npath={lookup_path}\n\n",
+            env={**env, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "SSH_ASKPASS": "", "GCM_INTERACTIVE": "Never"},
+            timeout=10, capture_output=True, text=True, check=False)
+        git_calls.append((forge.name, remote))
+        stage = "origin" if remote else "fill"
+        bad = control == "clone identity" and forge.name == "first"
+        if bad and outcome == stage + "-timeout":
+            raise subprocess.TimeoutExpired(args, 10, output=sensitive, stderr=sensitive)
+        if bad and outcome == stage + "-unavailable":
+            raise OSError(sensitive)
+        evidence = "protocol=https\nusername=rObOt\npassword=" + sensitive + "\n"
+        if outcome == "terminator":
+            evidence += "\n"
+        if outcome == "equals":
+            evidence = evidence.replace(sensitive, sensitive + "=suffix")
+        origins = {
+            "origin-missing": "", "origin-host": origin.replace("first.example", "elsewhere.example"),
+            "origin-prefix": origin.replace("/install/", "/other/"), "origin-repo": origin + "extra",
+            "origin-port": origin.replace(":8443", ":443"), "origin-scheme": origin.replace("https:", "http:"),
+            "origin-ssh": "git@first.example:first/repo.git",
+            "origin-userinfo": origin.replace("://", "://Robot:" + env[forge.token_env] + "@"),
+            "origin-query": origin + "?" + env[forge.token_env], "origin-fragment": origin + "#" + env[forge.token_env],
+            "origin-newline": origin.replace("/install", "/in\nstall"), "origin-duplicate": origin + "\n" + origin,
+            "origin-conflict": origin + "\nhttps://other.example/owner/repo",
+        }
+        fields = {
+            "wrong-user": evidence.replace("rObOt", sensitive), "no-user": "password=" + sensitive,
+            "no-password": "username=Robot", "empty-user": evidence.replace("rObOt", ""),
+            "empty-password": evidence.replace(sensitive, ""), "duplicate-user": evidence + "username=Robot\n",
+            "duplicate-password": evidence + "password=" + sensitive, "duplicate-extra": evidence + "protocol=https\n",
+            "malformed": evidence + sensitive, "empty-output": "", "empty-key": evidence + "=" + sensitive,
+            "bad-key": evidence + "bad key=" + sensitive, "blank-middle": evidence.replace("password=", "\npassword="),
+            "carriage-return": evidence + "extra=x\ry", "nul": evidence + "extra=x\x00y",
+        }
+        stdout = (origins.get(outcome, origin) + "\n" if remote else fields.get(outcome, evidence)) if bad else (
+            origin + "\n" if remote else evidence)
+        return subprocess.CompletedProcess(args, int(bad and outcome == stage + "-failure"), stdout, sensitive)
     def factory(url, token):
         forge = next(f for f in definitions if f.url == url)
         assert token == env[forge.token_env]
@@ -301,14 +359,22 @@ def test_preflight_gitea_negative_controls(monkeypatch, capsys, caplog, control,
     def github_reader(args):
         github.append(args[3])
         return reader({SANDBOX, "explicit/github"})(args)
-    checks = preflight.run(configuration, env, runner=github_reader, transport_factory=factory, deep=True)
+    supplied_env = env.copy()
+    checks = preflight.run(configuration, env, runner=github_reader, transport_factory=factory,
+                           credential_runner=credentials, deep=True)
+    assert env == supplied_env
     failed = [c for c in checks if not c.ok]
     assert len(failed) == int(control is not None)
     if control:
         assert "gitea first" in failed[0].name and failed[0].name.endswith(control)
     assert github == [SANDBOX, "explicit/github", OFF_LIMITS]
     assert len(made) == (1 if control == "token" else 2)
-    assert len([c for c in checks if c.name.startswith("gitea second") and c.ok]) == 4
+    assert len([c for c in checks if c.name.startswith("gitea second") and c.ok]) == 5
+    assert git_calls[-2:] == [("second", True), ("second", False)]
+    first_calls = [] if control in ("token", "transport") else [("first", True)]
+    if first_calls and not (control == "clone identity" and outcome.startswith("origin-")):
+        first_calls.append(("first", False))
+    assert git_calls[:-2] == first_calls
     for forge in definitions:
         calls = fakes[forge.url].calls
         assert all(c.method == "GET" and c.body is None for c in calls)
@@ -321,7 +387,7 @@ def test_preflight_gitea_negative_controls(monkeypatch, capsys, caplog, control,
         if forge.name == "first" and outcome == "bound":
             assert pages == list(range(1, 1001))
     output = ""
-    if control == "protection" and outcome == 403:
+    if (control == "protection" and outcome == 403) or control == "clone identity":
         assert "unverified" in failed[0].detail
         monkeypatch.setattr(config, "load", lambda _: configuration)
         monkeypatch.setattr(config, "load_env_file", lambda: [])
@@ -331,6 +397,75 @@ def test_preflight_gitea_negative_controls(monkeypatch, capsys, caplog, control,
         assert "unverified" in output and "checks failed" in output and "\nready\n" not in output
     diagnostics = repr(checks) + "\n".join(c.line for c in checks) + caplog.text + output + capsys.readouterr().out
     assert all(secret not in diagnostics for secret in [sensitive, "ambient-personal-secret", *filter(None, env.values())])
+
+
+@pytest.mark.scenario("forge-preflight/clone-credential-identity/clone-resolves-the-bot")
+@pytest.mark.parametrize("root", ["http://127.0.0.1:3000", "https://forge.example/prefix/"])
+def test_clone_credentials_override_prompts_without_mutating_environment(tmp_path, monkeypatch, root):
+    forge = config.ForgeConfig(name="tea", kind="gitea", url=root, bot_login="Robot")
+    repo = Repo(name="owner/repo.git", dir=str(tmp_path / "bot clone"), forge="tea")
+    env = {"PATH": "/fixture/bin", "HOME": str(tmp_path), "GIT_TERMINAL_PROMPT": "1",
+           "GIT_ASKPASS": "supplied-askpass", "SSH_ASKPASS": "supplied-ssh-askpass", "GCM_INTERACTIVE": "Always"}
+    original = env.copy()
+    monkeypatch.setenv("PERSONAL_CREDENTIAL", "must-not-inherit")
+    calls = []
+    def git(args, **kwargs):
+        calls.append(args)
+        assert kwargs["env"] == {**original, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "",
+                                 "SSH_ASKPASS": "", "GCM_INTERACTIVE": "Never"}
+        assert kwargs["timeout"] == 10
+        assert kwargs["capture_output"] and kwargs["text"] and not kwargs["check"]
+        if len(calls) == 1:
+            assert kwargs["input"] == ""
+            output = root.rstrip("/") + "/owner/repo.git\n"
+        else:
+            protocol, host_path = root.split("://")
+            host, _, prefix = host_path.partition("/")
+            path = prefix.rstrip("/") + "/owner/repo.git"
+            assert kwargs["input"] == f"protocol={protocol}\nhost={host}\npath={path.lstrip('/')}\n\n"
+            output = "username=ROBOT\npassword=fixture-secret\n"
+        return subprocess.CompletedProcess(args, 0, output, "private helper diagnostic")
+    ok, detail = preflight._clone_identity(repo, forge, env, git)
+    assert ok and "fixture-secret" not in detail and "private helper diagnostic" not in detail
+    assert env == original
+    assert calls == [["git", "-C", repo.dir, *command] for command in (
+        ["remote", "get-url", "--all", "origin"], ["credential", "fill"])]
+
+
+@pytest.mark.scenario("forge-preflight/clone-credential-identity/clone-resolves-the-bot")
+@pytest.mark.scenario("forge-preflight/clone-credential-identity/wrong-or-unavailable-clone-identity-fails")
+@pytest.mark.parametrize("prefix, decoded_user", [
+    ("%69nstall", "Robot"), ("%69nstall", "Personal"), ("%2569nstall", "Robot"),
+    *[("install" + escape, "Robot") for escape in ("%00", "%0a", "%0D", "%1f", "%7f", "%C2%85")],
+])
+def test_clone_credentials_use_git_decoded_path(prefix, decoded_user, monkeypatch):
+    forge = config.ForgeConfig(name="tea", kind="gitea", url=f"https://forge.example/{prefix}", bot_login="Robot")
+    repo = Repo(name="owner/repo", dir="/fixture/clone", forge="tea")
+    calls = []
+    def no_subprocess(*args, **kwargs):
+        pytest.fail("real credential helper must not run")
+    monkeypatch.setattr(subprocess, "run", no_subprocess)
+    def git(args, **kwargs):
+        calls.append((args[3:], kwargs["input"]))
+        assert kwargs["timeout"] == 10 and kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        output = forge.url + "/owner/repo.git\n"
+        if args[3:] == ["credential", "fill"]:
+            # Model path-specific helper entries: the encoded key is a bot,
+            # while Git's actual decoded key may resolve a personal account.
+            decoded = "install" if prefix == "%69nstall" else "%69nstall"
+            expected = f"protocol=https\nhost=forge.example\npath={decoded}/owner/repo.git\n\n"
+            user = decoded_user if kwargs["input"] == expected else "Robot"
+            output = f"username={user}\npassword=fixture-secret\n"
+        return subprocess.CompletedProcess(args, 0, output, "private helper diagnostic")
+    ok, detail = preflight._clone_identity(repo, forge, {}, git)
+    valid_path = prefix in ("%69nstall", "%2569nstall")
+    assert ok == (valid_path and decoded_user == "Robot")
+    expected_calls = [(["remote", "get-url", "--all", "origin"], "")]
+    if valid_path:
+        decoded = "install" if prefix == "%69nstall" else "%69nstall"
+        expected_calls.append((["credential", "fill"], f"protocol=https\nhost=forge.example\npath={decoded}/owner/repo.git\n\n"))
+    assert calls == expected_calls
+    assert "fixture-secret" not in detail and "private helper diagnostic" not in detail
 
 
 @pytest.mark.scenario("forge-preflight/isolated-forge-checks/mixed-configuration-remains-isolated")
@@ -359,11 +494,17 @@ def test_gitea_default_transport_checks_unused_forges_and_each_repository(monkey
     monkeypatch.setattr(os, "environ", {"BOT": "ambient-personal", "LAND": "human-secret"})
     def no_github(args):
         pytest.fail("no GitHub repository or probe was configured")
+    def credentials(args, **kwargs):
+        repo = next(r for r in repos if str(r.clone_dir()) == args[2])
+        return subprocess.CompletedProcess(args, 0, (
+            f"{forge.url}/{repo.name}\n" if args[3:] == ["remote", "get-url", "--all", "origin"]
+            else "username=Robot\npassword=helper-secret\n"), "")
+    monkeypatch.setattr(subprocess, "run", credentials)
     checks = preflight.run(configuration, {"BOT": "supplied-bot", "LAND": "human-secret"}, runner=no_github)
     assert [c.name for c in checks if not c.ok] == [
         "GH_TOKEN", "negative control", *(["gitea local owner/repo0 labels"] if repo_count else []), "alerts"]
     remote = [c for c in checks if c.name.startswith("gitea local")]
-    assert len(remote) == 2 + 2 * repo_count
+    assert len(remote) == 2 + 3 * repo_count
     assert all(c.ok for c in remote if not c.name.endswith("repo0 labels"))
     assert sum(c.path.endswith("/user") for c in fake.calls) == 1
     assert sum(c.path.endswith("/private/probe") for c in fake.calls) == 1

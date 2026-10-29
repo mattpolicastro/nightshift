@@ -380,6 +380,30 @@ Direct Python operation needs no worker OAuth, endpoint models or worker
 verification string. Manifest providers and verification retain their own
 requirements; [bundled service startup](#enabling-the-daemon) has extra guards.
 
+For configured Gitea forges, read-only preflight checks the nonadmin bot identity,
+a forbidden repository's 404, complete unique labels, exact base protection and
+the clone's matching HTTP(S) origin and credential-helper username. Git calls
+use the clone and supplied environment, disable prompts and time out after ten
+seconds; passwords and helper diagnostics are never printed. Helpers are
+operator-configured executables and may access their own storage or network.
+GitHub token/probe prerequisites still apply even to Gitea-only configurations.
+
+A clean preflight cannot enable Gitea drafting, admission, revisions, publication
+or pending delivery. Core authorization and durable label-transition recovery
+remain prerequisites, regardless of allowlists or cleared foreign journals.
+The pending human enrollment check is to run
+`nightshift preflight --config /absolute/path/to/config.toml` with the daemon's clone
+and bot environment against the real instance. Independently confirm the
+forbidden repository exists, then inspect the actual protection policy and
+helper's bot account. A protection 403 remains
+an `unverified` failure; an exact rule does not establish policy adequacy, and a
+matching username does not prove password ownership or scope. Confirm landing
+tokens are absent from the daemon and [provision the supervisor](#host-path-setup)
+separately. Record only redacted live results; CI fixtures do not prove live
+enrollment. See [Gitea limitations](KNOWN-LIMITATIONS.md),
+[issue #128](https://github.com/mattpolicastro/nightshift/issues/128) and
+[issue #122](https://github.com/mattpolicastro/nightshift/issues/122).
+
 ## Documentation
 
 | file | what's in it |

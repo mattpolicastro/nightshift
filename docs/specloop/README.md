@@ -37,6 +37,21 @@ are rejected ignoring case. See [forge configuration](../../config.example.toml)
 Gitea enrollment grants no GitHub landing authority; daemon status reports it
 as `not queried (gitea)`. Gitea daemon execution remains deferred.
 
+Gitea preflight provides read-only bot, forbidden-repository, label, exact
+protection-rule and clone credential-username evidence. It cannot enable
+drafting, admission, revisions, publication or pending delivery, even with a
+populated allowlist or cleared foreign journal: core authorization and durable
+label-transition recovery are still missing. The GitHub token/probe checks
+remain prerequisites. Follow the [preflight and human enrollment checks](../../README.md#quickstart)
+with the real instance, daemon clone and bot environment; CI uses fake services
+and helpers and cannot establish live enrollment. Protection `unverified` is a
+failure, and matching helper usernames prove neither password ownership nor
+scope. Provision the independent supervisor's config and credential sources
+via [host setup](../../README.md#host-path-setup); frozen-wrapper prerequisites
+still apply. The [deferred Gitea gaps](../../KNOWN-LIMITATIONS.md) are tracked in
+[issue #128](https://github.com/mattpolicastro/nightshift/issues/128) and
+[issue #122](https://github.com/mattpolicastro/nightshift/issues/122).
+
 | Label | Stage and action |
 | --- | --- |
 | `spec:draft` or `agent:ready` on an issue | Draft its title, body and comments into an OpenSpec change. |

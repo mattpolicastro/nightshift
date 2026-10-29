@@ -181,6 +181,30 @@ None of these follow-ups establishes live validation or a completed host rollout
   manifests or passing preflight does not enable execution
   ([issue #128](https://github.com/mattpolicastro/nightshift/issues/128),
   [issue #122](https://github.com/mattpolicastro/nightshift/issues/122)).
+- **Deferred Gitea workflow guarantees:** core authorization's User-owner
+  shortcut bypasses adapter allowlists; organization/team membership
+  authorization is unsupported. Label transitions lack durable intent/recovery:
+  deleting `spec:approved` before adding `needs-human` can lose the discovery
+  trigger if the DELETE succeeds but its response is lost. Core marker lookup
+  and reconciliation can accept human marker copies; the standalone adapter
+  still restricts comment updates to bot-owned comments. Drafts use a title
+  prefix rather than native draft state. These gaps keep drafting, admission,
+  revisions, publication and pending delivery unconditionally disabled.
+  Foreign-journal inspection adds a diagnostic, not an alternative enabling
+  path. GitHub execution and saved revision-round guarantees are unchanged.
+- **Gitea evidence limits:** preflight's forbidden 404 cannot establish that the
+  repository exists; a human must independently confirm it. Protection evidence
+  proves only an exact base rule exists, not adequate policy; wildcard-only rules
+  and denied reads remain unverified failures. Clone helpers run with disabled
+  prompts and ten-second subprocess bounds, but may use their own storage or
+  network. A matching username does not independently prove password account or
+  scope. Real-instance preflight, protection-policy and bot-helper inspection
+  remain pending human checks, not CI proof of live workflows. See the
+  [enrollment checks](README.md#quickstart) and [supervisor provisioning](README.md#host-path-setup).
+- **GitHub-only command boundaries:** landing, arming, the engine's PR commands
+  and plugin GitHub paths have not migrated to Gitea. Gitea enrollment cannot
+  authorize GitHub landing; daemon status skips its queue queries. Named GitHub
+  definitions still use ambient `gh` authentication and host selection.
 - **Config:**
   - Manifest failures now hold new drafting/admission/spec re-drafting locally;
     admitted GitHub publication/build revisions continue. GitHub worker leftovers are released
