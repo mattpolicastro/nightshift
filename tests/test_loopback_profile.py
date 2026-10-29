@@ -45,6 +45,9 @@ def test_invalid_loopback(kind, value, tmp_path, monkeypatch):
     with pytest.raises(ValueError, match=rf"'{kind}'.*loopback"):
         verify._run_commands([(manifest.Step(kind, ("true",), loopback=value), tmp_path / "sb")],
                              {}, tmp_path, tmp_path, "/usr/bin:/bin")
+    with pytest.raises(ValueError, match=rf"'{kind}'.*loopback"):
+        verify.run_extracted(tmp_path, "sha", (manifest.Step(kind, ("true",), loopback=value),),
+                             manifest.parse(MANIFEST), tmp_path / "execution")
 
 
 @pytest.fixture

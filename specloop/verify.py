@@ -482,15 +482,36 @@ def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out
     values = {**m.vars, "src": str(src), "build": str(build), "sha": sha,
               **_consume_snapshots(src, sha, m, out, snapshots)}
     scheduled = [(s, prep_sb) for s in m.prepare] + [(s, sb) for s in steps]
+
+    def profile_for_step(step: Step, original: Path, index: int) -> Path:
+        if original == prep_sb or not step.loopback:
+            return original
+        if already_sandboxed():
+            raise RuntimeError("loopback cannot run inside an enclosing sandbox")
+        ports = _listening_loopback_ports()
+        resolved = out / f"verify-loopback-{index}.sb"
+        resolved.write_text(profile(build, m, snapshots=snapshots, loopback=True, listening_ports=ports))
+        return resolved
+
+    if any(s.loopback for s in steps):
+        return _run_commands(scheduled, values, build, out, path, profile_for_step=profile_for_step)
     return _run_commands(scheduled, values, build, out, path)
 
 
+def _probe_loopback_profile(profile_path: Path, log) -> None:
+    result = subprocess.run(["/usr/bin/sandbox-exec", "-f", str(profile_path), "/usr/bin/true"],
+                            stdout=log, stderr=subprocess.STDOUT, timeout=5)
+    if result.returncode != 0:
+        raise RuntimeError(f"loopback profile probe exited {result.returncode}")
+
+
 def _run_commands(scheduled: list[tuple[Step, Path]], values: dict[str, str],
-                  build: Path, out: Path, path: str) -> list[Receipt]:
+                  build: Path, out: Path, path: str, *,
+                  profile_for_step: Callable[[Step, Path, int], Path] | None = None) -> list[Receipt]:
     base_env = {"PATH": path, "HOME": str(build / "home"), "TMPDIR": str(build / "tmp"),
                 "LANG": "en_US.UTF-8", "COPYFILE_DISABLE": "1"}
-    receipts = []
-    for step, step_sb in scheduled:
+    receipts: list[Receipt] = []
+    for index, (step, step_sb) in enumerate(scheduled):
         validate_loopback(step.loopback, f"step {step.id!r}")
         configured = validate_env(step.env, f"step {step.id!r}")
         expanded = {key: expand(value, values) for key, value in configured.items()}
@@ -499,6 +520,19 @@ def _run_commands(scheduled: list[tuple[Step, Path]], values: dict[str, str],
         log = out / f"{step.id}.log"
         t0 = time.monotonic()
         with open(log, "wb") as f:
+            try:
+                loopback = step.loopback and step_sb.name != "prepare.sb"
+                if loopback and profile_for_step is None:
+                    raise RuntimeError("loopback requires a launch-time profile resolver")
+                if profile_for_step is not None:
+                    step_sb = profile_for_step(step, step_sb, index)
+                if loopback:
+                    _probe_loopback_profile(step_sb, f)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                message = f"step {step.id!r} loopback setup/profile probe failed: {exc}"
+                f.write((message + "\n").encode())
+                (out / "receipts.json").write_text(json.dumps([asdict(r) for r in receipts], indent=2))
+                raise RuntimeError(message) from exc
             p = subprocess.Popen(wrap(argv, step_sb), stdout=f, stderr=subprocess.STDOUT,
                                  env=env, cwd=build, start_new_session=True)
             try:

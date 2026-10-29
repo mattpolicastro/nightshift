@@ -1979,7 +1979,13 @@ def test_worker_exception_drains_active_worker_before_baseline_cleanup(tmp_path,
         "parallel-evidence-mutants/independent-mutant-workspaces/prepared-copies-remain-separate")),
 ])
 @pytest.mark.parametrize("parallel", [1, 2])
-def test_mutants_have_private_source_and_fresh_build(tmp_path, monkeypatch, prepared, parallel):
+@pytest.mark.parametrize("loopback", [False, True])
+def test_mutants_have_private_source_and_fresh_build(tmp_path, monkeypatch, prepared, parallel, loopback):
+    if loopback:
+        monkeypatch.setattr(verify, "already_sandboxed", lambda: False)
+        monkeypatch.setattr(verify, "_listening_loopback_ports", lambda: frozenset())
+        monkeypatch.setattr(verify, "_probe_loopback_profile", lambda *a: None)
+        monkeypatch.setattr(verify, "wrap", lambda argv, sb: argv)
     repo, _, head = project(tmp_path, STRONG)
     out = tmp_path / "out"
     mutants = [
@@ -2010,7 +2016,7 @@ cat "{src}/calc.py"
         m = replace(M, prepare=(inspect_step, copy_step), verify=(test_step,))
     else:
         m = replace(M, verify=(inspect_step,) + M.verify, mutation_steps=("inspect", "test"))
-    m = replace(m, mutation_parallel=parallel)
+    m = replace(m, mutation_parallel=parallel, verify=tuple(replace(s, loopback=loopback) for s in m.verify))
 
     real_run = verify.run_extracted
     runs = []
