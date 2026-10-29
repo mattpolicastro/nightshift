@@ -24,6 +24,8 @@ from urllib.parse import SplitResult, unquote, urlsplit
 from urllib.request import build_opener
 
 from . import config, queue
+from .forge import ForgeError
+from .forge.gitea import GiteaForge
 from .forge.http import GiteaHTTPError, GiteaTransport
 
 
@@ -220,6 +222,8 @@ class LandingForge(Protocol):
 
     def read_actor(self, operations: Operations) -> dict[str, Any]: ...
 
+    def trusted_comment(self, comment: dict[str, Any]) -> bool: ...
+
     def edit_source(
         self, identity: Identity, source: CheckSource, operations: Operations,
     ) -> subprocess.CompletedProcess[str]: ...
@@ -290,6 +294,11 @@ class GitHubLandingForge:
 
     def read_actor(self, operations: Operations) -> dict[str, Any]:
         return operations.read_json(["gh", "api", "user"], stage="authenticated actor lookup")
+
+    @staticmethod
+    def trusted_comment(comment: dict[str, Any]) -> bool:
+        return (isinstance(comment.get("author_association"), str)
+                and queue.trusted(comment, key="author_association"))
 
     def edit_source(
         self, identity: Identity, source: CheckSource, operations: Operations,
@@ -369,6 +378,15 @@ class _BudgetOpener:
         return response
 
 
+class _LandingGiteaEvidence(GiteaForge):
+    def _record(self, row: dict) -> dict:
+        # Intake normalizes absent bodies to empty text. Landing must not turn
+        # unreadable evidence into an apparent absence of checks or markers.
+        if not isinstance(row.get("body"), str):
+            raise ForgeError("Invalid Gitea comment body", transient=False)
+        return super()._record(row)
+
+
 class GiteaLandingForge:
     """Landing-specific reads at the configured root, using only the human token."""
 
@@ -428,13 +446,86 @@ class GiteaLandingForge:
             raise Refusal("cannot establish an existing main branch: malformed Gitea branch response")
         return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": sha}}
 
+    def _adapter(self, operations: Operations) -> GiteaForge:
+        def guard() -> None:
+            operations.remaining()
+
+        return _LandingGiteaEvidence(
+            self.definition.url, self._token, trusted_logins=self.definition.trusted_logins,
+            bot_login=self.definition.bot_login, wip_prefix=self.definition.wip_prefix,
+            opener=_BudgetOpener(self._opener, operations), guard=guard,
+        )
+
+    def read_comments(self, identity: Identity, operations: Operations, *, stage: str) -> list[Any]:
+        try:
+            return self._adapter(operations).comment_pages(identity.repo, identity.number)
+        except (ForgeError, ValueError):
+            raise Refusal(f"{stage}: Gitea comment evidence is unreadable") from None
+        finally:
+            operations.remaining()
+
+    def trusted_comment(self, comment: dict[str, Any]) -> bool:
+        # Landing intentionally permits listed publication bots. Neither the
+        # server association nor the adapter's feedback trust grants authority.
+        user = comment.get("user")
+        login = user.get("login") if isinstance(user, dict) else None
+        return (isinstance(login, str) and login.casefold() in
+                {name.casefold() for name in self.definition.trusted_logins})
+
+    def read_actor(self, operations: Operations) -> dict[str, Any]:
+        data = self._read_json("/api/v1/user", operations, stage="authenticated actor lookup")
+        login = data.get("login")
+        if (not self.trusted_comment({"user": data})
+                or not isinstance(login, str)
+                or login.casefold() == self.definition.bot_login.casefold()):
+            raise Refusal("authenticated actor lookup: require a listed non-bot human login")
+        return data
+
+    def _write_body(
+        self, method: str, path: str, body: str, operations: Operations, *, stage: str,
+    ) -> Any:
+        # Human landing writes must bypass the adapter's bot ownership helpers.
+        # The transport attempts writes once; only attestation policy reconciles.
+        try:
+            _, _, response = self._transport(operations).request(method, path, json_body={"body": body})
+            return response
+        except (GiteaHTTPError, ValueError):
+            raise Refusal(f"{stage}: Gitea request failed; rerun land to recover") from None
+        finally:
+            operations.remaining()
+
+    def edit_source(
+        self, identity: Identity, source: CheckSource, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        endpoint = (f"/api/v1/repos/{identity.repo}/pulls/{identity.number}"
+                    if source.comment_id is None
+                    else f"/api/v1/repos/{identity.repo}/issues/comments/{source.comment_id}")
+        self._write_body("PATCH", endpoint, source.body, operations,
+                         stage=f"record human checks in {source.reference}")
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    def create_attestation(self, identity: Identity, body: str, operations: Operations) -> dict[str, Any]:
+        response = self._write_body(
+            "POST", f"/api/v1/repos/{identity.repo}/issues/{identity.number}/comments",
+            body, operations, stage="attestation create",
+        )
+        if not isinstance(response, dict):
+            raise Refusal("attestation create: incomplete comment acknowledgement")
+        return response
+
+    def edit_attestation(
+        self, identity: Identity, comment_id: int, body: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        self._write_body("PATCH", f"/api/v1/repos/{identity.repo}/issues/comments/{comment_id}",
+                         body, operations, stage=f"attestation update for comment {comment_id}")
+        return subprocess.CompletedProcess([], 0, "", "")
+
     def _unavailable(self, *args: Any, **kwargs: Any) -> Any:
-        # Subsequent implementation tasks add evidence and mutation operations.
+        # Subsequent implementation tasks add ancestry, CI and merge operations.
         # Until then no inherited GitHub operation may authorize a Gitea action.
         raise Refusal("Gitea landing operation is not yet implemented")
 
-    resolve_repo = request_update = read_commit = read_comments = read_actor = _unavailable
-    edit_source = create_attestation = edit_attestation = compare = checks = _unavailable
+    resolve_repo = request_update = read_commit = compare = checks = _unavailable
     merge = confirm_merge = _unavailable
 
 
@@ -863,7 +954,10 @@ def read_comments(
     return comments
 
 
-def select_publication(comments: list[dict[str, Any]], change: str) -> CheckSource | None:
+def select_publication(
+    comments: list[dict[str, Any]], change: str, *,
+    trusted: Callable[[dict[str, Any]], bool] = GitHubLandingForge.trusted_comment,
+) -> CheckSource | None:
     # One optional round token, with literal marker whitespace/delimiters.
     # Escape the change name so neither regex syntax nor a similarly named
     # change can select another run's publication.
@@ -872,9 +966,7 @@ def select_publication(comments: list[dict[str, Any]], change: str) -> CheckSour
     candidates = []
     for comment in comments:
         body = comment["body"]
-        association = comment.get("author_association")
-        if (not isinstance(association, str)
-                or not queue.trusted(comment, key="author_association")
+        if (not trusted(comment)
                 or not body.startswith(queue.SELF_COMMENT_PREFIX)
                 or not marker.search(body)):
             continue
@@ -899,7 +991,8 @@ def read_check_sources(
 ) -> tuple[CheckSource, ...]:
     sources = [CheckSource(pr.body)]
     if run is not None:
-        publication = select_publication(read_comments(pr.identity, operations), run.change)
+        publication = select_publication(read_comments(pr.identity, operations), run.change,
+                                         trusted=operations.forge.trusted_comment)
         if publication is not None:
             sources.append(publication)
     return tuple(sources)
@@ -945,7 +1038,10 @@ def prepare_human_checks(
     return CheckSnapshot(pr.head, tuple(completed), actor)
 
 
-def select_attestation(comments: list[dict[str, Any]], marker: str) -> int | None:
+def select_attestation(
+    comments: list[dict[str, Any]], marker: str, *,
+    trusted: Callable[[dict[str, Any]], bool] = GitHubLandingForge.trusted_comment,
+) -> int | None:
     """An untrusted match is uncertainty, never permission to create another."""
     matches = [comment for comment in comments if marker in comment["body"]]
     if not matches:
@@ -953,8 +1049,7 @@ def select_attestation(comments: list[dict[str, Any]], marker: str) -> int | Non
     if len(matches) != 1 or matches[0]["body"].count(marker) != 1:
         raise Refusal("attestation lookup: duplicate marker matches; resolve duplicates before retrying")
     comment = matches[0]
-    if (not isinstance(comment.get("author_association"), str)
-            or not queue.trusted(comment, key="author_association")
+    if (not trusted(comment)
             or not comment["body"].startswith(queue.SELF_COMMENT_PREFIX)):
         raise Refusal("attestation lookup: untrusted marker match; inspect the comment before retrying")
     comment_id = comment.get("id")
@@ -984,7 +1079,7 @@ def record_attestation(
     def lookup() -> int | None:
         return select_attestation(read_comments(
             identity, operations, stage="attestation lookup",
-        ), marker)
+        ), marker, trusted=operations.forge.trusted_comment)
 
     comment_id = lookup()
     if comment_id is None:
@@ -993,7 +1088,8 @@ def record_attestation(
             # Even exit zero can leave an unusable acknowledgement. Resolve
             # that through the same full-history lookup as a transport error.
             if (not isinstance(response.get("body"), str)
-                    or select_attestation([response], marker) is None):
+                    or select_attestation([response], marker,
+                                          trusted=operations.forge.trusted_comment) is None):
                 raise Refusal("attestation create: incomplete comment acknowledgement")
             return
         except Refusal as exc:
@@ -1225,7 +1321,7 @@ def after_ci(
     try:
         result = operations.forge.confirm_merge(identity, operations)
         if (type(result.get("number")) is not int or result["number"] != identity.number
-                or _url_identity(result.get("url")) != identity):
+                or _returned_identity(result.get("url"), identity) != identity):
             raise Refusal("merged-state confirmation: contradictory PR identity")
         if result.get("state") != "MERGED":
             raise Refusal("merged-state confirmation: "
