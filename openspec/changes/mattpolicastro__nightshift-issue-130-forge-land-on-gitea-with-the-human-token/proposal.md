@@ -10,12 +10,12 @@ Issue #129 supplies explicit Gitea publication and finish, but `nightshift.land`
 - Update a stale Gitea branch with one merge-style POST per required update, after checking the expected head; accept only a new head with exactly ordered parents `[expected_head, base]`.
 - Wait on combined status for the exact head SHA, then request a merge commit pinned by `head_commit_id` and confirm `merged` before success.
 - Migrate Factory Land's GitHub command definitions into the landing operation boundary and remove `nightshift/factory_land.py` from the #126 AST allowlist. Preserve its existing confirmation and execution isolation.
-- Update `docs/landing.md` and add offline regressions, including the four issue-named tests.
+- Update `docs/landing.md` and add offline regressions, including the four issue-named tests. Make one coordinated correction to `KNOWN-LIMITATIONS.md`'s GitHub-only command boundaries entry: terminal Gitea landing is supported, while Factory Land, arming, unrelated plugin paths and Gitea daemon restrictions remain unchanged; live merge verification remains pending.
 - Amend `specloop-documentation`'s Explicit forge command guidance to replace its GitHub-only terminal landing guarantee with the #130 support boundary in `docs/landing.md`. Preserve publication guidance and the disabled daemon, arming and Factory UI boundaries without editing the shared guides.
 
-Implementation scope is `nightshift/land.py`, `nightshift/factory_land.py`, `docs/landing.md`, tests and specs. No daemon, `specloop/`, plugin, shared forge implementation, service or configuration-schema changes. Factory UI eligibility remains unchanged; this is not a Gitea Land-button rollout. Merge remains explicitly human initiated. Automatic landing, rebase, protection bypasses, alternate base branches, live-service tests by default and credential provisioning are out of scope.
+Implementation scope is `nightshift/land.py`, `nightshift/factory_land.py`, `docs/landing.md`, tests and specs, plus the narrowly scoped `KNOWN-LIMITATIONS.md` correction. That exception is necessary to satisfy the existing Current limitations requirement: a demonstrated fixed claim cannot remain in the open list merely because another change edits the file. No daemon, `specloop/`, plugin, shared forge implementation, service or configuration-schema changes. Factory UI eligibility remains unchanged; this is not a Gitea Land-button rollout. Merge remains explicitly human initiated. Automatic landing, rebase, protection bypasses, alternate base branches, live-service tests by default and credential provisioning are out of scope.
 
-Avoid the concurrent work files named in the design, including `README.md`, `KNOWN-LIMITATIONS.md`, `docs/specloop/README.md` and all listed loopback tests. Use new landing test files.
+Avoid the concurrent work files named in the design, including `README.md`, `docs/specloop/README.md` and all listed loopback tests. In `KNOWN-LIMITATIONS.md`, change only the command-boundaries entry and preserve concurrent #151 loopback documentation. Use new landing test files.
 
 ## Capabilities
 
@@ -28,4 +28,4 @@ Avoid the concurrent work files named in the design, including `README.md`, `KNO
 - `reviewed-pr-landing`: broaden the existing operator and identity contracts to Gitea; qualify GitHub-specific authentication, update and merge operations while retaining every other landing gate.
 - `factory-landing-jobs`: replace the old restriction on landing implementation changes with the shared operation boundary, preserving confirmed handoff semantics.
 - `forge-interface`: retire the Factory worker's temporary argv exception and describe the landing guide as the current scoped documentation. Other staged exceptions remain unchanged.
-- `specloop-documentation`: amend Explicit forge command guidance so the landing guide supersedes historical GitHub-only terminal landing wording while retaining engine publication/finish guidance and all unrelated boundaries.
+- `specloop-documentation`: amend Explicit forge command guidance so the landing guide supersedes historical GitHub-only terminal landing wording; extend Current limitations to require the coordinated correction while retaining all unresolved gaps, engine publication/finish guidance and unrelated boundaries.
