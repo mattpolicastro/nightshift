@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -698,7 +699,7 @@ class _GitHubArmingForge:
 
 
 class _GiteaArmingForge:
-    """Internal read facet; context and writes must be completed before CLI use."""
+    """Internal read facet; writes must be completed before CLI use."""
 
     def __init__(self, forge: GiteaForge):
         self.forge = forge
@@ -706,23 +707,97 @@ class _GiteaArmingForge:
     def read_issue(self, repository: str, number: int) -> Issue:
         try:
             row = self.forge._detail(self.forge._repo_path(repository, "issues", str(number)))
-            if "pull_request" in row or row.get("state") not in ("open", "closed"):
-                raise ValueError
-            data = {**row, "stateReason": row.get("state_reason")}
-            if "body" in data and data["body"] is None:
-                data["body"] = ""
-            issue = _parse_issue(data, number)
-            if any(not label.strip() for label in issue.labels):
-                raise ValueError
-            return issue
+            return self._issue(row, number)
         except (ForgeError, ValueError, TypeError):
             raise IssueLookupError(f"Issue #{number} lookup failed.") from None
 
+    @staticmethod
+    def _issue(row: dict, number: int) -> Issue:
+        if "pull_request" in row or row.get("state") not in ("open", "closed"):
+            raise ValueError
+        data = {**row, "stateReason": row.get("state_reason")}
+        if "body" in data and data["body"] is None:
+            data["body"] = ""
+        issue = _parse_issue(data, number)
+        if any(not label.strip() for label in issue.labels):
+            raise ValueError
+        return issue
+
     def armed_issues(self, repository: str, cache: IssueCache) -> tuple[list[Issue], list[str]]:
-        raise NotImplementedError("Gitea arming context is not connected yet.")
+        try:
+            rows = self.forge._label_candidates(repository, "spec:draft", "issues")
+            # Normalize the entire strict snapshot before exposing any candidates.
+            candidates = [self._issue(row, row["number"]) for row in rows
+                          if "pull_request" not in row]
+        except (ForgeError, IssueLookupError, ValueError, TypeError):
+            return [], ["Armed Gitea issues could not be read completely."]
+        issues, notes = [], []
+        for issue in candidates:
+            if issue.state != "OPEN":
+                continue
+            key = (repository, issue.number)
+            cache._issues.setdefault(key, issue)
+            try:
+                issues.append(cache.get(*key))
+            except IssueLookupError as error:
+                notes.append(str(error))
+        return issues, list(dict.fromkeys(notes))
 
     def open_pr_context(self, repository: str) -> ConcurrentContext:
-        raise NotImplementedError("Gitea arming context is not connected yet.")
+        deadline = time.monotonic() + 120
+        transport = self.forge._transport
+        previous_guard = transport._guard
+
+        def guard():
+            if time.monotonic() >= deadline:
+                raise critic._LookupBudgetExhausted
+
+        def request_guard():
+            guard()
+            if previous_guard is not None:
+                previous_guard()
+
+        files: dict[str, list[str]] = {}
+        notes: list[str] = []
+        identities: dict[int, int | None] = {}
+        transport._guard = request_guard
+        try:
+            files, notes = critic._gitea_open_pr_files(self.forge, repository, "", guard=guard)
+            numbers = {int(match[1]) for labels in files.values() for label in labels
+                       if (match := re.match(r"#([1-9][0-9]*) ", label))}
+            for number in sorted(numbers):
+                try:
+                    row = self.forge._detail(self.forge._repo_path(repository, "pulls", str(number)))
+                    head = row.get("head")
+                    if (type(row.get("number")) is not int or row["number"] != number
+                            or not isinstance(head, dict) or not isinstance(head.get("ref"), str)
+                            or not head["ref"] or not isinstance(head.get("repo"), dict)
+                            or not isinstance(head["repo"].get("full_name"), str)
+                            or not head["repo"]["full_name"]):
+                        raise ValueError
+                    identities[number] = (
+                        front_door_issue(repository, head["ref"][5:])
+                        if head["repo"]["full_name"].casefold() == repository.casefold()
+                        and head["ref"].startswith("spec/") else None)
+                except (ForgeError, ValueError):
+                    notes.append(f"Open PR #{number} metadata could not be read.")
+            guard()
+        except critic._LookupBudgetExhausted:
+            notes.append("Open PR context incomplete: 120-second lookup budget exhausted.")
+        finally:
+            transport._guard = previous_guard
+        evidence = set()
+        for path, labels in files.items():
+            for label in labels:
+                match = re.match(r"#([1-9][0-9]*) ", label)
+                if not match or int(match[1]) not in identities:
+                    notes.append(f"Open PR metadata unavailable for {label}.")
+                    continue
+                source_issue = identities[int(match[1])]
+                if source_issue is not None:
+                    evidence.add(PathEvidence(path, source_issue, f"PR {label}"))
+        return ConcurrentContext(sorted(evidence, key=lambda e: (e.path, e.issue or 0, e.source)),
+                                 list(dict.fromkeys(notes)))
 
     def add_intake_label(self, repository: str, number: int) -> None:
         raise NotImplementedError("Gitea arming writes are not connected yet.")

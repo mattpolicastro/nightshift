@@ -87,13 +87,15 @@ def test_configured_selection(configured, monkeypatch, style, file_token):
     forge._transport._opener = server
     assert arm.read_issue(repo, 1, forge=facet) == arm.Issue(1, "", "OPEN", None, frozenset())
     assert [call.path for call in server.calls] == ["/gitea/api/v1/repos/Owner/Repo/issues/1"]
-    for operation, args in ((facet.armed_issues, (repo, arm.IssueCache(forge=facet))),
-                            (facet.open_pr_context, (repo,)),
-                            (facet.add_intake_label, (repo, 1)),
+    assert len(server.calls) == 1
+    assert facet.armed_issues(repo, arm.IssueCache(forge=facet))[1]  # Missing intake label.
+    assert facet.open_pr_context(repo) == arm.ConcurrentContext([], [])
+    reads = len(server.calls)
+    for operation, args in ((facet.add_intake_label, (repo, 1)),
                             (facet.confirm_intake_label, (repo, 1))):
         with pytest.raises(NotImplementedError):
             operation(*args)
-    assert len(server.calls) == 1
+    assert len(server.calls) == reads
 
 
 @pytest.mark.scenario("issue-arming/configured-arming-selection/explicit-selection-refuses-safely")
