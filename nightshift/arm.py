@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -76,6 +77,10 @@ class Issue:
 
 class IssueLookupError(Exception):
     """A failed or malformed issue read, safe to show in findings."""
+
+
+class _LabelWriteError(Exception):
+    """A label operation needs fresh confirmation."""
 
 
 def read_issue(repository: str, number: int, *, runner=None,
@@ -689,17 +694,20 @@ class _GitHubArmingForge:
     def add_intake_label(self, repository: str, number: int) -> None:
         command = ["gh", "issue", "edit", str(number), "--repo", repository,
                    "--add-label", "spec:draft"]
-        response = self.runner(command, capture_output=True, text=True,
-                               check=True, timeout=30)
-        if response.returncode:
-            raise subprocess.CalledProcessError(response.returncode, command)
+        try:
+            response = self.runner(command, capture_output=True, text=True,
+                                   check=True, timeout=30)
+            if response.returncode:
+                raise subprocess.CalledProcessError(response.returncode, command)
+        except (OSError, subprocess.SubprocessError):
+            raise _LabelWriteError from None
 
     def confirm_intake_label(self, repository: str, number: int) -> bool:
         return _github_confirm_intake_label(repository, number, runner=self.runner)
 
 
 class _GiteaArmingForge:
-    """Internal read facet; writes must be completed before CLI use."""
+    """Arming facts and verified label operations through the Gitea adapter."""
 
     def __init__(self, forge: GiteaForge):
         self.forge = forge
@@ -800,14 +808,45 @@ class _GiteaArmingForge:
                                  list(dict.fromkeys(notes)))
 
     def add_intake_label(self, repository: str, number: int) -> None:
-        raise NotImplementedError("Gitea arming writes are not connected yet.")
+        with self._label_errors():
+            self.forge.relabel_issue(repository, number, add=["spec:draft"], remove=[])
 
     def confirm_intake_label(self, repository: str, number: int) -> bool:
-        raise NotImplementedError("Gitea arming writes are not connected yet.")
+        try:
+            with self._label_errors():
+                return "spec:draft" in self.forge.issue_labels(repository, number)
+        except _LabelWriteError:
+            return False
+
+    @contextmanager
+    def _label_errors(self):
+        # Guard exceptions are control flow, even when their type is ForgeError.
+        transport = self.forge._transport
+        previous_guard = transport._guard
+        guard_error = None
+
+        def guard():
+            nonlocal guard_error
+            try:
+                if previous_guard is not None:
+                    previous_guard()
+            except BaseException as error:
+                guard_error = error
+                raise
+
+        transport._guard = guard
+        try:
+            yield
+        except ForgeError as error:
+            if error is guard_error:
+                raise
+            raise _LabelWriteError from None
+        finally:
+            transport._guard = previous_guard
 
 
 def _select_forge(config_path: str | Path, *, runner=None) -> tuple[Path, str, ArmingForge]:
-    """Select explicitly, without fallback. Kept internal until Gitea is complete."""
+    """Select explicitly, without fallback."""
     runner = runner or subprocess.run
     try:
         root = _checkout_root(runner)
@@ -846,13 +885,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("issues", metavar="ISSUE", nargs="+", type=_issue_number)
     parser.add_argument("--check", action="store_true", help="report only; never apply labels")
     parser.add_argument("--force", action="store_true", help="arm despite findings; --check takes precedence")
+    parser.add_argument("--config", metavar="PATH", help="select the checkout's configured forge")
     args = parser.parse_args(argv)
     try:
-        root, repository = resolve_checkout()
+        if args.config is None:
+            root, repository = resolve_checkout()
+            cache = IssueCache(runner=subprocess.run)
+        else:
+            root, repository, forge = _select_forge(args.config)
+            cache = IssueCache(forge=forge)
     except IssueLookupError as error:
         print(str(error), file=sys.stderr)
         return 1
-    cache = IssueCache(runner=subprocess.run)
     results = check_candidates(repository, list(dict.fromkeys(args.issues)), root, cache)
     failed = False
     for number, findings in results.items():
@@ -874,7 +918,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 try:
                     cache.forge.add_intake_label(repository, number)
-                except (OSError, subprocess.SubprocessError):
+                except _LabelWriteError:
                     success = confirm_intake_label(repository, number, forge=cache.forge)
                     disposition = ("armed (label confirmed after write failure)" if success else
                                    "unconfirmed (label write failed)")

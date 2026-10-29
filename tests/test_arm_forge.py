@@ -4,11 +4,193 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from urllib.error import URLError
 
 import pytest
 
 from nightshift import arm, config
 from fake_gitea import FakeGitea, Reply
+from test_arm import issue_body
+
+
+@pytest.fixture
+def arming_io(configured, monkeypatch, issue_body):
+    path, _, root, runner, _ = configured
+    fake = FakeGitea()
+    draft, bug = {"id": 19, "name": "spec:draft"}, {"id": 2, "name": "bug"}
+    rows = [dict(id=n, number=n, body=issue_body().replace("nightshift/arm.py", f"docs/{n}.md"),
+                 state="open", labels=[bug]) for n in (76, 77)]
+    fake.repository("Owner/Repo", labels=[bug, draft], issues=rows)
+    constructor = arm.GiteaForge
+    monkeypatch.setattr(arm, "GiteaForge", lambda *a, **kw: constructor(*a, **kw, opener=fake))
+    monkeypatch.setattr(arm.subprocess, "run", runner)
+    before = list(root.rglob("*"))
+    yield fake, rows, ["--config", str(path)], draft
+    assert list(root.rglob("*")) == before
+    assert all(c.timeout == 30 for c in fake.calls)
+    assert all(r.closed for r in fake.responses)
+
+
+@pytest.mark.scenario("issue-arming/verified-gitea-arming-writes/every-write-is-read-back")
+@pytest.mark.scenario("issue-arming/verified-gitea-arming-writes/silent-or-unreadable-mutation-fails")
+@pytest.mark.scenario("issue-arming/verified-gitea-arming-writes/lost-response-is-reconciled-once")
+@pytest.mark.parametrize("fault", ["ok", "silent", "lost", "absent", "malformed", "unavailable", "verification"])
+def test_arm_gitea_label_write_read_back(arming_io, capsys, fault):
+    fake, rows, args, draft = arming_io
+    path = "/gitea/api/v1/repos/Owner/Repo/issues/76/labels"
+    if fault != "ok":
+        def post(call):
+            if fault not in ("silent", "absent"):
+                rows[0]["labels"].append(draft)
+            if fault in ("malformed", "unavailable", "verification"):
+                bad = Reply(raw=b"invalid") if fault == "malformed" else Reply(status=403)
+                fake.route("GET", path, bad, *([Reply(rows[0]["labels"][:1])]
+                                               if fault == "verification" else []), page=1)
+            return (URLError("lost response") if fault == "lost" else
+                    Reply([]) if fault in ("silent", "verification") else Reply(status=503))
+        fake.route("POST", path, post)
+    success = fault in ("ok", "lost", "verification")
+    assert arm.main([*args, "--force", "76", "77", "76"]) == (0 if success else 1)
+    output = capsys.readouterr().out
+    assert ("#76: forced arming" if fault == "ok" else
+            "#76: armed (label confirmed after write failure)" if success else
+            "#76: unconfirmed (label write failed)") in output
+    assert "#77: forced arming" in output
+    writes = [c for c in fake.calls if c.method != "GET"]
+    assert [(c.method, c.path, c.body) for c in writes] == [
+        ("POST", path.replace("76", str(n)), {"labels": [19]}) for n in (76, 77)]
+    first = fake.calls.index(writes[0])
+    # Fresh label resolution and complete reads precede POST; read-back precedes target 77.
+    assert [(c.method, c.path.rsplit("/", 2)[-2:], c.query.get("page"))
+            for c in fake.calls[first - 5:first]] == [
+        ("GET", ["Repo", "labels"], [str(n)]) for n in (1, 2, 3)] + [
+        ("GET", ["76", "labels"], [str(n)]) for n in (1, 2)]
+    following = [c for c in fake.calls[first + 1:] if c.path == path]
+    pages = ([1, 2, 1, 2] if fault == "silent" else [1] if fault in ("malformed", "unavailable")
+             else [1, 2] if fault == "absent" else [1, 1, 2, 3] if fault == "verification"
+             else [1, 2, 3])
+    assert [c.query["page"] for c in following] == [[str(n)] for n in pages]
+    assert all(c.method == "GET" and fake.calls.index(c) < fake.calls.index(writes[1]) for c in following)
+    assert all(row["labels"][0]["name"] == "bug" for row in rows)
+    assert draft in rows[1]["labels"]
+
+
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/clean-issue-is-armed")
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/findings-prevent-default-arming")
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/check-mode-never-labels")
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/force-labels-and-reports")
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/existing-labels-are-idempotent")
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/target-and-label-failures-remain-failures")
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/batch-results-retain-failures")
+@pytest.mark.parametrize("mode", [[], ["--check"], ["--force"], ["--check", "--force"]])
+@pytest.mark.parametrize("state", ["clean", "findings", "armed", "armed-findings", "closed", "unreadable"])
+def test_gitea_modes_and_batches(arming_io, capsys, mode, state):
+    fake, rows, args, draft = arming_io
+    if "armed" in state:
+        rows[0]["labels"].append(draft)
+    if "findings" in state:
+        rows[0]["body"] = ""
+    if state == "closed":
+        rows[0]["state"] = "closed"
+    if state == "unreadable":
+        fake.route("GET", "/gitea/api/v1/repos/Owner/Repo/issues/76", Reply(status=403))
+    check, force = "--check" in mode, "--force" in mode
+    success = state not in ("closed", "unreadable") and ("findings" not in state or force and not check)
+    assert arm.main([*args, *mode, "76", "77", "76"]) == (0 if success else 1)
+    output = capsys.readouterr().out
+    findings = [line for line in output.splitlines() if "[missing-section]" in line]
+    assert len(findings) == (4 if "findings" in state else 0)
+    assert findings == sorted(findings)
+    assert output.count("#76: ") == output.count("#77: ") == 1
+    assert output.index("#76: ") < output.index("#77: ")
+    assert len([c for c in fake.calls if c.path.endswith("/issues/76")]) == 1
+    writes = [c.path for c in fake.calls if c.method != "GET"]
+    expected = ([] if check else ([76] if success and "armed" not in state else []) + [77])
+    assert writes == [f"/gitea/api/v1/repos/Owner/Repo/issues/{n}/labels" for n in expected]
+    assert (draft in rows[1]["labels"]) == (not check)
+
+
+@pytest.mark.scenario("issue-arming/verified-gitea-arming-writes/lost-response-is-reconciled-once")
+@pytest.mark.parametrize("fault", ["missing", "duplicate", "guard-forge", "guard-os"])
+def test_label_definition_and_guard_fail_closed(arming_io, monkeypatch, fault):
+    fake, _, args, draft = arming_io
+    select = arm._select_forge
+    error = arm.ForgeError("guard", transient=False) if fault == "guard-forge" else OSError("guard")
+    cutoff = []
+
+    def selected(path):
+        root, repo, facet = select(path)
+        original = facet.add_intake_label
+        def add(*a):
+            if fault.startswith("guard"):
+                def guard():
+                    cutoff.append(len(fake.calls))
+                    raise error
+                facet.forge._transport._guard = guard
+            else:
+                fake.repositories[repo]["labels"] = [] if fault == "missing" else [draft, {**draft, "id": 20}]
+            return original(*a)
+        facet.add_intake_label = add
+        return root, repo, facet
+
+    monkeypatch.setattr(arm, "_select_forge", selected)
+    if fault.startswith("guard"):
+        with pytest.raises(type(error)) as caught:
+            arm.main([*args, "--force", "76"])
+        assert caught.value is error and cutoff == [len(fake.calls)]
+    else:
+        assert arm.main([*args, "--force", "76"]) == 1
+    assert all(c.method == "GET" for c in fake.calls)
+
+
+@pytest.mark.scenario("issue-arming/github-arming-compatibility/github-transcripts-stay-identical")
+@pytest.mark.parametrize("host", ["github.com", "github.example"])
+@pytest.mark.parametrize("mode", ["success", "check", "force", "armed", "error-confirmed", "error-absent"])
+def test_arm_github_argv_unchanged(configured, monkeypatch, issue_body, host, mode):
+    path, _, root, _, _ = configured
+    path.write_text('[[forges]]\nname="github"\nkind="github"\n[[repos]]\n'
+                    'name="Owner/Repo"\nforge="github"\ndir=' + json.dumps(str(root)))
+    monkeypatch.setattr(config, "parse_env_file", lambda: pytest.fail("credential read"))
+    monkeypatch.setattr(arm.time, "monotonic", lambda: 0)
+    repo = "Owner/Repo" if host == "github.com" else f"{host}/Owner/Repo"
+    host_args = [] if host == "github.com" else ["--hostname", host]
+    issue = dict(number=76, body="" if mode == "force" else issue_body(), state="OPEN",
+                 stateReason=None, labels=[{"name": "spec:draft"}] if mode == "armed" else [])
+    pr = dict(number=901, html_url=f"https://{host}/Owner/Repo/pull/901",
+              head={"ref": "ordinary", "repo": {"full_name": "Owner/Repo"}})
+    transcript = [
+        (["git", "rev-parse", "--show-toplevel"], str(root)),
+        (["gh", "repo", "view", "--json", "nameWithOwner,url"],
+         json.dumps(dict(nameWithOwner="Owner/Repo", url=f"https://{host}/Owner/Repo"))),
+        (["gh", "issue", "view", "76", "--repo", repo, "--json", "number,body,state,stateReason,labels"], json.dumps(issue)),
+        (["gh", "api", "--hostname", host, "repos/Owner/Repo/issues?state=open&labels=spec%3Adraft&per_page=100&page=1"], "[]"),
+        (["gh", "api", "repos/Owner/Repo/pulls?state=open&per_page=100&page=1", *host_args, "--method", "GET"], json.dumps([pr])),
+        (["gh", "api", "repos/Owner/Repo/pulls/901/files?per_page=100&page=1", *host_args, "--method", "GET"], '[{"filename":"docs/other.md"}]'),
+        (["gh", "api", "--hostname", host, "repos/Owner/Repo/pulls?state=open&per_page=100&page=1"], json.dumps([pr])),
+    ]
+    if mode not in ("check", "armed"):
+        transcript.append((["gh", "issue", "edit", "76", "--repo", repo, "--add-label", "spec:draft"], ""))
+    if mode.startswith("error"):
+        transcript.append((["gh", "issue", "view", "76", "--repo", repo, "--json", "labels"],
+                           json.dumps({"labels": [{"name": "spec:draft"}] if mode == "error-confirmed" else []})))
+    for named in (False, True):
+        calls = []
+        def runner(argv, **kw):
+            expected, output = transcript[len(calls)]
+            calls.append((argv, kw))
+            assert argv == expected
+            assert kw == dict(capture_output=True, text=True, check=True, timeout=30,
+                              **({"cwd": root} if argv[1:3] == ["repo", "view"] else {}))
+            if mode.startswith("error") and argv[1:3] == ["issue", "edit"]:
+                raise subprocess.CalledProcessError(1, argv)
+            return subprocess.CompletedProcess(argv, 0, output)
+        with monkeypatch.context() as patch:
+            patch.setattr(arm.subprocess, "run", runner)
+            if not named:
+                patch.setattr(config, "load", lambda *a: pytest.fail("legacy config read"))
+            args = ["--config", str(path)] if named else []
+            assert arm.main([*args, *([f"--{mode}"] if mode in ("check", "force") else []), "76"]) == (1 if mode == "error-absent" else 0)
+        assert len(calls) == len(transcript)
 
 
 @pytest.fixture
@@ -91,11 +273,11 @@ def test_configured_selection(configured, monkeypatch, style, file_token):
     assert facet.armed_issues(repo, arm.IssueCache(forge=facet))[1]  # Missing intake label.
     assert facet.open_pr_context(repo) == arm.ConcurrentContext([], [])
     reads = len(server.calls)
-    for operation, args in ((facet.add_intake_label, (repo, 1)),
-                            (facet.confirm_intake_label, (repo, 1))):
-        with pytest.raises(NotImplementedError):
-            operation(*args)
-    assert len(server.calls) == reads
+    with pytest.raises(arm._LabelWriteError):  # Never create the missing repository label.
+        facet.add_intake_label(repo, 1)
+    assert not facet.confirm_intake_label(repo, 1)
+    assert len(server.calls) == reads + 2
+    assert all(call.method == "GET" for call in server.calls)
 
 
 @pytest.mark.scenario("issue-arming/configured-arming-selection/explicit-selection-refuses-safely")
@@ -136,6 +318,9 @@ def test_selection_refuses_before_api(configured, monkeypatch, failure):
         arm._select_forge(path, runner=runner)
     assert str(error.value) == "Could not select the configured arming repository and bot credentials."
     assert len(calls) == 1
+    monkeypatch.setattr(arm.subprocess, "run", runner)
+    assert arm.main(["--config", str(path), "--force", "76"]) == 1
+    assert len(calls) == 2
 
 
 @pytest.mark.scenario("issue-arming/configured-arming-selection/explicit-selection-refuses-safely")
@@ -165,8 +350,9 @@ def test_named_github_identity(configured, monkeypatch, matches):
 
 
 @pytest.mark.scenario("issue-arming/configured-arming-selection/explicit-selection-refuses-safely")
-@pytest.mark.parametrize("args", [["--config", "SECRET", "--force", "1"], ["--force", "0"]])
-def test_cli_cannot_select_partial_gitea_backend(monkeypatch, args):
+@pytest.mark.scenario("issue-arming/arming-modes-and-outcomes/invalid-arguments-fail-before-reads")
+@pytest.mark.parametrize("args", [[], ["--config", "SECRET", "--force", "0"], ["--force", "0"], ["bad"]])
+def test_invalid_cli_cannot_dispatch(monkeypatch, args):
     monkeypatch.setattr(arm.subprocess, "run", lambda *a, **kw: pytest.fail("discovery or write"))
     with pytest.raises(SystemExit) as error:
         arm.main(args)
@@ -225,7 +411,7 @@ def test_failed_gitea_reads_are_sanitized_and_cached(reply):
 
 @pytest.mark.scenario("issue-arming/github-arming-compatibility/runners-and-snapshots-remain-local")
 @pytest.mark.parametrize("explicit", [True, False])
-def test_arm_github_argv_unchanged(monkeypatch, explicit):
+def test_arm_github_snapshots_unchanged(monkeypatch, explicit):
     calls = []
     repo = "github.example/Owner/Repo"
 
