@@ -13,15 +13,18 @@ from datetime import datetime
 from html import escape
 import json
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 import time
 from typing import Any, Literal, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, unquote, urlsplit
+from urllib.request import build_opener
 
 from . import config, queue
+from .forge.http import GiteaHTTPError, GiteaTransport
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -47,10 +50,13 @@ class _CIDeadlineExpired(Refusal):
 class Identity:
     repo: str
     number: int
+    origin: str = "https://github.com"
+    forge_name: str | None = None
 
     @property
     def url(self) -> str:
-        return f"https://github.com/{self.repo}/pull/{self.number}"
+        route = "pull" if self.forge_name is None else "pulls"
+        return f"{self.origin}/{self.repo}/{route}/{self.number}"
 
 
 @dataclass(frozen=True)
@@ -133,6 +139,7 @@ class Operations:
     monotonic: Callable[[], float]
     deadline: float | None = None
     forge: LandingForge = field(default_factory=lambda: GitHubLandingForge())
+    gitea_forges: tuple[config.ForgeConfig, ...] = ()
 
     def remaining(self) -> float:
         """One absolute budget, retained across CI rounds and update observation."""
@@ -343,6 +350,94 @@ class GitHubLandingForge:
         )
 
 
+class _BudgetOpener:
+    """Apply the current logical operation's budget to every HTTP attempt."""
+
+    def __init__(self, opener: Any, operations: Operations):
+        self.opener, self.operations = opener, operations
+
+    def add_handler(self, handler: Any) -> None:
+        self.opener.add_handler(handler)
+
+    def open(self, request: Any, *, timeout: float) -> Any:
+        response = self.opener.open(request, timeout=min(timeout, self.operations.remaining()))
+        try:
+            self.operations.remaining()
+        except Refusal:
+            response.close()
+            raise
+        return response
+
+
+class GiteaLandingForge:
+    """Landing-specific reads at the configured root, using only the human token."""
+
+    def __init__(self, definition: config.ForgeConfig, token: str, *, opener: Any = None):
+        self.definition = definition
+        self._token = token
+        self._opener = build_opener() if opener is None else opener
+
+    def _transport(self, operations: Operations) -> GiteaTransport:
+        # Bind each call, not the initial unbounded Operations: finish replaces
+        # it with a shared deadline, and merge later restores ordinary timeouts.
+        return GiteaTransport(
+            self.definition.url, self._token,
+            opener=_BudgetOpener(self._opener, operations), guard=operations.remaining,
+        )
+
+    def _read_json(self, path: str, operations: Operations, *, stage: str) -> dict[str, Any]:
+        try:
+            value = self._transport(operations).get_json(path)
+        except (GiteaHTTPError, ValueError):
+            raise Refusal(f"{stage}: Gitea request failed") from None
+        finally:
+            operations.remaining()
+        if not isinstance(value, dict):
+            raise Refusal(f"{stage}: expected a JSON object")
+        return value
+
+    def read_pr(self, identity: Identity, operations: Operations) -> dict[str, Any]:
+        data = self._read_json(
+            f"/api/v1/repos/{identity.repo}/pulls/{identity.number}", operations, stage="PR read",
+        )
+        if (_returned_identity(data.get("html_url"), identity) != identity
+                or type(data.get("number")) is not int or data["number"] != identity.number):
+            raise Refusal("Gitea returned a contradictory PR identity")
+        if data.get("state") != "open":
+            raise Refusal("Gitea PR must be open")
+        base, head = data.get("base"), data.get("head")
+        if not isinstance(base, dict) or base.get("ref") != "main":
+            raise Refusal("Gitea PR must target main")
+        sha = head.get("sha") if isinstance(head, dict) else None
+        title, body = data.get("title"), data.get("body")
+        if not isinstance(sha, str) or not _SHA.fullmatch(sha) or not isinstance(title, str):
+            raise Refusal("malformed Gitea PR metadata: expected a full head SHA and title")
+        if not isinstance(body, str):
+            raise Refusal("malformed Gitea PR body: expected text")
+        return {"number": identity.number, "url": identity.url, "state": "OPEN",
+                "baseRefName": "main", "headRefOid": sha, "body": body,
+                "isDraft": title.startswith(self.definition.wip_prefix)}
+
+    def read_main(self, identity: Identity, operations: Operations) -> dict[str, Any]:
+        data = self._read_json(
+            f"/api/v1/repos/{identity.repo}/branches/main", operations, stage="read existing main branch",
+        )
+        commit = data.get("commit")
+        sha = commit.get("id") if isinstance(commit, dict) else None
+        if data.get("name") != "main" or not isinstance(sha, str) or not _SHA.fullmatch(sha):
+            raise Refusal("cannot establish an existing main branch: malformed Gitea branch response")
+        return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": sha}}
+
+    def _unavailable(self, *args: Any, **kwargs: Any) -> Any:
+        # Subsequent implementation tasks add evidence and mutation operations.
+        # Until then no inherited GitHub operation may authorize a Gitea action.
+        raise Refusal("Gitea landing operation is not yet implemented")
+
+    resolve_repo = request_update = read_commit = read_comments = read_actor = _unavailable
+    edit_source = create_attestation = edit_attestation = compare = checks = _unavailable
+    merge = confirm_merge = _unavailable
+
+
 def read_confirmed_remote_head(pr: str, read_json: Callable[[list[str]], Any]) -> str:
     """Factory's standalone identity read, retaining its caller's 20s boundary."""
     data = read_json(["gh", "pr", "view", pr, "--json", "url,headRefOid"])
@@ -420,6 +515,14 @@ def _repo_name(value: Any) -> str:
     return value.lower()
 
 
+def _gitea_repo_name(value: Any) -> str:
+    """Validate literal API path components without GitHub's owner grammar."""
+    if (not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value)
+            or any(part in {".", ".."} for part in value.split("/"))):
+        raise Refusal("invalid repository identity: expected owner/name")
+    return value.casefold()
+
+
 def _number(value: str) -> int:
     try:
         number = int(value)
@@ -451,6 +554,97 @@ def resolve_identity(pr: str, repo: str | None, operations: Operations) -> Ident
     return identity
 
 
+def _safe_url(value: Any) -> SplitResult:
+    """Reject syntax that URL parsers normalize away before matching authority."""
+    try:
+        if (not isinstance(value, str) or not value
+                or any(c.isspace() or ord(c) < 32 or 127 <= ord(c) <= 159 or c == "\\"
+                       for c in value)):
+            raise ValueError
+        parts = urlsplit(value)
+        decoded_path = unquote(parts.path, errors="strict")
+        if (parts.scheme not in ("https", "http") or not parts.hostname
+                or parts.username is not None or parts.password is not None
+                or parts.netloc.endswith(":") or parts.port == 0
+                or "?" in value or "#" in value
+                or re.search(r"%(?![0-9a-fA-F]{2})", value)
+                or any(c.isspace() or ord(c) < 32 or 127 <= ord(c) <= 159 or c == "\\"
+                       for c in decoded_path)
+                or any(p in (".", "..") for p in decoded_path.split("/"))):
+            raise ValueError
+        return parts
+    except ValueError:
+        raise Refusal("invalid PR identity: unsafe or malformed URL") from None
+
+
+def _gitea_url_identity(value: Any, origin: str, forge_name: str) -> Identity:
+    parts = _safe_url(value)
+    root = _safe_url(origin)
+    def authority(parsed: SplitResult) -> tuple[str, str | None, int]:
+        return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    prefix = root.path.rstrip("/")
+    match = re.fullmatch(re.escape(prefix) + r"/([^/]+/[^/]+)/pulls/([0-9]+)/?", parts.path)
+    if authority(parts) != authority(root) or match is None:
+        raise Refusal("invalid PR identity: URL contradicts configured Gitea origin or prefix")
+    _gitea_repo_name(match[1])
+    return Identity(match[1], _number(match[2]), origin.rstrip("/"), forge_name)
+
+
+def _returned_identity(value: Any, expected: Identity) -> Identity:
+    if expected.forge_name is None:
+        return _url_identity(value)
+    parsed = _gitea_url_identity(value, expected.origin, expected.forge_name)
+    if parsed.repo.casefold() == expected.repo.casefold():
+        parsed = replace(parsed, repo=expected.repo)
+    return parsed
+
+
+def resolve_target(
+    pr: str, repo: str | None, cfg: config.Config, operations: Operations,
+) -> tuple[Identity, config.ForgeConfig]:
+    # Preserve GitHub's number inference and exact URL grammar and argv.
+    try:
+        hostname = urlsplit(pr).hostname
+    except ValueError:
+        raise Refusal("invalid PR identity: malformed URL") from None
+    if re.fullmatch(r"[0-9]+", pr) or hostname == "github.com":
+        identity = resolve_identity(pr, repo, operations)
+        enrollment = enrolled_repo(cfg, identity)
+        return identity, cfg.forge_for(enrollment)
+    parts = _safe_url(pr)
+    definitions = [f for f in cfg.forges if f.kind == "gitea"
+                   and urlsplit(f.url).hostname == parts.hostname]
+    if len(definitions) != 1:
+        raise Refusal("invalid PR identity: absent or ambiguous configured Gitea hostname")
+    definition = definitions[0]
+    identity = _gitea_url_identity(pr, definition.url, definition.name)
+    if repo is not None and _gitea_repo_name(repo) != identity.repo.casefold():
+        raise Refusal("PR URL repository contradicts --repo")
+    enrollment = enrolled_repo(cfg, identity)
+    return replace(identity, repo=enrollment.name), definition
+
+
+def load_land_token(definition: config.ForgeConfig) -> str:
+    """File presence wins, even for empty values; never export loaded secrets."""
+    variable = definition.land_token_env
+    path = Path.home() / ".config" / "nightshift" / "land.env"
+    try:
+        # Path.exists() may hide permission errors on newer Python versions.
+        # Only a genuinely missing file permits the process-only fallback.
+        try:
+            path.stat()
+        except FileNotFoundError:
+            pass
+        values = config.parse_env_file(path)
+    except (OSError, ValueError):
+        raise Refusal(f"human credential loading: cannot read land.env for {variable}") from None
+    token = values[variable] if variable in values else os.environ.get(variable, "")
+    if not token or "\r" in token or "\n" in token:
+        raise Refusal(f"human credential loading: missing or invalid {variable}")
+    return token
+
+
 def load_config(path: Path) -> config.Config:
     try:
         return config.load(path)
@@ -459,8 +653,12 @@ def load_config(path: Path) -> config.Config:
 
 
 def enrolled_repo(cfg: config.Config, identity: Identity) -> config.Repo:
-    matches = [repo for repo in cfg.repos if _repo_name(repo.name) == identity.repo
-               and cfg.forge_for(repo).kind == "github"]
+    validate_repo = _repo_name if identity.forge_name is None else _gitea_repo_name
+    matches = [repo for repo in cfg.repos
+               if ((identity.forge_name is None and cfg.forge_for(repo).kind == "github")
+                    or (identity.forge_name is not None and cfg.forge_for(repo).kind == "gitea"
+                        and repo.forge == identity.forge_name))
+               and validate_repo(repo.name) == identity.repo.casefold()]
     if not matches:
         raise Refusal(f"repository {identity.repo} is not enrolled in configuration")
     if len(matches) != 1:
@@ -470,7 +668,7 @@ def enrolled_repo(cfg: config.Config, identity: Identity) -> config.Repo:
 
 def read_pr(identity: Identity, operations: Operations) -> PullRequest:
     data = operations.forge.read_pr(identity, operations)
-    if (_url_identity(data.get("url")) != identity
+    if (_returned_identity(data.get("url"), identity) != identity
             or type(data.get("number")) is not int or data["number"] != identity.number):
         raise Refusal("GitHub returned a contradictory PR identity")
     if data.get("state") != "OPEN":
@@ -604,13 +802,20 @@ def discover_run(identity: Identity, operations: Operations) -> LandingRun | Non
             run_identity = None
             if pr:
                 parsed = urlsplit(pr)
-                if (not pr.startswith("https://") or not parsed.hostname
+                configured_http = False
+                if parsed.scheme == "http":
+                    for definition in operations.gitea_forges:
+                        if urlsplit(definition.url).hostname == parsed.hostname:
+                            _gitea_url_identity(pr, definition.url, definition.name)
+                            configured_http = True
+                            break
+                if ((not pr.startswith("https://") and not configured_http) or not parsed.hostname
                         or re.search(r"[\s\x00-\x1f\x7f\\]", pr)):
                     raise ValueError("invalid HTTPS URL")
                 # Accessing port also validates malformed or out-of-range ports.
                 _ = parsed.port
                 if parsed.hostname == urlsplit(identity.url).hostname:
-                    run_identity = _url_identity(pr)
+                    run_identity = _returned_identity(pr, identity)
         except (Refusal, ValueError) as exc:
             raise Refusal(f"{stage} ({change}): malformed PR URL: {pr!r}") from exc
         if not isinstance(head, str) or not _SHA.fullmatch(head):
@@ -1040,6 +1245,7 @@ def main(
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     forge: LandingForge | None = None,
+    opener: Any = None,
 ) -> int:
     args = parser().parse_args(argv)
     operations = Operations(subprocess.run if runner is None else runner, sleep, monotonic)
@@ -1047,8 +1253,12 @@ def main(
         operations.forge = forge
     try:
         cfg = load_config(args.config)
-        identity = resolve_identity(args.pr, args.repo, operations)
-        enrolled_repo(cfg, identity)
+        operations.gitea_forges = tuple(f for f in cfg.forges if f.kind == "gitea")
+        identity, definition = resolve_target(args.pr, args.repo, cfg, operations)
+        if definition.kind == "gitea":
+            token = load_land_token(definition)
+            operations.forge = (GiteaLandingForge(definition, token, opener=opener)
+                                if forge is None else forge)
         pr = read_pr(identity, operations)
         read_main(identity, operations)
         run = discover_run(identity, operations)
