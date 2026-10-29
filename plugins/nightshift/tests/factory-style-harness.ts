@@ -113,9 +113,9 @@ export function styleView(runs: FactoryRun[], options: {
       if (name === 'react-native') return {
         View: 'View', Text: 'Text', Pressable: 'Pressable', TextInput: 'TextInput',
         AppState: appState,
-        Linking: { openURL: async (url: string) => { urls.push(url); await options.openURL?.(url); } },
       };
       if (name === '@getpaseo/plugin/client') return {
+        openExternalUrl: async (url: string) => { urls.push(url); await options.openURL?.(url); },
         useRpc: (rpc: unknown) => {
           if (rpc === runsRpc) return read;
           if (rpc === actRpc) return act;
