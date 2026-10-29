@@ -6,6 +6,9 @@ on:
     paths-ignore: ['**.md']
   pull_request:
     paths-ignore: ['**.md']
+  schedule:
+    # Daily: catches a Paseo SDK release that breaks the plugin before the app updates.
+    - cron: '17 9 * * *'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -36,6 +39,30 @@ jobs:
           cache: npm
           cache-dependency-path: plugins/nightshift/package-lock.json
       - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
+
+  plugin-canary:
+    # The manifest has no upper bound, so check the plugin against SDKs it has not been built with.
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ github.event_name != 'schedule' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [latest, beta]
+    defaults:
+      run:
+        working-directory: plugins/nightshift
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: plugins/nightshift/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm install --no-save --ignore-scripts @getpaseo/plugin@${{ matrix.sdk }}
+      - run: npm ls @getpaseo/plugin
       - run: npm run typecheck
       - run: npm test
 

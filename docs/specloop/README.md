@@ -733,8 +733,10 @@ against its last good status before calling `act`, which rechecks live state.
 Only display fields cross to the client, with home directories replaced by
 `~` and raw command errors excluded.
 
-The supported range is `>=0.10.1 <0.14.0`, built
-against SDK 0.13.2. See the [plugin README](../../plugins/nightshift/README.md#factory)
+The supported range is `>=0.10.1`, built against SDK 0.14.0. It has no upper
+bound because Paseo refuses a plugin outside its declared range, so a cap drops
+the plugin on every release; a daily CI canary tests against the latest and
+beta SDKs instead. See the [plugin README](../../plugins/nightshift/README.md#factory)
 for usage, refresh behavior and installation.
 
 ## How the engine works
