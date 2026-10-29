@@ -37,6 +37,20 @@ None of these follow-ups establishes live validation or a completed host rollout
 
 ## Open gaps
 
+- **Verification loopback:** `loopback` defaults to false; opted-in steps allow
+  localhost TCP but exclude observed launch-time IPv4/IPv6 and wildcard listener
+  ports ([issue #151](https://github.com/mattpolicastro/nightshift/issues/151)).
+  Preparation is unchanged and external verification networking remains denied.
+  Discovery/profile/probe failures stop before the command, retaining diagnostics;
+  they cannot satisfy expected exits or count as mutant kills. Successful probes
+  leave command receipts unchanged and do not attest the later command started.
+  Snapshot and launch are not atomic: later services can be reachable, observed
+  ports stay blocked after their listener exits, and sibling steps can exclude
+  one another's ports. Visibility depends on host privileges and `lsof` behavior.
+  Opted-in nested sandboxes are unsupported; skipped tests prove no enforcement.
+  Real Flutter and healthy model-server/forge/agent-daemon exclusion checks remain
+  pending human work in the design; CI cannot establish those host results.
+  See [configuration and evidence limits](docs/specloop/README.md#verification-loopback).
 - **Codex session scratch:** cleanup now attempts to remove disposable
   `<stem>.tmp` at adapter finalization after the existing runner returns or
   setup/spawning/result interpretation raises

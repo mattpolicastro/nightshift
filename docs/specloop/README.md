@@ -185,7 +185,7 @@ JSON carries `specloop` beside historical worker
 below. Daemon quota pacing for these runs remains separate work.
 
 Optional manifest `[[prepare]]` steps fetch dependencies before offline
-verification. They have the same `id`, argv-list `run`, `expect`, `timeout` and `env`
+verification. They have the same `id`, argv-list `run`, `expect`, `timeout`, `env` and `loopback`
 fields as `[[verify]]`. After candidate extraction, they run in order from the
 build directory, under their own sandbox allowing network but confining writes
 to that directory and denying credential-directory reads. The extracted
@@ -243,6 +243,63 @@ run = ["/usr/bin/printf", "%s\n", "{build}/cache", "{env_mode}"]
 env = { CACHE_DIR = "{build}/cache", MODE = "{env_mode}" }
 ```
 <!-- step-env-example:end -->
+
+### Verification loopback
+
+All step kinds accept boolean `loopback`, default false
+([issue #151](https://github.com/mattpolicastro/nightshift/issues/151)). Preparation
+ignores it and keeps its existing network policy. In verification mode, true
+allows localhost TCP while external networking stays denied. Immediately before
+each opted-in command, a fresh `lsof` snapshot excludes IPv4/IPv6 loopback and
+wildcard listener ports, across address families. Source, credential, write and
+environment restrictions remain unchanged.
+
+Discovery, profile-write and direct sandbox profile-probe failures are setup
+errors regardless of `expect`, including 65; they cannot count as mutant kills.
+The affected and later commands do not run and no affected receipt is invented;
+completed receipts, step-log diagnostics and written profiles remain available.
+After a successful probe, ordinary command launch and receipt semantics remain
+unchanged, including genuine exit 65, signals and timeouts. Setup time contributes
+to elapsed duration; the command retains its full execution timeout. The probe
+does not attest that the separate subsequent sandbox invocation started.
+
+Snapshot and launch are not atomic. Services starting afterwards may be reachable;
+observed ports stay blocked even after listeners exit. Concurrent opted-in steps
+may exclude each other's listeners. Host privileges limit discovery visibility.
+Enclosing sandboxes cannot apply this policy: opted-in execution is refused and
+real integration tests explicitly skip nesting or non-macOS hosts. Skips provide
+no enforcement evidence; unexpected eligible-host policy failures fail tests.
+
+This fragment assumes dependencies fetched, an initialized SDK at `flutter_root`
+and a writable prepared `{build}/project`. The runner's cwd stays `{build}`; the
+trusted shell script changes to the project using separate literal path arguments.
+Analyze remains unflagged; test opts in. Both invoke the Flutter tool snapshot
+directly with string-valued `FLUTTER_ALREADY_LOCKED`, avoiding SDK lock writes.
+
+<!-- loopback-example:start -->
+```toml
+[vars]
+flutter_root = "/path/to/flutter"
+
+[[verify]]
+id = "flutter-analyze"
+run = ["/bin/sh", "-c", 'cd "$1" && exec "$2" "$3" --suppress-analytics analyze --no-pub', "flutter-analyze", "{build}/project", "{flutter_root}/bin/cache/dart-sdk/bin/dart", "{flutter_root}/bin/cache/flutter_tools.snapshot"]
+env = { FLUTTER_ALREADY_LOCKED = "true" }
+
+[[verify]]
+id = "flutter-test"
+run = ["/bin/sh", "-c", 'cd "$1" && exec "$2" "$3" --suppress-analytics test --no-pub', "flutter-test", "{build}/project", "{flutter_root}/bin/cache/dart-sdk/bin/dart", "{flutter_root}/bin/cache/flutter_tools.snapshot"]
+env = { FLUTTER_ALREADY_LOCKED = "true" }
+loopback = true
+```
+<!-- loopback-example:end -->
+
+The design's human host checklist remains pending: prepared real Flutter test
+success, analyze without opt-in, retained profile/listener evidence and denied
+connections to still-healthy pre-existing model-server, forge and agent-daemon
+listeners, with Flutter/Dart/macOS versions and redacted outcomes. CI's Python
+socket coverage cannot establish those project/service results. The original
+spike established IPv4 Flutter operation, not IPv6 Flutter operation.
 
 ### Retirement rollout
 

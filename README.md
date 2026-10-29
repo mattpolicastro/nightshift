@@ -13,7 +13,7 @@ for you to review. When you label that PR `spec:approved`, its build engine,
 
 - a fresh agent implements the task;
 - the harness, not the agent, commits it;
-- trusted commands verify it in a sandbox with no network;
+- trusted commands verify it in a sandbox with network denied by default;
 - a separate agent reviews it against the spec;
 - failures retry with the findings.
 
@@ -347,7 +347,17 @@ leaves it cached for the offline verify steps.
 After candidate extraction, prepare steps run in declaration order with
 `{build}` as their working directory. Their own sandbox allows network access,
 confines writes to the build directory and denies credential-directory reads;
-the extracted `{src}` remains read-only. Verify steps then run offline.
+the extracted `{src}` remains read-only. Verify steps deny external networking;
+`loopback = true` optionally allows localhost TCP, excluding IPv4/IPv6 and
+wildcard listener ports observed immediately before each launch. The default
+is false; preparation ignores the flag and keeps its existing policy
+([issue #151](https://github.com/mattpolicastro/nightshift/issues/151)).
+Discovery, profile-write or direct profile-probe failure stops execution with
+retained diagnostics, regardless of expected exit; it cannot count as a mutant
+kill. After probe success, command receipts retain their existing semantics.
+Services starting after the snapshot can be reachable, and opted-in steps
+cannot run inside an enclosing sandbox. See the [Flutter fragment and pending
+host checks](docs/specloop/README.md#verification-loopback) before opting in.
 Each prepare step has a receipt and log alongside verification; an unexpected
 exit or timeout fails verification and stops subsequent steps. Commands are
 trusted manifest content; use the candidate's lockfile and freeze it when the
