@@ -8,11 +8,11 @@ This is issue #151, blocked by #135, part of #122 (Gitea plan E1, Phase 3). The 
 
 - Add optional boolean `Step.loopback`, default false, preserving older manifests, positional construction, env handling and ignored unknown keys.
 - For opted-in verification-mode steps, retain the default network denial, add the measured inbound/outbound localhost TCP allowances, then deny outbound TCP to every loopback-reachable port found by a fresh IPv4/IPv6 listener snapshot immediately before that step launches.
-- Fail before launching the affected command if listener discovery or application of the new profile cannot be trusted. Distinguish sandbox/supervisor startup failures from actual command results through a private control channel: a wrapper exit cannot satisfy `expect` or become a mutant kill. Retain diagnostics and propagate setup errors without fabricated receipts. Never fall back to unrestricted localhost or unsandboxed execution.
+- After writing each opted-in profile, probe it immediately before command launch with `/usr/bin/sandbox-exec -f <profile> /usr/bin/true`, directly outside any wrapper. Discovery, profile-write or probe failure raises a setup `RuntimeError`, retains step-log diagnostics and completed receipts, and launches neither the affected command nor later commands. Probe failures cannot satisfy `expect` or count as mutant kills. After a successful probe, use today's `wrap()` plus `Popen` path and unchanged receipt semantics.
 - Keep ordinary verify profiles byte-for-byte unchanged and preserve preparation, credentials, source protection, environment isolation and existing test assertions. Add unit and real Seatbelt integration coverage.
 - Correct affected passages of `README.md`, `KNOWN-LIMITATIONS.md` and `docs/specloop/README.md`, including the snapshot's timing limits and pending human Flutter validation.
 
-Explicitly out of scope: `nightshift/`, the plugin, prepare-mode network rules, changing any existing step's configuration/profile, Flutter installation or dependency setup, new `network-bind` allowances, external-network access, continuous listener monitoring, and proving IPv6 Flutter operation. Implementation is capped at three tasks.
+Explicitly out of scope: `nightshift/`, the plugin, prepare-mode network rules, changing any existing step's configuration/profile, Flutter installation or dependency setup, new `network-bind` allowances, external-network access, continuous listener monitoring, a trusted Python supervisor or private control pipe, and proving IPv6 Flutter operation. Implementation is capped at three tasks.
 
 ## Capabilities
 

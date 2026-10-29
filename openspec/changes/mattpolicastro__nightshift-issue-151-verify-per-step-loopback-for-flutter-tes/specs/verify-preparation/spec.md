@@ -19,7 +19,7 @@ Support explicitly configured localhost TCP exchanges during verification while 
 
 #### Scenario: Preparation retains its policy
 - **WHEN** a prepare step declares either loopback value or internal dependency warming runs
-- **THEN** preparation uses its existing byte-identical profile and network policy, takes no listener snapshot and preserves source, credential, environment, write and ordering restrictions
+- **THEN** preparation uses its existing byte-identical profile and network policy, takes no listener snapshot or loopback profile probe and preserves source, credential, environment, write and ordering restrictions
 
 ### Requirement: Opted in localhost profile
 
@@ -33,7 +33,7 @@ An opted-in verification profile SHALL require an explicit successful listener s
 
 #### Scenario: Default profiles retain network denial
 - **WHEN** a step omits loopback or explicitly sets false, including a default step following an opted-in step
-- **THEN** `test_steps_without_loopback_keep_deny_network` verifies byte-identical ordinary profile output with the existing `(deny network*)`, no localhost allowances or discovery call, and no leakage from the preceding step's profile
+- **THEN** `test_steps_without_loopback_keep_deny_network` verifies byte-identical ordinary profile output with the existing `(deny network*)`, no localhost allowances, discovery call or loopback profile probe, and no leakage from the preceding step's profile
 
 ### Requirement: Launch time listener exclusions
 
@@ -51,7 +51,7 @@ Immediately before each opted-in verification launch, the harness SHALL take a f
 
 ### Requirement: Loopback setup fails closed
 
-Opted-in steps SHALL fail closed on discovery, profile, sandbox or launch-channel failure. The harness SHALL preserve diagnostics and completed receipts, raise RuntimeError and stop later commands without inventing a command outcome. Only confirmed command outcomes from a trusted supervisor in the same sandbox SHALL enter receipts; wrapper exits, command output and preflight success SHALL NOT authorize them. Defaults and preparation SHALL remain unchanged.
+Opted-in verification SHALL probe each newly written profile before command launch and fail closed on any setup failure. Failure SHALL raise `RuntimeError`, retain diagnostics and completed receipts, and launch neither the affected nor later commands, with no affected-step receipt. Successful probes SHALL preserve existing command launch and receipt semantics. Defaults and preparation SHALL remain unchanged.
 
 #### Scenario: Snapshot failure prevents execution
 - **WHEN** discovery cannot start, is denied access, exceeds five seconds, reports errors with partial output, returns an unsupported failure status, cannot decode or parse its output, or the resulting profile cannot be generated or written
@@ -64,16 +64,15 @@ Opted-in steps SHALL fail closed on discovery, profile, sandbox or launch-channe
 - **THEN** ordinary unflagged steps retain their existing nested-sandbox behavior
 
 #### Scenario: Sandbox startup failure cannot satisfy expected exit
-- **WHEN** sandbox-exec fails before command execution, including profile compilation exit 65 with either matching `expect = 65` or nonmatching `expect = 0`, or the supervisor cannot exec the command
-- **THEN** `test_loopback_sandbox_startup_failure_is_not_command_exit` verifies a contextual RuntimeError regardless of expected exit, no affected-command execution or receipt, no later commands, retained previous receipts and wrapper diagnostics, and process-group and descriptor cleanup
-- **THEN** missing, malformed or broken control records also raise setup errors rather than accepting a wrapper status or stdout/stderr text as a command result
+- **WHEN** the direct launch-time probe rejects a generated malformed profile with exit 65, with either matching `expect = 65` or nonmatching `expect = 0`, or the probe returns another nonzero status, fails to launch or times out
+- **THEN** `test_loopback_sandbox_startup_failure_is_not_command_exit` verifies a contextual RuntimeError regardless of expected exit, no affected-command execution or receipt, no later commands, and retained previous receipts and step-log probe diagnostics
+- **THEN** immediately after writing the profile and before command launch, the harness directly runs `/usr/bin/sandbox-exec -f <profile> /usr/bin/true` outside `wrap()` and any other wrapper, with a five-second setup timeout; its failure or timeout never becomes a command result
 
 #### Scenario: Actual command outcomes retain their meaning
-- **WHEN** the opted-in command has confirmed startup and exits 65, exits on a signal, or exceeds its execution deadline
-- **THEN** `test_loopback_command_exit_retains_expected_exit_semantics` verifies that a genuine exit 65 passes only with expect 65, an unexpected exit or signal remains a command failure, and a confirmed running-command timeout retains exit null
-- **THEN** only trusted complete command-result records with successful wrapper completion authorize integer exits, a deadline before confirmed startup is a setup error, and wrapper failure without a completed result remains infrastructure failure
-- **THEN** the command receives its original argv, cwd and configured env without the private control descriptor, the supervisor ignores candidate Python startup configuration, and command output resembling control messages cannot fabricate an outcome
-- **THEN** receipt schema, one execution timeout budget, cleanup and all unflagged-step behavior remain unchanged
+- **WHEN** the probe succeeds and the opted-in command exits 65, exits on a signal, or exceeds its execution deadline
+- **THEN** `test_loopback_command_exit_retains_expected_exit_semantics` verifies that a genuine exit 65 passes only with expect 65, an unexpected exit or signal remains a command failure, and a command timeout retains exit null
+- **THEN** the command immediately uses the same profile through ordinary `wrap()` and `Popen`, with its original argv, cwd, configured env, execution timeout and process-group cleanup
+- **THEN** receipt schema and subprocess-status handling remain unchanged, elapsed seconds include opted-in setup, no probe receipt is emitted, and no supervisor or private control pipe is added
 
 ### Requirement: Real loopback enforcement evidence
 
@@ -86,5 +85,5 @@ Automated integration coverage SHALL exercise the real launch path, listener dis
 
 #### Scenario: Real sandbox rejection is a setup error
 - **WHEN** an eligible macOS integration test launches an opted-in step through the real runner with malformed profile text and expect 65, followed by a separate valid-profile run whose command deliberately exits 65
-- **THEN** sandbox compilation failure raises a setup error with retained diagnostics, leaves the command sentinel absent and produces no affected receipt, while the valid-profile command runs and passes with its genuine exit 65
+- **THEN** the real probe's sandbox compilation failure raises a setup error with retained diagnostics, leaves the command sentinel absent and produces no affected receipt, while the valid-profile probe succeeds and its command runs and passes with its genuine exit 65
 - **THEN** non-macOS or nested-sandbox hosts skip explicitly, and unexpected failures on eligible hosts fail the test
