@@ -7,6 +7,7 @@ head-conditioned merge, whose result must be confirmed by the selected forge.
 from __future__ import annotations
 
 import argparse
+import base64
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -19,9 +20,9 @@ import re
 import subprocess
 import sys
 import time
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypeGuard
 from urllib.error import HTTPError
-from urllib.parse import SplitResult, unquote, urlsplit
+from urllib.parse import SplitResult, quote, unquote, urlencode, urlsplit
 from urllib.request import build_opener
 
 from . import config, queue
@@ -217,6 +218,12 @@ class LandingForge(Protocol):
 
     def read_main(self, identity: Identity, operations: Operations) -> dict[str, Any]: ...
 
+    def changed_paths(self, identity: Identity, operations: Operations) -> tuple[str, ...] | None: ...
+
+    def ci_workflow(
+        self, identity: Identity, base_sha: str, operations: Operations,
+    ) -> tuple[str, str] | None: ...
+
     def request_update(
         self, identity: Identity, expected_head: str, operations: Operations,
     ) -> subprocess.CompletedProcess[str]: ...
@@ -252,8 +259,215 @@ class LandingForge(Protocol):
     def confirm_merge(self, identity: Identity, operations: Operations) -> dict[str, Any]: ...
 
 
-class GitHubLandingForge:
+def _relative_path(value: Any) -> TypeGuard[str]:
+    return (isinstance(value, str) and bool(value)
+            and not any(part in ("", ".", "..") for part in value.split("/"))
+            and not any(ord(c) < 32 or 127 <= ord(c) <= 159 or c == "\\" for c in value))
+
+
+def _ignore_glob(pattern: str) -> re.Pattern[str] | None:
+    if (not _relative_path(pattern) or "***" in pattern
+            or any(c in pattern for c in "!?[]{}+()|^$")):
+        return None
+    # Only a whole directory component may disappear together with its slash.
+    pieces = re.split(r"((?:^|(?<=/))\*\*/|\*\*|\*)", pattern)
+    return re.compile("".join({"**/": "(?:[^/]+/)*", "**": ".*", "*": "[^/]*"}.get(
+        piece, re.escape(piece)) for piece in pieces))
+
+
+def ignored_paths(workflow_text: str) -> tuple[tuple[str, ...], ...] | None:
+    """Return one ignore list per event, recognizing only physical trigger lines."""
+    lines = workflow_text.split("\n")
+    starts = [i for i, line in enumerate(lines)
+              if re.match(r"^(?:on|'on'|\"on\")\s*:", line)]
+    if len(starts) != 1 or not re.fullmatch(r"(?:on|'on'|\"on\"):[ ]*\r?", lines[starts[0]]):
+        return None
+    events: dict[str, dict[str, list[str]]] = {}
+    fields: dict[str, list[str]] | None = None
+    active: str | None = None
+    scalar = r"(?:'[^'\\\r\n]*'|\"[^\"\\\r\n]*\")"
+    for raw in lines[starts[0] + 1:]:
+        line = raw.removesuffix("\r")
+        if line and not line[0].isspace() and not line.startswith("#"):
+            break
+        if "\t" in line:
+            return None
+        if not line.strip(" ") or line.lstrip(" ").startswith("#"):
+            continue
+        if not line.startswith(" "):
+            return None
+        event = re.fullmatch(r"  (pull_request|push): *", line)
+        if event:
+            if event[1] in events:
+                return None
+            fields = events[event[1]] = {}
+            active = None
+            continue
+        field_match = re.fullmatch(r"    (paths-ignore|branches|branches-ignore): *(.*?) *", line)
+        item = re.fullmatch(r"      - (.*?) *", line)
+        if fields is None:
+            return None
+        if field_match:
+            name, value = field_match.groups()
+            if name in fields:
+                return None
+            fields[name] = []
+            active = name if not value else None
+            if not value:
+                continue
+            if not (value.startswith("[") and value.endswith("]")):
+                return None
+            # Validate delimiters separately: empty items and trailing commas
+            # are not part of the supported list spelling.
+            list_scalar = scalar if name == "paths-ignore" else rf"(?:{scalar}|[A-Za-z0-9_./*-]+)"
+            if not re.fullmatch(rf" *{list_scalar}(?: *, *{list_scalar})* *", value[1:-1]):
+                return None
+            values = re.findall(list_scalar, value[1:-1])
+        elif item and active:
+            name, values = active, [item[1]]
+        else:
+            return None
+        grammar = scalar if name == "paths-ignore" else rf"(?:{scalar}|[A-Za-z0-9_./*-]+)"
+        for value in values:
+            value = value.strip(" ")
+            if not re.fullmatch(grammar, value):
+                return None
+            value = value[1:-1] if value.startswith(("'", '"')) else value
+            if (not value or value in fields[name]
+                    or (name == "paths-ignore" and _ignore_glob(value) is None)):
+                return None
+            fields[name].append(value)
+    if ("pull_request" not in events
+            or any(not fields.get("paths-ignore") or any(not v for v in fields.values())
+                   for fields in events.values())):
+        return None
+    return tuple(tuple(fields["paths-ignore"]) for fields in events.values())
+
+
+def all_paths_ignored(paths: tuple[str, ...] | None,
+                      patterns: tuple[tuple[str, ...], ...] | None) -> bool:
+    """Every full path must match an ignore pattern for every declared event."""
+    if not paths or not patterns or any(not _relative_path(path) for path in paths):
+        return False
+    if len(set(paths)) != len(paths):
+        return False
+    for event in patterns:
+        compiled = [_ignore_glob(pattern) for pattern in event]
+        if not compiled or any(pattern is None for pattern in compiled):
+            return False
+        if any(not any(pattern is not None and pattern.fullmatch(path)
+                       for pattern in compiled) for path in paths):
+            return False
+    return True
+
+
+class _CIExclusionEvidence:
+    """Optional factual evidence. Unavailable reads never swallow budget expiry."""
+
+    _workflow_directory = ".github/workflows"
+    _page_size_key = "per_page"
+
+    def _ci_read(self, identity: Identity, path: str, query: dict[str, Any],
+                 operations: Operations) -> Any:
+        raise NotImplementedError
+
+    def changed_paths(self, identity: Identity, operations: Operations) -> tuple[str, ...] | None:
+        try:
+            endpoint = f"pulls/{identity.number}"
+            metadata = self._ci_read(identity, endpoint, {}, operations)
+            count = metadata.get("changed_files") if isinstance(metadata, dict) else None
+            # GitHub caps file responses at 3000. Use the same conservative
+            # ceiling on Gitea, whose configured cap can also truncate pages.
+            if type(count) is not int or not 0 < count < 3000:
+                return None
+            paths: list[str] = []
+            seen: set[str] = set()
+            received = 0
+            for page in range(1, 101):
+                rows = self._ci_read(identity, endpoint + "/files",
+                                     {self._page_size_key: 100, "page": page}, operations)
+                if not isinstance(rows, list) or received + len(rows) > count:
+                    return None
+                if not rows:
+                    return tuple(paths) if received == count else None
+                received += len(rows)
+                for row in rows:
+                    if not isinstance(row, dict) or row.get("status") not in (
+                            "added", "modified", "removed", "deleted", "renamed"):
+                        return None
+                    names = [row.get("filename")]
+                    if row["status"] == "renamed":
+                        names.append(row.get("previous_filename"))
+                    elif row.get("previous_filename") not in (None, ""):
+                        return None
+                    for name in names:
+                        if not _relative_path(name) or name in seen:
+                            return None
+                        seen.add(name)
+                        paths.append(name)
+            return None  # Pagination cannot establish completeness within the bound.
+        except _CIDeadlineExpired:
+            raise
+        except (Refusal, GiteaHTTPError, ValueError):
+            operations.remaining()
+            return None
+
+    def ci_workflow(self, identity: Identity, base_sha: str,
+                    operations: Operations) -> tuple[str, str] | None:
+        operations.remaining()
+        if not isinstance(base_sha, str) or not _SHA.fullmatch(base_sha):
+            return None
+        try:
+            query = {"ref": base_sha}
+            rows = self._ci_read(identity, "contents/" + self._workflow_directory, query, operations)
+            if not isinstance(rows, list) or not rows or len(rows) >= 1000:
+                return None
+            workflows = []
+            names: set[str] = set()
+            for row in rows:
+                if not isinstance(row, dict):
+                    return None
+                name = row.get("name")
+                if (not _relative_path(name) or "/" in name or name in names
+                        or row.get("path") != f"{self._workflow_directory}/{name}"
+                        or row.get("type") not in ("file", "dir")
+                        or row.get("truncated") or row.get("target") or row.get("submodule_git_url")):
+                    return None
+                names.add(name)
+                if name.lower().endswith((".yml", ".yaml")):
+                    workflows.append(row)
+            if (len(workflows) != 1 or workflows[0]["name"] not in ("ci.yml", "ci.yaml")
+                    or workflows[0]["type"] != "file"):
+                return None
+            selected = workflows[0]
+            content = self._ci_read(identity, "contents/" + quote(selected["path"], safe="/"),
+                                    query, operations)
+            if (not isinstance(content, dict) or content.get("type") != "file"
+                    or any(content.get(key) != selected.get(key) for key in ("name", "path", "sha"))
+                    or not isinstance(content.get("sha"), str) or not _SHA.fullmatch(content["sha"])
+                    or content.get("encoding") != "base64" or not isinstance(content.get("content"), str)
+                    or content.get("truncated") or content.get("target") or content.get("submodule_git_url")):
+                return None
+            decoded = base64.b64decode(content["content"].replace("\n", ""), validate=True)
+            if type(content.get("size")) is not int or len(decoded) != content["size"]:
+                return None
+            return selected["path"], decoded.decode("utf-8")
+        except _CIDeadlineExpired:
+            raise
+        except (Refusal, GiteaHTTPError, ValueError):
+            operations.remaining()
+            return None
+
+
+class GitHubLandingForge(_CIExclusionEvidence):
     """The existing GitHub transcript, executed by the caller's injected runner."""
+
+    def _ci_read(self, identity: Identity, path: str, query: dict[str, Any],
+                 operations: Operations) -> Any:
+        endpoint = f"repos/{quote(identity.repo, safe='/')}/{path}"
+        if query:
+            endpoint += "?" + urlencode(query)
+        return operations._read_json(["gh", "api", endpoint], stage="CI exclusion evidence")
 
     def resolve_repo(self, operations: Operations) -> dict[str, Any]:
         return operations.read_json(
@@ -414,8 +628,20 @@ class _LandingGiteaEvidence(GiteaForge):
         return super()._record(row)
 
 
-class GiteaLandingForge:
+class GiteaLandingForge(_CIExclusionEvidence):
     """Landing-specific reads at the configured root, using only the human token."""
+
+    _workflow_directory = ".gitea/workflows"
+    _page_size_key = "limit"
+
+    def _ci_read(self, identity: Identity, path: str, query: dict[str, Any],
+                 operations: Operations) -> Any:
+        try:
+            return self._transport(operations).get_json(
+                f"/api/v1/repos/{quote(identity.repo, safe='/')}/{path}", query=query or None,
+            )
+        finally:
+            operations.remaining()
 
     def __init__(self, definition: config.ForgeConfig, token: str, *, opener: Any = None):
         self.definition = definition
