@@ -12,11 +12,17 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
+from nightshift import config
+from nightshift.forge import ForgeError
+from nightshift.forge.gitea import GiteaForge
 from specloop import feasibility, loop, manifest, messages, openspec, tasks, verify
 from specloop.seal import git
 from specloop.state import SAFE_CHANGE, Busy, Run, TaskState, iter_run_dirs, proposals_dir, run_dir
@@ -422,19 +428,108 @@ class PublishTarget(ValueError):
     """Pushing to the source clone's origin would not reach the manifest's repository."""
 
 
+@dataclass(frozen=True)
+class ForgeTarget:
+    repository: str
+    forge: GiteaForge | None = None
+    definition: config.ForgeConfig | None = None
+
+
+def _forge_target(github: str, *, guard: Callable[[], None] | None = None) -> ForgeTarget:
+    """Select from trusted process configuration; legacy GitHub needs no secrets."""
+    parts = github.rstrip("/").split("/")
+    if (len(parts) not in (2, 3) or any(not re.fullmatch(r"[\w.-]+", p, re.ASCII)
+                                      or p in (".", "..") for p in parts)):
+        raise PublishTarget("invalid manifest repository; expected [HOST/]OWNER/REPO")
+    repository = "/".join(parts[-2:])
+    if len(parts) == 2 or parts[0].casefold() == "github.com":
+        return ForgeTarget(repository)
+    override = os.environ.get("NIGHTSHIFT_FORGE_CONFIG")
+    if override is not None and (not override.strip() or not Path(override).is_absolute()):
+        raise PublishTarget("NIGHTSHIFT_FORGE_CONFIG must be a nonempty absolute path")
+    path = Path(override) if override is not None else config.DEFAULT_PATH
+    try:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            if override is not None:
+                raise
+            raw = {}
+        else:
+            raw = tomllib.loads(path.read_text())
+        matches = [f for f in config.parse_forges(raw) if f.kind == "gitea"
+                   and urlsplit(f.url).hostname == parts[0].lower()]
+        if len(matches) != 1:
+            raise PublishTarget("manifest host must match exactly one configured Gitea forge")
+        definition = matches[0]
+        try:
+            config.ENV_FILE.lstat()
+        except FileNotFoundError:
+            file_env = {}
+        else:
+            config.ENV_FILE.stat()
+            file_env = config.parse_env_file()
+        token = file_env.get(definition.token_env, os.environ.get(definition.token_env, ""))
+        if not token.strip():
+            raise PublishTarget("selected Gitea forge has no bot credential")
+        forge = GiteaForge(definition.url, token, trusted_logins=definition.trusted_logins,
+                           bot_login=definition.bot_login, wip_prefix=definition.wip_prefix, guard=guard)
+        return ForgeTarget(repository, forge, definition)
+    except PublishTarget:
+        raise
+    except (OSError, ValueError):
+        raise PublishTarget("cannot select Gitea forge: invalid trusted config or credentials") from None
+
+
+def _gitea_origin(url: str) -> tuple[str, str, int, str]:
+    # Decode only to reject unsafe paths; identity uses the original encoded path.
+    parts = urlsplit(url)
+    decoded = unquote(parts.path, errors="strict")
+    if (parts.scheme not in ("http", "https") or not parts.hostname
+            or parts.username is not None or parts.password is not None
+            or parts.netloc.endswith(":") or parts.port == 0 or "?" in url or "#" in url
+            or re.search(r"%(?![0-9a-fA-F]{2})", url)
+            or any(c.isspace() or ord(c) < 32 or 127 <= ord(c) <= 159 or c == "\\"
+                   for c in url + decoded)
+            or any(p in (".", "..") for p in decoded.split("/"))):
+        raise ValueError("invalid origin")
+    return parts.scheme, parts.hostname.lower(), parts.port or (443 if parts.scheme == "https" else 80), parts.path
+
+
 def _repository(url: str) -> str:
     """host/owner/repo of a hosted remote URL; "" for a local path."""
     m = re.match(r"(?:[a-z][a-z0-9+.-]*://(?:[^@/]+@)?|[^@/:]+@)([^/:]+)(?::\d+)?[/:](.+?)(?:\.git)?/?$", url)
     return f"{m.group(1)}/{m.group(2)}" if m else ""
 
 
-def _remote(ctx: loop.Ctx) -> str:
-    # Publishing reaches GitHub through the clone's origin, so a clone of
+def _remote(ctx: loop.Ctx, target: ForgeTarget | None = None) -> str:
+    # Publishing reaches the forge through the clone's origin, so a clone of
     # someone else's repository would send the run's branch there.
     github = ctx.m.github.rstrip("/")
     if not github:
         raise PublishTarget(f"the manifest names no GitHub repository; add github = \"owner/repo\" "
                             f"under [run] in {ctx.run.dir / 'manifest.toml'}")
+    target = target or _forge_target(github)
+    if target.forge is not None:
+        assert target.definition is not None
+        try:
+            output = subprocess.run(["git", "-C", str(ctx.m.repo), "remote", "get-url", "--all", "origin"],
+                                    capture_output=True, text=True, check=True).stdout
+            urls = output.removesuffix("\n").split("\n")
+            if len(urls) != 1:
+                raise ValueError
+            url = urls[0]
+            origin = _gitea_origin(url)
+            base = _gitea_origin(target.definition.url)
+            path = base[3].rstrip("/") + "/" + "/".join(quote(p, safe="") for p in target.repository.split("/"))
+            if origin[:3] != base[:3] or origin[3] not in (path, path + ".git"):
+                raise ValueError
+            if ctx.run.state.pr:
+                target.forge._pr_url_number(target.repository, ctx.run.state.pr)
+        except (OSError, ValueError, subprocess.SubprocessError, ForgeError):
+            raise PublishTarget("Gitea origin or recorded PR does not match the configured repository; "
+                                "repoint origin or correct the recorded PR before publishing") from None
+        return url
     url = subprocess.run(["git", "-C", str(ctx.m.repo), "remote", "get-url", "origin"],
                          capture_output=True, text=True, check=True).stdout.strip()
     parts = github.split("/")
@@ -599,6 +694,9 @@ def _finish(args, run: Run) -> int:
     if any(not t.done for t in tasks.parse(text)):
         print("tasks are unfinished; refusing to archive", file=sys.stderr)
         return 1
+    # Validate before the archive's internal push as well as the external push.
+    # Preserve direct finish's exception contract; act renders the same reason.
+    remote = _remote(ctx)
     if task_path == ctx.tasks_path:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp) / "w"
@@ -609,7 +707,7 @@ def _finish(args, run: Run) -> int:
             git(work, "push", "-q", str(ctx.repo), f"HEAD:{ctx.ref}")
     # The branch itself records the archive durably. Retry external operations
     # from that commit without requiring a separate state write to have survived.
-    _push(ctx.repo, _remote(ctx), ctx.ref)
+    _push(ctx.repo, remote, ctx.ref)
     try:
         _gh("pr", "ready", st.pr, "-R", ctx.m.github)
     except (RuntimeError, OSError, subprocess.TimeoutExpired):

@@ -656,6 +656,7 @@ def test_direct_accept_preserves_abort_that_wins_lock(admitted, monkeypatch, cap
         assert (run.dir / name).read_bytes() == contents
 
 
+@pytest.mark.scenario("run-actions/publish-only-to-the-named-repository/local-origin-compatibility-is-github-only")
 def test_publish_and_finish_use_existing_transitions(admitted, tmp_path, monkeypatch, capfd):
     run, source = admitted
     remote = tmp_path / "remote.git"
@@ -732,11 +733,12 @@ def publication_pr(url, repository="example/repo"):
             "repo": {"full_name": repository} if repository else None}, "base": {"ref": "main"}}
 
 
+@pytest.mark.scenario("specloop-forge/manifest-forge-selection/github-stays-compatible")
 @pytest.mark.parametrize("fork_count", [0, 30])
 @pytest.mark.parametrize("interruption", ["response_lost", "before_save"])
 @pytest.mark.parametrize("retry_command", ["act", "publish"])
 @pytest.mark.parametrize("admitted", ["example/repo", "github.com/example/repo",
-                                     "github.example.com/Example/Repo"], indirect=True)
+                                     "github.com/Example/Repo"], indirect=True)
 def test_publish_recovers_unrecorded_pr(admitted, tmp_path, monkeypatch, capfd, interruption,
                                        retry_command, fork_count):
     run, source = admitted
@@ -1131,6 +1133,7 @@ def test_publish_without_github_repository_is_refused_with_its_reason(admitted, 
     assert asdict(run.state) == before
 
 
+@pytest.mark.scenario("run-actions/publish-only-to-the-named-repository/fork-still-pointing-upstream")
 @pytest.mark.parametrize("origin", ["https://github.com/upstream/repo.git", "git@github.com:upstream/repo.git",
                                     "https://github.example.com/example/repo.git"])
 def test_publish_to_an_origin_of_another_repository_is_refused(admitted, monkeypatch, capfd, origin):
