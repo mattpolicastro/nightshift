@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Literal, Protocol
+from urllib.error import HTTPError
 from urllib.parse import SplitResult, unquote, urlsplit
 from urllib.request import build_opener
 
@@ -46,6 +47,10 @@ class Refusal(Exception):
 
 class _CIDeadlineExpired(Refusal):
     """Distinguish shared-budget expiry from command and validation failures."""
+
+
+class _UncertainBranchUpdate(Refusal):
+    """A single dispatched update needs read-only provenance reconciliation."""
 
 
 @dataclass(frozen=True)
@@ -234,7 +239,7 @@ class LandingForge(Protocol):
         self, identity: Identity, comment_id: int, body: str, operations: Operations,
     ) -> subprocess.CompletedProcess[str]: ...
 
-    def compare(self, identity: Identity, head: str, base: str, operations: Operations) -> dict[str, Any]: ...
+    def incorporates_base(self, identity: Identity, head: str, base: str, operations: Operations) -> bool: ...
 
     def checks(
         self, identity: Identity, head: str, operations: Operations,
@@ -333,6 +338,17 @@ class GitHubLandingForge:
             stage="initial base ancestry check",
         )
 
+    def incorporates_base(self, identity: Identity, head: str, base: str, operations: Operations) -> bool:
+        comparison = self.compare(identity, head, base, operations)
+        ancestor = comparison.get("merge_base_commit")
+        status = comparison.get("status")
+        if (status not in ("ahead", "identical", "behind", "diverged")
+                or not isinstance(ancestor, dict) or not isinstance(ancestor.get("sha"), str)
+                or not _SHA.fullmatch(ancestor["sha"])
+                or (ancestor["sha"] == base) != (status in ("ahead", "identical"))):
+            raise Refusal("initial base ancestry check: malformed or inconsistent comparison")
+        return ancestor["sha"] == base
+
     def checks(
         self, identity: Identity, head: str, operations: Operations,
     ) -> subprocess.CompletedProcess[str]:
@@ -369,7 +385,18 @@ class _BudgetOpener:
         self.opener.add_handler(handler)
 
     def open(self, request: Any, *, timeout: float) -> Any:
-        response = self.opener.open(request, timeout=min(timeout, self.operations.remaining()))
+        try:
+            response = self.opener.open(request, timeout=min(timeout, self.operations.remaining()))
+        except Exception as error:
+            # A failed dispatch also consumes time. Do not back off or retry
+            # after expiry, and close an HTTP error stream if expiry masks it.
+            try:
+                self.operations.remaining()
+            except Refusal:
+                if isinstance(error, HTTPError):
+                    error.close()
+                raise
+            raise
         try:
             self.operations.remaining()
         except Refusal:
@@ -520,12 +547,63 @@ class GiteaLandingForge:
                          body, operations, stage=f"attestation update for comment {comment_id}")
         return subprocess.CompletedProcess([], 0, "", "")
 
+    def read_commit(self, identity: Identity, head: str, operations: Operations) -> dict[str, Any]:
+        try:
+            commit = self._adapter(operations).commit(identity.repo, head)
+        except (ForgeError, ValueError):
+            raise Refusal("Gitea commit inspection: unreadable commit facts") from None
+        finally:
+            operations.remaining()
+        if commit["sha"] != head:
+            raise Refusal("Gitea commit inspection: mismatched commit SHA")
+        return commit
+
+    def incorporates_base(self, identity: Identity, head: str, base: str, operations: Operations) -> bool:
+        pending, visited = [head], set()
+        while pending:
+            operations.remaining()
+            sha = pending.pop()
+            if sha == base:
+                return True
+            if sha in visited:
+                continue
+            visited.add(sha)
+            try:
+                commit = self.read_commit(identity, sha, operations)
+            except _CIDeadlineExpired:
+                raise
+            except Refusal as exc:
+                raise Refusal(f"initial base ancestry check: {exc}") from exc
+            pending.extend(parent["sha"] for parent in commit["parents"])
+        return False
+
+    def request_update(
+        self, identity: Identity, expected_head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        # The controller checked H and captured B immediately before this call.
+        # Gitea has no expected-head CAS; exact ordered parents gate acceptance.
+        try:
+            self._transport(operations).request(
+                "POST", f"/api/v1/repos/{identity.repo}/pulls/{identity.number}/update",
+                query={"style": "merge"},
+            )
+        except GiteaHTTPError as exc:
+            if ((exc.status is None and exc.transient)
+                    or (exc.status is not None and (200 <= exc.status < 300 or 500 <= exc.status < 600))):
+                raise _UncertainBranchUpdate("branch update: uncertain Gitea response") from None
+            raise Refusal("branch update: Gitea request rejected") from None
+        except ValueError:
+            raise Refusal("branch update: invalid Gitea request") from None
+        finally:
+            operations.remaining()
+        return subprocess.CompletedProcess([], 0, "", "")
+
     def _unavailable(self, *args: Any, **kwargs: Any) -> Any:
-        # Subsequent implementation tasks add ancestry, CI and merge operations.
+        # Subsequent implementation tasks add CI and merge operations.
         # Until then no inherited GitHub operation may authorize a Gitea action.
         raise Refusal("Gitea landing operation is not yet implemented")
 
-    resolve_repo = request_update = read_commit = compare = checks = _unavailable
+    resolve_repo = checks = _unavailable
     merge = confirm_merge = _unavailable
 
 
@@ -789,12 +867,12 @@ def read_main(identity: Identity, operations: Operations) -> str:
 def update_branch(
     identity: Identity, expected_head: str, operations: Operations,
 ) -> tuple[PullRequest, str]:
-    """Return the exact update head and its retained, immediately pre-PUT base.
+    """Return the exact update head and its retained, immediately pre-request base.
 
     The caller supplies the shared CI deadline and must obtain fresh CI for the
     returned head. A queued acknowledgement is not provenance: only the observed
     commit's ordered parents can authorize advancing the expected head. Never
-    retry the PUT, even when its response is lost.
+    retry the update, even when its response is lost.
     """
     if operations.deadline is None:
         raise Refusal("branch update requires the shared CI deadline")
@@ -808,6 +886,8 @@ def update_branch(
     lost_response: Refusal | None = None
     try:
         result = operations.forge.request_update(identity, expected_head, operations)
+    except _UncertainBranchUpdate as exc:
+        lost_response = exc
     except Refusal as exc:
         if not isinstance(exc.__cause__, (OSError, subprocess.SubprocessError)):
             raise
@@ -1216,16 +1296,8 @@ def continue_landing(
 
 
 def incorporates_base(identity: Identity, head: str, base: str, operations: Operations) -> bool:
-    """Compare the recorded base to the pinned head, failing closed on bad data."""
-    comparison = operations.forge.compare(identity, head, base, operations)
-    ancestor = comparison.get("merge_base_commit")
-    status = comparison.get("status")
-    if (status not in ("ahead", "identical", "behind", "diverged")
-            or not isinstance(ancestor, dict) or not isinstance(ancestor.get("sha"), str)
-            or not _SHA.fullmatch(ancestor["sha"])
-            or (ancestor["sha"] == base) != (status in ("ahead", "identical"))):
-        raise Refusal("initial base ancestry check: malformed or inconsistent comparison")
-    return ancestor["sha"] == base
+    """Establish pinned-head ancestry using the selected forge's commit facts."""
+    return operations.forge.incorporates_base(identity, head, base, operations)
 
 
 def _checks_not_registered(result: subprocess.CompletedProcess[str]) -> bool:

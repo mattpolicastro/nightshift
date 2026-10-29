@@ -135,3 +135,20 @@ def test_operation_boundary_is_unreachable_from_background_helpers():
     assert {"nightshift.specloop_intake", "nightshift.specloop_job"} <= visited
     assert "nightshift.factory_land" not in visited
     assert not violations
+
+
+@pytest.mark.scenario("reviewed-pr-landing/guarded-rest-branch-update/expected-head-supplied")
+@pytest.mark.parametrize("status_code", [409, 422])
+def test_github_update_keeps_expected_head_and_refuses_rejection(scripted_runner, status_code):
+    from test_land import expect_update_request, update_operations
+
+    clock = FakeClock()
+    expect_update_request(scripted_runner, subprocess.CompletedProcess(
+        [], 1, "", f"HTTP {status_code}: rejected"))
+    with pytest.raises(land.Refusal, match="branch update"):
+        land.update_branch(land.Identity(REPO, 78), HEAD, update_operations(scripted_runner, clock))
+    assert scripted_runner.calls[-1][0] == [
+        "gh", "api", "--method", "PUT", f"repos/{REPO}/pulls/78/update-branch",
+        "-f", f"expected_head_sha={HEAD}",
+    ]
+    assert len(scripted_runner.calls) == 3

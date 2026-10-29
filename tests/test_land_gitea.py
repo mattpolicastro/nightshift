@@ -894,10 +894,10 @@ def test_ineligible_run_or_direct_wip_refuses(config_path, scripted_runner, open
 
 
 class LifecycleForge(land.GiteaLandingForge):
-    """Stub only later-task ancestry/CI/merge operations; exercise shared gates.
+    """Stub ancestry/CI/merge operations to isolate the shared lifecycle gates.
 
     Evidence, PR/main HTTP, identity, discovery and finish use production code.
-    Later tasks test their own real HTTP update/CI/merge serialization.
+    Separate operation tests exercise their real HTTP serialization.
     """
 
     def __init__(self, definition, opener, *, ci_passes=True):
@@ -905,9 +905,9 @@ class LifecycleForge(land.GiteaLandingForge):
         self.events = []
         self.ci_passes = ci_passes
 
-    def compare(self, identity, head, base, operations):
+    def incorporates_base(self, identity, head, base, operations):
         self.events.append(("ancestry", head, base))
-        return {"status": "ahead", "merge_base_commit": {"sha": base}}
+        return True
 
     def checks(self, identity, head, operations):
         self.events.append(("checks", head))
@@ -1094,3 +1094,331 @@ def test_comment_reads_cannot_outlive_current_budget(config_path, scripted_runne
     with pytest.raises(land.Refusal, match="shared CI deadline expired"):
         land.read_comments(identity, bounded)
     assert len(opener.calls) == 1
+
+
+UPDATE_PATH = PR_PATH + "/update?style=merge"
+SUCCESSOR = "e" * 40
+OTHER_BASE = "f" * 40
+
+
+def commit_path(head):
+    return f"{ROOT}/api/v1/repos/{REPO}/git/commits/{head}"
+
+
+def commit_facts(head, *parents):
+    return {"sha": head, "parents": [{"sha": parent} for parent in parents]}
+
+
+def bounded_operations(config_path, runner, opener, *, budget=60):
+    identity, ops = resolved(config_path, runner, opener)
+    clock = FakeClock()
+    return identity, replace(ops, sleep=clock.sleep, monotonic=clock.monotonic,
+                             deadline=clock.monotonic() + budget), clock
+
+
+def expect_branch_update(opener, response=None, *, head=HEAD, base=BASE, status=202, timeout=30):
+    opener.expect("GET", PR_PATH, {**PR, "head": {"sha": head}}, timeout=timeout)
+    opener.expect("GET", MAIN_PATH, {**MAIN, "commit": {"id": base}}, timeout=timeout)
+    # No expected-head field: this endpoint has no server-side CAS.
+    opener.expect("POST", UPDATE_PATH, response, status=status, timeout=timeout)
+
+
+@pytest.mark.scenario("gitea-landing/single-attempt-update-provenance/one-update-establishes-exact-parents")
+@pytest.mark.parametrize("response, status_code", [
+    ({}, 202), (b"", 204), (URLError("private lost response"), 202),
+    (TimeoutError("private timeout"), 202), (b"undecodable", 200),
+    (b"\xff", 202), (b"private server failure", 500), (b"bad gateway", 502),
+])
+def test_land_gitea_update_branch_single_attempt_then_provenance(
+    config_path, scripted_runner, opener, response, status_code,
+):
+    identity, ops, clock = bounded_operations(config_path, scripted_runner, opener)
+    expect_branch_update(opener, response, status=status_code)
+    opener.expect("GET", PR_PATH, PR)  # acknowledgement alone is insufficient
+    changed = {**PR, "head": {"sha": SUCCESSOR}}
+    opener.expect("GET", PR_PATH, changed)
+    opener.expect("GET", commit_path(SUCCESSOR), commit_facts(SUCCESSOR, HEAD, BASE))
+    observed, baseline = land.update_branch(identity, HEAD, ops)
+    assert observed.head == SUCCESSOR and baseline == BASE
+    assert clock.sleeps == [10]
+    assert sum(req.get_method() == "POST" for req, _ in opener.calls) == 1
+    assert not scripted_runner.calls
+
+
+@pytest.mark.scenario("gitea-landing/single-attempt-update-provenance/races-and-update-rejection-refuse")
+@pytest.mark.parametrize("failure", ["head", "wip", "closed", "bad-pr", "bad-main", "read"])
+def test_gitea_pre_update_guard_sends_no_post(config_path, scripted_runner, opener, failure):
+    identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
+    remote = dict(PR)
+    if failure == "head":
+        remote["head"] = {"sha": SUCCESSOR}
+    elif failure == "wip":
+        remote["title"] = "Draft: review again"
+    elif failure == "closed":
+        remote["state"] = "closed"
+    opener.expect("GET", PR_PATH, b"bad json" if failure == "bad-pr" else remote,
+                  status=403 if failure == "read" else 200)
+    if failure == "bad-main":
+        opener.expect("GET", MAIN_PATH, {"name": "main", "commit": {"id": "short"}})
+    with pytest.raises(land.Refusal):
+        land.update_branch(identity, HEAD, ops)
+    assert all(req.get_method() == "GET" for req, _ in opener.calls)
+
+
+@pytest.mark.scenario("gitea-landing/single-attempt-update-provenance/races-and-update-rejection-refuse")
+@pytest.mark.parametrize("status_code", [301, 400, 401, 403, 404, 409, 422, 429])
+@pytest.mark.parametrize("raised", [False, True])
+def test_gitea_definite_update_rejection_does_not_observe(
+    config_path, scripted_runner, opener, status_code, raised,
+):
+    identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
+    response = (HTTPError(UPDATE_PATH, status_code, "private rejection", Message(), BytesIO(b"secret"))
+                if raised else b"private rejection")
+    expect_branch_update(opener, response, status=status_code)
+    with pytest.raises(land.Refusal, match="branch update: Gitea request rejected") as error:
+        land.update_branch(identity, HEAD, ops)
+    assert "private" not in str(error.value) and "secret" not in str(error.value)
+    assert len(opener.calls) == 3  # no observation or replay after definite rejection
+
+
+BAD_COMMITS = [
+    None, [], {}, {"parents": []}, {"sha": "short", "parents": []},
+    commit_facts(OTHER_BASE, HEAD, BASE),
+    {"sha": SUCCESSOR}, {"sha": SUCCESSOR, "parents": None},
+    {"sha": SUCCESSOR, "parents": {}}, {"sha": SUCCESSOR, "parents": [None]},
+    {"sha": SUCCESSOR, "parents": [{"sha": HEAD}, {}]},
+    {"sha": SUCCESSOR, "parents": [{"sha": HEAD}, {"sha": "short"}]},
+    {"sha": SUCCESSOR, "parents": [{"sha": HEAD}, {"sha": True}]},
+    {**commit_facts(SUCCESSOR, HEAD, BASE), "commit": None},
+    b"invalid JSON",
+]
+
+
+@pytest.mark.scenario("gitea-landing/single-attempt-update-provenance/races-and-update-rejection-refuse")
+@pytest.mark.parametrize("facts", BAD_COMMITS + [
+    commit_facts(SUCCESSOR), commit_facts(SUCCESSOR, HEAD),
+    commit_facts(SUCCESSOR, BASE, HEAD), commit_facts(SUCCESSOR, HEAD, BASE, OTHER_BASE),
+    commit_facts(SUCCESSOR, HEAD, OTHER_BASE),
+    commit_facts(SUCCESSOR, FINISHED_HEAD),  # descendant of an otherwise valid update
+    commit_facts(SUCCESSOR, FINISHED_HEAD, BASE),
+])
+@pytest.mark.parametrize("lost", [False, True])
+def test_gitea_first_changed_head_requires_exact_parents(config_path, scripted_runner, opener, facts, lost):
+    identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
+    expect_branch_update(opener, URLError("lost") if lost else {})
+    opener.expect("GET", PR_PATH, {**PR, "head": {"sha": SUCCESSOR}})
+    opener.expect("GET", commit_path(SUCCESSOR), facts)
+    with pytest.raises(land.Refusal):
+        land.update_branch(identity, HEAD, ops)
+    # No walking back through descendants, adopting a later head, or CI/merge.
+    assert len(opener.calls) == 5
+    assert sum(req.get_method() == "POST" for req, _ in opener.calls) == 1
+
+
+@pytest.mark.scenario("gitea-landing/single-attempt-update-provenance/races-and-update-rejection-refuse")
+@pytest.mark.parametrize("observation", ["stale", "wip", "closed", "malformed", "unreadable", "commit-read"])
+@pytest.mark.parametrize("lost", [False, True])
+def test_gitea_failed_observation_never_replays_update(config_path, scripted_runner, opener, observation, lost):
+    identity, ops, clock = bounded_operations(config_path, scripted_runner, opener, budget=7)
+    expect_branch_update(opener, URLError("lost") if lost else {}, timeout=7)
+    remote = dict(PR)
+    if observation == "wip":
+        remote["title"] = "Draft: now WIP"
+    elif observation == "closed":
+        remote["state"] = "closed"
+    elif observation == "commit-read":
+        remote["head"] = {"sha": SUCCESSOR}
+    opener.expect("GET", PR_PATH, b"bad JSON" if observation == "malformed" else remote,
+                  status=403 if observation == "unreadable" else 200, timeout=7)
+    if observation == "commit-read":
+        opener.expect("GET", commit_path(SUCCESSOR), b"unreadable", status=403, timeout=7)
+    with pytest.raises(land.Refusal) as error:
+        land.update_branch(identity, HEAD, ops)
+    if lost:
+        assert "reconciliation failed" in str(error.value)
+    assert clock.sleeps == ([7] if observation == "stale" else [])
+    assert sum(req.get_method() == "POST" for req, _ in opener.calls) == 1
+
+
+@pytest.mark.scenario("gitea-landing/initial-gitea-base-ancestry/ancestry-determines-update-need")
+@pytest.mark.parametrize("included", [False, True])
+def test_gitea_ancestry_walk_reads_shared_ancestors_once(config_path, scripted_runner, opener, included):
+    identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
+    # A diamond requires both sides to be read on exhaustion, with a shared root.
+    opener.expect("GET", commit_path(HEAD), commit_facts(HEAD, SUCCESSOR, FINISHED_HEAD))
+    opener.expect("GET", commit_path(FINISHED_HEAD), commit_facts(FINISHED_HEAD, OTHER_BASE))
+    opener.expect("GET", commit_path(OTHER_BASE), commit_facts(OTHER_BASE))
+    opener.expect("GET", commit_path(SUCCESSOR),
+                  commit_facts(SUCCESSOR, OTHER_BASE, *([BASE] if included else [])))
+    assert land.incorporates_base(identity, HEAD, BASE, ops) is included
+    assert len({req.full_url for req, _ in opener.calls}) == len(opener.calls) == 4
+
+
+@pytest.mark.scenario("gitea-landing/initial-gitea-base-ancestry/ancestry-cannot-be-established")
+@pytest.mark.parametrize("facts", BAD_COMMITS)
+def test_gitea_malformed_ancestry_does_not_authorize_update(config_path, scripted_runner, opener, facts):
+    identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
+    opener.expect("GET", commit_path(SUCCESSOR), facts)
+    with pytest.raises(land.Refusal, match="initial base ancestry check"):
+        land.incorporates_base(identity, SUCCESSOR, BASE, ops)
+    assert len(opener.calls) == 1 and opener.calls[0][0].get_method() == "GET"
+
+
+@pytest.mark.scenario("gitea-landing/initial-gitea-base-ancestry/ancestry-cannot-be-established")
+@pytest.mark.parametrize("retry", [False, True])
+def test_gitea_unreadable_ancestry_refuses(config_path, scripted_runner, opener, retry):
+    identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
+    for _ in range(3 if retry else 1):
+        opener.expect("GET", commit_path(HEAD), URLError("secret") if retry else b"denied",
+                      status=200 if retry else 403)
+    with pytest.raises(land.Refusal, match="initial base ancestry check"):
+        land.incorporates_base(identity, HEAD, BASE, ops)
+    assert all(req.get_method() == "GET" for req, _ in opener.calls)
+
+
+@pytest.mark.scenario("gitea-landing/initial-gitea-base-ancestry/ancestry-cannot-be-established")
+@pytest.mark.scenario("gitea-landing/single-attempt-update-provenance/races-and-update-rejection-refuse")
+@pytest.mark.parametrize("stage", ["ancestry", "pre-update", "post", "commit"])
+@pytest.mark.parametrize("failure", ["dispatch", "body", "lost", "backoff"])
+def test_gitea_deadline_exhaustion_stops_dispatch(
+    config_path, scripted_runner, opener, monkeypatch, stage, failure,
+):
+    identity, ops, clock = bounded_operations(config_path, scripted_runner, opener, budget=2)
+    path = commit_path(HEAD) if stage == "ancestry" else PR_PATH
+    method, facts = "GET", commit_facts(HEAD, BASE) if stage == "ancestry" else PR
+    if stage in {"post", "commit"}:
+        if stage == "commit":
+            expect_branch_update(opener, {}, timeout=2)
+            opener.expect("GET", PR_PATH, {**PR, "head": {"sha": SUCCESSOR}}, timeout=2)
+            path, facts = commit_path(SUCCESSOR), commit_facts(SUCCESSOR, HEAD, BASE)
+        else:
+            opener.expect("GET", PR_PATH, PR, timeout=2).expect("GET", MAIN_PATH, MAIN, timeout=2)
+            path, method, facts = UPDATE_PATH, "POST", {}
+    if failure == "backoff" and stage != "post":
+        monkeypatch.setattr(http, "sleep", lambda _: clock.sleep(2))
+        response = URLError("lost")
+    elif failure == "body":
+        response = addinfourl(BytesIO(json.dumps(facts).encode()), Message(), path, 200)
+        read = response.read
+        def expired_body():
+            clock.sleep(2)
+            return read()
+        monkeypatch.setattr(response, "read", expired_body)
+    else:
+        def expired_dispatch():
+            clock.sleep(2)
+            return URLError("lost") if failure in {"lost", "backoff"} else facts
+        response = expired_dispatch
+    opener.expect(method, path, response, timeout=2)
+    with pytest.raises(land.Refusal, match="shared CI deadline expired"):
+        if stage == "ancestry":
+            land.incorporates_base(identity, HEAD, BASE, ops)
+        else:
+            land.update_branch(identity, HEAD, ops)
+    assert sum(req.get_method() == "POST" for req, _ in opener.calls) == int(stage in {"post", "commit"})
+
+
+@pytest.mark.scenario("gitea-landing/initial-gitea-base-ancestry/ancestry-cannot-be-established")
+def test_gitea_each_parent_and_retry_spends_original_budget(config_path, scripted_runner, opener, monkeypatch):
+    identity, ops, clock = bounded_operations(config_path, scripted_runner, opener, budget=5)
+    def first_commit():
+        clock.sleep(1)
+        return commit_facts(HEAD, SUCCESSOR)
+    opener.expect("GET", commit_path(HEAD), first_commit, timeout=5)
+    opener.expect("GET", commit_path(SUCCESSOR), URLError("lost"), timeout=4)
+    monkeypatch.setattr(http, "sleep", lambda _: clock.sleep(1))
+    opener.expect("GET", commit_path(SUCCESSOR), commit_facts(SUCCESSOR, BASE), timeout=3)
+    assert land.incorporates_base(identity, HEAD, BASE, ops)
+    assert ops.remaining() == 3
+
+
+@pytest.mark.scenario("gitea-landing/initial-gitea-base-ancestry/ancestry-cannot-be-established")
+def test_gitea_pages_and_retries_bind_replaced_operations(config_path, scripted_runner, opener, monkeypatch):
+    identity, ops = resolved(config_path, scripted_runner, opener)
+    pages(opener)  # initial evidence reads precede the shared deadline
+    assert land.read_comments(identity, ops) == []
+    clock = FakeClock()
+    bounded = replace(ops, monotonic=clock.monotonic, deadline=clock.monotonic() + 3)
+    monkeypatch.setattr(http, "sleep", lambda _: clock.sleep(1))
+    opener.expect("GET", COMMENTS_PATH + "?page=1&limit=50", URLError("lost"), timeout=3)
+    def first_page():
+        clock.sleep(1)
+        return [comment()]
+    opener.expect("GET", COMMENTS_PATH + "?page=1&limit=50", first_page, timeout=2)
+    def last_page():
+        clock.sleep(1)
+        return []
+    opener.expect("GET", COMMENTS_PATH + "?page=2&limit=50", last_page, timeout=1)
+    with pytest.raises(land.Refusal, match="shared CI deadline expired"):
+        land.read_comments(identity, bounded)
+    assert [timeout for _, timeout in opener.calls] == [30, 3, 2, 1]
+
+
+@pytest.mark.scenario("gitea-landing/initial-gitea-base-ancestry/ancestry-determines-update-need")
+@pytest.mark.scenario("gitea-landing/single-attempt-update-provenance/one-update-establishes-exact-parents")
+@pytest.mark.parametrize("ancestry", ["equal", "included", "absent"])
+def test_gitea_ancestry_controls_initial_update_before_ci(
+    config_path, scripted_runner, opener, monkeypatch, ancestry,
+):
+    identity, ops, clock = bounded_operations(config_path, scripted_runner, opener)
+    initial_base = HEAD if ancestry == "equal" else BASE
+    opener.expect("GET", MAIN_PATH, {**MAIN, "commit": {"id": initial_base}})
+    if ancestry != "equal":
+        opener.expect("GET", commit_path(HEAD), commit_facts(HEAD, *([BASE] if ancestry == "included" else [])))
+    expected_head = HEAD
+    if ancestry == "absent":
+        # Use the immediately pre-update base, even if main moved since ancestry.
+        expect_branch_update(opener, {}, base=OTHER_BASE)
+        opener.expect("GET", PR_PATH, {**PR, "head": {"sha": SUCCESSOR}})
+        opener.expect("GET", commit_path(SUCCESSOR), commit_facts(SUCCESSOR, HEAD, OTHER_BASE))
+        expected_head = SUCCESSOR
+    events = []
+    def ci(identity, head, operations, **kwargs):
+        assert head == expected_head and operations.deadline == clock.now + 60
+        events.append("ci")
+    def revalidate(identity, run, snapshot, operations, **kwargs):
+        assert snapshot.head == expected_head
+        return land.PullRequest(identity, snapshot.head, False, PR["body"]), run
+    monkeypatch.setattr(land, "wait_for_ci", ci)
+    monkeypatch.setattr(land, "revalidate_landing_inputs", revalidate)
+    monkeypatch.setattr(land, "after_ci", lambda *args: 0)
+    opener.expect("GET", MAIN_PATH, {**MAIN, "commit": {"id": OTHER_BASE if ancestry == "absent" else initial_base}})
+    pr = land.PullRequest(identity, HEAD, False, PR["body"])
+    assert land.continue_landing(pr, None, land.CheckSnapshot(HEAD, (), None), ops, timeout=60) == 0
+    assert events == ["ci"]
+    assert sum(req.get_method() == "POST" for req, _ in opener.calls) == int(ancestry == "absent")
+
+
+@pytest.mark.scenario("gitea-landing/single-attempt-update-provenance/one-update-establishes-exact-parents")
+def test_gitea_base_moving_during_observation_requires_separate_update(
+    config_path, scripted_runner, opener, monkeypatch,
+):
+    identity, ops, clock = bounded_operations(config_path, scripted_runner, opener)
+    opener.expect("GET", MAIN_PATH, MAIN)
+    opener.expect("GET", commit_path(HEAD), commit_facts(HEAD))
+    expect_branch_update(opener, URLError("lost acknowledgement"))
+    remote_main = [BASE]
+    def observe():
+        clock.sleep(1)
+        remote_main[0] = OTHER_BASE
+        return {**PR, "head": {"sha": SUCCESSOR}}
+    opener.expect("GET", PR_PATH, observe)
+    opener.expect("GET", commit_path(SUCCESSOR), commit_facts(SUCCESSOR, HEAD, BASE))
+    opener.expect("GET", MAIN_PATH, lambda: {**MAIN, "commit": {"id": remote_main[0]}})
+    opener.expect("GET", MAIN_PATH, {**MAIN, "commit": {"id": OTHER_BASE}})
+    expect_branch_update(opener, {}, head=SUCCESSOR, base=OTHER_BASE)
+    opener.expect("GET", PR_PATH, {**PR, "head": {"sha": FINISHED_HEAD}})
+    opener.expect("GET", commit_path(FINISHED_HEAD), commit_facts(FINISHED_HEAD, SUCCESSOR, OTHER_BASE))
+    opener.expect("GET", MAIN_PATH, {**MAIN, "commit": {"id": OTHER_BASE}})
+    checked = []
+    def ci(identity, head, operations, **kwargs):
+        checked.append((head, operations.deadline, operations.remaining()))
+    def revalidate(identity, run, snapshot, operations, **kwargs):
+        return land.PullRequest(identity, snapshot.head, False, PR["body"]), run
+    monkeypatch.setattr(land, "wait_for_ci", ci)
+    monkeypatch.setattr(land, "revalidate_landing_inputs", revalidate)
+    monkeypatch.setattr(land, "after_ci", lambda *args: 0)
+    pr = land.PullRequest(identity, HEAD, False, PR["body"])
+    assert land.continue_landing(pr, None, land.CheckSnapshot(HEAD, (), None), ops, timeout=60) == 0
+    assert checked == [(SUCCESSOR, 160, 59), (FINISHED_HEAD, 160, 59)]
+    assert sum(req.get_method() == "POST" for req, _ in opener.calls) == 2
