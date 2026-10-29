@@ -32,6 +32,7 @@ class Step:
     expect: int = 0
     timeout: int = 300
     env: dict[str, str] = field(default_factory=dict)
+    loopback: bool = False
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,12 @@ def validate_env(raw, setting: str) -> dict[str, str]:
     return dict(raw)
 
 
+def validate_loopback(raw, setting: str) -> bool:
+    if type(raw) is not bool:
+        raise ValueError(f"{setting}.loopback: must be a boolean")
+    return raw
+
+
 def _steps(raw, setting: str = "step") -> tuple[Step, ...]:
     if raw is not None and not isinstance(raw, list):
         raise ValueError(f"{setting}: must be an array of step tables")
@@ -129,8 +136,9 @@ def _steps(raw, setting: str = "step") -> tuple[Step, ...]:
         if not isinstance(run, list) or not run or not all(isinstance(a, str) for a in run):
             raise ValueError(f"{setting} {s['id']!r}: run must be a non-empty argv list")
         env = validate_env(s.get("env", {}), f"{setting} {s['id']!r}")
+        loopback = validate_loopback(s.get("loopback", False), f"{setting} {s['id']!r}")
         try:
-            steps.append(Step(s["id"], tuple(run), int(s.get("expect", 0)), int(s.get("timeout", 300)), env))
+            steps.append(Step(s["id"], tuple(run), int(s.get("expect", 0)), int(s.get("timeout", 300)), env, loopback))
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{setting} {s['id']!r}: invalid expect or timeout") from exc
     ids = [s.id for s in steps]

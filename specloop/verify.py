@@ -15,6 +15,7 @@ or a timeout never satisfies an expected non-zero exit.
 import ctypes
 import functools
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -32,7 +33,7 @@ from threading import Lock
 
 from nightshift.host_paths import tool_path
 from specloop.agents import homes_dir
-from specloop.manifest import Manifest, Snapshot, Step, expand, validate_env
+from specloop.manifest import Manifest, Snapshot, Step, expand, validate_env, validate_loopback
 
 CREDENTIAL_DIRS = (".codex", ".claude", ".specloop/homes", ".nightshift/homes",
                    ".ssh", ".config", ".aws", "Library/Keychains")
@@ -271,10 +272,59 @@ class Receipt:
     tail: str
 
 
+def _listening_loopback_ports() -> frozenset[int]:
+    """Take a bounded numeric listener snapshot; uncertain output fails closed."""
+    try:
+        result = subprocess.run(["/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fpn"],
+                                capture_output=True, encoding="utf-8", errors="strict", timeout=5)
+        if result.returncode == 1 and not result.stdout and not result.stderr:
+            return frozenset()
+        if result.returncode != 0 or result.stderr:
+            raise ValueError(f"lsof exit {result.returncode}: {result.stderr.strip()}")
+        if result.stdout and not result.stdout.endswith("\n"):
+            raise ValueError("incomplete lsof output")
+        ports: set[int] = set()
+        state = "process"
+        for line in result.stdout.split("\n")[:-1]:
+            if re.fullmatch(r"p[0-9]+", line) and state in ("process", "complete"):
+                state = "file"
+                continue
+            # lsof emits file-set identifiers even when only p/n are selected.
+            if re.fullmatch(r"f[0-9]+", line) and state in ("file", "complete"):
+                state = "name"
+                continue
+            match = re.fullmatch(r"n(?:\[([^\[\]\s]+)\]|([^\[\]\s]+)):([0-9]+)", line)
+            if state != "name" or match is None:
+                raise ValueError("malformed lsof process/file/listener record")
+            host, port = match[1] or match[2], int(match[3])
+            if not 1 <= port <= 65535:
+                raise ValueError("invalid listener port")
+            address = None if host == "*" else ipaddress.ip_address(host)
+            if match[1] and not isinstance(address, ipaddress.IPv6Address):
+                raise ValueError("brackets require an IPv6 listener address")
+            mapped = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) else None
+            if address is None or address.is_loopback or address.is_unspecified or (mapped and mapped.is_loopback):
+                ports.add(port)
+            state = "complete"
+        if state not in ("process", "complete"):
+            raise ValueError("incomplete lsof process/file record")
+        return frozenset(ports)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise RuntimeError(f"loopback listener discovery failed: {exc}") from exc
+
+
 def profile(build: Path, m: Manifest, *, prepare: bool = False, home: Path | None = None,
-            src: Path | None = None, snapshots: SnapshotContext | None = None) -> str:
+            src: Path | None = None, snapshots: SnapshotContext | None = None,
+            loopback: bool = False, listening_ports: frozenset[int] | None = None) -> str:
     # The sandbox matches real paths: /tmp/x is /private/tmp/x to it.
     build = build.resolve()
+    network = "" if prepare else "(deny network*)"
+    if not prepare and loopback:
+        if listening_ports is None or any(type(p) is not int or not 1 <= p <= 65535 for p in listening_ports):
+            raise ValueError("loopback profile requires a successful listener snapshot with valid ports")
+        network += '\n(allow network-inbound (local tcp "localhost:*"))'
+        network += '\n(allow network-outbound (remote tcp "localhost:*"))'
+        network += "".join(f'\n(deny network-outbound (remote tcp "localhost:{p}"))' for p in sorted(set(listening_ports)))
 
     def q(s: str) -> str:
         return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -297,7 +347,7 @@ def profile(build: Path, m: Manifest, *, prepare: bool = False, home: Path | Non
                  f"(allow file-read* {' '.join(f'(subpath {q(p)})' for p in allowed)})")
     return f"""(version 1)
 (allow default)
-{"" if prepare else "(deny network*)"}
+{network}
 (deny file-write*)
 (allow file-write* (subpath {q(str(build))}) {writable}
   (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (regex #"^/dev/fd/"))
@@ -441,6 +491,7 @@ def _run_commands(scheduled: list[tuple[Step, Path]], values: dict[str, str],
                 "LANG": "en_US.UTF-8", "COPYFILE_DISABLE": "1"}
     receipts = []
     for step, step_sb in scheduled:
+        validate_loopback(step.loopback, f"step {step.id!r}")
         configured = validate_env(step.env, f"step {step.id!r}")
         expanded = {key: expand(value, values) for key, value in configured.items()}
         env = {**base_env, **validate_env(expanded, f"step {step.id!r}")}
