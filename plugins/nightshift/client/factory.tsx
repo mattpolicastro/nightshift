@@ -1,6 +1,6 @@
-import { getPaseoClient, type PluginSurfaceProps, useRpc } from '@getpaseo/plugin/client';
+import { getPaseoClient, openExternalUrl, type PluginSurfaceProps, useRpc } from '@getpaseo/plugin/client';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState, Linking, Pressable, Text, TextInput, View } from 'react-native';
+import { AppState, Pressable, Text, TextInput, View } from 'react-native';
 import {
   factoryRuns, factoryAct, type FactoryRun, type FactorySnapshot, type FactoryActInput,
   factoryLanding, factoryLand, factoryLandStop, type FactoryLandingSnapshot,
@@ -164,12 +164,12 @@ function FactoryRow({ run, colors, disabled, act, report, notice, host, navigati
       borderTopWidth: 1, borderColor: colors.border, paddingTop: 8,
     }}>
       {run.pr ? <Pressable accessibilityRole="link" accessibilityLabel={`Open PR for ${run.change}`}
-        onPress={() => { void Linking.openURL(run.pr).catch(() => report('Could not open GitHub.')); }}
+        onPress={() => { void openExternalUrl(run.pr).catch(() => report('Could not open GitHub.')); }}
         style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
         <Text style={{ color: colors.accent, fontWeight: '600', textDecorationLine: 'underline' }}>Open PR ↗</Text>
       </Pressable> : null}
       {showChangeLink ? <Pressable accessibilityRole="link" accessibilityLabel={`Open change ${run.change} on GitHub`}
-        onPress={() => { void Linking.openURL(details.github).catch(() => report('Could not open GitHub.')); }}
+        onPress={() => { void openExternalUrl(details.github).catch(() => report('Could not open GitHub.')); }}
         style={{ paddingVertical: 10, alignSelf: 'flex-start' }}>
         <Text style={{ color: colors.accent, fontWeight: '600', textDecorationLine: 'underline' }}>Open change on GitHub ↗</Text>
       </Pressable> : null}

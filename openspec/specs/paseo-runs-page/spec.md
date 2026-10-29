@@ -103,6 +103,17 @@ SHALL remain unchanged. An empty navigation row SHALL be omitted.
 - **THEN** Open PR appears exactly when its PR exists, the other two controls appear only while Details is open and their existing conditions hold, and the row is absent when no items are visible
 - **THEN** grouping causes no additional workspace lookup or RPC and the existing Details fields, events, and command remain available when expanded
 
+### Requirement: External links open outside Paseo
+
+Every forge link the plugin renders, on Factory and on the attention page,
+SHALL open through the SDK's `openExternalUrl`, never react-native `Linking`.
+On the desktop app `Linking.openURL` becomes `window.open`, which Electron
+shows as a bare in-app window with no browser controls.
+
+#### Scenario: Links reach the system browser
+- **WHEN** Open PR, Open change on GitHub, or an attention task's Open on GitHub is pressed
+- **THEN** its URL is passed to `openExternalUrl`, and a rejected open shows the existing error
+
 ### Requirement: Status chip presentation
 
 Each visible card SHALL show a rounded, status-colored chip on `surface2`
