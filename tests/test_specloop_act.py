@@ -331,7 +331,7 @@ def test_direct_push_holds_lock_against_act_abort(admitted, monkeypatch, capfd, 
         assert "locked" in act(capfd, run, "abort", code=1)["detail"]
         assert (run.dir / "state.json").read_bytes() == before
 
-    monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
+    monkeypatch.setattr(cli, "_remote", lambda ctx, target=None: "unused")
     monkeypatch.setattr(cli, "_push", push)
     # The fake transport supplies an unchanged base before publication.
     monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
@@ -716,7 +716,7 @@ def test_publish_failure_returns_refused_json(admitted, monkeypatch, capfd):
     run, _ = admitted
     run.pause("ready_to_publish")
     before = asdict(run.state)
-    monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
+    monkeypatch.setattr(cli, "_remote", lambda ctx, target=None: "unused")
     # The fake transport supplies an unchanged base before the failing push.
     monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
 
@@ -845,7 +845,7 @@ def test_publish_ignores_unrelated_pr(admitted, monkeypatch, capfd, repository, 
         return url
 
     monkeypatch.setattr(cli, "_gh", gh)
-    monkeypatch.setattr(cli, "_remote", lambda ctx: "unused")
+    monkeypatch.setattr(cli, "_remote", lambda ctx, target=None: "unused")
     monkeypatch.setattr(cli, "_push", lambda *args: None)
     # PR matching uses a fake transport with an unchanged base.
     monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())

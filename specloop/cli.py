@@ -565,7 +565,30 @@ def publish(args) -> int:
     return _locked_command(args, _publish)
 
 
-def _existing_pr(ctx: loop.Ctx) -> str:
+def _existing_pr(ctx: loop.Ctx, target: ForgeTarget | None = None) -> str:
+    target = target or _forge_target(ctx.m.github)
+    if target.forge is not None:
+        forge, repository = target.forge, target.repository
+        matches = []
+        for rows in forge._pages(forge._repo_path(repository, "pulls"), {"state": "open"}):
+            for pr in rows:
+                head, base = pr.get("head"), pr.get("base")
+                if (not isinstance(head, dict) or not isinstance(base, dict)
+                        or not all(isinstance(ref, str) and ref for ref in (head.get("ref"), base.get("ref")))
+                        or not isinstance(head.get("repo"), dict)
+                        or not isinstance(head["repo"].get("full_name"), str)
+                        or not head["repo"]["full_name"] or pr.get("state") not in ("open", "closed")):
+                    raise RuntimeError("Invalid Gitea PR identity")
+                if (pr["state"] == "open" and head["ref"] == ctx.m.branch and base["ref"] == ctx.m.pr_base
+                        and head["repo"]["full_name"] == repository):
+                    url = pr.get("html_url")
+                    if (not isinstance(url, str) or type(pr.get("number")) is not int
+                            or forge._pr_url_number(repository, url) != pr["number"]):
+                        raise RuntimeError("Invalid Gitea PR URL or number")
+                    matches.append(url)
+        if len(matches) > 1:
+            raise RuntimeError("Multiple Gitea PRs match the publication branch and base")
+        return matches[0] if matches else ""
     # gh accepts [HOST/]OWNER/REPO. REST repository names omit the host;
     # select it explicitly when supplied, retaining gh's default otherwise.
     parts = ctx.m.github.rstrip("/").split("/")
@@ -588,6 +611,19 @@ def _existing_pr(ctx: loop.Ctx) -> str:
         page += 1
 
 
+def _check_publish_paths(ctx: loop.Ctx, base: str, head: str) -> None:
+    try:
+        paths = git(ctx.repo, "diff", "--no-renames", "--name-only", "-z", f"{base}..{head}", "--")
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        raise RuntimeError("Could not inspect publication paths; nothing was published") from None
+    if not isinstance(paths, bytes) or (paths and (not paths.endswith(b"\0") or b"" in paths[:-1].split(b"\0"))):
+        raise RuntimeError("Incomplete publication path list; nothing was published")
+    protected = [p for p in paths.split(b"\0")
+                 if p.startswith((b".github/workflows/", b".gitea/workflows/", b".forgejo/"))]
+    if protected:
+        raise RuntimeError("Refusing to publish protected paths: " + ", ".join(ascii(os.fsdecode(p)) for p in protected))
+
+
 def _publish(args, run: Run) -> int:
     st = run.state
     if not (st.status == "paused" and st.pause and st.pause.reason == "ready_to_publish"):
@@ -597,7 +633,8 @@ def _publish(args, run: Run) -> int:
         return 1
     ctx = _ctx(run)
     try:
-        remote = _remote(ctx)
+        target = _forge_target(ctx.m.github) if ctx.m.github else None
+        remote = _remote(ctx, target)
     except PublishTarget as e:
         _outcome(args, reasons=[str(e)])
         print(e, file=sys.stderr)
@@ -628,15 +665,22 @@ def _publish(args, run: Run) -> int:
             _outcome(args, reasons=[reason])
         print(reason, file=sys.stderr)
         return 1
+    _check_publish_paths(ctx, base, head)
     _push(ctx.repo, remote, ctx.ref)
     url = st.pr
     if not url:
         # Creation may have succeeded before its response or local state was
         # saved. Reconcile first; a failed lookup must not trigger creation.
-        url = _existing_pr(ctx)
+        url = _existing_pr(ctx, target)
     if not url:
-        url = _gh("pr", "create", "--draft", "-R", ctx.m.github, "--head", ctx.m.branch, "--base", ctx.m.pr_base,
-                  "--title", f"{ctx.m.change}: OpenSpec change via specloop", "--body", _pr_body(ctx))
+        title = f"{ctx.m.change}: OpenSpec change via specloop"
+        if target is not None and target.forge is not None:
+            url = target.forge.create_draft_pr(target.repository, ctx.m.branch, ctx.m.pr_base, title, _pr_body(ctx)).stdout
+        else:
+            url = _gh("pr", "create", "--draft", "-R", ctx.m.github, "--head", ctx.m.branch, "--base", ctx.m.pr_base,
+                      "--title", title, "--body", _pr_body(ctx))
+    if target is not None and target.forge is not None:
+        target.forge._pr_url_number(target.repository, url)
     st.pr = url
     run.event("published", pr=url, head=ctx.head())
     ctx.pause("human_checks", detail=f"{url}\nHosted CI runs on the PR. Make the PR's human checks, then "
