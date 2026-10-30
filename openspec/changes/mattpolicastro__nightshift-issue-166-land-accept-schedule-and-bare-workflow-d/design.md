@@ -6,7 +6,7 @@ The existing `reviewed-pr-landing` requirements bind exclusion to complete chang
 
 ## Goals / Non-Goals
 
-Restore exclusion parsing for the current repository workflow and the planned bare dispatch trigger while preserving a small, deterministic, conservative grammar. Keep the implementation, tests and requirement update together in one task of about 150 changed lines.
+Restore exclusion parsing for the current repository workflow and the planned bare dispatch trigger while preserving a small, deterministic, conservative grammar. Keep implementation and tests together in one task of about 150 changed lines. The requirement update is already expressed by this draft's MODIFIED delta; applying it to the canonical spec is not implementation work.
 
 Do not edit workflows, broaden workflow selection or glob matching, parse general YAML, validate cron timing semantics, add dependencies, or change code outside `ignored_paths` in `nightshift/land.py`. A second workflow still disables exclusion. No live forge access is needed for automated verification.
 
@@ -22,7 +22,9 @@ Do not edit workflows, broaden workflow selection or glob matching, parse genera
 
 5. **Test behavior through the existing pure interface.** Add exactly the three requested test functions in `tests/test_land_ci_exclusion.py`, using parametrization for compact coverage and scenario markers for the new scenarios. `test_schedule_and_dispatch_events_do_not_block_exclusion` covers each event separately and together, different event positions, both quote styles, multiple cron items, trailing spaces and CRLF; asserts the unchanged path-event tuples and docs eligibility, plus a mismatching push ignore list and missing pull_request still preventing exclusion. `test_schedule_accepts_only_cron_items` covers valid comments/blanks and malformed, empty, flow, duplicate and non-cron cases, including empty schedules at event/block/end boundaries. `test_dispatch_with_nested_lines_needs_ci` covers nested fields/items/comments/space-only lines, flow forms, duplicates and the existing replacement example. Rejections assert `None` and no path exclusion. Preserve every existing assertion, including unknown/ambiguous syntax and multiple-workflow refusal. Leave `test_repository_trigger_and_unrelated_yaml_are_supported` entirely unedited.
 
-6. **Verification and scope gates.** Run `uv run pytest tests/test_land_ci_exclusion.py`, then the acceptance command `uv run pytest`, and `uv run python scripts/check_types.py` with no new type errors or baseline changes. Confirm the implementation diff touches only the three allowed locations and remains about 150 changed lines. No implementation changes or test execution success are claimed by this draft.
+6. **Verification and scope gates.** Run `uv run pytest tests/test_land_ci_exclusion.py`, then the acceptance command `uv run pytest`, and `uv run python scripts/check_types.py` with no new type errors or baseline changes. Confirm the implementation diff touches only `nightshift/land.py` within `ignored_paths` and `tests/test_land_ci_exclusion.py`, and remains about 150 changed lines. No implementation changes or test execution success are claimed by this draft.
+
+7. **Keep spec synchronization outside the implementation task.** The feasibility review identifies all `openspec/**` files as frozen for implementing agents. Retain the full MODIFIED requirement and its scenarios in this change's `specs/reviewed-pr-landing/spec.md` as the approved behavioral contract. Task 1.1 must not edit that delta, `tasks.md`, or `openspec/specs/reviewed-pr-landing/spec.md`, run archive, or change frozen-path policy. The existing trusted finish flow in `specloop/cli.py` calls `openspec.archive` after tasks are complete to synchronize the delta into canonical specs. This lifecycle step needs no implementing-agent task or engine change.
 
 ## Risks / Trade-offs
 
