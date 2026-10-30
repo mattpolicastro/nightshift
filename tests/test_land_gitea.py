@@ -558,9 +558,7 @@ def comment_path(id):
 
 
 def pages(opener, *rows):
-    # Require the terminal empty page even for short pages and declared totals.
-    for number, page in enumerate([*rows, []], 1):
-        opener.expect("GET", f"{COMMENTS_PATH}?page={number}&limit=50", page)
+    opener.expect("GET", COMMENTS_PATH, [row for group in rows for row in group])
 
 
 def attestation_body(sources, *, actor="operator", head=HEAD):
@@ -755,8 +753,7 @@ def test_lost_post_reconciles_complete_history_once(config_path, scripted_runner
     opener.expect("POST", COMMENTS_PATH, response, body={"body": body})
     found = comment(body, id=20, login="owner" if outcome == "untrusted" else "operator")
     if outcome == "unreadable":
-        opener.expect("GET", COMMENTS_PATH + "?page=1&limit=50", [comment("unrelated")])
-        opener.expect("GET", COMMENTS_PATH + "?page=2&limit=50", b"unreadable", status=403)
+        opener.expect("GET", COMMENTS_PATH, b"unreadable", status=403)
     else:
         matches = [] if outcome == "absent" else [found]
         if outcome == "duplicates":
@@ -795,6 +792,7 @@ def test_unresolved_create_can_be_retried_next_invocation(config_path, scripted_
 
 @pytest.mark.scenario("gitea-landing/allowlisted-landing-evidence/untrusted-evidence-blocks-attestation")
 @pytest.mark.scenario("gitea-landing/landing-lifecycle-parity/changed-inputs-refuse")
+@pytest.mark.scenario("gitea-landing/existing-human-check-semantics/complete-comment-evidence-remains-mandatory")
 @pytest.mark.parametrize("failure", ["later-page", "body", "null-body", "missing-body", "id", "conflict", "repeated",
                                     "total", "next", "date", "naive-date"])
 def test_unreadable_comment_evidence_refuses_before_mutations(config_path, scripted_runner, opener, capsys, failure):
@@ -813,17 +811,13 @@ def test_unreadable_comment_evidence_refuses_before_mutations(config_path, scrip
         first["created_at"] = "not-a-date"
     elif failure == "naive-date":
         first["created_at"] = "2026-10-01T00:00:00"
-    headers = {"X-Next-Page": "5"} if failure == "next" else None
-    opener.expect("GET", COMMENTS_PATH + "?page=1&limit=50", [first], headers=headers)
-    if failure == "later-page":
-        opener.expect("GET", COMMENTS_PATH + "?page=2&limit=50", b"denied", status=403)
-    elif failure in {"repeated", "conflict"}:
-        second = dict(first, body="conflicting") if failure == "conflict" else first
-        opener.expect("GET", COMMENTS_PATH + "?page=2&limit=50", [second])
-    elif failure == "total":
-        opener.expect("GET", COMMENTS_PATH + "?page=2&limit=50", [], headers={"X-Total-Count": "2"})
-    elif failure not in {"id", "next"}:
-        opener.expect("GET", COMMENTS_PATH + "?page=2&limit=50", [])
+    headers = {"X-Next-Page": "5"} if failure == "next" else (
+        {"X-Total-Count": "2"} if failure == "total" else None)
+    rows = [first]
+    if failure in {"repeated", "conflict"}:
+        rows.append(dict(first, body="conflicting") if failure == "conflict" else first)
+    opener.expect("GET", COMMENTS_PATH, b"denied" if failure == "later-page" else rows,
+                  status=403 if failure == "later-page" else 200, headers=headers)
     assert invoke(config_path, scripted_runner, opener, URL, "--checks-done") == 1
     assert "publication comment discovery" in capsys.readouterr().err
     assert all(req.get_method() == "GET" for req, _ in opener.calls)
@@ -1090,7 +1084,7 @@ def test_comment_reads_cannot_outlive_current_budget(config_path, scripted_runne
             clock.sleep(2)
             return [comment()]
         response = expired_page
-    opener.expect("GET", COMMENTS_PATH + "?page=1&limit=50", response, timeout=2)
+    opener.expect("GET", COMMENTS_PATH, response, timeout=2)
     with pytest.raises(land.Refusal, match="shared CI deadline expired"):
         land.read_comments(identity, bounded)
     assert len(opener.calls) == 1
@@ -1340,18 +1334,14 @@ def test_gitea_pages_and_retries_bind_replaced_operations(config_path, scripted_
     clock = FakeClock()
     bounded = replace(ops, monotonic=clock.monotonic, deadline=clock.monotonic() + 3)
     monkeypatch.setattr(http, "sleep", lambda _: clock.sleep(1))
-    opener.expect("GET", COMMENTS_PATH + "?page=1&limit=50", URLError("lost"), timeout=3)
-    def first_page():
-        clock.sleep(1)
+    opener.expect("GET", COMMENTS_PATH, URLError("lost"), timeout=3)
+    def complete_response():
+        clock.sleep(2)
         return [comment()]
-    opener.expect("GET", COMMENTS_PATH + "?page=1&limit=50", first_page, timeout=2)
-    def last_page():
-        clock.sleep(1)
-        return []
-    opener.expect("GET", COMMENTS_PATH + "?page=2&limit=50", last_page, timeout=1)
+    opener.expect("GET", COMMENTS_PATH, complete_response, timeout=2)
     with pytest.raises(land.Refusal, match="shared CI deadline expired"):
         land.read_comments(identity, bounded)
-    assert [timeout for _, timeout in opener.calls] == [30, 3, 2, 1]
+    assert [timeout for _, timeout in opener.calls] == [30, 3, 2]
 
 
 @pytest.mark.scenario("gitea-landing/initial-gitea-base-ancestry/ancestry-determines-update-need")

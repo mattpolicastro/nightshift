@@ -126,8 +126,7 @@ class GiteaForge:
         return self._record(self._detail(self._repo_path(repo, "issues", self._number(number))))
 
     def comment_pages(self, repo: str, number: int) -> list[list[dict]]:
-        pages = self._pages(self._repo_path(repo, "issues", self._number(number), "comments"))
-        return [[self._record(row) for row in page] for page in pages]
+        return self._pages(self._repo_path(repo, "issues", self._number(number), "comments"))
 
     @staticmethod
     def _comment_marker(body: str) -> str | None:
@@ -294,13 +293,44 @@ class GiteaForge:
                 items.append(FeedbackItem(f'{source}:{row["id"]}', block))
         return items
 
+    def _read_comments(self, path: str) -> list[list[dict]]:
+        """Validate a complete comment response; never follow continuation hints."""
+        _, headers, rows = self._request("GET", path)
+        if not isinstance(rows, list):
+            raise ForgeError("Invalid Gitea comment listing", transient=False)
+        count = headers.get("X-Total-Count")
+        if count is not None:
+            if not re.fullmatch(r"[0-9]+", count):
+                raise ForgeError("Invalid Gitea comment total", transient=False)
+            try:
+                total = int(count)
+            except ValueError:
+                raise ForgeError("Invalid Gitea comment total", transient=False) from None
+            if total != len(rows):
+                raise ForgeError("Incomplete Gitea comment listing", transient=False)
+        if headers.get("X-Next-Page") not in (None, "", "0") or any(re.search(
+                r';\s*rel\s*=\s*(?:"[^\"]*\bnext\b[^\"]*"|next\b)',
+                link, re.IGNORECASE) is not None for link in headers.get_all("Link", [])):
+            raise ForgeError("Incomplete Gitea comment listing", transient=False)
+        records = []
+        seen = set()
+        for row in rows:
+            if (not isinstance(row, dict) or type(row.get("id")) is not int
+                    or row["id"] <= 0 or row["id"] in seen):
+                raise ForgeError("Invalid or duplicate Gitea comment ID", transient=False)
+            seen.add(row["id"])
+            records.append(self._record(row))
+        return [records] if records else []
+
     def _pages(self, path: str, query=None, *, strict: bool = True,
                unpack: Callable[[object], list] | None = None) -> list[list[dict]]:
-        """Read through an empty page or refuse the entire listing.
+        """Read complete comments or paginate through an empty terminal page.
 
         Keep queries endpoint-local and treat response links only as evidence,
-        never as request destinations. Identical IDs are deduplicated.
+        never as request destinations. Paginated listings deduplicate identical IDs.
         """
+        if re.fullmatch(r"/api/v1/repos/[^/?#]+/[^/?#]+/issues/[1-9][0-9]*/comments", path):
+            return self._read_comments(path)
         fixed_query = dict(query or {})
         pages: list[list[dict]] = []
         seen: dict[int, dict] = {}

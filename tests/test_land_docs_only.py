@@ -73,8 +73,7 @@ class LandingScript:
 
     def comments(self, *pages):
         if self.gitea:
-            for i, page in enumerate([*pages, []], 1):
-                self.api(f"repos/{REPO}/issues/78/comments?page={i}&limit=50", page)
+            self.api(f"repos/{REPO}/issues/78/comments", [row for page in pages for row in page])
         else:
             self.runner.expect(COMMENTS, [*pages, []], timeout=self.timeout)
 

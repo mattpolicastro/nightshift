@@ -43,7 +43,8 @@ class FakeGitea:
         """Install factual read/write routes; deliberately ignore label/head filters.
 
         Issues may carry comments and timeline arrays; PRs may additionally
-        carry reviews with nested comments. Each list paginates independently.
+        carry reviews with nested comments. Issue comments return a complete list;
+        other lists paginate independently.
         """
         self.repositories[repo] = dict(labels=labels, issues=list(issues),
                                        pulls=list(pulls), page_size=page_size,
@@ -129,6 +130,8 @@ class FakeGitea:
                     for endpoint in ("comments", "timeline"):
                         if call.path == detail_path + "/" + endpoint:
                             rows = issue.get(endpoint, [])
+                            if endpoint == "comments":
+                                return Reply(rows)
                             if endpoint == "timeline":
                                 # Convert legacy fixtures only at the state-backed wire boundary.
                                 rows = [dict(row) if isinstance(row, dict) else row for row in rows]
