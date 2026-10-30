@@ -1,6 +1,7 @@
 """Conservative exclusion evidence through offline, exact transport scripts."""
 
 import base64
+from itertools import permutations
 from pathlib import Path
 import socket
 import subprocess
@@ -77,7 +78,8 @@ def file_row(path="README.md", status="modified", **extra):
 
 
 @pytest.mark.scenario("reviewed-pr-landing/base-workflow-exclusion-proof/base-content-controls-exclusion")
-@pytest.mark.parametrize("base_text, eligible", [(TRIGGER, True), (TRIGGER.replace("**.md", "*.py"), False)])
+@pytest.mark.parametrize("base_text, eligible", [(TRIGGER, True), (TRIGGER.replace("**.md", "*.py"), False),
+    (TRIGGER + "  schedule:\n    - cron: '0 0 * * *'\n  workflow_dispatch:\n", True)])
 @pytest.mark.parametrize("name", ["ci.yml", "ci.yaml"])
 def test_base_content_controls_exclusion(evidence, base_text, eligible, name):
     identity, ops, expect, directory, limit_key, _ = evidence
@@ -103,6 +105,74 @@ def test_repository_trigger_and_unrelated_yaml_are_supported():
     assert land.all_paths_ignored(DOCS, patterns)
     unrelated = 'jobs:\t&anchor\n  run: |\n    paths-ignore: [!no]\n    on: weird\n'
     assert land.ignored_paths(TRIGGER + unrelated) == patterns
+
+
+@pytest.mark.scenario("reviewed-pr-landing/base-workflow-exclusion-proof/schedule-and-dispatch-events-do-not-block-exclusion")
+@pytest.mark.parametrize("order", [order for extra in [("schedule",), ("workflow_dispatch",),
+    ("schedule", "workflow_dispatch")] for order in permutations(("push", "pull_request", *extra))])
+@pytest.mark.parametrize("cron", ["    - cron: '0 0 * * *'\n",
+    '    - cron: "0 0 * * *"  \n    - cron: \'another scalar\'\n'])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_schedule_and_dispatch_events_do_not_block_exclusion(order, cron, newline):
+    blocks = {"push": "  push:\n    paths-ignore: ['**.md']\n",
+              "pull_request": "  pull_request:\n    paths-ignore: ['**.md', 'docs/**']\n",
+              "schedule": "  schedule:  \n" + cron,
+              "workflow_dispatch": "  workflow_dispatch:  \n\n# comment\n  # comment\n"}
+    text = "on:\n" + "".join(blocks[event] for event in order)
+    expected = tuple(("**.md",) if event == "push" else ("**.md", "docs/**")
+                     for event in order if event in ("push", "pull_request"))
+    assert land.ignored_paths(text.replace("\n", newline)) == expected
+    assert land.all_paths_ignored(DOCS, land.ignored_paths(text.replace("\n", newline)))
+    mismatch = text.replace(blocks["push"], blocks["push"].replace("**.md", "*.md"))
+    assert not land.all_paths_ignored(DOCS, land.ignored_paths(mismatch))
+    missing = text.replace(blocks["pull_request"], "")
+    assert land.ignored_paths(missing) is None
+    assert not land.all_paths_ignored(DOCS, land.ignored_paths(missing))
+    assert land.ignored_paths(text.replace(blocks["push"], "")) == (("**.md", "docs/**"),)
+    missing_ignore = text.replace("    paths-ignore: ['**.md']\n", "")
+    assert land.ignored_paths(missing_ignore) is None
+    assert not land.all_paths_ignored(DOCS, land.ignored_paths(missing_ignore))
+
+
+@pytest.mark.scenario("reviewed-pr-landing/base-workflow-exclusion-proof/schedule-accepts-only-cron-items")
+@pytest.mark.scenario("reviewed-pr-landing/base-workflow-exclusion-proof/incomplete-or-ambiguous-evidence-needs-ci")
+@pytest.mark.parametrize("ending", ["  workflow_dispatch:\n", "jobs:\n  run: anything\n", ""])
+@pytest.mark.parametrize("schedule, valid", [
+    ("  schedule:  \n\n    # comment\n    - cron: '0 0 * * *'  \n  \n# end\n", True),
+    ('  schedule:\n    - cron: ""\n    - cron: \'not a cron expression\'\n', True),
+    ("  schedule:\n", False), ("  schedule:\n    # comment\n   \n", False),
+    ("  schedule: []\n", False), ("  schedule: [{cron: '0 0 * * *'}]\n", False),
+    ("  schedule: # inline\n    - cron: '0 0 * * *'\n", False),
+    *[("  schedule:\n" + item + "\n", False) for item in [
+        "    - cron: 0 0 * * *", "    - cron: '0 0 * * *' # inline",
+        "   - cron: '0 0 * * *'", "     - cron: '0 0 * * *'", "\t- cron: 'x'",
+        "    - cron:  'x'", "    cron: 'x'", "    - timezone: 'UTC'",
+        "    paths-ignore: ['**.md']", "    - 'x'", "    - cron: 'a' 'b'",
+        '    - cron: "a\\nb"', "    - cron: |\n        value",
+        "    - cron: 'x'\n      other: 'value'",
+        "    - cron: 'x'\n  schedule:\n    - cron: 'y'",
+        "    - cron: 'x'\n  repository_dispatch:"]],
+])
+def test_schedule_accepts_only_cron_items(schedule, valid, ending):
+    patterns = land.ignored_paths(TRIGGER + schedule + ending)
+    assert patterns == ((("**.md",), ("**.md",)) if valid else None)
+    assert land.all_paths_ignored(DOCS, patterns) is valid
+
+
+@pytest.mark.scenario("reviewed-pr-landing/base-workflow-exclusion-proof/dispatch-with-nested-lines-needs-ci")
+@pytest.mark.scenario("reviewed-pr-landing/base-workflow-exclusion-proof/incomplete-or-ambiguous-evidence-needs-ci")
+@pytest.mark.parametrize("text", [
+    TRIGGER.replace("  push:", "  workflow_dispatch:"),
+    TRIGGER + "  workflow_dispatch: {}\n", TRIGGER + "  workflow_dispatch: []\n",
+    TRIGGER + "  workflow_dispatch: # inline\n",
+    TRIGGER + "  workflow_dispatch:\n  workflow_dispatch:\n",
+    *[TRIGGER + "  workflow_dispatch:\n" + nested + "\n" for nested in [
+        "    inputs:", "    branches: [main]", "    paths-ignore: ['**.md']",
+        "    - item", "   # comment", "    # comment", "   ", "    ", "  \t# comment"]],
+])
+def test_dispatch_with_nested_lines_needs_ci(text):
+    assert land.ignored_paths(text) is None
+    assert not land.all_paths_ignored(DOCS, land.ignored_paths(text))
 
 
 @pytest.mark.parametrize("header", ["on", "'on'", '"on"'])
@@ -151,6 +221,8 @@ def test_rename_and_deletion_provenance(evidence, row, paths):
     result = ops.forge.changed_paths(identity, ops)
     assert result == paths
     assert not land.all_paths_ignored(result, land.ignored_paths(TRIGGER))
+    extra = "  schedule:\n    - cron: '0 0 * * *'\n  workflow_dispatch:\n"
+    assert not land.all_paths_ignored(result, land.ignored_paths(TRIGGER + extra))
 
 
 @pytest.mark.scenario("reviewed-pr-landing/base-workflow-exclusion-proof/incomplete-or-ambiguous-evidence-needs-ci")
