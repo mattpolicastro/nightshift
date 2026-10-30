@@ -134,3 +134,63 @@ this is a sanitized result summary, not a public reproduction archive.
 This establishes one successful local-implementation/cloud-review integration.
 It does not establish local reviewer quality, OpenAI proxy compatibility,
 automatic routing, native Codex support, or reliability across larger tasks.
+
+## Gitea contract CI
+
+`.github/workflows/gitea-contract.yml` runs on main pushes, weekly, and manual
+dispatch (not pull requests). It provisions a fresh SQLite Gitea service using
+`scripts/gitea_contract_setup.py`. Only administrator bootstrap uses the container
+CLI; users, runtime tokens, the ten Nightshift labels, repository, commits and
+feedback are created through the API. The bot is restricted, non-admin, and a
+write collaborator. Tokens are masked in Actions and exported only to the job's
+`GITHUB_ENV`; no repository secrets or external instance are required.
+
+The image is `gitea/gitea:28.2.0`, pinned to multi-platform digest
+`sha256:30777c91280d973fa02be48b1ade735bd6859e8f6f7af3b4444d519437852504`
+(resolved with Docker manifest inspection and confirmed by Docker pull).
+To update it, resolve and review a new tag's digest and rerun the live contracts.
+`PYTEST_ADDOPTS=--gitea-live` is essential: environment variables alone do not
+select the live cases. The job executes `uv run pytest -q tests/contract`.
+
+Local reproduction requires a fresh disposable container configured like the
+workflow. Bind it to loopback on an unused port, set `GITHUB_ENV` to a temporary
+file, and run the helper with `--container NAME --url http://127.0.0.1:PORT`.
+Load that file as environment key/value pairs (the fixture JSON is not shell
+syntax), then run `uv run pytest -q tests/contract --gitea-live --tb=short`.
+Remove the container and its anonymous volume with `docker rm -fv NAME`, and
+remove the temporary environment file afterward.
+
+### Known live failures observed on 2026-10-30
+
+Provisioning completed against the pinned 28.2.0 image. The four fake cases pass;
+all four live cases (`test_issue_contract`, `test_feedback_contract`,
+`test_pr_evidence_contract`, `test_owned_mutations_contract`) error in fixture
+setup at `tests/contract/conftest.py:124`: the issue-comments endpoint repeats its
+rows on page 2, and `GiteaForge._pages` (`nightshift/forge/gitea.py:365`) rejects
+that with `Repeated Gitea page`. No live case reaches its assertions.
+
+A second incompatibility is visible in the label timeline response. These are
+exact values of the relevant fields from the disposable fixture (unrelated
+fields omitted):
+
+```json
+{"id":1,"type":"label","body":"1","label":{"id":1,"name":"agent:ready","exclusive":false,"is_archived":false,"color":"4287f5","description":"","url":"http://127.0.0.1:3407/api/v1/repos/contract-owner/contract/labels/1"},"removed_assignee":false}
+{"id":2,"type":"label","body":"","label":{"id":1,"name":"agent:ready","exclusive":false,"is_archived":false,"color":"4287f5","description":"","url":"http://127.0.0.1:3407/api/v1/repos/contract-owner/contract/labels/1"},"removed_assignee":false}
+{"id":3,"type":"label","body":"1","label":{"id":1,"name":"agent:ready","exclusive":false,"is_archived":false,"color":"4287f5","description":"","url":"http://127.0.0.1:3407/api/v1/repos/contract-owner/contract/labels/1"},"removed_assignee":false}
+```
+
+The rows are add/remove/reapply respectively; all have actor
+`user.login = "contract-owner"`. None contains a `removed` field.
+`GiteaForge.label_event_pages` (`nightshift/forge/gitea.py:218`, boolean check at
+line 228) requires that field and would reject these rows with
+`Invalid Gitea label event`. The adapter and contract tests are unchanged;
+these failures are deliberately neither skipped nor marked xfail.
+
+The unchanged unit-suite command, `uv run pytest -q`, completed locally with
+13,886 passed and 19 failed. One failure is
+`test_land_ci_exclusion.py::test_repository_trigger_and_unrelated_yaml_are_supported`
+(`ignored_paths` returns `None` for the unchanged `ci.yml`). The other 18 are in
+`test_mutation_route_examples.py`: copied Python executables cannot load
+`@rpath/libpython3.12.dylib` on this Mac. These files were not modified by this
+CI change. Workflow parsing with `yaml.safe_load` and helper syntax validation
+both passed. The hosted GitHub Actions job has not yet been run.
