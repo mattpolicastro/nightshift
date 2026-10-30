@@ -39,7 +39,7 @@ A Land offer SHALL bind change, canonical PR, pause_id, published head and pause
 
 ### Requirement: Confirmed landing handoff
 
-The worker SHALL supply the confirmed identity to nightshift.land through its injectable runner, use checks-done and preserve land as the sole merge path. It SHALL NOT duplicate landing gates or silently adopt an unrelated head.
+The worker SHALL supply the confirmed identity to nightshift.land through its injectable runner and named landing helpers, use checks-done and preserve land as the sole merge path. It SHALL NOT duplicate landing gates or silently adopt an unrelated head.
 
 #### Scenario: Head changes at handoff
 - **WHEN** PR or pause changes between preflight and the actual initial responses consumed by land, or before a pre-finish mutation
@@ -47,8 +47,8 @@ The worker SHALL supply the confirmed identity to nightshift.land through its in
 
 #### Scenario: Landing gates and head pin remain authoritative
 - **WHEN** land executes through the adapter and finish or a validated base update advances the head
-- **THEN** existing checklist, attestation, finish, CI, provenance and protection gates decide the outcome and merge uses --match-head-commit with land's verified successor head
-- **THEN** land's only implementation change passes the validated PR head to finish, all existing gate assertions remain, and unknown pre-finish mutation command shapes refuse
+- **THEN** existing checklist, attestation, finish, CI, provenance and protection gates decide the outcome and the GitHub merge uses --match-head-commit with land's verified successor head
+- **THEN** land passes the validated PR head to finish, all existing gate assertions remain, and unknown pre-finish mutation command shapes refuse through the shared command classifier
 
 ### Requirement: Terminal attestation behavior
 
@@ -127,3 +127,12 @@ Status SHALL return newest N attempts (default/max 20), total count and separate
 - **WHEN** an attempt progresses, succeeds, refuses or loses its worker before writing a result
 - **THEN** status retains phase/outcome/reason or an explicit interruption diagnostic without inferring success, creating an uncertain hold or retrying
 - **THEN** overdue is display-only after 2400 seconds, damaged records do not erase healthy results and evidence remains until manual pruning, preserving undrained-group records
+
+### Requirement: Shared landing operation boundary
+
+Factory Land SHALL obtain remote PR reads and pre-finish command classification from named helpers in `nightshift.land`. It SHALL contain no direct GitHub argv builders or command-construction disguises. Existing confirmation eligibility, runner injection, timeouts, output handling and execution isolation SHALL remain unchanged.
+
+#### Scenario: Factory delegates GitHub definitions
+- **WHEN** Factory reads the remote head or classifies a confirmed invocation's pre-finish operation
+- **THEN** named landing helpers supply the existing behavior and exact GitHub argv while the existing injectable runner performs subprocess execution
+- **THEN** the worker passes the AST scan without its temporary allowlist entry and no plugin, daemon, lifecycle or public CLI path changes

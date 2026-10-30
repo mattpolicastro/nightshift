@@ -728,14 +728,12 @@ def test_gitea_label_write_is_read_back(fake, label_repo, target):
     relabel("owner/repo", target, add=["working", "later", "working"], remove=["ready", "other"])
     path = f"/gitea/api/v1/repos/owner/repo/issues/{target}/labels"
     calls = [call for call in fake.calls if call.path != WIRE_PATH]
-    expected = [("GET", path, {"page": [str(page)], "limit": ["50"]}, None)
-                for page in range(1, 5)]
-    for method, suffix, body, pages in [("DELETE", "/4", None, 3), ("DELETE", "/1", None, 2),
-                                       ("POST", "", {"labels": [5]}, 3),
-                                       ("POST", "", {"labels": [2]}, 4)]:
+    expected = [("GET", path, {}, None)]
+    for method, suffix, body in [("DELETE", "/4", None), ("DELETE", "/1", None),
+                                 ("POST", "", {"labels": [5]}),
+                                 ("POST", "", {"labels": [2]})]:
         expected.append((method, path + suffix, {}, body))
-        expected.extend(("GET", path, {"page": [str(page)], "limit": ["50"]}, None)
-                        for page in range(1, pages + 1))
+        expected.append(("GET", path, {}, None))
     assert [(call.method, call.path, call.query, call.body) for call in calls] == expected
     assert {label["name"] for label in (issue if target == 1 else pr)["labels"]} == {
         "keep", "working", "later"}
@@ -774,7 +772,7 @@ def test_label_failure_stops_remaining_writes(fake, label_repo, target, method, 
         fake.silent_label_writes.add(method)
     elif failure.startswith("readback"):
         reply = Reply({"unexpected": SECRET}) if failure == "readback-malformed" else Reply(status=503)
-        fake.route("GET", path, Reply([issue["labels"][1]]), reply, reply, reply, page=2)
+        fake.route("GET", path, Reply(issue["labels"]), reply, reply, reply)
     else:
         fake.route(method, path + ("/4" if method == "DELETE" else ""), Reply(status=503))
     forge = make_forge(fake)
@@ -791,9 +789,12 @@ def test_label_failure_stops_remaining_writes(fake, label_repo, target, method, 
 
 @pytest.mark.scenario("gitea-forge/verified-label-mutations/silent-write-failure")
 @pytest.mark.parametrize("operation", ["issue_labels", "relabel_issue"])
-def test_unreadable_current_labels_refused(fake, label_repo, operation):
+@pytest.mark.parametrize("bad", [None, {}, [label_row(9, None)],
+                                 [label_row(9, "same"), label_row(10, "same")],
+                                 [label_row(9, "one"), label_row(9, "two")]])
+def test_unreadable_current_labels_refused(fake, label_repo, operation, bad):
     path = "/gitea/api/v1/repos/owner/repo/issues/1/labels"
-    fake.route("GET", path, Reply([label_row(9, None)]), page=2)
+    fake.route("GET", path, Reply(bad))
     with pytest.raises(ForgeError):
         method = getattr(make_forge(fake), operation)
         method("owner/repo", 1, **({"add": ["working"], "remove": []}
@@ -815,16 +816,37 @@ def test_poll_later_page_failure_refuses_candidates(fake, label_repo, operation,
 
 
 @pytest.mark.scenario("gitea-forge/verified-label-mutations/write-is-read-back")
+def test_issue_labels_endpoint_is_unpaginated(fake, label_repo):
+    _, issue, _ = label_repo
+    assert make_forge(fake).issue_labels("owner/repo", 1) == {
+        label["name"] for label in issue["labels"]}
+    assert [(call.method, call.path, call.query) for call in fake.calls] == [
+        ("GET", "/gitea/api/v1/repos/owner/repo/issues/1/labels", {})]
+
+
+@pytest.mark.scenario("gitea-forge/verified-label-mutations/write-is-read-back")
+def test_relabel_read_back_on_labelled_issue(fake, label_repo):
+    _, issue, _ = label_repo
+    make_forge(fake).relabel_issue("owner/repo", 1, add=["working"], remove=[])
+    assert {label["name"] for label in issue["labels"]} == {
+        "ready", "keep", "other", "working"}
+    path = "/gitea/api/v1/repos/owner/repo/issues/1/labels"
+    assert [(call.method, call.query, call.body) for call in fake.calls
+            if call.path == path] == [
+        ("GET", {}, None), ("POST", {}, {"labels": [2]}), ("GET", {}, None)]
+
+
+@pytest.mark.scenario("gitea-forge/verified-label-mutations/write-is-read-back")
 def test_empty_issue_labels_are_proven_by_a_read(fake):
     fake.repository("owner/repo", labels=[], issues=[candidate(1, [])])
     assert make_forge(fake).issue_labels("owner/repo", 1) == set()
-    assert len(fake.calls) == 1 and fake.calls[0].query == {"page": ["1"], "limit": ["50"]}
+    assert len(fake.calls) == 1 and fake.calls[0].query == {}
 
 
 @pytest.mark.scenario("gitea-forge/failure-and-guard-boundaries/guard-exception-identity")
 @pytest.mark.parametrize("kind", ["http", "forge", "os", "pause"])
-@pytest.mark.parametrize("stage, stop", [("read", 1), ("write", 11), ("readback", 12),
-                                         ("later-page", 13), ("retry", 13)])
+@pytest.mark.parametrize("stage, stop", [("read", 1), ("write", 8), ("readback", 9),
+                                         ("later-page", 2), ("retry", 10)])
 def test_label_guard_identity(fake, label_repo, kind, stage, stop):
     labels, _, _ = label_repo
     error = guard_error(kind)
@@ -837,13 +859,13 @@ def test_label_guard_identity(fake, label_repo, kind, stage, stop):
 
     if stage == "retry":
         fake.route("GET", "/gitea/api/v1/repos/owner/repo/issues/1/labels",
-                   Reply([labels[0]]), Reply(status=503), page=1)
+                   Reply(labels), Reply(status=503))
     forge = make_forge(fake, guard=guard)
     with pytest.raises(type(error)) as caught:
         forge.relabel_issue("owner/repo", 1, add=["working"], remove=["ready", "other"])
     assert caught.value is error
     assert len(fake.calls) == stop - 1 and len(guards) == stop
-    assert sum(call.method != "GET" for call in fake.calls) == (1 if stop > 11 else 0)
+    assert sum(call.method != "GET" for call in fake.calls) == (1 if stage in ("readback", "retry") else 0)
     assert forge._guard_error.get() is None
 
 
@@ -966,7 +988,7 @@ def test_pr_targets_resolve_for_views_and_verified_labels(fake, target):
     assert [(call.method, call.path, call.body) for call in writes] == [
         ("POST", "/gitea/api/v1/repos/owner/repo/issues/7/labels", {"labels": [2]})]
     assert fake.calls[-1].path.endswith("/issues/7/labels")
-    assert fake.calls[-1].query["page"] == ["3"]  # Complete verification after the write.
+    assert fake.calls[-1].method == "GET" and fake.calls[-1].query == {}  # Complete verification after the write.
     if target == "topic/work":
         assert sum(call.path == PULLS_PATH for call in fake.calls) == 6
 
@@ -991,7 +1013,7 @@ def test_pr_branch_targets_allow_git_valid_characters_for_views_and_labels(fake,
         {"state": ["all"], "page": [str(page)], "limit": ["50"]}
         for page in range(1, 4)] * 3
     assert fake.calls[-1].path == ROOT + "/issues/7/labels"
-    assert fake.calls[-1].query["page"] == ["3"]
+    assert fake.calls[-1].method == "GET" and fake.calls[-1].query == {}
 
 
 @pytest.mark.scenario("gitea-forge/pr-identity-and-drafts/pr-views-and-targets")

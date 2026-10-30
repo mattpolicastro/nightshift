@@ -1,27 +1,34 @@
 """Explicit operator entry point for landing an enrolled, reviewed PR.
 
 Human checks, run completion, and bounded CI/base synchronization precede a
-head-conditioned merge, whose result must be confirmed by GitHub.
+head-conditioned merge, whose result must be confirmed by the selected forge.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from html import escape
 import json
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 import time
-from typing import Any
-from urllib.parse import urlsplit
+from typing import Any, Literal, Protocol, TypeGuard
+from urllib.error import HTTPError
+from urllib.parse import SplitResult, quote, unquote, urlencode, urlsplit
+from urllib.request import build_opener
 
 from . import config, queue
+from .forge import ForgeError
+from .forge.gitea import GiteaForge
+from .forge.http import GiteaHTTPError, GiteaTransport
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -43,14 +50,21 @@ class _CIDeadlineExpired(Refusal):
     """Distinguish shared-budget expiry from command and validation failures."""
 
 
+class _UncertainBranchUpdate(Refusal):
+    """A single dispatched update needs read-only provenance reconciliation."""
+
+
 @dataclass(frozen=True)
 class Identity:
     repo: str
     number: int
+    origin: str = "https://github.com"
+    forge_name: str | None = None
 
     @property
     def url(self) -> str:
-        return f"https://github.com/{self.repo}/pull/{self.number}"
+        route = "pull" if self.forge_name is None else "pulls"
+        return f"{self.origin}/{self.repo}/{route}/{self.number}"
 
 
 @dataclass(frozen=True)
@@ -118,6 +132,18 @@ class LandingRun:
     pause_reason: str | None
 
 
+@dataclass(frozen=True)
+class CIExclusion:
+    """A round's exact-head/base evidence, to attest before final validation."""
+
+    head: str
+    base: str
+    workflow: str
+    paths: tuple[str, ...]
+    patterns: tuple[tuple[str, ...], ...]
+    grace: float = 0
+
+
 @dataclass
 class Operations:
     """Single process and clock boundary, shared by command helpers.
@@ -132,6 +158,8 @@ class Operations:
     sleep: Callable[[float], None]
     monotonic: Callable[[], float]
     deadline: float | None = None
+    forge: LandingForge = field(default_factory=lambda: GitHubLandingForge())
+    gitea_forges: tuple[config.ForgeConfig, ...] = ()
 
     def remaining(self) -> float:
         """One absolute budget, retained across CI rounds and update observation."""
@@ -189,6 +217,719 @@ class Operations:
         return value
 
 
+class LandingForge(Protocol):
+    """Named landing transport operations; policy remains in the gate helpers.
+
+    Receive the current Operations on every call so deadline replacements apply
+    to every dispatch. There is no arbitrary-command operation on this boundary.
+    """
+
+    def resolve_repo(self, operations: Operations) -> dict[str, Any]: ...
+
+    def read_pr(self, identity: Identity, operations: Operations) -> dict[str, Any]: ...
+
+    def read_main(self, identity: Identity, operations: Operations) -> dict[str, Any]: ...
+
+    def changed_paths(self, identity: Identity, operations: Operations) -> tuple[str, ...] | None: ...
+
+    def ci_workflow(
+        self, identity: Identity, base_sha: str, operations: Operations,
+    ) -> tuple[str, str] | None: ...
+
+    def request_update(
+        self, identity: Identity, expected_head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+    def read_commit(self, identity: Identity, head: str, operations: Operations) -> dict[str, Any]: ...
+
+    def read_comments(self, identity: Identity, operations: Operations, *, stage: str) -> list[Any]: ...
+
+    def read_actor(self, operations: Operations) -> dict[str, Any]: ...
+
+    def trusted_comment(self, comment: dict[str, Any]) -> bool: ...
+
+    def edit_source(
+        self, identity: Identity, source: CheckSource, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+    def create_attestation(self, identity: Identity, body: str, operations: Operations) -> dict[str, Any]: ...
+
+    def edit_attestation(
+        self, identity: Identity, comment_id: int, body: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+    def incorporates_base(self, identity: Identity, head: str, base: str, operations: Operations) -> bool: ...
+
+    def checks(
+        self, identity: Identity, head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+    def merge(
+        self, identity: Identity, head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+    def confirm_merge(self, identity: Identity, operations: Operations) -> dict[str, Any]: ...
+
+
+def _relative_path(value: Any) -> TypeGuard[str]:
+    return (isinstance(value, str) and bool(value)
+            and not any(part in ("", ".", "..") for part in value.split("/"))
+            and not any(ord(c) < 32 or 127 <= ord(c) <= 159 or c == "\\" for c in value))
+
+
+def _ignore_glob(pattern: str) -> re.Pattern[str] | None:
+    if (not _relative_path(pattern) or "***" in pattern
+            or any(c in pattern for c in "!?[]{}+()|^$")):
+        return None
+    # Only a whole directory component may disappear together with its slash.
+    pieces = re.split(r"((?:^|(?<=/))\*\*/|\*\*|\*)", pattern)
+    return re.compile("".join({"**/": "(?:[^/]+/)*", "**": ".*", "*": "[^/]*"}.get(
+        piece, re.escape(piece)) for piece in pieces))
+
+
+def ignored_paths(workflow_text: str) -> tuple[tuple[str, ...], ...] | None:
+    """Return one ignore list per event, recognizing only physical trigger lines."""
+    lines = workflow_text.split("\n")
+    starts = [i for i, line in enumerate(lines)
+              if re.match(r"^(?:on|'on'|\"on\")\s*:", line)]
+    if len(starts) != 1 or not re.fullmatch(r"(?:on|'on'|\"on\"):[ ]*\r?", lines[starts[0]]):
+        return None
+    events: dict[str, dict[str, list[str]]] = {}
+    fields: dict[str, list[str]] | None = None
+    active: str | None = None
+    scalar = r"(?:'[^'\\\r\n]*'|\"[^\"\\\r\n]*\")"
+    for raw in lines[starts[0] + 1:]:
+        line = raw.removesuffix("\r")
+        if line and not line[0].isspace() and not line.startswith("#"):
+            break
+        if "\t" in line:
+            return None
+        if not line.strip(" ") or line.lstrip(" ").startswith("#"):
+            continue
+        if not line.startswith(" "):
+            return None
+        event = re.fullmatch(r"  (pull_request|push): *", line)
+        if event:
+            if event[1] in events:
+                return None
+            fields = events[event[1]] = {}
+            active = None
+            continue
+        field_match = re.fullmatch(r"    (paths-ignore|branches|branches-ignore): *(.*?) *", line)
+        item = re.fullmatch(r"      - (.*?) *", line)
+        if fields is None:
+            return None
+        if field_match:
+            name, value = field_match.groups()
+            if name in fields:
+                return None
+            fields[name] = []
+            active = name if not value else None
+            if not value:
+                continue
+            if not (value.startswith("[") and value.endswith("]")):
+                return None
+            # Validate delimiters separately: empty items and trailing commas
+            # are not part of the supported list spelling.
+            list_scalar = scalar if name == "paths-ignore" else rf"(?:{scalar}|[A-Za-z0-9_./*-]+)"
+            if not re.fullmatch(rf" *{list_scalar}(?: *, *{list_scalar})* *", value[1:-1]):
+                return None
+            values = re.findall(list_scalar, value[1:-1])
+        elif item and active:
+            name, values = active, [item[1]]
+        else:
+            return None
+        grammar = scalar if name == "paths-ignore" else rf"(?:{scalar}|[A-Za-z0-9_./*-]+)"
+        for value in values:
+            value = value.strip(" ")
+            if not re.fullmatch(grammar, value):
+                return None
+            value = value[1:-1] if value.startswith(("'", '"')) else value
+            if (not value or value in fields[name]
+                    or (name == "paths-ignore" and _ignore_glob(value) is None)):
+                return None
+            fields[name].append(value)
+    if ("pull_request" not in events
+            or any(not fields.get("paths-ignore") or any(not v for v in fields.values())
+                   for fields in events.values())):
+        return None
+    return tuple(tuple(fields["paths-ignore"]) for fields in events.values())
+
+
+def all_paths_ignored(paths: tuple[str, ...] | None,
+                      patterns: tuple[tuple[str, ...], ...] | None) -> bool:
+    """Every full path must match an ignore pattern for every declared event."""
+    if not paths or not patterns or any(not _relative_path(path) for path in paths):
+        return False
+    if len(set(paths)) != len(paths):
+        return False
+    for event in patterns:
+        compiled = [_ignore_glob(pattern) for pattern in event]
+        if not compiled or any(pattern is None for pattern in compiled):
+            return False
+        if any(not any(pattern is not None and pattern.fullmatch(path)
+                       for pattern in compiled) for path in paths):
+            return False
+    return True
+
+
+class _CIExclusionEvidence:
+    """Optional factual evidence. Unavailable reads never swallow budget expiry."""
+
+    _workflow_directory = ".github/workflows"
+    _page_size_key = "per_page"
+
+    def _ci_read(self, identity: Identity, path: str, query: dict[str, Any],
+                 operations: Operations) -> Any:
+        raise NotImplementedError
+
+    def changed_paths(self, identity: Identity, operations: Operations) -> tuple[str, ...] | None:
+        try:
+            endpoint = f"pulls/{identity.number}"
+            metadata = self._ci_read(identity, endpoint, {}, operations)
+            count = metadata.get("changed_files") if isinstance(metadata, dict) else None
+            # GitHub caps file responses at 3000. Use the same conservative
+            # ceiling on Gitea, whose configured cap can also truncate pages.
+            if type(count) is not int or not 0 < count < 3000:
+                return None
+            paths: list[str] = []
+            seen: set[str] = set()
+            received = 0
+            for page in range(1, 101):
+                rows = self._ci_read(identity, endpoint + "/files",
+                                     {self._page_size_key: 100, "page": page}, operations)
+                if not isinstance(rows, list) or received + len(rows) > count:
+                    return None
+                if not rows:
+                    return tuple(paths) if received == count else None
+                received += len(rows)
+                for row in rows:
+                    if not isinstance(row, dict) or row.get("status") not in (
+                            "added", "modified", "removed", "deleted", "renamed"):
+                        return None
+                    names = [row.get("filename")]
+                    if row["status"] == "renamed":
+                        names.append(row.get("previous_filename"))
+                    elif row.get("previous_filename") not in (None, ""):
+                        return None
+                    for name in names:
+                        if not _relative_path(name) or name in seen:
+                            return None
+                        seen.add(name)
+                        paths.append(name)
+            return None  # Pagination cannot establish completeness within the bound.
+        except _CIDeadlineExpired:
+            raise
+        except (Refusal, GiteaHTTPError, ValueError):
+            operations.remaining()
+            return None
+
+    def ci_workflow(self, identity: Identity, base_sha: str,
+                    operations: Operations) -> tuple[str, str] | None:
+        operations.remaining()
+        if not isinstance(base_sha, str) or not _SHA.fullmatch(base_sha):
+            return None
+        try:
+            query = {"ref": base_sha}
+            rows = self._ci_read(identity, "contents/" + self._workflow_directory, query, operations)
+            if not isinstance(rows, list) or not rows or len(rows) >= 1000:
+                return None
+            workflows = []
+            names: set[str] = set()
+            for row in rows:
+                if not isinstance(row, dict):
+                    return None
+                name = row.get("name")
+                if (not _relative_path(name) or "/" in name or name in names
+                        or row.get("path") != f"{self._workflow_directory}/{name}"
+                        or row.get("type") not in ("file", "dir")
+                        or row.get("truncated") or row.get("target") or row.get("submodule_git_url")):
+                    return None
+                names.add(name)
+                if name.lower().endswith((".yml", ".yaml")):
+                    workflows.append(row)
+            if (len(workflows) != 1 or workflows[0]["name"] not in ("ci.yml", "ci.yaml")
+                    or workflows[0]["type"] != "file"):
+                return None
+            selected = workflows[0]
+            content = self._ci_read(identity, "contents/" + quote(selected["path"], safe="/"),
+                                    query, operations)
+            if (not isinstance(content, dict) or content.get("type") != "file"
+                    or any(content.get(key) != selected.get(key) for key in ("name", "path", "sha"))
+                    or not isinstance(content.get("sha"), str) or not _SHA.fullmatch(content["sha"])
+                    or content.get("encoding") != "base64" or not isinstance(content.get("content"), str)
+                    or content.get("truncated") or content.get("target") or content.get("submodule_git_url")):
+                return None
+            decoded = base64.b64decode(content["content"].replace("\n", ""), validate=True)
+            if type(content.get("size")) is not int or len(decoded) != content["size"]:
+                return None
+            return selected["path"], decoded.decode("utf-8")
+        except _CIDeadlineExpired:
+            raise
+        except (Refusal, GiteaHTTPError, ValueError):
+            operations.remaining()
+            return None
+
+
+class GitHubLandingForge(_CIExclusionEvidence):
+    """The existing GitHub transcript, executed by the caller's injected runner."""
+
+    def _ci_read(self, identity: Identity, path: str, query: dict[str, Any],
+                 operations: Operations) -> Any:
+        endpoint = f"repos/{quote(identity.repo, safe='/')}/{path}"
+        if query:
+            endpoint += "?" + urlencode(query)
+        return operations._read_json(["gh", "api", endpoint], stage="CI exclusion evidence")
+
+    def resolve_repo(self, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(
+            ["gh", "repo", "view", "--json", "nameWithOwner"],
+            stage="repository resolution",
+        )
+
+    def read_pr(self, identity: Identity, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(
+            ["gh", "pr", "view", str(identity.number), "--repo", identity.repo,
+             "--json", PR_FIELDS],
+            stage=f"PR read for {identity.url}",
+        )
+
+    def read_main(self, identity: Identity, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(
+            ["gh", "api", f"repos/{identity.repo}/git/ref/heads/main"],
+            stage=f"read existing main branch in {identity.repo}",
+        )
+
+    def request_update(
+        self, identity: Identity, expected_head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        return operations.run(
+            ["gh", "api", "--method", "PUT",
+             f"repos/{identity.repo}/pulls/{identity.number}/update-branch",
+             "-f", f"expected_head_sha={expected_head}"],
+            stage="branch update", allowed_returncodes=None,
+        )
+
+    def read_commit(self, identity: Identity, head: str, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(
+            ["gh", "api", f"repos/{identity.repo}/commits/{head}"],
+            stage="branch update parent inspection",
+        )
+
+    def read_comments(self, identity: Identity, operations: Operations, *, stage: str) -> list[Any]:
+        return operations.read_json_array(
+            ["gh", "api", f"repos/{identity.repo}/issues/{identity.number}/comments",
+             "--paginate", "--slurp"],
+            stage=stage,
+        )
+
+    def read_actor(self, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(["gh", "api", "user"], stage="authenticated actor lookup")
+
+    @staticmethod
+    def trusted_comment(comment: dict[str, Any]) -> bool:
+        return (isinstance(comment.get("author_association"), str)
+                and queue.trusted(comment, key="author_association"))
+
+    def edit_source(
+        self, identity: Identity, source: CheckSource, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        endpoint = (f"repos/{identity.repo}/pulls/{identity.number}"
+                    if source.comment_id is None
+                    else f"repos/{identity.repo}/issues/comments/{source.comment_id}")
+        return operations.run(
+            ["gh", "api", "--method", "PATCH", endpoint, "-f", f"body={source.body}"],
+            stage=f"record human checks in {source.reference}; rerun land to recover",
+        )
+
+    def create_attestation(self, identity: Identity, body: str, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(
+            ["gh", "api", "--method", "POST",
+             f"repos/{identity.repo}/issues/{identity.number}/comments", "-f", f"body={body}"],
+            stage="attestation create",
+        )
+
+    def edit_attestation(
+        self, identity: Identity, comment_id: int, body: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        return operations.run(
+            ["gh", "api", "--method", "PATCH", f"repos/{identity.repo}/issues/comments/{comment_id}",
+             "-f", f"body={body}"],
+            stage=f"attestation update for comment {comment_id}; rerun land to recover",
+        )
+
+    def compare(self, identity: Identity, head: str, base: str, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(
+            ["gh", "api", f"repos/{identity.repo}/compare/{base}...{head}"],
+            stage="initial base ancestry check",
+        )
+
+    def incorporates_base(self, identity: Identity, head: str, base: str, operations: Operations) -> bool:
+        comparison = self.compare(identity, head, base, operations)
+        ancestor = comparison.get("merge_base_commit")
+        status = comparison.get("status")
+        if (status not in ("ahead", "identical", "behind", "diverged")
+                or not isinstance(ancestor, dict) or not isinstance(ancestor.get("sha"), str)
+                or not _SHA.fullmatch(ancestor["sha"])
+                or (ancestor["sha"] == base) != (status in ("ahead", "identical"))):
+            raise Refusal("initial base ancestry check: malformed or inconsistent comparison")
+        return ancestor["sha"] == base
+
+    def checks(
+        self, identity: Identity, head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        return operations.run(
+            ["gh", "pr", "checks", str(identity.number), "--repo", identity.repo,
+             "--json", "name,bucket,state,link"],
+            stage="CI checks", allowed_returncodes=(0, 1, 8),
+        )
+
+    def merge(
+        self, identity: Identity, head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        return operations.run(
+            ["gh", "pr", "merge", str(identity.number), "--repo", identity.repo,
+             "--merge", "--match-head-commit", head],
+            stage="merge request",
+        )
+
+    def confirm_merge(self, identity: Identity, operations: Operations) -> dict[str, Any]:
+        return operations.read_json(
+            ["gh", "pr", "view", str(identity.number), "--repo", identity.repo,
+             "--json", "number,url,state"],
+            stage="merged-state confirmation",
+        )
+
+
+class _BudgetOpener:
+    """Apply the current logical operation's budget to every HTTP attempt."""
+
+    def __init__(self, opener: Any, operations: Operations):
+        self.opener, self.operations = opener, operations
+
+    def add_handler(self, handler: Any) -> None:
+        self.opener.add_handler(handler)
+
+    def open(self, request: Any, *, timeout: float) -> Any:
+        try:
+            response = self.opener.open(request, timeout=min(timeout, self.operations.remaining()))
+        except Exception as error:
+            # A failed dispatch also consumes time. Do not back off or retry
+            # after expiry, and close an HTTP error stream if expiry masks it.
+            try:
+                self.operations.remaining()
+            except Refusal:
+                if isinstance(error, HTTPError):
+                    error.close()
+                raise
+            raise
+        try:
+            self.operations.remaining()
+        except Refusal:
+            response.close()
+            raise
+        return response
+
+
+class _LandingGiteaEvidence(GiteaForge):
+    def _record(self, row: dict) -> dict:
+        # Intake normalizes absent bodies to empty text. Landing must not turn
+        # unreadable evidence into an apparent absence of checks or markers.
+        if not isinstance(row.get("body"), str):
+            raise ForgeError("Invalid Gitea comment body", transient=False)
+        return super()._record(row)
+
+
+class GiteaLandingForge(_CIExclusionEvidence):
+    """Landing-specific reads at the configured root, using only the human token."""
+
+    _workflow_directory = ".gitea/workflows"
+    _page_size_key = "limit"
+
+    def _ci_read(self, identity: Identity, path: str, query: dict[str, Any],
+                 operations: Operations) -> Any:
+        try:
+            return self._transport(operations).get_json(
+                f"/api/v1/repos/{quote(identity.repo, safe='/')}/{path}", query=query or None,
+            )
+        finally:
+            operations.remaining()
+
+    def __init__(self, definition: config.ForgeConfig, token: str, *, opener: Any = None):
+        self.definition = definition
+        self._token = token
+        self._opener = build_opener() if opener is None else opener
+
+    def _transport(self, operations: Operations) -> GiteaTransport:
+        # Bind each call, not the initial unbounded Operations: finish replaces
+        # it with a shared deadline, and merge later restores ordinary timeouts.
+        return GiteaTransport(
+            self.definition.url, self._token,
+            opener=_BudgetOpener(self._opener, operations), guard=operations.remaining,
+        )
+
+    def _read_json(self, path: str, operations: Operations, *, stage: str) -> dict[str, Any]:
+        try:
+            value = self._transport(operations).get_json(path)
+        except (GiteaHTTPError, ValueError):
+            raise Refusal(f"{stage}: Gitea request failed") from None
+        finally:
+            operations.remaining()
+        if not isinstance(value, dict):
+            raise Refusal(f"{stage}: expected a JSON object")
+        return value
+
+    def read_pr(self, identity: Identity, operations: Operations) -> dict[str, Any]:
+        data = self._read_json(
+            f"/api/v1/repos/{identity.repo}/pulls/{identity.number}", operations, stage="PR read",
+        )
+        if (_returned_identity(data.get("html_url"), identity) != identity
+                or type(data.get("number")) is not int or data["number"] != identity.number):
+            raise Refusal("Gitea returned a contradictory PR identity")
+        if data.get("state") != "open":
+            raise Refusal("Gitea PR must be open")
+        base, head = data.get("base"), data.get("head")
+        if not isinstance(base, dict) or base.get("ref") != "main":
+            raise Refusal("Gitea PR must target main")
+        sha = head.get("sha") if isinstance(head, dict) else None
+        title, body = data.get("title"), data.get("body")
+        if not isinstance(sha, str) or not _SHA.fullmatch(sha) or not isinstance(title, str):
+            raise Refusal("malformed Gitea PR metadata: expected a full head SHA and title")
+        if not isinstance(body, str):
+            raise Refusal("malformed Gitea PR body: expected text")
+        return {"number": identity.number, "url": identity.url, "state": "OPEN",
+                "baseRefName": "main", "headRefOid": sha, "body": body,
+                "isDraft": title.startswith(self.definition.wip_prefix)}
+
+    def read_main(self, identity: Identity, operations: Operations) -> dict[str, Any]:
+        data = self._read_json(
+            f"/api/v1/repos/{identity.repo}/branches/main", operations, stage="read existing main branch",
+        )
+        commit = data.get("commit")
+        sha = commit.get("id") if isinstance(commit, dict) else None
+        if data.get("name") != "main" or not isinstance(sha, str) or not _SHA.fullmatch(sha):
+            raise Refusal("cannot establish an existing main branch: malformed Gitea branch response")
+        return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": sha}}
+
+    def _adapter(self, operations: Operations) -> GiteaForge:
+        def guard() -> None:
+            operations.remaining()
+
+        return _LandingGiteaEvidence(
+            self.definition.url, self._token, trusted_logins=self.definition.trusted_logins,
+            bot_login=self.definition.bot_login, wip_prefix=self.definition.wip_prefix,
+            opener=_BudgetOpener(self._opener, operations), guard=guard,
+        )
+
+    def read_comments(self, identity: Identity, operations: Operations, *, stage: str) -> list[Any]:
+        try:
+            return self._adapter(operations).comment_pages(identity.repo, identity.number)
+        except (ForgeError, ValueError):
+            raise Refusal(f"{stage}: Gitea comment evidence is unreadable") from None
+        finally:
+            operations.remaining()
+
+    def trusted_comment(self, comment: dict[str, Any]) -> bool:
+        # Landing intentionally permits listed publication bots. Neither the
+        # server association nor the adapter's feedback trust grants authority.
+        user = comment.get("user")
+        login = user.get("login") if isinstance(user, dict) else None
+        return (isinstance(login, str) and login.casefold() in
+                {name.casefold() for name in self.definition.trusted_logins})
+
+    def read_actor(self, operations: Operations) -> dict[str, Any]:
+        data = self._read_json("/api/v1/user", operations, stage="authenticated actor lookup")
+        login = data.get("login")
+        if (not self.trusted_comment({"user": data})
+                or not isinstance(login, str)
+                or login.casefold() == self.definition.bot_login.casefold()):
+            raise Refusal("authenticated actor lookup: require a listed non-bot human login")
+        return data
+
+    def _write_body(
+        self, method: str, path: str, body: str, operations: Operations, *, stage: str,
+    ) -> Any:
+        # Human landing writes must bypass the adapter's bot ownership helpers.
+        # The transport attempts writes once; only attestation policy reconciles.
+        try:
+            _, _, response = self._transport(operations).request(method, path, json_body={"body": body})
+            return response
+        except (GiteaHTTPError, ValueError):
+            raise Refusal(f"{stage}: Gitea request failed; rerun land to recover") from None
+        finally:
+            operations.remaining()
+
+    def edit_source(
+        self, identity: Identity, source: CheckSource, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        endpoint = (f"/api/v1/repos/{identity.repo}/pulls/{identity.number}"
+                    if source.comment_id is None
+                    else f"/api/v1/repos/{identity.repo}/issues/comments/{source.comment_id}")
+        self._write_body("PATCH", endpoint, source.body, operations,
+                         stage=f"record human checks in {source.reference}")
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    def create_attestation(self, identity: Identity, body: str, operations: Operations) -> dict[str, Any]:
+        response = self._write_body(
+            "POST", f"/api/v1/repos/{identity.repo}/issues/{identity.number}/comments",
+            body, operations, stage="attestation create",
+        )
+        if not isinstance(response, dict):
+            raise Refusal("attestation create: incomplete comment acknowledgement")
+        return response
+
+    def edit_attestation(
+        self, identity: Identity, comment_id: int, body: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        self._write_body("PATCH", f"/api/v1/repos/{identity.repo}/issues/comments/{comment_id}",
+                         body, operations, stage=f"attestation update for comment {comment_id}")
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    def read_commit(self, identity: Identity, head: str, operations: Operations) -> dict[str, Any]:
+        try:
+            commit = self._adapter(operations).commit(identity.repo, head)
+        except (ForgeError, ValueError):
+            raise Refusal("Gitea commit inspection: unreadable commit facts") from None
+        finally:
+            operations.remaining()
+        if commit["sha"] != head:
+            raise Refusal("Gitea commit inspection: mismatched commit SHA")
+        return commit
+
+    def incorporates_base(self, identity: Identity, head: str, base: str, operations: Operations) -> bool:
+        pending, visited = [head], set()
+        while pending:
+            operations.remaining()
+            sha = pending.pop()
+            if sha == base:
+                return True
+            if sha in visited:
+                continue
+            visited.add(sha)
+            try:
+                commit = self.read_commit(identity, sha, operations)
+            except _CIDeadlineExpired:
+                raise
+            except Refusal as exc:
+                raise Refusal(f"initial base ancestry check: {exc}") from exc
+            pending.extend(parent["sha"] for parent in commit["parents"])
+        return False
+
+    def request_update(
+        self, identity: Identity, expected_head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        # The controller checked H and captured B immediately before this call.
+        # Gitea has no expected-head CAS; exact ordered parents gate acceptance.
+        try:
+            self._transport(operations).request(
+                "POST", f"/api/v1/repos/{identity.repo}/pulls/{identity.number}/update",
+                query={"style": "merge"},
+            )
+        except GiteaHTTPError as exc:
+            if ((exc.status is None and exc.transient)
+                    or (exc.status is not None and (200 <= exc.status < 300 or 500 <= exc.status < 600))):
+                raise _UncertainBranchUpdate("branch update: uncertain Gitea response") from None
+            raise Refusal("branch update: Gitea request rejected") from None
+        except ValueError:
+            raise Refusal("branch update: invalid Gitea request") from None
+        finally:
+            operations.remaining()
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    def checks(
+        self, identity: Identity, head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            evidence = self._adapter(operations).checks_for_sha(identity.repo, head)
+        except (ForgeError, ValueError):
+            raise Refusal("CI checks: Gitea status evidence is unreadable") from None
+        finally:
+            operations.remaining()
+        # The adapter validates the exact SHA and every combined-status page.
+        # Its factual projection omits links; normalize only here, preserving
+        # the strict GitHub check schema in ci_is_green.
+        checks = [{**check, "link": ""} for check in json.loads(evidence.stdout)]
+        if not checks:
+            return subprocess.CompletedProcess([], 1, "", "no checks reported")
+        return subprocess.CompletedProcess([], 0, json.dumps(checks), "")
+
+    def merge(
+        self, identity: Identity, head: str, operations: Operations,
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            self._transport(operations).request(
+                "POST", f"/api/v1/repos/{identity.repo}/pulls/{identity.number}/merge",
+                json_body={"Do": "merge", "head_commit_id": head},
+            )
+        except GiteaHTTPError as exc:
+            detail = f" (HTTP {exc.status})" if exc.status is not None else ""
+            raise Refusal(f"merge request: Gitea request failed{detail}") from None
+        except ValueError:
+            raise Refusal("merge request: invalid Gitea request") from None
+        finally:
+            operations.remaining()
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    def confirm_merge(self, identity: Identity, operations: Operations) -> dict[str, Any]:
+        data = self._read_json(
+            f"/api/v1/repos/{identity.repo}/pulls/{identity.number}", operations,
+            stage="merged-state confirmation",
+        )
+        # A closed PR alone is not evidence of merging, and merged=true on an
+        # open/unknown state is contradictory. Do not coerce truthy values.
+        if data.get("merged") is not True or data.get("state") != "closed":
+            raise Refusal("merged-state confirmation: Gitea PR is not confirmed merged")
+        return {"number": data.get("number"), "url": data.get("html_url"), "state": "MERGED"}
+
+    def resolve_repo(self, operations: Operations) -> dict[str, Any]:
+        raise Refusal("Gitea landing requires a full configured PR URL")
+
+
+def read_confirmed_remote_head(pr: str, read_json: Callable[[list[str]], Any]) -> str:
+    """Factory's standalone identity read, retaining its caller's 20s boundary."""
+    data = read_json(["gh", "pr", "view", pr, "--json", "url,headRefOid"])
+    if (not isinstance(data, dict) or data.get("url") != pr
+            or not isinstance(data.get("headRefOid"), str) or not _SHA.fullmatch(data["headRefOid"])):
+        raise Refusal("fresh PR identity is unreadable or contradictory")
+    return data["headRefOid"].lower()
+
+
+ConfirmedCommand = Literal["pr", "status", "read", "mutation", "finish", "unknown"]
+
+
+def classify_confirmed_command(
+    argv: list[str], *, repo: str, number: str, change: str, head: str,
+) -> ConfirmedCommand:
+    """Recognize only exact pre-finish shapes for the confirmed GitHub target.
+
+    Classification grants no permission: Factory must still inspect the actual
+    responses and revalidate all five confirmation fields before each mutation.
+    """
+    view = ["gh", "pr", "view", number, "--repo", repo, "--json", PR_FIELDS]
+    status = [sys.executable, "-m", "nightshift.cli", "status", "--json"]
+    finish = [sys.executable, "-m", "nightshift.cli", "finish", change, "--expect-head", head]
+    if argv == view:
+        return "pr"
+    if argv == status:
+        return "status"
+    if argv in (["gh", "api", f"repos/{repo}/git/ref/heads/main"],
+                ["gh", "api", f"repos/{repo}/issues/{number}/comments", "--paginate", "--slurp"],
+                ["gh", "api", "user"]):
+        return "read"
+    if len(argv) == len(finish) and argv[:-1] == finish[:-1] and argv[-1].lower() == head:
+        return "finish"
+    if (len(argv) == 7 and argv[:3] == ["gh", "api", "--method"]
+            and argv[5] == "-f" and argv[6].startswith("body=")):
+        endpoint = argv[4]
+        if (argv[3] == "POST" and endpoint == f"repos/{repo}/issues/{number}/comments"
+                or argv[3] == "PATCH" and (
+                    endpoint == f"repos/{repo}/pulls/{number}"
+                    or re.fullmatch(rf"repos/{re.escape(repo)}/issues/comments/[1-9][0-9]*", endpoint)
+                    is not None)):
+            return "mutation"
+    return "unknown"
+
+
 def _positive_timeout(value: str) -> float:
     try:
         seconds = float(value)
@@ -221,6 +962,14 @@ def _repo_name(value: Any) -> str:
     return value.lower()
 
 
+def _gitea_repo_name(value: Any) -> str:
+    """Validate literal API path components without GitHub's owner grammar."""
+    if (not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value)
+            or any(part in {".", ".."} for part in value.split("/"))):
+        raise Refusal("invalid repository identity: expected owner/name")
+    return value.casefold()
+
+
 def _number(value: str) -> int:
     try:
         number = int(value)
@@ -243,16 +992,104 @@ def resolve_identity(pr: str, repo: str | None, operations: Operations) -> Ident
     if re.fullmatch(r"[0-9]+", pr):
         number = _number(pr)
         if explicit_repo is None:
-            data = operations.read_json(
-                ["gh", "repo", "view", "--json", "nameWithOwner"],
-                stage="repository resolution",
-            )
+            data = operations.forge.resolve_repo(operations)
             explicit_repo = _repo_name(data.get("nameWithOwner"))
         return Identity(explicit_repo, number)
     identity = _url_identity(pr)
     if explicit_repo is not None and explicit_repo != identity.repo:
         raise Refusal(f"PR URL repository {identity.repo} contradicts --repo {explicit_repo}")
     return identity
+
+
+def _safe_url(value: Any) -> SplitResult:
+    """Reject syntax that URL parsers normalize away before matching authority."""
+    try:
+        if (not isinstance(value, str) or not value
+                or any(c.isspace() or ord(c) < 32 or 127 <= ord(c) <= 159 or c == "\\"
+                       for c in value)):
+            raise ValueError
+        parts = urlsplit(value)
+        decoded_path = unquote(parts.path, errors="strict")
+        if (parts.scheme not in ("https", "http") or not parts.hostname
+                or parts.username is not None or parts.password is not None
+                or parts.netloc.endswith(":") or parts.port == 0
+                or "?" in value or "#" in value
+                or re.search(r"%(?![0-9a-fA-F]{2})", value)
+                or any(c.isspace() or ord(c) < 32 or 127 <= ord(c) <= 159 or c == "\\"
+                       for c in decoded_path)
+                or any(p in (".", "..") for p in decoded_path.split("/"))):
+            raise ValueError
+        return parts
+    except ValueError:
+        raise Refusal("invalid PR identity: unsafe or malformed URL") from None
+
+
+def _gitea_url_identity(value: Any, origin: str, forge_name: str) -> Identity:
+    parts = _safe_url(value)
+    root = _safe_url(origin)
+    def authority(parsed: SplitResult) -> tuple[str, str | None, int]:
+        return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    prefix = root.path.rstrip("/")
+    match = re.fullmatch(re.escape(prefix) + r"/([^/]+/[^/]+)/pulls/([0-9]+)/?", parts.path)
+    if authority(parts) != authority(root) or match is None:
+        raise Refusal("invalid PR identity: URL contradicts configured Gitea origin or prefix")
+    _gitea_repo_name(match[1])
+    return Identity(match[1], _number(match[2]), origin.rstrip("/"), forge_name)
+
+
+def _returned_identity(value: Any, expected: Identity) -> Identity:
+    if expected.forge_name is None:
+        return _url_identity(value)
+    parsed = _gitea_url_identity(value, expected.origin, expected.forge_name)
+    if parsed.repo.casefold() == expected.repo.casefold():
+        parsed = replace(parsed, repo=expected.repo)
+    return parsed
+
+
+def resolve_target(
+    pr: str, repo: str | None, cfg: config.Config, operations: Operations,
+) -> tuple[Identity, config.ForgeConfig]:
+    # Preserve GitHub's number inference and exact URL grammar and argv.
+    try:
+        hostname = urlsplit(pr).hostname
+    except ValueError:
+        raise Refusal("invalid PR identity: malformed URL") from None
+    if re.fullmatch(r"[0-9]+", pr) or hostname == "github.com":
+        identity = resolve_identity(pr, repo, operations)
+        enrollment = enrolled_repo(cfg, identity)
+        return identity, cfg.forge_for(enrollment)
+    parts = _safe_url(pr)
+    definitions = [f for f in cfg.forges if f.kind == "gitea"
+                   and urlsplit(f.url).hostname == parts.hostname]
+    if len(definitions) != 1:
+        raise Refusal("invalid PR identity: absent or ambiguous configured Gitea hostname")
+    definition = definitions[0]
+    identity = _gitea_url_identity(pr, definition.url, definition.name)
+    if repo is not None and _gitea_repo_name(repo) != identity.repo.casefold():
+        raise Refusal("PR URL repository contradicts --repo")
+    enrollment = enrolled_repo(cfg, identity)
+    return replace(identity, repo=enrollment.name), definition
+
+
+def load_land_token(definition: config.ForgeConfig) -> str:
+    """File presence wins, even for empty values; never export loaded secrets."""
+    variable = definition.land_token_env
+    path = Path.home() / ".config" / "nightshift" / "land.env"
+    try:
+        # Path.exists() may hide permission errors on newer Python versions.
+        # Only a genuinely missing file permits the process-only fallback.
+        try:
+            path.stat()
+        except FileNotFoundError:
+            pass
+        values = config.parse_env_file(path)
+    except (OSError, ValueError):
+        raise Refusal(f"human credential loading: cannot read land.env for {variable}") from None
+    token = values[variable] if variable in values else os.environ.get(variable, "")
+    if not token or "\r" in token or "\n" in token:
+        raise Refusal(f"human credential loading: missing or invalid {variable}")
+    return token
 
 
 def load_config(path: Path) -> config.Config:
@@ -263,8 +1100,12 @@ def load_config(path: Path) -> config.Config:
 
 
 def enrolled_repo(cfg: config.Config, identity: Identity) -> config.Repo:
-    matches = [repo for repo in cfg.repos if _repo_name(repo.name) == identity.repo
-               and cfg.forge_for(repo).kind == "github"]
+    validate_repo = _repo_name if identity.forge_name is None else _gitea_repo_name
+    matches = [repo for repo in cfg.repos
+               if ((identity.forge_name is None and cfg.forge_for(repo).kind == "github")
+                    or (identity.forge_name is not None and cfg.forge_for(repo).kind == "gitea"
+                        and repo.forge == identity.forge_name))
+               and validate_repo(repo.name) == identity.repo.casefold()]
     if not matches:
         raise Refusal(f"repository {identity.repo} is not enrolled in configuration")
     if len(matches) != 1:
@@ -273,12 +1114,8 @@ def enrolled_repo(cfg: config.Config, identity: Identity) -> config.Repo:
 
 
 def read_pr(identity: Identity, operations: Operations) -> PullRequest:
-    data = operations.read_json(
-        ["gh", "pr", "view", str(identity.number), "--repo", identity.repo,
-         "--json", PR_FIELDS],
-        stage=f"PR read for {identity.url}",
-    )
-    if (_url_identity(data.get("url")) != identity
+    data = operations.forge.read_pr(identity, operations)
+    if (_returned_identity(data.get("url"), identity) != identity
             or type(data.get("number")) is not int or data["number"] != identity.number):
         raise Refusal("GitHub returned a contradictory PR identity")
     if data.get("state") != "OPEN":
@@ -296,10 +1133,7 @@ def read_pr(identity: Identity, operations: Operations) -> PullRequest:
 
 
 def read_main(identity: Identity, operations: Operations) -> str:
-    data = operations.read_json(
-        ["gh", "api", f"repos/{identity.repo}/git/ref/heads/main"],
-        stage=f"read existing main branch in {identity.repo}",
-    )
+    data = operations.forge.read_main(identity, operations)
     obj = data.get("object")
     if (data.get("ref") != "refs/heads/main" or not isinstance(obj, dict)
             or obj.get("type") != "commit" or not isinstance(obj.get("sha"), str)
@@ -311,12 +1145,12 @@ def read_main(identity: Identity, operations: Operations) -> str:
 def update_branch(
     identity: Identity, expected_head: str, operations: Operations,
 ) -> tuple[PullRequest, str]:
-    """Return the exact update head and its retained, immediately pre-PUT base.
+    """Return the exact update head and its retained, immediately pre-request base.
 
     The caller supplies the shared CI deadline and must obtain fresh CI for the
     returned head. A queued acknowledgement is not provenance: only the observed
     commit's ordered parents can authorize advancing the expected head. Never
-    retry the PUT, even when its response is lost.
+    retry the update, even when its response is lost.
     """
     if operations.deadline is None:
         raise Refusal("branch update requires the shared CI deadline")
@@ -329,12 +1163,9 @@ def update_branch(
     base = read_main(identity, operations)
     lost_response: Refusal | None = None
     try:
-        result = operations.run(
-            ["gh", "api", "--method", "PUT",
-             f"repos/{identity.repo}/pulls/{identity.number}/update-branch",
-             "-f", f"expected_head_sha={expected_head}"],
-            stage="branch update", allowed_returncodes=None,
-        )
+        result = operations.forge.request_update(identity, expected_head, operations)
+    except _UncertainBranchUpdate as exc:
+        lost_response = exc
     except Refusal as exc:
         if not isinstance(exc.__cause__, (OSError, subprocess.SubprocessError)):
             raise
@@ -370,10 +1201,7 @@ def update_branch(
             if observed.draft:
                 raise Refusal("PR became draft during branch update")
             if observed.head != expected_head:
-                commit = operations.read_json(
-                    ["gh", "api", f"repos/{identity.repo}/commits/{observed.head}"],
-                    stage="branch update parent inspection",
-                )
+                commit = operations.forge.read_commit(identity, observed.head, operations)
                 parents = commit.get("parents")
                 if (commit.get("sha") != observed.head or not isinstance(parents, list)
                         or len(parents) != 2
@@ -423,13 +1251,20 @@ def discover_run(identity: Identity, operations: Operations) -> LandingRun | Non
             run_identity = None
             if pr:
                 parsed = urlsplit(pr)
-                if (not pr.startswith("https://") or not parsed.hostname
+                configured_http = False
+                if parsed.scheme == "http":
+                    for definition in operations.gitea_forges:
+                        if urlsplit(definition.url).hostname == parsed.hostname:
+                            _gitea_url_identity(pr, definition.url, definition.name)
+                            configured_http = True
+                            break
+                if ((not pr.startswith("https://") and not configured_http) or not parsed.hostname
                         or re.search(r"[\s\x00-\x1f\x7f\\]", pr)):
                     raise ValueError("invalid HTTPS URL")
                 # Accessing port also validates malformed or out-of-range ports.
                 _ = parsed.port
                 if parsed.hostname == urlsplit(identity.url).hostname:
-                    run_identity = _url_identity(pr)
+                    run_identity = _returned_identity(pr, identity)
         except (Refusal, ValueError) as exc:
             raise Refusal(f"{stage} ({change}): malformed PR URL: {pr!r}") from exc
         if not isinstance(head, str) or not _SHA.fullmatch(head):
@@ -465,11 +1300,7 @@ def read_comments(
     identity: Identity, operations: Operations, *, stage: str = "publication comment discovery",
 ) -> list[dict[str, Any]]:
     """Slurp all REST pages into one JSON document; never use a partial history."""
-    pages = operations.read_json_array(
-        ["gh", "api", f"repos/{identity.repo}/issues/{identity.number}/comments",
-         "--paginate", "--slurp"],
-        stage=stage,
-    )
+    pages = operations.forge.read_comments(identity, operations, stage=stage)
     comments = []
     for page in pages:
         if not isinstance(page, list):
@@ -481,7 +1312,10 @@ def read_comments(
     return comments
 
 
-def select_publication(comments: list[dict[str, Any]], change: str) -> CheckSource | None:
+def select_publication(
+    comments: list[dict[str, Any]], change: str, *,
+    trusted: Callable[[dict[str, Any]], bool] = GitHubLandingForge.trusted_comment,
+) -> CheckSource | None:
     # One optional round token, with literal marker whitespace/delimiters.
     # Escape the change name so neither regex syntax nor a similarly named
     # change can select another run's publication.
@@ -490,9 +1324,7 @@ def select_publication(comments: list[dict[str, Any]], change: str) -> CheckSour
     candidates = []
     for comment in comments:
         body = comment["body"]
-        association = comment.get("author_association")
-        if (not isinstance(association, str)
-                or not queue.trusted(comment, key="author_association")
+        if (not trusted(comment)
                 or not body.startswith(queue.SELF_COMMENT_PREFIX)
                 or not marker.search(body)):
             continue
@@ -517,7 +1349,8 @@ def read_check_sources(
 ) -> tuple[CheckSource, ...]:
     sources = [CheckSource(pr.body)]
     if run is not None:
-        publication = select_publication(read_comments(pr.identity, operations), run.change)
+        publication = select_publication(read_comments(pr.identity, operations), run.change,
+                                         trusted=operations.forge.trusted_comment)
         if publication is not None:
             sources.append(publication)
     return tuple(sources)
@@ -534,7 +1367,7 @@ def validate_human_checks(sources: tuple[CheckSource, ...], *, checks_done: bool
 
 
 def read_actor(operations: Operations) -> str:
-    data = operations.read_json(["gh", "api", "user"], stage="authenticated actor lookup")
+    data = operations.forge.read_actor(operations)
     login = data.get("login")
     if not isinstance(login, str) or not login or any(char.isspace() for char in login):
         raise Refusal("authenticated actor lookup: malformed or missing login")
@@ -555,21 +1388,18 @@ def prepare_human_checks(
     for source in sources:
         updated = source.completed()
         if updated.body != source.body:
-            endpoint = (f"repos/{pr.identity.repo}/pulls/{pr.identity.number}"
-                        if source.comment_id is None
-                        else f"repos/{pr.identity.repo}/issues/comments/{source.comment_id}")
             # One full-source PATCH, with raw text fields preserving newlines.
             # Stop on failure without rollback or blind retry: the next operator
             # invocation reads actual remote state, including ambiguous writes.
-            operations.run(
-                ["gh", "api", "--method", "PATCH", endpoint, "-f", f"body={updated.body}"],
-                stage=f"record human checks in {source.reference}; rerun land to recover",
-            )
+            operations.forge.edit_source(pr.identity, updated, operations)
         completed.append(updated)
     return CheckSnapshot(pr.head, tuple(completed), actor)
 
 
-def select_attestation(comments: list[dict[str, Any]], marker: str) -> int | None:
+def select_attestation(
+    comments: list[dict[str, Any]], marker: str, *,
+    trusted: Callable[[dict[str, Any]], bool] = GitHubLandingForge.trusted_comment,
+) -> int | None:
     """An untrusted match is uncertainty, never permission to create another."""
     matches = [comment for comment in comments if marker in comment["body"]]
     if not matches:
@@ -577,8 +1407,7 @@ def select_attestation(comments: list[dict[str, Any]], marker: str) -> int | Non
     if len(matches) != 1 or matches[0]["body"].count(marker) != 1:
         raise Refusal("attestation lookup: duplicate marker matches; resolve duplicates before retrying")
     comment = matches[0]
-    if (not isinstance(comment.get("author_association"), str)
-            or not queue.trusted(comment, key="author_association")
+    if (not trusted(comment)
             or not comment["body"].startswith(queue.SELF_COMMENT_PREFIX)):
         raise Refusal("attestation lookup: untrusted marker match; inspect the comment before retrying")
     comment_id = comment.get("id")
@@ -604,24 +1433,42 @@ def record_attestation(
             lines.extend([f"Source: {source.reference}",
                           *[f"- [x] {escape(check.text, quote=False)}" for check in source.checks], ""])
     body = "\n".join([*lines, marker])
+    _upsert_attestation(identity, marker, body, operations)
+
+
+def record_ci_attestation(
+    identity: Identity, exclusion: CIExclusion, operations: Operations,
+) -> None:
+    actor = read_actor(operations)
+    marker = f"<!-- nightshift:land-ci:{identity.number}:{exclusion.head}:{exclusion.base} -->"
+    lines = [f"{queue.SELF_COMMENT_PREFIX} CI not required: docs-only", "",
+             f"@{escape(actor, quote=False)} recorded the CI exclusion through `land`.",
+             f"PR: {escape(identity.url, quote=False)}", f"Head: `{exclusion.head}`",
+             f"Base: `{exclusion.base}`", f"Workflow: {escape(exclusion.workflow, quote=False)}",
+             f"Patterns: {escape(json.dumps(exclusion.patterns), quote=False)}",
+             "Changed paths:", *[f"- {escape(path, quote=False)}" for path in exclusion.paths],
+             f"Observed grace: {exclusion.grace:g}s", "", marker]
+    _upsert_attestation(identity, marker, "\n".join(lines), operations)
+
+
+def _upsert_attestation(
+    identity: Identity, marker: str, body: str, operations: Operations,
+) -> None:
 
     def lookup() -> int | None:
         return select_attestation(read_comments(
             identity, operations, stage="attestation lookup",
-        ), marker)
+        ), marker, trusted=operations.forge.trusted_comment)
 
     comment_id = lookup()
     if comment_id is None:
         try:
-            response = operations.read_json(
-                ["gh", "api", "--method", "POST",
-                 f"repos/{identity.repo}/issues/{identity.number}/comments", "-f", f"body={body}"],
-                stage="attestation create",
-            )
+            response = operations.forge.create_attestation(identity, body, operations)
             # Even exit zero can leave an unusable acknowledgement. Resolve
             # that through the same full-history lookup as a transport error.
             if (not isinstance(response.get("body"), str)
-                    or select_attestation([response], marker) is None):
+                    or select_attestation([response], marker,
+                                          trusted=operations.forge.trusted_comment) is None):
                 raise Refusal("attestation create: incomplete comment acknowledgement")
             return
         except Refusal as exc:
@@ -633,11 +1480,7 @@ def record_attestation(
                 raise Refusal(f"{exc}; attestation could not be reconciled; rerun land to recover") from exc
             # The remote create may have succeeded. Reuse its known ID; never
             # issue a second POST in this invocation, even if it was rejected.
-    operations.run(
-        ["gh", "api", "--method", "PATCH", f"repos/{identity.repo}/issues/comments/{comment_id}",
-         "-f", f"body={body}"],
-        stage=f"attestation update for comment {comment_id}; rerun land to recover",
-    )
+    operations.forge.edit_attestation(identity, comment_id, body, operations)
 
 
 def refresh_run(
@@ -739,10 +1582,17 @@ def continue_landing(
             snapshot = replace(snapshot, head=pr.head)
         # Retain the immediately pre-update base even if main moved while the
         # asynchronous update was being observed. Only a new round adopts it.
-        wait_for_ci(pr.identity, snapshot.head, bounded, timeout=timeout)
+        exclusion = wait_for_ci(pr.identity, snapshot.head, bounded, timeout=timeout,
+                                base_sha=baseline)
         pr, run = revalidate_landing_inputs(
             pr.identity, run, snapshot, bounded, require_done=True,
         )
+        if exclusion is not None:
+            record_ci_attestation(pr.identity, exclusion, bounded)
+            pr, run = revalidate_landing_inputs(
+                pr.identity, run, snapshot, bounded, require_done=True,
+            )
+            print("CI not required: docs-only")
         observed_base = read_main(pr.identity, bounded)
         if observed_base == baseline:
             return after_ci(pr, run, snapshot, bounded)
@@ -752,19 +1602,8 @@ def continue_landing(
 
 
 def incorporates_base(identity: Identity, head: str, base: str, operations: Operations) -> bool:
-    """Compare the recorded base to the pinned head, failing closed on bad data."""
-    comparison = operations.read_json(
-        ["gh", "api", f"repos/{identity.repo}/compare/{base}...{head}"],
-        stage="initial base ancestry check",
-    )
-    ancestor = comparison.get("merge_base_commit")
-    status = comparison.get("status")
-    if (status not in ("ahead", "identical", "behind", "diverged")
-            or not isinstance(ancestor, dict) or not isinstance(ancestor.get("sha"), str)
-            or not _SHA.fullmatch(ancestor["sha"])
-            or (ancestor["sha"] == base) != (status in ("ahead", "identical"))):
-        raise Refusal("initial base ancestry check: malformed or inconsistent comparison")
-    return ancestor["sha"] == base
+    """Establish pinned-head ancestry using the selected forge's commit facts."""
+    return operations.forge.incorporates_base(identity, head, base, operations)
 
 
 def _checks_not_registered(result: subprocess.CompletedProcess[str]) -> bool:
@@ -807,11 +1646,15 @@ def ci_is_green(result: subprocess.CompletedProcess[str]) -> bool:
 
 def wait_for_ci(
     identity: Identity, expected_head: str, operations: Operations, *, timeout: float | None = None,
-) -> None:
-    """Require green checks bracketed by reads of the same reviewed head."""
+    base_sha: str | None = None,
+) -> CIExclusion | None:
+    """Require green checks or a fresh, bounded proof of workflow exclusion."""
     if timeout is None:
         timeout = operations.remaining()
     awaiting_registration = False
+    registered = False
+    first_empty: float | None = None
+    exclusion = None
 
     def check_head() -> None:
         pr = read_pr(identity, operations)
@@ -824,15 +1667,34 @@ def wait_for_ci(
     try:
         while True:
             check_head()
-            result = operations.run(
-                ["gh", "pr", "checks", str(identity.number), "--repo", identity.repo,
-                 "--json", "name,bucket,state,link"],
-                stage="CI checks", allowed_returncodes=(0, 1, 8),
-            )
+            result = operations.forge.checks(identity, expected_head, operations)
             check_head()
             if ci_is_green(result):
-                return
+                return None
             awaiting_registration = _checks_not_registered(result)
+            empty = awaiting_registration or json.loads(result.stdout) == []
+            if not empty:
+                # Even skipped-only or pending checks permanently win over
+                # exclusion for this head; later empty polls cannot undo it.
+                registered = True
+            elif base_sha is not None and not registered:
+                if first_empty is None:
+                    # Evidence work consumes grace and the shared deadline.
+                    # It must precede the first registration sleep.
+                    first_empty = operations.monotonic()
+                    check_head()
+                    paths = operations.forge.changed_paths(identity, operations)
+                    workflow = (operations.forge.ci_workflow(identity, base_sha, operations)
+                                if paths else None)
+                    check_head()
+                    patterns = ignored_paths(workflow[1]) if workflow else None
+                    if paths and workflow and patterns and all_paths_ignored(paths, patterns):
+                        exclusion = CIExclusion(expected_head, base_sha, workflow[0], paths, patterns)
+                elif exclusion is not None:
+                    grace = operations.monotonic() - first_empty
+                    operations.remaining()
+                    if grace >= CI_POLL_INTERVAL:
+                        return replace(exclusion, grace=grace)
             operations.poll_sleep()
     except _CIDeadlineExpired as exc:
         if awaiting_registration:
@@ -856,23 +1718,15 @@ def after_ci(
     identity = pr.identity
     merge_error: Refusal | None = None
     try:
-        operations.run(
-            ["gh", "pr", "merge", str(identity.number), "--repo", identity.repo,
-             "--merge", "--match-head-commit", snapshot.head],
-            stage="merge request",
-        )
+        operations.forge.merge(identity, snapshot.head, operations)
     except Refusal as exc:
         # Never repeat the mutation: the server may have completed it already.
         merge_error = exc
 
     try:
-        result = operations.read_json(
-            ["gh", "pr", "view", str(identity.number), "--repo", identity.repo,
-             "--json", "number,url,state"],
-            stage="merged-state confirmation",
-        )
+        result = operations.forge.confirm_merge(identity, operations)
         if (type(result.get("number")) is not int or result["number"] != identity.number
-                or _url_identity(result.get("url")) != identity):
+                or _returned_identity(result.get("url"), identity) != identity):
             raise Refusal("merged-state confirmation: contradictory PR identity")
         if result.get("state") != "MERGED":
             raise Refusal("merged-state confirmation: "
@@ -891,13 +1745,21 @@ def main(
     argv: list[str] | None = None, *, runner: Runner | None = None,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    forge: LandingForge | None = None,
+    opener: Any = None,
 ) -> int:
     args = parser().parse_args(argv)
     operations = Operations(subprocess.run if runner is None else runner, sleep, monotonic)
+    if forge is not None:
+        operations.forge = forge
     try:
         cfg = load_config(args.config)
-        identity = resolve_identity(args.pr, args.repo, operations)
-        enrolled_repo(cfg, identity)
+        operations.gitea_forges = tuple(f for f in cfg.forges if f.kind == "gitea")
+        identity, definition = resolve_target(args.pr, args.repo, cfg, operations)
+        if definition.kind == "gitea":
+            token = load_land_token(definition)
+            operations.forge = (GiteaLandingForge(definition, token, opener=opener)
+                                if forge is None else forge)
         pr = read_pr(identity, operations)
         read_main(identity, operations)
         run = discover_run(identity, operations)

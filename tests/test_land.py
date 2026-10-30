@@ -1851,6 +1851,12 @@ def expect_ci_poll(runner, checks, *, code=0, pr=None, timeout=30):
     runner.expect(VIEW, pr, timeout=timeout)
 
 
+def expect_unavailable_proof(runner, *, pr=PR, timeout=30):
+    runner.expect(VIEW, pr, timeout=timeout)
+    runner.expect(["gh", "api", f"repos/{REPO}/pulls/78"], {}, timeout=timeout)
+    runner.expect(VIEW, pr, timeout=timeout)
+
+
 def expect_round_start(runner, *, head=HEAD, base=BASE, stale=False, timeout=30):
     runner.expect(MAIN, {**MAIN_REF, "object": {"type": "commit", "sha": base}}, timeout=timeout)
     runner.expect(["gh", "api", f"repos/{REPO}/compare/{base}...{head}"],
@@ -2020,6 +2026,8 @@ def test_land_controller_retains_deadline_across_rounds(
         checks = [] if waiting == "empty" else [ci_check(waiting)]
         expect_ci_poll(scripted_runner, checks, code=8 if waiting == "pending" else 0,
                        pr=UPDATED_PR, timeout=5)
+        if waiting == "empty":
+            expect_unavailable_proof(scripted_runner, pr=UPDATED_PR, timeout=5)
     assert invoke_ci(config_path, scripted_runner, clock, timeout=25) == 1
     assert "shared CI deadline expired" in capsys.readouterr().err
     assert clock.now == 125 and clock.sleeps == [10, 10, 5]
@@ -2178,6 +2186,8 @@ def test_land_ci_timeout(config_path, scripted_runner, capsys, checks, code):
     expect_ci_entry(scripted_runner, timeout=25)
     for remaining in (25, 15, 5):
         expect_ci_poll(scripted_runner, checks, code=code, timeout=remaining)
+        if not checks and remaining == 25:
+            expect_unavailable_proof(scripted_runner, timeout=remaining)
     assert invoke_ci(config_path, scripted_runner, clock, timeout=25) == 1
     # Recovery requires inspecting the checks as well as rerunning land.
     assert capsys.readouterr().err == (

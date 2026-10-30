@@ -10,7 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = "nightshift/forge/github.py"
 DEFERRED = {
-    "nightshift/queue.py", "nightshift/land.py", "nightshift/factory_land.py",
+    "nightshift/queue.py", "nightshift/land.py",
     "nightshift/arm.py", "nightshift/outcomes.py", "nightshift/preflight.py",
     "specloop/cli.py", "specloop/critic.py",
 }

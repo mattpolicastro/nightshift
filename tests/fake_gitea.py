@@ -137,7 +137,7 @@ class FakeGitea:
                             rows = review.get("comments", [])
                 path = root + f'/issues/{issue["number"]}/labels'
                 if call.method == "GET" and call.path == path:
-                    rows = issue["labels"]
+                    return Reply(issue["labels"])
                 elif call.method == "POST" and call.path == path:
                     assert set(call.body) == {"labels"}
                     if "POST" not in self.silent_label_writes:

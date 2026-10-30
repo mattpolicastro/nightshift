@@ -69,8 +69,8 @@ def test_arm_gitea_label_write_read_back(arming_io, capsys, fault):
                 rows[0]["labels"].append(draft)
             if fault in ("malformed", "unavailable", "verification"):
                 bad = Reply(raw=b"invalid") if fault == "malformed" else Reply(status=403)
-                fake.route("GET", path, bad, *([Reply(rows[0]["labels"][:1])]
-                                               if fault == "verification" else []), page=1)
+                fake.route("GET", path, bad, *([Reply(rows[0]["labels"][:])]
+                                               if fault == "verification" else []))
             return (URLError("lost response") if fault == "lost" else
                     Reply([]) if fault in ("silent", "verification") else Reply(status=503))
         fake.route("POST", path, post)
@@ -87,14 +87,14 @@ def test_arm_gitea_label_write_read_back(arming_io, capsys, fault):
     first = fake.calls.index(writes[0])
     # Fresh label resolution and complete reads precede POST; read-back precedes target 77.
     assert [(c.method, c.path.rsplit("/", 2)[-2:], c.query.get("page"))
-            for c in fake.calls[first - 5:first]] == [
+            for c in fake.calls[first - 4:first]] == [
         ("GET", ["Repo", "labels"], [str(n)]) for n in (1, 2, 3)] + [
-        ("GET", ["76", "labels"], [str(n)]) for n in (1, 2)]
+        ("GET", ["76", "labels"], None)]
     following = [c for c in fake.calls[first + 1:] if c.path == path]
-    pages = ([1, 2, 1, 2] if fault == "silent" else [1] if fault in ("malformed", "unavailable")
-             else [1, 2] if fault == "absent" else [1, 1, 2, 3] if fault == "verification"
-             else [1, 2, 3])
-    assert [c.query["page"] for c in following] == [[str(n)] for n in pages]
+    read_backs = 2 if fault in ("silent", "verification") else 1
+    assert [c.query for c in following] == [{}] * read_backs
+    assert all(c.query == {} for c in fake.calls
+               if c.method == "GET" and "/issues/" in c.path and c.path.endswith("/labels"))
     assert all(c.method == "GET" and fake.calls.index(c) < fake.calls.index(writes[1]) for c in following)
     assert all(row["labels"][0]["name"] == "bug" for row in rows)
     assert draft in rows[1]["labels"]
