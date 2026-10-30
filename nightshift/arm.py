@@ -1,16 +1,23 @@
-"""Issue-body lint and bounded GitHub reads for issue arming."""
+"""Issue-body lint and invocation-local forge operations for issue arming."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 from urllib.parse import urlparse
 
+from nightshift import config
+from nightshift.forge import ForgeError
+from nightshift.forge.gitea import GiteaForge
 from nightshift.queue import blockers
 from specloop import critic, propose
 
@@ -69,10 +76,19 @@ class Issue:
 
 
 class IssueLookupError(Exception):
-    """A failed or malformed GitHub issue read, safe to show in findings."""
+    """A failed or malformed issue read, safe to show in findings."""
 
 
-def read_issue(repository: str, number: int, *, runner=None) -> Issue:
+class _LabelWriteError(Exception):
+    """A label operation needs fresh confirmation."""
+
+
+def read_issue(repository: str, number: int, *, runner=None,
+               forge: ArmingForge | None = None) -> Issue:
+    return (forge if forge is not None else _GitHubArmingForge(runner)).read_issue(repository, number)
+
+
+def _github_read_issue(repository: str, number: int, *, runner=None) -> Issue:
     """Read one issue with a subprocess-compatible boundary and a 30s bound.
 
     Repository may include a GitHub hostname. Never include raw command output
@@ -120,12 +136,28 @@ def _parse_issue(data: object, number: int) -> Issue:
 class IssueCache:
     """Invocation-local snapshot, including failures, keyed by repository and number."""
 
-    def __init__(self, *, runner=None):
-        self.runner = runner
+    def __init__(self, *, runner=None, forge: ArmingForge | None = None):
+        self._runner = runner or subprocess.run
+        self._github_forge = None
+        if forge is None:
+            self._github_forge = _GitHubArmingForge(self._runner)
+            forge = self._github_forge
+        self.forge = forge
         self._issues: dict[tuple[str, int], Issue | IssueLookupError] = {}
         self._armed: dict[str, tuple[list[Issue], list[str]]] = {}
         self._prs: dict[str, ConcurrentContext] = {}
         self._reachability: dict[tuple[str, int, int], tuple[bool, tuple[tuple[int, str], ...]]] = {}
+
+    @property
+    def runner(self):
+        return self._runner
+
+    @runner.setter
+    def runner(self, runner):
+        self._runner = runner or subprocess.run
+        # Preserve reassignment without changing caller-owned, injected forges.
+        if self._github_forge is not None:
+            self._github_forge.runner = self._runner
 
     def reaches(self, repository: str, source: int, target: int
                 ) -> tuple[bool, tuple[tuple[int, str], ...]]:
@@ -160,63 +192,19 @@ class IssueCache:
 
     def open_prs(self, repository: str) -> ConcurrentContext:
         if repository not in self._prs:
-            self._prs[repository] = read_pr_context(repository, runner=self.runner)
+            self._prs[repository] = read_pr_context(repository, forge=self.forge)
         return self._prs[repository]
 
     def armed(self, repository: str) -> tuple[list[Issue], list[str]]:
-        """Cache all open intake issues, keeping earlier pages on a failed read."""
-        if repository in self._armed:
-            return self._armed[repository]
-        issues: dict[int, Issue] = {}
-        notes: list[str] = []
-        parts = repository.split("/")
-        host, repo = (parts[0], "/".join(parts[1:])) if len(parts) == 3 else ("github.com", repository)
-        page = 1
-        while True:
-            argv = ["gh", "api", "--hostname", host,
-                    f"repos/{repo}/issues?state=open&labels=spec%3Adraft&per_page=100&page={page}"]
-            try:
-                response = (self.runner or subprocess.run)(
-                    argv, capture_output=True, text=True, check=True, timeout=30)
-                if response.returncode:
-                    raise ValueError
-                rows = json.loads(response.stdout)
-                if not isinstance(rows, list):
-                    raise ValueError
-            except (OSError, subprocess.SubprocessError, ValueError, TypeError):
-                notes.append(f"Armed issue page {page} could not be read.")
-                break
-            for row in rows:
-                if isinstance(row, dict) and "pull_request" in row:
-                    continue
-                try:
-                    # mutation-equivalent: The supplied before/after condition is identical; no code changes.
-                    if not isinstance(row, dict) or type(row.get("number")) is not int or row["number"] <= 0:
-                        raise ValueError
-                    # REST represents an issue without a description as null.
-                    data = {**row, "stateReason": row.get("state_reason")}
-                    if "body" in data and data["body"] is None:
-                        data["body"] = ""
-                    issue = _parse_issue(data, row["number"])
-                    if issue.state != "OPEN" or "spec:draft" not in issue.labels:
-                        continue
-                    key = (repository, issue.number)
-                    self._issues.setdefault(key, issue)
-                    issues[issue.number] = self.get(*key)
-                except (ValueError, IssueLookupError):
-                    notes.append(f"Armed issue page {page} contains an unreadable issue.")
-            if len(rows) < 100:
-                break
-            page += 1
-        result = (list(issues.values()), notes)
-        self._armed[repository] = result
-        return result
+        if repository not in self._armed:
+            self._armed[repository] = self.forge.armed_issues(repository, self)
+        return self._armed[repository]
 
     def get(self, repository: str, number: int) -> Issue:
         key = (repository, number)
         if key not in self._issues:
             try:
-                self._issues[key] = read_issue(repository, number, runner=self.runner)
+                self._issues[key] = read_issue(repository, number, forge=self.forge)
             except IssueLookupError as error:
                 self._issues[key] = error
         result = self._issues[key]
@@ -262,7 +250,12 @@ def front_door_issue(repository: str, change: str) -> int | None:
     return int(match[1]) if match else None
 
 
-def read_pr_context(repository: str, *, runner=None) -> ConcurrentContext:
+def read_pr_context(repository: str, *, runner=None,
+                    forge: ArmingForge | None = None) -> ConcurrentContext:
+    return (forge if forge is not None else _GitHubArmingForge(runner)).open_pr_context(repository)
+
+
+def _github_read_pr_context(repository: str, *, runner=None) -> ConcurrentContext:
     """Join the critic's filenames/URLs to front-door source issue identities.
 
     The two reads are a best-effort snapshot: an absent metadata row is unknown,
@@ -571,15 +564,19 @@ def _issue_number(value: str) -> int:
     raise argparse.ArgumentTypeError("issue numbers must be positive integers")
 
 
-def resolve_checkout(*, runner=None) -> tuple[Path, str]:
+def _checkout_root(runner) -> Path:
+    result = runner(["git", "rev-parse", "--show-toplevel"],
+                    capture_output=True, text=True, check=True, timeout=30)
+    if result.returncode or not result.stdout.strip():
+        raise ValueError
+    return Path(result.stdout.strip()).resolve()
+
+
+def resolve_checkout(*, runner=None, _root: Path | None = None) -> tuple[Path, str]:
     """Resolve the current checkout and preserve enterprise GitHub hostnames."""
     runner = runner or subprocess.run
     try:
-        result = runner(["git", "rev-parse", "--show-toplevel"],
-                        capture_output=True, text=True, check=True, timeout=30)
-        if result.returncode or not result.stdout.strip():
-            raise ValueError
-        root = Path(result.stdout.strip()).resolve()
+        root = _root if _root is not None else _checkout_root(runner)
         result = runner(["gh", "repo", "view", "--json", "nameWithOwner,url"], cwd=root,
                         capture_output=True, text=True, check=True, timeout=30)
         if result.returncode:
@@ -605,7 +602,12 @@ def report_finding(finding: Finding) -> None:
           f"{finding.message} Suggestion: {finding.suggestion}")
 
 
-def confirm_intake_label(repository: str, number: int, *, runner=None) -> bool:
+def confirm_intake_label(repository: str, number: int, *, runner=None,
+                         forge: ArmingForge | None = None) -> bool:
+    return (forge if forge is not None else _GitHubArmingForge(runner)).confirm_intake_label(repository, number)
+
+
+def _github_confirm_intake_label(repository: str, number: int, *, runner=None) -> bool:
     """Reconcile an uncertain write with one fresh read, bypassing the snapshot."""
     command = ["gh", "issue", "view", str(number), "--repo", repository, "--json", "labels"]
     try:
@@ -623,19 +625,278 @@ def confirm_intake_label(repository: str, number: int, *, runner=None) -> bool:
         return False
 
 
+class ArmingForge(Protocol):
+    """Named arming operations; no arbitrary command or transport escape hatch."""
+
+    def read_issue(self, repository: str, number: int) -> Issue: ...
+    def armed_issues(self, repository: str, cache: IssueCache) -> tuple[list[Issue], list[str]]: ...
+    def open_pr_context(self, repository: str) -> ConcurrentContext: ...
+    def add_intake_label(self, repository: str, number: int) -> None: ...
+    def confirm_intake_label(self, repository: str, number: int) -> bool: ...
+
+
+class _GitHubArmingForge:
+    def __init__(self, runner=None):
+        self.runner = runner or subprocess.run
+
+    def read_issue(self, repository: str, number: int) -> Issue:
+        return _github_read_issue(repository, number, runner=self.runner)
+
+    def armed_issues(self, repository: str, cache: IssueCache) -> tuple[list[Issue], list[str]]:
+        """Cache all open intake issues, keeping earlier pages on a failed read."""
+        issues: dict[int, Issue] = {}
+        notes: list[str] = []
+        parts = repository.split("/")
+        host, repo = (parts[0], "/".join(parts[1:])) if len(parts) == 3 else ("github.com", repository)
+        page = 1
+        while True:
+            argv = ["gh", "api", "--hostname", host,
+                    f"repos/{repo}/issues?state=open&labels=spec%3Adraft&per_page=100&page={page}"]
+            try:
+                response = (self.runner or subprocess.run)(
+                    argv, capture_output=True, text=True, check=True, timeout=30)
+                if response.returncode:
+                    raise ValueError
+                rows = json.loads(response.stdout)
+                if not isinstance(rows, list):
+                    raise ValueError
+            except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+                notes.append(f"Armed issue page {page} could not be read.")
+                break
+            for row in rows:
+                if isinstance(row, dict) and "pull_request" in row:
+                    continue
+                try:
+                    # mutation-equivalent: The supplied before/after condition is identical; no code changes.
+                    if not isinstance(row, dict) or type(row.get("number")) is not int or row["number"] <= 0:
+                        raise ValueError
+                    # REST represents an issue without a description as null.
+                    data = {**row, "stateReason": row.get("state_reason")}
+                    if "body" in data and data["body"] is None:
+                        data["body"] = ""
+                    issue = _parse_issue(data, row["number"])
+                    if issue.state != "OPEN" or "spec:draft" not in issue.labels:
+                        continue
+                    key = (repository, issue.number)
+                    cache._issues.setdefault(key, issue)
+                    issues[issue.number] = cache.get(*key)
+                except (ValueError, IssueLookupError):
+                    notes.append(f"Armed issue page {page} contains an unreadable issue.")
+            if len(rows) < 100:
+                break
+            page += 1
+        result = (list(issues.values()), notes)
+        return result
+
+    def open_pr_context(self, repository: str) -> ConcurrentContext:
+        return _github_read_pr_context(repository, runner=self.runner)
+
+    def add_intake_label(self, repository: str, number: int) -> None:
+        command = ["gh", "issue", "edit", str(number), "--repo", repository,
+                   "--add-label", "spec:draft"]
+        try:
+            response = self.runner(command, capture_output=True, text=True,
+                                   check=True, timeout=30)
+            if response.returncode:
+                raise subprocess.CalledProcessError(response.returncode, command)
+        except (OSError, subprocess.SubprocessError):
+            raise _LabelWriteError from None
+
+    def confirm_intake_label(self, repository: str, number: int) -> bool:
+        return _github_confirm_intake_label(repository, number, runner=self.runner)
+
+
+class _GiteaArmingForge:
+    """Arming facts and verified label operations through the Gitea adapter."""
+
+    def __init__(self, forge: GiteaForge):
+        self.forge = forge
+
+    def read_issue(self, repository: str, number: int) -> Issue:
+        try:
+            row = self.forge._detail(self.forge._repo_path(repository, "issues", str(number)))
+            return self._issue(row, number)
+        except (ForgeError, ValueError, TypeError):
+            raise IssueLookupError(f"Issue #{number} lookup failed.") from None
+
+    @staticmethod
+    def _issue(row: dict, number: int) -> Issue:
+        if row.get("pull_request") is not None or row.get("state") not in ("open", "closed"):
+            raise ValueError
+        data = {**row, "stateReason": row.get("state_reason")}
+        if "body" in data and data["body"] is None:
+            data["body"] = ""
+        issue = _parse_issue(data, number)
+        if any(not label.strip() for label in issue.labels):
+            raise ValueError
+        return issue
+
+    def armed_issues(self, repository: str, cache: IssueCache) -> tuple[list[Issue], list[str]]:
+        try:
+            rows = self.forge._label_candidates(repository, "spec:draft", "issues")
+            # Normalize the entire strict snapshot before exposing any candidates.
+            candidates = [self._issue(row, row["number"]) for row in rows
+                          if row.get("pull_request") is None]
+        except (ForgeError, IssueLookupError, ValueError, TypeError):
+            return [], ["Armed Gitea issues could not be read completely."]
+        issues, notes = [], []
+        for issue in candidates:
+            if issue.state != "OPEN":
+                continue
+            key = (repository, issue.number)
+            cache._issues.setdefault(key, issue)
+            try:
+                issues.append(cache.get(*key))
+            except IssueLookupError as error:
+                notes.append(str(error))
+        return issues, list(dict.fromkeys(notes))
+
+    def open_pr_context(self, repository: str) -> ConcurrentContext:
+        deadline = time.monotonic() + 120
+        transport = self.forge._transport
+        previous_guard = transport._guard
+
+        def guard():
+            if time.monotonic() >= deadline:
+                raise critic._LookupBudgetExhausted
+
+        def request_guard():
+            guard()
+            if previous_guard is not None:
+                previous_guard()
+
+        files: dict[str, list[str]] = {}
+        notes: list[str] = []
+        identities: dict[int, int | None] = {}
+        transport._guard = request_guard
+        try:
+            files, notes = critic._gitea_open_pr_files(self.forge, repository, "", guard=guard)
+            numbers = {int(match[1]) for labels in files.values() for label in labels
+                       if (match := re.match(r"#([1-9][0-9]*) ", label))}
+            for number in sorted(numbers):
+                try:
+                    row = self.forge._detail(self.forge._repo_path(repository, "pulls", str(number)))
+                    head = row.get("head")
+                    if (type(row.get("number")) is not int or row["number"] != number
+                            or not isinstance(head, dict) or not isinstance(head.get("ref"), str)
+                            or not head["ref"] or not isinstance(head.get("repo"), dict)
+                            or not isinstance(head["repo"].get("full_name"), str)
+                            or not head["repo"]["full_name"]):
+                        raise ValueError
+                    identities[number] = (
+                        front_door_issue(repository, head["ref"][5:])
+                        if head["repo"]["full_name"].casefold() == repository.casefold()
+                        and head["ref"].startswith("spec/") else None)
+                except (ForgeError, ValueError):
+                    notes.append(f"Open PR #{number} metadata could not be read.")
+            guard()
+        except critic._LookupBudgetExhausted:
+            notes.append("Open PR context incomplete: 120-second lookup budget exhausted.")
+        finally:
+            transport._guard = previous_guard
+        evidence = set()
+        for path, labels in files.items():
+            for label in labels:
+                match = re.match(r"#([1-9][0-9]*) ", label)
+                if not match or int(match[1]) not in identities:
+                    notes.append(f"Open PR metadata unavailable for {label}.")
+                    continue
+                source_issue = identities[int(match[1])]
+                if source_issue is not None:
+                    evidence.add(PathEvidence(path, source_issue, f"PR {label}"))
+        return ConcurrentContext(sorted(evidence, key=lambda e: (e.path, e.issue or 0, e.source)),
+                                 list(dict.fromkeys(notes)))
+
+    def add_intake_label(self, repository: str, number: int) -> None:
+        with self._label_errors():
+            self.forge.relabel_issue(repository, number, add=["spec:draft"], remove=[])
+
+    def confirm_intake_label(self, repository: str, number: int) -> bool:
+        try:
+            with self._label_errors():
+                return "spec:draft" in self.forge.issue_labels(repository, number)
+        except _LabelWriteError:
+            return False
+
+    @contextmanager
+    def _label_errors(self):
+        # Guard exceptions are control flow, even when their type is ForgeError.
+        transport = self.forge._transport
+        previous_guard = transport._guard
+        guard_error = None
+
+        def guard():
+            nonlocal guard_error
+            try:
+                if previous_guard is not None:
+                    previous_guard()
+            except BaseException as error:
+                guard_error = error
+                raise
+
+        transport._guard = guard
+        try:
+            yield
+        except ForgeError as error:
+            if error is guard_error:
+                raise
+            raise _LabelWriteError from None
+        finally:
+            transport._guard = previous_guard
+
+
+def _select_forge(config_path: str | Path, *, runner=None) -> tuple[Path, str, ArmingForge]:
+    """Select explicitly, without fallback."""
+    runner = runner or subprocess.run
+    try:
+        root = _checkout_root(runner)
+        cfg = config.load(Path(config_path).expanduser().resolve())
+        matches = [repo for repo in cfg.repos if repo.clone_dir().resolve() == root]
+        if len(matches) != 1:
+            raise ValueError
+        repo = matches[0]
+        definition = cfg.forge_for(repo)
+        if definition.kind == "github":
+            _, repository = resolve_checkout(runner=runner, _root=root)
+            if "/".join(repository.split("/")[-2:]).casefold() != repo.name.casefold():
+                raise ValueError
+            return root, repository, _GitHubArmingForge(runner)
+        # Path.exists() in the shared parser can suppress permission errors.
+        # Only a missing file permits the process-environment fallback.
+        try:
+            config.ENV_FILE.stat()
+        except FileNotFoundError:
+            pass
+        credentials = config.parse_env_file()
+        token = credentials.get(definition.token_env, os.environ.get(definition.token_env, ""))
+        if not token:
+            raise ValueError
+        forge = GiteaForge(definition.url, token, bot_login=definition.bot_login,
+                           trusted_logins=definition.trusted_logins, wip_prefix=definition.wip_prefix)
+        return root, repo.name, _GiteaArmingForge(forge)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError,
+            RuntimeError):
+        raise IssueLookupError("Could not select the configured arming repository and bot credentials.") from None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m nightshift.arm", allow_abbrev=False,
                                      description="Check issue wording and overlap before arming.")
     parser.add_argument("issues", metavar="ISSUE", nargs="+", type=_issue_number)
     parser.add_argument("--check", action="store_true", help="report only; never apply labels")
     parser.add_argument("--force", action="store_true", help="arm despite findings; --check takes precedence")
+    parser.add_argument("--config", metavar="PATH", help="select the checkout's configured forge")
     args = parser.parse_args(argv)
     try:
-        root, repository = resolve_checkout()
+        if args.config is None:
+            root, repository = resolve_checkout()
+            cache = IssueCache(runner=subprocess.run)
+        else:
+            root, repository, forge = _select_forge(args.config)
+            cache = IssueCache(forge=forge)
     except IssueLookupError as error:
         print(str(error), file=sys.stderr)
         return 1
-    cache = IssueCache(runner=subprocess.run)
     results = check_candidates(repository, list(dict.fromkeys(args.issues)), root, cache)
     failed = False
     for number, findings in results.items():
@@ -655,15 +916,10 @@ def main(argv: list[str] | None = None) -> int:
             elif "spec:draft" in issue.labels:
                 disposition, success = "already armed", True
             else:
-                command = ["gh", "issue", "edit", str(number), "--repo", repository,
-                           "--add-label", "spec:draft"]
                 try:
-                    response = subprocess.run(command, capture_output=True, text=True,
-                                              check=True, timeout=30)
-                    if response.returncode:
-                        raise subprocess.CalledProcessError(response.returncode, command)
-                except (OSError, subprocess.SubprocessError):
-                    success = confirm_intake_label(repository, number)
+                    cache.forge.add_intake_label(repository, number)
+                except _LabelWriteError:
+                    success = confirm_intake_label(repository, number, forge=cache.forge)
                     disposition = ("armed (label confirmed after write failure)" if success else
                                    "unconfirmed (label write failed)")
                 else:

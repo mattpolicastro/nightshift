@@ -213,17 +213,22 @@ None of these follow-ups establishes live validation or a completed host rollout
   WIP PR creation and finish prefix removal, plus live Paseo confirmation/Cancel,
   remain pending human checks in the design, not CI evidence
   ([issue #129](https://github.com/mattpolicastro/nightshift/issues/129)).
-- **GitHub-only command boundaries:** Factory Land, arming and unrelated plugin
-  GitHub paths remain GitHub-only. Human-initiated terminal Gitea landing is
+- **GitHub-only command boundaries:** Factory Land and unrelated plugin GitHub
+  paths remain GitHub-only. Human-initiated terminal Gitea landing is
   supported using the configured human `land_token_env` from `land.env`, with no
   bot-token fallback; see the [landing guide](docs/landing.md) and
   [issue #130](https://github.com/mattpolicastro/nightshift/issues/130).
+  [Explicit configured arming](docs/arming.md#configured-gitea) supports Gitea
+  with bot credentials and verified label read-back
+  ([issue #131](https://github.com/mattpolicastro/nightshift/issues/131)).
   Explicit engine publish/finish and critic context use the manifest-selected
   forge. Gitea enrollment cannot authorize GitHub landing; daemon status skips
   its queue queries. Named GitHub definitions still use ambient `gh`
   authentication and host selection. Gitea daemon drafting, admission, revisions,
-  publication and pending delivery remain disabled. The first real Gitea landing
-  and merge-commit inspection remain pending human validation, not CI evidence.
+  publication and pending delivery remain disabled; drafting must await the
+  separate hold prerequisites. Real issue arming, later drafting, and the first
+  real Gitea landing with merge-commit inspection remain pending human
+  validation, not CI evidence.
 - **Config:**
   - Manifest failures now hold new drafting/admission/spec re-drafting locally;
     admitted GitHub publication/build revisions continue. GitHub worker leftovers are released

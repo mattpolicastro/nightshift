@@ -49,6 +49,8 @@ class FakeGitea:
                                        pulls=list(pulls), page_size=page_size,
                                        commits=list(commits), combined_statuses=combined_statuses or {},
                                        facts=facts if facts is not None else {"name": repo.split("/")[1]})
+        for issue in self.repositories[repo]["issues"]:
+            issue.setdefault("pull_request", None)
 
     def _state_reply(self, call, page):
         for repo, state in self.repositories.items():
@@ -61,6 +63,7 @@ class FakeGitea:
                 assert set(call.body) == {"title", "body"}
                 number = max((r["number"] for r in [*state["issues"], *state["pulls"]]), default=0) + 1
                 created = dict(id=number, number=number, state="open", labels=[], comments=[],
+                               pull_request=None,
                                user={"login": self.bot_login}, **call.body)
                 state["issues"].append(created)
                 return Reply(created, status=201)
@@ -120,6 +123,8 @@ class FakeGitea:
                             return Reply(comment)
                 if call.method == "GET":
                     if call.path == detail_path:
+                        if any(issue is pr for pr in state["pulls"]):
+                            return Reply({**issue, "pull_request": {}})
                         return Reply(issue)
                     for endpoint in ("comments", "timeline"):
                         if call.path == detail_path + "/" + endpoint:

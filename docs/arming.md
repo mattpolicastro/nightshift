@@ -2,8 +2,9 @@
 
 Arming checks issue wording and concurrent file work before applying `spec:draft`.
 Run it from the current repository checkout with Git, `uv`, the project's Python
-3.12+ environment, and GitHub CLI (`gh`) installed. Authenticate `gh` for the repository's
-host, with access to issues and PRs and permission to apply labels when arming.
+3.12+ environment. For GitHub, install and authenticate GitHub CLI (`gh`) for the
+repository's host, with issue/PR access and permission to apply labels. Configured
+Gitea uses its bot credentials and does not require `gh`.
 The repository must already have a `spec:draft` label; the command never creates it.
 Local run coverage requires access to Nightshift's existing run state.
 
@@ -17,10 +18,43 @@ uv run python -m nightshift.arm --check --force 76 77
 ```
 
 Use positive issue numbers, optionally quoted as `'#76'` to protect the `#` from
-shell comment parsing. Duplicates are processed once in argument order. Git and
+shell comment parsing. Duplicates are processed once in argument order. Without
+`--config`, no config or credential file is read: Git and
 `gh repo view` resolve the current checkout and repository, including enterprise
 GitHub hosts. Cross-repository issue arguments are unsupported. This is a module
 command; integration into the single CLI is separate work.
+
+## Configured Gitea
+
+Use [forge configuration](../config.example.toml) to enroll the checkout with
+`repos.forge` and an absolute `repos.dir`. `--config PATH` expands `~` and resolves
+relative paths from the invocation directory. Exactly one enrollment's resolved
+clone directory must match the Git checkout root; another worktree needs its own
+matching configuration. Missing, invalid, unmatched or ambiguous config refuses
+even with force. Named GitHub still uses ambient `gh` host/authentication and
+requires discovery to match the configured owner/repository, ignoring case.
+
+Provision the Gitea forge's `token_env` bot token in `~/.config/nightshift/env` or
+the process environment. The file wins, including an empty value, which refuses
+arming. File values are not exported. Landing tokens, manifest env and GitHub
+credentials are not fallbacks. The repository's `spec:draft` label must exist.
+
+```sh
+uv run python -m nightshift.arm --config /absolute/path/to/config.toml --check 76
+uv run python -m nightshift.arm --config /absolute/path/to/config.toml 76
+```
+
+Gitea armed-issue collection reads all pages and filters labels client-side using
+current repository label IDs. Missing or duplicate label definitions and partial
+context become findings. Every label POST is read back before success; unrelated
+labels remain intact. A silent write or unavailable final confirmation fails,
+including with force. An uncertain response gets one fresh logical label read,
+never a replacement POST; that read may paginate and use existing GET retries.
+
+Configured arming ([issue #131](https://github.com/mattpolicastro/nightshift/issues/131))
+does not enable Gitea daemon drafting, admission, revisions, publication or pending
+delivery. Force, allowlists and read-only preflight cannot bypass that hold.
+Landing remains GitHub-only; see [remaining limitations](../KNOWN-LIMITATIONS.md#open-gaps).
 
 ## Issue template
 
@@ -120,7 +154,8 @@ findings intact. Failed dependency reads cannot establish an exemption.
 An open direct blocker is acceptable for arming; the existing queue defers drafting
 until blockers are closed. A direct blocker closed as `COMPLETED` passes completion
 lint; `NOT_PLANNED` produces a finding. An unknown closed reason or failed lookup
-is incomplete context. This does not change the daemon's closed-state gate.
+is incomplete context. Gitea may omit completion reasons; closed alone is never
+treated as `COMPLETED`. This does not change the daemon's closed-state gate.
 
 Overlap compares Scope paths with open `spec:draft` issues, other requested
 targets (even unlabelled), running/paused runs in the same resolved checkout,
@@ -147,7 +182,7 @@ label is a no-op reported as `already armed` in default mode when clean or with
 force. Findings still fail default/check mode on an already-labelled issue.
 Closed or unreadable targets fail with exit 1 in every mode, including force.
 Invalid arguments exit 2 before collection. Checkout/repository resolution
-failure exits 1. Check mode never mutates GitHub; force does not override check.
+failure exits 1. Check mode never mutates the forge; force does not override check.
 
 All candidates and shared context are collected before any label writes. A batch
 exits 0 only if every target passes the selected policy; otherwise it exits 1.
@@ -179,8 +214,10 @@ their actor, edits bodies, posts comments, creates PRs, or writes local receipts
   numbers. File evidence includes old/new rename paths and retains PR links.
   Missing metadata and PR-helper limitations become incomplete-context findings.
 - Paginated issue/PR reads and cached dependency lookups give a best-effort
-  snapshot, not an atomic reservation. New GitHub calls have 30-second timeouts;
-  the PR-file helper retains its own overall budget. Partial failures retain
+  snapshot, not an atomic reservation. GitHub calls have 30-second timeouts;
+  the PR-file helper retains its own overall budget. Gitea uses 30-second socket
+  timeouts and a 120-second PR-context request-start cutoff, not an elapsed-response
+  guarantee; slow bodies can overrun these bounds. Partial failures retain
   available evidence. Other operators and daemon transitions can race the check;
   there is no cross-process lock, scheduler, or enforcement in the daemon.
 
@@ -191,6 +228,12 @@ acceptance by the drafter or critic. Later checks remain necessary.
 
 ## Human follow-up for the implementation PR
 
+- On a real configured Gitea checkout, run check mode, then arm a suitable issue.
+  Inspect `spec:draft` and unchanged unrelated labels; record sanitized results
+  and review the guidance against the actual setup. This live check is pending.
+- Observe that issue drafting only after the separate daemon authorization and
+  durable-transition prerequisites permit it. Until then, confirm the hold and
+  leave the drafting observation pending; verified labels do not prove drafting.
 - On the next few issues armed with this command, compare its findings with
   subsequent drafter/critic objections.
 - Record missed objections and false positives for refining the heuristics.

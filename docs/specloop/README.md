@@ -637,8 +637,10 @@ response bodies can overrun both. See [remaining risks](../../KNOWN-LIMITATIONS.
 and [issue #129](https://github.com/mattpolicastro/nightshift/issues/129).
 
 These explicit commands and critic reads do not enable Gitea daemon drafting,
-admission, revisions, publication or pending delivery. Arming and Land remain
-GitHub-only. Read-only preflight is not execution authorization. First real
+admission, revisions, publication or pending delivery.
+[Explicit configured arming](../arming.md#configured-gitea) supports Gitea with bot
+credentials and verified label read-back; Land remains GitHub-only.
+Read-only preflight is not execution authorization. First real
 WIP publication and finish prefix removal, and live Paseo presentation, remain
 pending human checks in the approved design; CI fixtures do not prove them.
 
