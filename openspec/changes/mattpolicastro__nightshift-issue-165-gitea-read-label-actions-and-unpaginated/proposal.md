@@ -23,14 +23,23 @@ causing valid evidence to fail. These #122 compatibility fixes must land before
   all other assertions. Deliver three tasks, each targeting about 200 changed
   lines and never more than about 300.
 
-Implementation scope is `nightshift/forge/gitea.py` (the named readers and private
-listing helper), `tests/fake_gitea.py`, `tests/test_forge_gitea.py`, the narrowly
-approved portions of the two landing test files, and the `gitea-forge` and
-`gitea-landing` specifications. This draft writes only its own change directory.
+Implementation edits are limited to `nightshift/forge/gitea.py` (the named
+readers and private listing helper), `tests/fake_gitea.py`,
+`tests/test_forge_gitea.py`, and the narrowly approved portions of
+`tests/test_land_gitea.py` and `tests/test_land_docs_only.py`.
+
+This draft writes only its own change directory, including the `gitea-forge`
+and `gitea-landing` requirement deltas. Those deltas are read-only acceptance
+criteria for implementation. Implementing agents SHALL NOT edit any
+`openspec/**` file, apply deltas to canonical specs, or archive the change;
+canonical spec synchronization belongs to the separate finish/archive workflow.
+Task completion requires code and test evidence against the drafted deltas,
+with all requirements not explicitly modified by them preserved.
 
 Out of scope: `tests/contract/`, every GitHub path and assertion, `nightshift/land.py`,
 HTTP transport policy, authorization, dispatch enablement, CI configuration,
-type-baseline edits, other endpoints, and other files. The contract suite remains
+type-baseline edits, implementation-time `openspec/**` edits, other endpoints,
+and other files. The contract suite remains
 the unchanged oracle; its direct private-helper calls must work too.
 
 ## Capabilities

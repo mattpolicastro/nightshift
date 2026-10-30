@@ -30,6 +30,24 @@ or change retry policy. No Markdown/HTML parser or marker-rule change is needed.
 
 ## Decisions
 
+### Drafted requirements and frozen implementation scope
+
+The `specs/gitea-forge/spec.md` and `specs/gitea-landing/spec.md` files within
+this change contain the complete proposed requirement deltas. They are written
+during drafting and become read-only acceptance criteria for all three tasks.
+The implementing agents may edit only the five code/test files allowed by the
+proposal, with the stated restrictions on landing tests. They must not edit
+`openspec/**`, including canonical specs, change artifacts or task checkboxes,
+and must not run spec synchronization or archival commands. Applying these
+deltas to canonical specifications is the separate finish/archive workflow's
+responsibility, not an implementation task or a prerequisite for its tests.
+
+The deltas explicitly replace the incompatible label-action and comment-list
+requirements and narrowly permit the inventoried assertion replacements.
+All other requirements in both capabilities remain in force. Verification
+checks implementation behavior against these deltas without rewriting specs
+or weakening the frozen contract oracle.
+
 ### Label action decoding and fake serialization
 
 In `GiteaForge.label_event_pages`, require a string `body` exactly equal to `"1"`
