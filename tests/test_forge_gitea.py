@@ -302,14 +302,14 @@ def test_absent_user_cannot_borrow_server_author_identity(fake):
 
 def label_event(identity=1, **extra):
     return dict(id=identity, type="label", label={"name": "ready"}, user={"login": "Alice"},
-                removed=False, created_at=STAMP) | extra
+                body="1", created_at=STAMP) | extra
 
 
 @pytest.mark.scenario("gitea-forge/label-timeline-evidence/label-actions-and-actors")
 def test_timeline_actions_sorted_and_projected(fake):
     rows = [label_event(4, user={"login": "ROBOT"}),
             {"id": 2, "type": "comment", "body": "Alice applied ready"},
-            label_event(3, removed=True, user={"login": "Mallory"}, author_association="OWNER"),
+            label_event(3, body="", user={"login": "Mallory"}, author_association="OWNER"),
             label_event(1, user={"login": "aLiCe"})]
     fake.repository("owner/repo", labels=[], issues=[candidate(1, [], timeline=rows)], page_size=2)
     path = ROOT + "/issues/1/timeline"
@@ -330,14 +330,118 @@ def test_timeline_actions_sorted_and_projected(fake):
 @pytest.mark.parametrize("patch", [{"id": None}, {"id": True}, {"id": 0}, {"id": "2"},
     {"user": None}, {"user": {}}, {"user": {"login": ""}}, {"user": {"login": True}},
     {"label": None}, {"label": {}}, {"label": {"name": ""}}, {"label": {"name": 1}},
-    {"removed": None}, {"removed": "false"}, {"removed": 0}, {"created_at": None},
-    {"id": 1, "removed": True}])
+    {"body": None}, {"body": "false"}, {"body": 0}, {"created_at": None},
+    {"id": 1, "body": ""}])
 def test_invalid_timeline_evidence_refused(fake, patch):
     rows = [label_event(), label_event(2, **patch)]
     fake.repository("owner/repo", labels=[], issues=[candidate(1, [], timeline=rows)])
     with pytest.raises(ForgeError) as caught:
         make_forge(fake).label_event_pages("owner/repo", 1)
     assert not caught.value.transient and len(fake.calls) in (2, 3)
+
+
+@pytest.mark.scenario("gitea-forge/label-timeline-evidence/label-actions-and-actors")
+@pytest.mark.parametrize("removed", [{}, *({"removed": value} for value in (
+    True, False, None, 0, "false", [], {}))])
+def test_gitea_label_action_read_from_body(fake, removed):
+    path = ROOT + "/issues/1/timeline"
+    # Raw routes retain contradictory removed fields to exercise the real decoder.
+    rows = [label_event(identity, body=body, user={"login": actor}, created_at=stamp, **removed)
+            for identity, body, actor, stamp in (
+                (3, "1", "Alice", "2026-01-03T00:00:00Z"),
+                (1, "1", "aLiCe", "2026-01-01T00:00:00Z"),
+                (2, "", "Mallory", "2026-01-02T00:00:00Z"))]
+    fake.route("GET", path, Reply([rows[0], {"id": 4, "type": "comment",
+                                          "body": "Alice removed ready"}]), page=1)
+    fake.route("GET", path, Reply(rows[1:]), page=2)
+    fake.route("GET", path, Reply([]), page=3)
+    assert make_forge(fake).label_event_pages("owner/repo", 1) == [[
+        {"id": identity, "event": action, "actor": {"login": actor},
+         "author_association": trust, "label": {"name": "ready"}, "created_at": stamp}
+        for identity, action, actor, trust, stamp in (
+            (1, "labeled", "aLiCe", "OWNER", "2026-01-01T00:00:00Z"),
+            (2, "unlabeled", "Mallory", "NONE", "2026-01-02T00:00:00Z"),
+            (3, "labeled", "Alice", "OWNER", "2026-01-03T00:00:00Z"))]]
+    assert [(call.method, call.path, call.query) for call in fake.calls] == [
+        ("GET", path, {"page": [str(page)], "limit": ["50"]}) for page in (1, 2, 3)]
+
+
+@pytest.mark.scenario("gitea-forge/label-timeline-evidence/unknown-label-evidence")
+@pytest.mark.parametrize("action", [{}, *({"body": value} for value in (
+    None, True, False, 1, 0, 1.0, [], {}, "0", "2", " 1", "1\n", " "))])
+@pytest.mark.parametrize("removed", [{}, {"removed": True}, {"removed": False}])
+def test_gitea_label_event_rejects_unknown_body(fake, action, removed):
+    row = label_event(2, **removed)
+    del row["body"]
+    row.update(action)
+    path = ROOT + "/issues/1/timeline"
+    fake.route("GET", path, Reply([label_event()]), page=1)
+    fake.route("GET", path, Reply([row]), page=2)
+    fake.route("GET", path, Reply([]), page=3)
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).label_event_pages("owner/repo", 1)
+    assert not caught.value.transient
+    assert all(call.method == "GET" and call.path == path for call in fake.calls)
+
+
+@pytest.mark.scenario("gitea-forge/label-timeline-evidence/unknown-label-evidence")
+@pytest.mark.parametrize("patch", [
+    {"body": ""}, {"user": {"login": "Mallory"}},
+    {"label": {"name": "other"}}, {"created_at": "2026-01-02T00:00:00Z"}])
+@pytest.mark.parametrize("same_page", [False, True])
+def test_gitea_label_event_rejects_conflicting_identity(fake, patch, same_page):
+    path = ROOT + "/issues/1/timeline"
+    rows = [label_event(removed=False), label_event(removed=False, **patch)]
+    pages = [rows] if same_page else [[row] for row in rows]
+    for page, records in enumerate([*pages, []], 1):
+        fake.route("GET", path, Reply(records), page=page)
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).label_event_pages("owner/repo", 1)
+    assert not caught.value.transient
+    assert all(call.method == "GET" and call.path == path for call in fake.calls)
+
+
+@pytest.mark.scenario("gitea-forge/label-timeline-evidence/label-actions-and-actors")
+@pytest.mark.scenario("gitea-forge/label-timeline-evidence/unknown-label-evidence")
+@pytest.mark.parametrize("legacy, action", [
+    ({"removed": False}, {"body": "1"}), ({"removed": True}, {"body": ""}),
+    ({"body": "1"}, {"body": "1"}), ({"body": ""}, {"body": ""}),
+    ({"body": None}, {"body": None}), ({"body": "unknown"}, {"body": "unknown"}),
+    ({}, {}), ({"removed": None}, {}), ({"removed": 0}, {}),
+    ({"removed": 1}, {}), ({"removed": "false"}, {}),
+    *[({"removed": removed, "body": body}, {"body": body})
+      for removed in (False, True) for body in ("1", "", None, True, 1, [], {}, "unknown")]])
+def test_fake_gitea_timeline_wire_shape(fake, legacy, action):
+    row = label_event()
+    del row["body"]
+    row.update(legacy)
+    original = dict(row)
+    comment = {"id": 2, "type": "comment", "body": "ready", "removed": False}
+    fake.repository("owner/repo", labels=[], issues=[candidate(1, [], timeline=[row, comment])],
+                    page_size=2)
+    forge = make_forge(fake)
+    path = forge._repo_path("owner/repo", "issues", "1", "timeline")
+    query = {"page": 1, "limit": 50}
+    wire = forge._request("GET", path, query=query)[2]
+    expected = {key: value for key, value in original.items() if key not in ("removed", "body")}
+    assert wire == [expected | action, comment]
+    assert row == original  # Reading must not rewrite stored fixture input.
+    fake.route("GET", ROOT + "/issues/1/timeline", Reply([original]), page=1)
+    assert forge._request("GET", path, query=query)[2] == [original]
+
+
+@pytest.mark.scenario("gitea-forge/label-timeline-evidence/unknown-label-evidence")
+@pytest.mark.parametrize("missing", ["id", "user", "label", "created_at"])
+def test_gitea_label_event_rejects_missing_evidence(fake, missing):
+    row = label_event(removed=False, author={"login": "Alice"}, author_association="OWNER")
+    del row[missing]
+    path = ROOT + "/issues/1/timeline"
+    fake.route("GET", path, Reply([row]), page=1)
+    fake.route("GET", path, Reply([]), page=2)
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).label_event_pages("owner/repo", 1)
+    assert not caught.value.transient
+    assert all(call.method == "GET" and call.path == path for call in fake.calls)
 
 
 @pytest.mark.scenario("gitea-forge/issue-and-feedback-records/draft-facts-and-blockers")

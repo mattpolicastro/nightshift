@@ -223,12 +223,14 @@ class GiteaForge:
                 if row.get("type") != "label":
                     continue
                 label = row.get("label")
+                # Gitea encodes label actions in body; removed is not action evidence.
+                body = row.get("body")
                 if (not isinstance(label, dict) or not isinstance(label.get("name"), str)
                         or not label["name"].strip() or self._login(row.get("user")) is None
-                        or type(row.get("removed")) is not bool
+                        or not isinstance(body, str) or body not in ("1", "")
                         or not isinstance(row.get("created_at"), str) or not row["created_at"]):
                     raise ForgeError("Invalid Gitea label event", transient=False)
-                events.append({"id": row["id"], "event": "unlabeled" if row["removed"] else "labeled",
+                events.append({"id": row["id"], "event": "labeled" if body == "1" else "unlabeled",
                                "actor": {"login": self._login(row["user"])},
                                "author_association": self._association(row["user"]),
                                "label": label, "created_at": row["created_at"]})

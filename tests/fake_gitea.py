@@ -129,6 +129,14 @@ class FakeGitea:
                     for endpoint in ("comments", "timeline"):
                         if call.path == detail_path + "/" + endpoint:
                             rows = issue.get(endpoint, [])
+                            if endpoint == "timeline":
+                                # Convert legacy fixtures only at the state-backed wire boundary.
+                                rows = [dict(row) if isinstance(row, dict) else row for row in rows]
+                                for row in rows:
+                                    if isinstance(row, dict) and row.get("type") == "label":
+                                        if "body" not in row and type(row.get("removed")) is bool:
+                                            row["body"] = "" if row["removed"] else "1"
+                                        row.pop("removed", None)
                     review_path = root + f'/pulls/{issue["number"]}/reviews'
                     if call.path == review_path:
                         rows = issue.get("reviews", [])
