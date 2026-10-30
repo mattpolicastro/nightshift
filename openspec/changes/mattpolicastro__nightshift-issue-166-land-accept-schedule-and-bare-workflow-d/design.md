@@ -1,0 +1,35 @@
+## Context
+
+`ignored_paths(workflow_text: str) -> tuple[tuple[str, ...], ...] | None` currently stores every accepted event in a dictionary of path/branch fields and requires a nonempty `paths-ignore` list for each. The repository's daily schedule therefore makes it return `None`. `test_repository_trigger_and_unrelated_yaml_are_supported` reads the real workflow and expects the two existing ignore lists; it must remain unchanged.
+
+The existing `reviewed-pr-landing` requirements bind exclusion to complete changed paths, the recorded base SHA and a single selected workflow. This change modifies only `Base workflow exclusion proof`: its universal event wording must distinguish path events from the two accepted non-path events. All other requirements and the existing three scenarios remain in force. No applicable `AGENTS.md` was found in the checkout or its ancestor directories.
+
+## Goals / Non-Goals
+
+Restore exclusion parsing for the current repository workflow and the planned bare dispatch trigger while preserving a small, deterministic, conservative grammar. Keep the implementation, tests and requirement update together in one task of about 150 changed lines.
+
+Do not edit workflows, broaden workflow selection or glob matching, parse general YAML, validate cron timing semantics, add dependencies, or change code outside `ignored_paths` in `nightshift/land.py`. A second workflow still disables exclusion. No live forge access is needed for automated verification.
+
+## Decisions
+
+1. **Separate event recognition from ignore-list collection.** Within `ignored_paths`, track the current event and all seen event names, but retain path/branch fields only for `push` and `pull_request`. Keep the public signature and `None` failure result. Require `pull_request` and supported nonempty ignore lists for it and any declared `push`; return those lists in their existing declaration order. Neither `schedule` nor `workflow_dispatch` creates an empty list or satisfies the required `pull_request` event. Reject repeated names for all four events.
+
+2. **Retain the physical-line boundary rules.** Keep exactly one supported column-zero `on:` header (including the existing quoted spellings), CRLF handling, tab rejection within the trigger block and termination at the next noncomment, nonblank column-zero line. Event headers must full-match exactly two spaces, an accepted name, a colon and optional ASCII spaces. Inline values/comments, flow forms and every other event name return `None`. Preserve all existing push/pull_request field, scalar and duplicate checks. Do not infer YAML structure from arbitrary indentation or scan unrelated job content for triggers.
+
+3. **Schedule has a closed grammar.** Under `  schedule:`, accept only blank lines, whole-line comments and physical lines consisting of exactly four spaces, `- cron: `, one scalar matching the existing single-/double-quoted `scalar` grammar, and optional trailing ASCII spaces. This permits both quote styles without escapes, embedded matching quotes or multiline values. Do not interpret the scalar as a cron expression. Require at least one cron item before another event, the trigger-block boundary or end of input. Empty/comment-only schedules, flow lists, unquoted values, inline comments, other keys/items, wrong indentation and any other nested syntax return `None`. Multiple cron items are allowed.
+
+4. **Dispatch has no nested content.** Accept `  workflow_dispatch:` with optional trailing ASCII spaces only. Before skipping blank/comment lines, reject any subsequent nonempty physical line beginning with three or more ASCII spaces while this event is current; these are nested lines, including indented comments and space-only lines. Tabs still refuse. Truly empty lines and comments at column zero or event indentation retain the existing handling. A new valid two-space event heading or the normal trigger-block boundary ends the dispatch event. Thus `inputs`, `branches`, `paths-ignore`, list items, and any other nested content refuse; `workflow_dispatch: {}` and duplicates also refuse. In particular, `TRIGGER.replace("  push:", "  workflow_dispatch:")` must remain `None`.
+
+5. **Test behavior through the existing pure interface.** Add exactly the three requested test functions in `tests/test_land_ci_exclusion.py`, using parametrization for compact coverage and scenario markers for the new scenarios. `test_schedule_and_dispatch_events_do_not_block_exclusion` covers each event separately and together, different event positions, both quote styles, multiple cron items, trailing spaces and CRLF; asserts the unchanged path-event tuples and docs eligibility, plus a mismatching push ignore list and missing pull_request still preventing exclusion. `test_schedule_accepts_only_cron_items` covers valid comments/blanks and malformed, empty, flow, duplicate and non-cron cases, including empty schedules at event/block/end boundaries. `test_dispatch_with_nested_lines_needs_ci` covers nested fields/items/comments/space-only lines, flow forms, duplicates and the existing replacement example. Rejections assert `None` and no path exclusion. Preserve every existing assertion, including unknown/ambiguous syntax and multiple-workflow refusal. Leave `test_repository_trigger_and_unrelated_yaml_are_supported` entirely unedited.
+
+6. **Verification and scope gates.** Run `uv run pytest tests/test_land_ci_exclusion.py`, then the acceptance command `uv run pytest`, and `uv run python scripts/check_types.py` with no new type errors or baseline changes. Confirm the implementation diff touches only the three allowed locations and remains about 150 changed lines. No implementation changes or test execution success are claimed by this draft.
+
+## Risks / Trade-offs
+
+Accidentally keeping non-path events in the ignore-list dictionary would still block exclusion; accidentally reusing path-field parsing under dispatch could permit ambiguous evidence. Exact return-value assertions and rejection tests cover both. A forgotten schedule-finalization check could admit an empty schedule at end of input or before another event; test all three termination boundaries.
+
+The intentionally narrow grammar can reject otherwise valid YAML. Unsupported or ambiguous input retains ordinary CI waiting. Syntactic acceptance of a quoted cron scalar is not validation of a hosted scheduler's configuration. No scheduling, registration-grace or protection policy changes are implied.
+
+Human checklist for the implementation PR (after merge; not an implementing-agent task):
+
+- [ ] Land the next real docs-only PR on this repository and confirm it uses the exclusion, reports/attests `CI not required: docs-only`, and merges without waiting out the CI deadline. Record that PR's number on issue #166. Offline tests cannot prove the live scheduling, protection and merge outcome; leave this check pending until observed.
