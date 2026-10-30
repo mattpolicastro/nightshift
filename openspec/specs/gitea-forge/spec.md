@@ -46,16 +46,20 @@ write reconciliation. Diagnostics SHALL exclude credentials and remote bodies.
 
 ### Requirement: Complete endpoint pagination
 
-The backend SHALL use independent page/limit loops for all list endpoints,
-including nested review comments and combined-status arrays. It SHALL continue
+The backend SHALL use independent page/limit loops for paginated list endpoints,
+including repository labels, nested review comments and combined-status arrays.
+For these endpoints it SHALL continue
 after every nonempty page until explicit empty-page termination, never infer
 completion from a short page, and never follow response URLs. It SHALL refuse
 malformed or conflicting evidence, repeated nonempty pages, contradictory
 termination metadata and exhaustion of the 1,000-page bound without returning
 partial success.
 
+Issue-label reads SHALL use a single GET without page/limit parameters and
+validate the complete response as a list of unique, valid labels.
+
 #### Scenario: Short intermediate page
-- **WHEN** any list endpoint returns a short nonempty page followed by more records and then an empty page
+- **WHEN** a paginated list endpoint returns a short nonempty page followed by more records and then an empty page
 - **THEN** the adapter reads all records using page numbers starting at one and limit 50, without mutating another endpoint's query or following Link URLs
 
 #### Scenario: Incomplete listing refused
