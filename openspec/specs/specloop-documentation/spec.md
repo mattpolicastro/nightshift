@@ -545,7 +545,7 @@ README.md and docs/specloop/README.md SHALL explain manifest-host selection, tru
 #### Scenario: Explicit commands do not enable the daemon
 - **WHEN** an operator compares forge configuration, preflight and engine instructions
 - **THEN** the docs distinguish WIP-title drafts and finish's title PATCH/read-back from native draft state or merging
-- **THEN** all Gitea daemon stages and pending delivery stay disabled, and arming, landing and unrelated plugin paths retain their boundaries
+- **THEN** all Gitea daemon stages and pending delivery stay disabled; explicit arming supports configured Gitea with verified label writes, while landing and unrelated plugin paths retain their boundaries
 - **THEN** existing base preparation and recovery, frozen wrappers, enrollment examples and issue #135 per-step env guidance remain intact
 
 ### Requirement: Factory forge action guidance
@@ -576,3 +576,27 @@ Documentation checks SHALL validate scoped structure, relative links and command
 - **WHEN** touched documentation examples and links are validated
 - **THEN** exact unique physical headings select passages through the next heading of the same or higher level, and fences, indentation or HTML do not hide recognized lines
 - **THEN** command examples parse without dispatch, links resolve, unknown placeholders or ambiguous command syntax fail closed, and no extra raw `[[repos]]` guide block breaks existing extraction
+
+### Requirement: Configured arming guidance
+
+The arming guide SHALL document explicit config selection, checkout matching, Gitea bot credentials, client-side label filtering and verified writes. It SHALL retain legacy GitHub commands, lint rules, modes and examples. New examples SHALL be checked with deterministic physical-line rules and the real command parser without network access or exact-prose assertions.
+
+#### Scenario: Operator configures arming
+- **WHEN** an operator reads docs/arming.md's prerequisites, Invocation and Configured Gitea passages
+- **THEN** they can use --config with a unique matching enrollment and existing spec:draft label, provision file-wins bot credentials, and run check and arming examples without gh on Gitea
+- **THEN** instructions retain GitHub and enterprise discovery when the flag is omitted, explain missing completion reasons and verification failure, and preserve the original template and named-test examples
+
+#### Scenario: Arming examples are structurally checked
+- **WHEN** new documentation tests select the configured arming section and its shell examples
+- **THEN** unique column-zero headings and exact physical fence delimiters select it regardless of surrounding Markdown or HTML; missing, duplicate, indented or reversed delimiters fail closed
+- **THEN** shlex tokenization and the real module parser/main with fake transport validate both commands, relative links resolve and all existing documentation assertions remain intact
+
+### Requirement: Gitea arming support boundary
+
+The arming guide, known limitations and engine guide SHALL distinguish verified explicit Gitea arming from disabled daemon stages and pending delivery. They SHALL remove only obsolete GitHub-only arming claims, preserve landing and unrelated limits, and identify real issue arming and eventual drafting as pending human checks without claiming CI proves live operation.
+
+#### Scenario: Operator understands the continuing hold
+- **WHEN** an operator compares the updated arming guide, limitations and explicit-publication guidance
+- **THEN** all describe configured arming and bot-backed verified labels while retaining unconditional Gitea daemon holds; force, allowlists and preflight do not enable drafting
+- **THEN** landing remains GitHub-only, publication guidance and concurrent loopback content stay intact, and only arming claims change in the shared documents
+- **THEN** the human checks require a real armed issue and a later drafting observation once separate prerequisites permit it; until then drafting remains pending rather than bypassing the hold
