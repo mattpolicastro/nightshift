@@ -994,6 +994,30 @@ def _context_recent(run: Run, all_tasks: list[tasks.Task]) -> list[dict]:
     return list(reversed(recent))
 
 
+def _status_forge_link(github: str, branch: str, task_path: str) -> str:
+    """Resolve public display metadata without execution credentials or clients."""
+    try:
+        parts = github.rstrip("/").split("/")
+        if (len(parts) != 3 or any(not re.fullmatch(r"[\w.-]+", p, re.ASCII)
+                                  or p in (".", "..") for p in parts)):
+            return ""
+        override = os.environ.get("NIGHTSHIFT_FORGE_CONFIG")
+        if override is not None and (not override.strip() or not Path(override).is_absolute()):
+            return ""
+        path = Path(override) if override is not None else config.DEFAULT_PATH
+        raw = tomllib.loads(path.read_text())
+        matches = [f for f in config.parse_forges(raw) if f.kind == "gitea"
+                   and urlsplit(f.url).hostname == parts[0].lower()]
+        if len(matches) != 1:
+            return ""
+        return (f"{matches[0].url.rstrip('/')}/{quote('/'.join(parts[1:]), safe='/')}"
+                f"/src/branch/{quote(branch, safe='/')}"
+                f"/{quote(Path(task_path).parent.as_posix(), safe='/')}")
+    except (OSError, ValueError):
+        # Missing or invalid metadata must not discard the rest of the context.
+        return ""
+
+
 def _status_context(run: Run, m: manifest.Manifest, head: str, task_path: str,
                     all_tasks: list[tasks.Task]) -> dict:
     try:
@@ -1001,7 +1025,7 @@ def _status_context(run: Run, m: manifest.Manifest, head: str, task_path: str,
         task = next((t for t in all_tasks if pause and t.key == pause.task), None)
         if task is None:
             task = next((t for t in all_tasks if not t.done), None)
-        # Publication accepts [HOST/]OWNER/REPO; display links support github.com only.
+        # Preserve the existing GitHub calculation and publication gate.
         parts = m.github.rstrip("/").split("/")
         host = parts.pop(0).lower() if len(parts) == 3 else "github.com"
         github = ""
@@ -1009,7 +1033,7 @@ def _status_context(run: Run, m: manifest.Manifest, head: str, task_path: str,
             github = (f"https://github.com/{quote('/'.join(parts), safe='/')}"
                       f"/tree/{quote(m.branch, safe='/')}"
                       f"/{quote(Path(task_path).parent.as_posix(), safe='/')}")
-        return {
+        context = {
             "summary": _context_summary(run.dir / "repo.git", head, task_path),
             "repo": str(m.repo.absolute()),
             "branch": m.branch,
@@ -1019,6 +1043,9 @@ def _status_context(run: Run, m: manifest.Manifest, head: str, task_path: str,
             "recent": _context_recent(run, all_tasks),
             "github": github,
         }
+        if host != "github.com" and len(parts) == 2 and all(parts) and host:
+            context["link"] = _status_forge_link(m.github, m.branch, task_path) if run.state.pr else ""
+        return context
     except Exception:
         # Display context is best effort; one damaged run must not hide status.
         return {"summary": "", "repo": "", "branch": "", "task": None,
