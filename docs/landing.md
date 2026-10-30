@@ -332,17 +332,31 @@ on:
     paths-ignore: ['**.md']
   pull_request:
     paths-ignore: ['**.md']
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 ```
 
 The narrow physical-line grammar accepts one column-zero `on:` (optionally
 quoted), two-space `pull_request:` and optional `push:` headings, and four-space
 `paths-ignore`, `branches` or `branches-ignore` fields without duplicates.
 Lists use quoted strings in brackets or six-space `- 'value'` lines; branch
-lists also accept simple unquoted names/globs such as `main`. Every declared
-event must ignore every changed path. Blank lines and whole-line comments are
-allowed. Other events/fields, inline comments, tabs, escapes, aliases, anchors,
-tags and multiline scalars are unsupported. Missing, incomplete, ambiguous or
-unsupported evidence retains ordinary CI waiting.
+lists also accept simple unquoted names/globs such as `main`. Each declared
+`push`/`pull_request` event needs a nonempty ignore list matching every changed
+path; `pull_request` is required.
+
+Optional `schedule` and bare `workflow_dispatch` events contribute no ignore
+list. Schedule requires one or more exact four-space `- cron: ` lines with
+single- or double-quoted scalars, without escapes or embedded matching quotes;
+cron timing semantics are not validated. Event headings and cron items allow
+trailing spaces. Blank lines and whole-line comments are allowed, except that
+dispatch permits no nested physical lines: even comments or space-only lines
+beginning with three or more spaces are refused. Truly empty lines and comments
+at column zero or two-space event indentation remain allowed under dispatch.
+Duplicate events, empty/comment-only or flow schedules, nested/flow dispatches,
+other events/fields, inline comments, tabs, escapes, aliases, anchors, tags and
+multiline scalars are unsupported. Missing, incomplete, ambiguous or unsupported
+evidence retains ordinary CI waiting.
 
 Globs match whole case-sensitive repository-relative paths: `*` excludes `/`,
 `**` includes `/`, and `**/` matches zero or more directory components.
@@ -386,6 +400,12 @@ that invocation. The existing late-POST cross-invocation limitation and
 `duplicate-markers` recovery below apply to both kinds of attestation. An older
 CI comment is historical head/base evidence, not proof of merge or permission
 for a later invocation to skip its fresh gates.
+
+Live validation remains pending: land the next real docs-only PR, confirm
+`CI not required: docs-only` in the output and attestation, and verify it merges
+without waiting out the CI deadline. Record that PR's number on
+[issue #166](https://github.com/mattpolicastro/nightshift/issues/166); offline
+tests cannot complete the live scheduling, protection and merge checks below.
 
 ## Gitea update, exact-head CI, and merge requests
 
