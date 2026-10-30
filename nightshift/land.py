@@ -288,13 +288,16 @@ def _ignore_glob(pattern: str) -> re.Pattern[str] | None:
 
 
 def ignored_paths(workflow_text: str) -> tuple[tuple[str, ...], ...] | None:
-    """Return one ignore list per event, recognizing only physical trigger lines."""
+    """Return one ignore list per path event, recognizing only physical trigger lines."""
     lines = workflow_text.split("\n")
     starts = [i for i, line in enumerate(lines)
               if re.match(r"^(?:on|'on'|\"on\")\s*:", line)]
     if len(starts) != 1 or not re.fullmatch(r"(?:on|'on'|\"on\"):[ ]*\r?", lines[starts[0]]):
         return None
-    events: dict[str, dict[str, list[str]]] = {}
+    path_events: dict[str, dict[str, list[str]]] = {}
+    seen: set[str] = set()
+    current: str | None = None
+    has_cron = False
     fields: dict[str, list[str]] | None = None
     active: str | None = None
     scalar = r"(?:'[^'\\\r\n]*'|\"[^\"\\\r\n]*\")"
@@ -304,16 +307,27 @@ def ignored_paths(workflow_text: str) -> tuple[tuple[str, ...], ...] | None:
             break
         if "\t" in line:
             return None
+        if current == "workflow_dispatch" and line.startswith("   "):
+            return None
         if not line.strip(" ") or line.lstrip(" ").startswith("#"):
             continue
         if not line.startswith(" "):
             return None
-        event = re.fullmatch(r"  (pull_request|push): *", line)
+        event = re.fullmatch(r"  (pull_request|push|schedule|workflow_dispatch): *", line)
         if event:
-            if event[1] in events:
+            if event[1] in seen or (current == "schedule" and not has_cron):
                 return None
-            fields = events[event[1]] = {}
+            current = event[1]
+            seen.add(current)
+            fields = None
+            if current in ("push", "pull_request"):
+                fields = path_events[current] = {}
             active = None
+            continue
+        if current == "schedule":
+            if not re.fullmatch(rf"    - cron: {scalar} *", line):
+                return None
+            has_cron = True
             continue
         field_match = re.fullmatch(r"    (paths-ignore|branches|branches-ignore): *(.*?) *", line)
         item = re.fullmatch(r"      - (.*?) *", line)
@@ -349,11 +363,11 @@ def ignored_paths(workflow_text: str) -> tuple[tuple[str, ...], ...] | None:
                     or (name == "paths-ignore" and _ignore_glob(value) is None)):
                 return None
             fields[name].append(value)
-    if ("pull_request" not in events
+    if ((current == "schedule" and not has_cron) or "pull_request" not in path_events
             or any(not fields.get("paths-ignore") or any(not v for v in fields.values())
-                   for fields in events.values())):
+                   for fields in path_events.values())):
         return None
-    return tuple(tuple(fields["paths-ignore"]) for fields in events.values())
+    return tuple(tuple(fields["paths-ignore"]) for fields in path_events.values())
 
 
 def all_paths_ignored(paths: tuple[str, ...] | None,
