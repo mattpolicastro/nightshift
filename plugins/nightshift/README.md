@@ -1,8 +1,8 @@
 # Nightshift for Paseo
 
 One host-level sidebar page for outstanding Nightshift tasks and specloop runs.
-Requires Paseo 0.10.1–0.13.x, daemon and app alike (`paseo-plugin.json` pins
-`>=0.10.1 <0.14.0`; built against SDK 0.13.2), and the Nightshift
+Requires Paseo 0.10.1 or later, daemon and app alike (`paseo-plugin.json`
+declares `>=0.10.1` with no upper bound; built against SDK 0.14.0), and the Nightshift
 checkout on the Paseo host (`NIGHTSHIFT_CHECKOUT`, default `~/Projects/nightshift`;
 see [platform settings and limits](../../KNOWN-LIMITATIONS.md#platform-assumptions)).
 The existing outcome database must be present. The page creates no agents.
