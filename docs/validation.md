@@ -137,8 +137,9 @@ automatic routing, native Codex support, or reliability across larger tasks.
 
 ## Gitea contract CI
 
-`.github/workflows/gitea-contract.yml` runs on main pushes, weekly, and manual
-dispatch (not pull requests). It provisions a fresh SQLite Gitea service using
+The `gitea-contract` job in `.github/workflows/ci.yml` runs on main pushes, the
+daily schedule and manual dispatch, never on pull requests. It lives in `ci.yml`
+because docs-only landing exclusion requires a single workflow file. It provisions a fresh SQLite Gitea service using
 `scripts/gitea_contract_setup.py`. Only administrator bootstrap uses the container
 CLI; users, runtime tokens, the ten Nightshift labels, repository, commits and
 feedback are created through the API. The bot is restricted, non-admin, and a
