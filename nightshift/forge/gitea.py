@@ -10,7 +10,7 @@ from urllib.parse import quote, urlsplit
 from nightshift.forge import ForgeError
 from nightshift.forge.http import GiteaHTTPError, GiteaTransport
 from nightshift.forge.types import ResponseText
-from nightshift.queue import FeedbackItem, Issue, _block, has_instructions
+from nightshift.queue import FeedbackItem, Issue, _block, _has_final_marker, has_instructions
 
 
 class GiteaForge:
@@ -128,6 +128,21 @@ class GiteaForge:
     def comment_pages(self, repo: str, number: int) -> list[list[dict]]:
         return self._pages(self._repo_path(repo, "issues", self._number(number), "comments"))
 
+    def bot_comment_pages(self, repo: str, number: int) -> list[list[dict]]:
+        """Validated daemon evidence, separate from factual human comments."""
+        pages = []
+        markers: set[str] = set()
+        for page in self.comment_pages(repo, number):
+            bots = [row for row in page if self._is_bot(row["user"])]
+            for row in bots:
+                marker = self._comment_marker(row["body"])
+                if marker is not None:
+                    if marker in markers:
+                        raise ForgeError("Ambiguous Gitea comment marker", transient=False)
+                    markers.add(marker)
+            pages.append(bots)
+        return pages
+
     @staticmethod
     def _comment_marker(body: str) -> str | None:
         if not isinstance(body, str):
@@ -145,14 +160,8 @@ class GiteaForge:
         return lines[-1]
 
     def _upsert_marked_comment(self, repo: str, number: int, body: str, marker: str) -> bool:
-        matches = []
-        for page in self.comment_pages(repo, number):
-            for row in page:
-                candidate = self._comment_marker(row["body"])
-                if candidate == marker and self._is_bot(row["user"]):
-                    matches.append(row)
-        if len(matches) > 1:
-            raise ForgeError("Ambiguous Gitea comment marker", transient=False)
+        matches = [row for page in self.bot_comment_pages(repo, number) for row in page
+                   if _has_final_marker(row["body"], marker)]
         if not matches:
             return False
         if matches[0]["body"] != body:

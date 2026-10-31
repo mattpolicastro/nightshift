@@ -2094,6 +2094,112 @@ def comment_repo(fake):
     return issue["comments"]
 
 
+LOOKUP_TEXT = " Résumé 🦉\r\n '$HOME' `literal` \n "
+
+
+def marker_lookup(forge, operation):
+    from nightshift import queue, specloop_intake as intake
+
+    marker = "<!-- nightshift:draft:gate -->"
+    body = f"{queue.SELF_COMMENT_PREFIX} {LOOKUP_TEXT}\n\n{marker}"
+    if operation == "rejection":
+        marker = "<!-- nightshift:draft:label-authorization-1:42 -->"
+        act = lambda: intake._comment_label_rejection("owner/repo", 1, "spec:draft",
+            {"id": 42, "actor": {"login": "outsider"}}, forge=forge)
+    elif operation == "delivery":
+        act = lambda: intake._comment("owner/repo", 1, "gate", LOOKUP_TEXT, forge=forge)
+    else:
+        act = lambda: forge.create_comment("owner/repo", 1, "issue", body)
+    return marker, act
+
+
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/human-copies-cannot-satisfy-daemon-lookup")
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/bot-ownership-gates-upserts")
+@pytest.mark.parametrize("operation", ["rejection", "delivery", "adapter"])
+@pytest.mark.parametrize("bot", [False, True])
+def test_gitea_marker_lookup_ignores_human_copies(fake, comment_repo, operation, bot):
+    forge = make_forge(fake)
+    marker, act = marker_lookup(forge, operation)
+    humans = [authored(1, body="human\r\n" + marker),
+              authored(2, body=" " + marker + "\ntrailing")]
+    comment_repo.extend(row.copy() for row in humans)
+    if bot:
+        comment_repo.append(authored(3, "rObOt", "old\r\n" + marker))
+    act()
+    writes = [c for c in fake.calls if c.method != "GET"]
+    expected = [] if bot and operation == "rejection" else ["PATCH" if bot else "POST"]
+    assert [c.method for c in writes] == expected
+    if writes:
+        assert writes[0].body == {"body": comment_repo[-1]["body"]}
+        assert comment_repo[-1]["body"].endswith("\n\n" + marker)
+        if operation != "rejection":
+            from nightshift import queue
+            assert comment_repo[-1]["body"] == f"{queue.SELF_COMMENT_PREFIX} {LOOKUP_TEXT}\n\n{marker}"
+    assert comment_repo[:2] == humans
+    assert [r["body"] for p in forge.comment_pages("owner/repo", 1) for r in p][:2] == [
+        row["body"] for row in humans]
+    assert [r["body"] for p in forge.bot_comment_pages("owner/repo", 1) for r in p] == [
+        comment_repo[-1]["body"]]
+    assert [r["body"] for r in forge.issue_for_draft("owner/repo", 1)["comments"]] == [
+        row["body"] for row in humans]
+    fake.calls.clear()
+    act()
+    assert [c.method for c in fake.calls if c.method != "GET"] == (
+        ["PATCH"] if operation == "delivery" else [])
+
+
+@pytest.mark.scenario("forge-interface/canonical-daemon-markers/inline-references-do-not-match")
+@pytest.mark.parametrize("operation", ["rejection", "delivery", "adapter"])
+@pytest.mark.parametrize("present", [False, True])
+def test_gitea_inline_a_final_b_selects_only_a(fake, comment_repo, operation, present):
+    marker, act = marker_lookup(make_forge(fake), operation)
+    original = authored(1, "Robot", "inline " + marker + " suffix\r\n" + MARKER)
+    comment_repo.append(original.copy())
+    if present:
+        comment_repo.append(authored(2, "Robot", "old\n" + marker))
+    act()
+    writes = [c for c in fake.calls if c.method != "GET"]
+    expected = [] if present and operation == "rejection" else ["PATCH" if present else "POST"]
+    assert [c.method for c in writes] == expected
+    assert comment_repo[0] == original and len(comment_repo) == 2
+    if writes:
+        assert writes[0].path == (ROOT + "/issues/comments/2" if present else COMMENT_PATH)
+        assert writes[0].body == {"body": comment_repo[1]["body"]}
+    assert comment_repo[1]["body"].endswith(marker)
+    if operation != "rejection":
+        from nightshift import queue
+        assert comment_repo[1]["body"] == f"{queue.SELF_COMMENT_PREFIX} {LOOKUP_TEXT}\n\n{marker}"
+
+
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/ambiguous-bot-evidence-refuses")
+@pytest.mark.parametrize("operation", ["rejection", "delivery", "adapter"])
+@pytest.mark.parametrize("evidence", ["malformed", "duplicate", "invalid-human", "unavailable"])
+def test_gitea_marker_lookup_refuses_bad_evidence(fake, comment_repo, operation, evidence):
+    marker, act = marker_lookup(make_forge(fake), operation)
+    comment_repo.append(authored(1, "Robot", marker))
+    if evidence == "unavailable":
+        fake.route("GET", COMMENT_PATH, Reply(status=403))
+    else:
+        comment_repo.append(authored(2, "Alice" if evidence == "invalid-human" else "Robot",
+            42 if evidence == "invalid-human" else " " + marker if evidence == "malformed" else marker))
+    before = [row.copy() for row in comment_repo]
+    with pytest.raises(ForgeError):
+        act()
+    assert all(c.method == "GET" for c in fake.calls)
+    assert comment_repo == before
+
+
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/ambiguous-bot-evidence-refuses")
+def test_gitea_delivery_rechecks_ownership_before_patch(fake, comment_repo):
+    marker, act = marker_lookup(make_forge(fake), "delivery")
+    comment_repo.append(authored(1, "Robot", marker))
+    fake.route("GET", COMMENT_DETAIL, Reply(authored(1, "Alice", marker)))
+    with pytest.raises(ForgeError, match="bot-owned"):
+        act()
+    assert [c.method for c in fake.calls] == ["GET", "GET"]
+    assert comment_repo[0]["body"] == marker
+
+
 @pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/deterministic-marker-matching")
 @pytest.mark.parametrize("namespace", ["draft", "admit", "publish", "revise", "approval",
     "draft-error", "admit-error", "publish-error", "revise-error"])
@@ -2138,9 +2244,15 @@ def test_malformed_comment_input_refused_before_dispatch(fake, body, operation):
 @pytest.mark.parametrize("body", [" " + MARKER, MARKER + "\ntrailing", MARKER + "\n" + MARKER])
 def test_malformed_existing_marker_is_not_absence(fake, comment_repo, login, body):
     comment_repo.append(authored(login=login, body=body))
-    with pytest.raises(ForgeError, match="marker"):
+    if login == "Alice":
         make_forge(fake).create_comment("owner/repo", 1, "issue", BODY)
-    assert all(c.method == "GET" for c in fake.calls) and comment_repo[0]["body"] == body
+        assert [c.method for c in fake.calls] == ["GET", "POST"]
+        assert comment_repo[-1]["body"] == BODY
+    else:
+        with pytest.raises(ForgeError, match="marker"):
+            make_forge(fake).create_comment("owner/repo", 1, "issue", BODY)
+        assert all(c.method == "GET" for c in fake.calls)
+    assert comment_repo[0]["body"] == body
 
 
 @pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/bot-ownership-gates-upserts")
@@ -2168,6 +2280,7 @@ def test_comment_upsert_ignores_humans_and_reads_all_pages(fake, comment_repo, b
 
 
 @pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/bot-ownership-gates-upserts")
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/ambiguous-bot-evidence-refuses")
 @pytest.mark.parametrize("login", ["Alice", None, "rObOt"])
 @pytest.mark.parametrize("upsert", [False, True])
 def test_every_patch_checks_current_ownership(fake, comment_repo, login, upsert):

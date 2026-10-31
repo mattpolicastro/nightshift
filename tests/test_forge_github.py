@@ -532,15 +532,17 @@ def test_membership_fake_keeps_status_parsing_in_core(intake_forge, response, ex
 
 
 @pytest.mark.scenario("forge-interface/core-policy-preservation/authorization-and-comments-unchanged")
-@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("existing", [False, True, "canonical"])
 def test_comment_fake_preserves_literal_marker_and_raw_body(intake_forge, existing):
     marker = "<!-- nightshift:draft:change:round -->"
-    intake_forge.comment_pages.return_value = [[], [{"id": 42, "body": "prefix " + marker + " suffix",
+    previous = "prefix\r\n" + marker if existing == "canonical" else "prefix " + marker + " suffix"
+    intake_forge.comment_pages.return_value = [[], [{"id": 42, "body": previous,
         "author_association": "NONE"}] if existing else []]
     intake._comment("o/r", 7, "change", BODY, round_id="round", forge=intake_forge)
     body = f"{queue.SELF_COMMENT_PREFIX} {BODY}\n\n{marker}"
     assert intake_forge.mock_calls == [call.comment_pages("o/r", 7),
-        call.update_comment("o/r", 42, body) if existing else call.create_comment("o/r", 7, "issue", body)]
+        call.update_comment("o/r", 42, body) if existing == "canonical"
+        else call.create_comment("o/r", 7, "issue", body)]
 
 
 @pytest.mark.real_trust

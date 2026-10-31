@@ -86,6 +86,71 @@ def deliver(*, action="revise", kind="pr", round_id=None):
                             runner=partial(queue._gh, sleep=lambda _: None))
 
 
+@pytest.mark.scenario("forge-interface/canonical-daemon-markers/inline-references-do-not-match")
+@pytest.mark.parametrize("operation", ["rejection", "delivery"])
+@pytest.mark.parametrize("present", [False, True])
+def test_github_inline_a_final_b_selects_only_a(remote, operation, present):
+    remote.lose_response = False
+    marker = ("<!-- nightshift:draft:label-authorization-8:42 -->" if operation == "rejection"
+              else "<!-- nightshift:revise:gate -->")
+    original = {"id": 81, "body": f"inline {marker} suffix\r\n<!-- nightshift:revise:other -->"}
+    remote.comments.append(original.copy())
+    if present:
+        remote.comments.append({"id": 82, "body": "old\r\n" + marker})
+    runner = partial(queue._gh, sleep=lambda _: None)
+    if operation == "rejection":
+        specloop_intake._comment_label_rejection(REPO, 8, "agent:revise",
+            {"id": 42, "actor": {"login": "outsider"}}, runner=runner)
+    else:
+        deliver()
+    assert remote.comments[0] == original and len(remote.comments) == 2
+    assert len(remote.creates) == int(not present)
+    assert len(remote.patches) == int(present and operation == "delivery")
+    if remote.patches:
+        assert remote.patches[0][1] == f"repos/{REPO}/issues/comments/82"
+    if operation == "delivery":
+        assert remote.comments[1]["body"] == f"{queue.SELF_COMMENT_PREFIX} Revision complete\n\n{marker}"
+    assert remote.comments[1]["body"].endswith(marker)
+
+
+@pytest.mark.scenario("forge-interface/canonical-daemon-markers/lost-response-uses-canonical-selection")
+@pytest.mark.parametrize("failure", [None, "HTTP 403", "HTTP 503", "pause"])
+def test_github_lost_post_response_patches_canonical_a_never_b(remote, monkeypatch, failure):
+    marker = "<!-- nightshift:revise:gate -->"
+    original = {"id": 81, "body": f"inline {marker} suffix\r\n<!-- nightshift:revise:other -->"}
+    remote.comments.append(original.copy())
+    raw = " Résumé\r\n '$HOME' `literal` \n "
+    body = f"{queue.SELF_COMMENT_PREFIX} {raw}\n\n{marker}"
+    waits = []
+
+    def transport(args, **kwargs):
+        result = remote.run(args, **kwargs)
+        if args[1:3] == ["pr", "comment"] and failure != "pause":
+            remote.read_error = failure
+        return result
+
+    def guard():
+        if failure == "pause" and waits:
+            raise specloop_intake.Paused()
+
+    monkeypatch.setattr(queue.subprocess, "run", transport)
+    with queue.gh_guard(guard):
+        if failure:
+            with pytest.raises(specloop_intake.Paused if failure == "pause" else queue.GhError):
+                specloop_intake._comment(REPO, 8, "gate", raw, action="revise", kind="pr",
+                                        runner=partial(queue._gh, sleep=waits.append))
+        else:
+            specloop_intake._comment(REPO, 8, "gate", raw, action="revise", kind="pr",
+                                    runner=partial(queue._gh, sleep=waits.append))
+    assert len(remote.creates) == 1 and len(remote.comments) == 2
+    assert remote.comments == [original, {"id": 502, "body": body}]
+    assert remote.patches == ([] if failure else [["api", f"repos/{REPO}/issues/comments/502",
+        "--method", "PATCH", "-f", f"body={body}"]])
+    assert waits == ([2, 2, 8] if failure == "HTTP 503" else [2])
+    reads = sum(c[:2] == ["api", COMMENTS] for c in remote.calls)
+    assert reads == (1 if failure == "pause" else 4 if failure == "HTTP 503" else 2)
+
+
 @pytest.mark.scenario(LOST)
 @pytest.mark.scenario(ERROR_RETRY)
 @pytest.mark.parametrize("round_id", [None, "42"])

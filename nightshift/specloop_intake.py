@@ -29,6 +29,7 @@ from specloop import state as run_state, tasks as run_tasks
 from . import queue, specloop_client, specloop_job
 from .config import Repo
 from .forge import Forge
+from .forge.gitea import GiteaForge
 from .forge.github import GitHubForge
 
 
@@ -1579,7 +1580,8 @@ def _comment_label_rejection(repo: str, number: int, label: str, event: dict, *,
     """
     marker = f"<!-- nightshift:draft:label-authorization-{number}:{event['id']} -->"
     forge = forge if forge is not None else GitHubForge(runner)
-    pages = forge.comment_pages(repo, number)
+    pages = (forge.bot_comment_pages(repo, number) if isinstance(forge, GiteaForge)
+             else forge.comment_pages(repo, number))
     malformed = f"malformed comment history for #{number}; retry next poll"
     if not isinstance(pages, list):
         raise RuntimeError(malformed)
@@ -1592,7 +1594,7 @@ def _comment_label_rejection(repo: str, number: int, label: str, event: dict, *,
                     or (comment.get("body") is not None and not isinstance(comment["body"], str))):
                 raise RuntimeError(malformed)
             bodies.append(comment.get("body") or "")
-    if any(marker in body for body in bodies):
+    if any(queue._has_final_marker(body, marker) for body in bodies):
         return
 
     actor = event.get("actor")
@@ -1816,9 +1818,10 @@ def _comment(repo: str, number: int, change: str, body: str, *, runner=None,
     marker = f"<!-- nightshift:{action}:{change}{suffix} -->"
     body = f"{queue.SELF_COMMENT_PREFIX} {body}\n\n{marker}"
     forge = forge if forge is not None else GitHubForge(runner)
-    pages = forge.comment_pages(repo, number)
+    pages = (forge.bot_comment_pages(repo, number) if isinstance(forge, GiteaForge)
+             else forge.comment_pages(repo, number))
     comments = [comment for page in pages for comment in page]
-    previous = next((c for c in comments if marker in (c.get("body") or "")), None)
+    previous = next((c for c in comments if queue._has_final_marker(c.get("body") or "", marker)), None)
     if previous:
         forge.update_comment(repo, previous['id'], body)
     else:
