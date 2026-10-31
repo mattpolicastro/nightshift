@@ -569,7 +569,9 @@ class GiteaForge:
         if set(add) & set(remove):
             raise ForgeError("Overlapping Gitea label changes", transient=False)
         current = set(self._read_issue_labels(path).values())
-        for adding, names in ((False, remove), (True, add)):
+        # Confirm every destination before removing any source, so interrupted
+        # transitions retain a discoverable label (or a needs-human hold).
+        for adding, names in ((True, add), (False, remove)):
             for name in sorted(set(names)):
                 label_id = labels[name]
                 if (label_id in current) == adding:

@@ -1188,9 +1188,9 @@ def test_gitea_label_write_is_read_back(fake, label_repo, target):
     path = f"/gitea/api/v1/repos/owner/repo/issues/{target}/labels"
     calls = [call for call in fake.calls if call.path != WIRE_PATH]
     expected = [("GET", path, {}, None)]
-    for method, suffix, body in [("DELETE", "/4", None), ("DELETE", "/1", None),
-                                 ("POST", "", {"labels": [5]}),
-                                 ("POST", "", {"labels": [2]})]:
+    for method, suffix, body in [("POST", "", {"labels": [5]}),
+                                 ("POST", "", {"labels": [2]}),
+                                 ("DELETE", "/4", None), ("DELETE", "/1", None)]:
         expected.append((method, path + suffix, {}, body))
         expected.append(("GET", path, {}, None))
     assert [(call.method, call.path, call.query, call.body) for call in calls] == expected
@@ -1225,13 +1225,17 @@ def test_mutation_uses_recreated_label_and_refuses_overlap(fake, label_repo):
 @pytest.mark.parametrize("method", ["POST", "DELETE"])
 @pytest.mark.parametrize("failure", ["silent", "readback-malformed", "readback-http", "write-http"])
 def test_label_failure_stops_remaining_writes(fake, label_repo, target, method, failure):
-    _, issue, _ = label_repo
+    labels, issue, _ = label_repo
     path = f"/gitea/api/v1/repos/owner/repo/issues/{target}/labels"
     if failure == "silent":
         fake.silent_label_writes.add(method)
     elif failure.startswith("readback"):
         reply = Reply({"unexpected": SECRET}) if failure == "readback-malformed" else Reply(status=503)
-        fake.route("GET", path, Reply(issue["labels"]), reply, reply, reply)
+        prefix = [Reply(list(issue["labels"]))]
+        if method == "DELETE":
+            prefix.extend(Reply([*issue["labels"], *added])
+                          for added in ([labels[4]], [labels[4], labels[1]]))
+        fake.route("GET", path, *prefix, reply, reply, reply)
     else:
         fake.route(method, path + ("/4" if method == "DELETE" else ""), Reply(status=503))
     forge = make_forge(fake)
@@ -1240,10 +1244,142 @@ def test_label_failure_stops_remaining_writes(fake, label_repo, target, method, 
         relabel("owner/repo", target, add=["working", "later"],
                 remove=["ready", "other"] if method == "DELETE" else [])
     assert caught.value.transient is failure.endswith("http")
-    assert [call.method for call in fake.calls if call.method != "GET"] == [method]
+    assert [call.method for call in fake.calls if call.method != "GET"] == (
+        ["POST", "POST", "DELETE"] if method == "DELETE" else ["POST"])
     assert SECRET not in "".join(traceback.format_exception(caught.value))
     if failure == "write-http":
         assert fake.calls[-1].method == method
+
+
+@pytest.mark.scenario("gitea-forge/verified-label-mutations/silent-write-failure")
+@pytest.mark.scenario("gitea-forge/verified-label-mutations/interrupted-transition-retains-a-label")
+@pytest.mark.parametrize("target", [1, 2, "2"])
+@pytest.mark.parametrize("stop", range(4))
+@pytest.mark.parametrize("failure", [
+    "write-http", "lost-response", "silent", "readback-http", "readback-malformed",
+])
+def test_gitea_transition_never_leaves_neither_label(fake, label_repo, monkeypatch,
+                                                   target, stop, failure):
+    _, issue, pr = label_repo
+    item = issue if target == 1 else pr
+    path = f"/gitea/api/v1/repos/owner/repo/issues/{target}/labels"
+    original = fake._state_reply
+    writes, snapshots = [], []
+
+    def respond(call, page):
+        if call.method != "GET":
+            writes.append(call.method)
+            if call.method == "DELETE":
+                assert {"later", "working"} <= {row["name"] for row in item["labels"]}
+            failing = len(writes) == stop + 1
+            if failing and failure in ("write-http", "silent"):
+                reply = Reply(status=503) if failure == "write-http" else Reply()
+            else:
+                reply = original(call, page)
+            snapshots.append({row["name"] for row in item["labels"]})
+            return OSError("accepted response lost") if failing and failure == "lost-response" else reply
+        if call.path == path and len(writes) == stop + 1:
+            if failure == "readback-http":
+                return Reply(status=503)
+            if failure == "readback-malformed":
+                return Reply({"unexpected": SECRET})
+        return original(call, page)
+
+    monkeypatch.setattr(fake, "_state_reply", respond)
+    operation = "relabel_issue" if target == 1 else "relabel_pr"
+    changes = dict(add=["working", "later", "working"], remove=["ready", "other", "ready"])
+    with pytest.raises(ForgeError) as caught:
+        getattr(make_forge(fake), operation)("owner/repo", target, **changes)
+    assert caught.value.transient is (failure in ("write-http", "lost-response", "readback-http"))
+    assert writes == ["POST", "POST", "DELETE", "DELETE"][:stop + 1]
+    assert all("keep" in state and state & {"ready", "working"}
+               and state & {"other", "later"} for state in snapshots)
+    expected = ["GET"]
+    for method in writes[:-1]:
+        expected.extend([method, "GET"])
+    expected.append(writes[-1])
+    if failure not in ("write-http", "lost-response"):
+        expected.extend(["GET"] * (3 if failure == "readback-http" else 1))
+    assert [call.method for call in fake.calls if call.path.startswith(path)] == expected
+
+    # A new adapter reads actual state and skips every already accepted change.
+    monkeypatch.setattr(fake, "_state_reply", original)
+    before = len(fake.calls)
+    getattr(make_forge(fake), operation)("owner/repo", target, **changes)
+    applied = stop if failure in ("write-http", "silent") else stop + 1
+    assert [call.method for call in fake.calls[before:] if call.method != "GET"] == (
+        ["POST", "POST", "DELETE", "DELETE"][applied:])
+    assert fake.calls[before].path == WIRE_PATH
+    assert {row["name"] for row in item["labels"]} == {"keep", "later", "working"}
+    before = len(fake.calls)
+    getattr(make_forge(fake), operation)("owner/repo", target, **changes)
+    assert fake.calls[before].path == WIRE_PATH
+    assert all(call.method == "GET" for call in fake.calls[before:])
+
+
+@pytest.mark.scenario("gitea-forge/verified-label-mutations/needs-human-remains-a-safe-hold")
+@pytest.mark.parametrize("failure", ["lost-response", "readback-http"])
+def test_gitea_needs_human_holds_retained_trigger_across_restart(fake, tmp_path, monkeypatch, failure):
+    from nightshift import queue, specloop_intake
+    from nightshift.config import Repo
+    from test_specloop_label_authorization_recovery import restarted_intake
+
+    labels = queue.Labels()
+    rows = [label_row(i, name) for i, name in enumerate(
+        (labels.ready, labels.spec_draft, labels.needs_human, "keep"), 1)]
+    issue = candidate(1, [rows[1], rows[3]], user={"login": "owner"}, timeline=[
+        dict(id=1, type="label", label=rows[1], body="1", user={"login": "owner"},
+             created_at="2026-10-20T12:00:00Z")])
+    fake.repository("owner/repo", labels=rows, issues=[issue],
+                    facts={"owner": {"login": "owner", "type": "User"}})
+    repo = Repo("owner/repo", engine="specloop")
+    receipt = dict(change="owner__repo-issue-1", idea="Issue 1\n\nDetails",
+                   drafting_events={labels.spec_draft: 1}, round_id="a" * 32,
+                   result={"outcome": "needs_input", "questions": ["Clarify the request."]})
+    path = tmp_path / "proposals/owner__repo/1.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(receipt))
+    before = path.read_bytes()
+    label_path = "/gitea/api/v1/repos/owner/repo/issues/1/labels"
+
+    def accepted(call):
+        reply = fake._state_reply(call, None)
+        if failure == "lost-response":
+            return OSError("accepted response lost")
+        fake.route("GET", label_path, *(Reply(status=503) for _ in range(3)))
+        return reply
+
+    fake.route("POST", label_path, accepted)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Completed work must not run again during refusal recovery")
+
+    def poll(module):
+        monkeypatch.setattr(module, "GitHubForge", lambda runner: make_forge(fake, trusted_logins=["owner"]))
+        return module.propose_pending(repo, labels, tmp_path, specloop_runner=forbidden,
+                                      git_runner=forbidden, launcher=forbidden)
+
+    with pytest.raises(ForgeError):
+        poll(specloop_intake)
+    assert {row["name"] for row in issue["labels"]} == {labels.spec_draft, labels.needs_human, "keep"}
+    assert path.read_bytes() == before
+    comments = json.dumps(issue["comments"])
+    restarted = restarted_intake()
+    for module in (specloop_intake, specloop_intake, restarted):
+        start = len(fake.calls)
+        assert poll(module) == []
+        assert path.read_bytes() == before and json.dumps(issue["comments"]) == comments
+        assert all(call.method == "GET" for call in fake.calls[start:])
+
+    # Human resolution removes only the hold; the authorized trigger and receipt survive.
+    fake.routes.clear()
+    issue["labels"][:] = [row for row in issue["labels"] if row["name"] != labels.needs_human]
+    delivered, = poll(restarted)
+    assert delivered == {**receipt, "title": issue["title"], "delivered": True}
+    assert json.loads(path.read_text()) == delivered
+    assert json.dumps(issue["comments"]) == comments
+    assert {row["name"] for row in issue["labels"]} == {labels.needs_human, "keep"}
+    assert poll(restarted) == []
 
 
 @pytest.mark.scenario("gitea-forge/verified-label-mutations/silent-write-failure")
