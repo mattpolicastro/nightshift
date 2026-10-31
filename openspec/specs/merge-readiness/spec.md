@@ -66,7 +66,7 @@ Readiness SHALL require no pending build revision and an empty human-check secti
 
 ### Requirement: Advisory CI snapshot
 
-Readiness SHALL query `gh pr checks <pr> --json name,bucket,state` with an explicit repository once per assessment. It SHALL accept green only when at least one check is `pass` and all checks are `pass` or `skipping`. It SHALL NOT inspect current-base or merge-ref provenance and SHALL describe the label as advisory.
+Readiness SHALL use Forge.pr_checks once per assessment: GitHub SHALL retain `gh pr checks <pr> --json name,bucket,state` with an explicit repository, and Gitea SHALL use its current PR-head read followed by one logical exact-SHA combined-status snapshot with existing pagination. It SHALL accept green only when at least one check is `pass` and all checks are `pass` or `skipping`. It SHALL NOT inspect current-base or merge-ref provenance and SHALL describe the label as advisory.
 
 #### Scenario: Green checks qualify
 - **WHEN** valid check results contain at least one pass and only pass or skipping buckets
@@ -83,7 +83,7 @@ Readiness SHALL query `gh pr checks <pr> --json name,bucket,state` with an expli
 
 ### Requirement: Head bound polling
 
-Readiness SHALL require PR head equality with the run head, read the PR once per eligible poll, and query checks only when unlabelled or the stored assessment no longer matches the observed head or publication identity. A complete matching assessment with consistent labels SHALL be cached for both outcomes, except that an assessment blocked on CI SHALL be reassessed each poll until CI no longer blocks. Label removal SHALL permit explicit reassessment.
+Readiness SHALL require PR head equality with the run head, read the PR once in core per eligible poll (Gitea pr_checks may read it once more when CI is queried), and query checks only when unlabelled or the stored assessment no longer matches the observed head or publication identity. A complete matching assessment with consistent labels SHALL be cached for both outcomes, except that an assessment blocked on CI SHALL be reassessed each poll until CI no longer blocks. Label removal SHALL permit explicit reassessment.
 
 #### Scenario: Matching assessment is cached
 - **WHEN** a ready or blocked assessment is delivered and repeated eligible polls, including after restart, observe the same head, identity, and labels
@@ -97,12 +97,12 @@ Readiness SHALL require PR head equality with the run head, read the PR once per
 
 #### Scenario: Unlabelled head is reassessed
 - **WHEN** readiness labels are absent or inconsistent, or a new matching publication identity is observed
-- **THEN** the poll makes at most one checks query and a fresh assessment using its one PR read
+- **THEN** the poll makes at most one checks query and a fresh assessment using its one core PR read, with Gitea permitted one additional PR read inside pr_checks
 - **THEN** a head matching the run can become ready only if all conditions pass
 
 ### Requirement: Recoverable readiness delivery
 
-Readiness SHALL reconcile mutually exclusive `merge:ready` and `merge:blocked` labels and one distinct readiness comment per PR/change. It SHALL persist delivery intent separately from publication, explain every determinable failed condition with the full assessed head, reconcile ambiguous writes, preserve unrelated labels, and obey daemon pause guards. It SHALL use the existing recognized approval-marker namespace without changing queue retry behavior.
+Readiness SHALL reconcile mutually exclusive `merge:ready` and `merge:blocked` labels and one distinct readiness comment per PR/change. It SHALL persist delivery intent separately from publication, explain every determinable failed condition with the full assessed head, reconcile ambiguous writes, preserve unrelated labels, and obey daemon pause guards. It SHALL use the existing recognized approval-marker namespace without changing queue retry timing or attempts; candidate selection SHALL follow Canonical daemon markers. Gitea no-duplicate recovery SHALL assume read-after-write-consistent complete listings and no concurrent creator of the same marker. The deployed single-node assumption SHALL be documented: accepted creates are visible to subsequent listings. If a successfully accepted ambiguous create is invisible on later polls, duplicate comments or PRs remain possible across polls and restart; replicated deployments require revisiting the assumption. This accepted limitation SHALL NOT introduce persistent create reservations or other new recovery state.
 
 #### Scenario: Ready PR is labelled once
 - **WHEN** every readiness condition passes and delivery succeeds across repeated polls and restart
@@ -116,7 +116,7 @@ Readiness SHALL reconcile mutually exclusive `merge:ready` and `merge:blocked` l
 
 #### Scenario: Ambiguous writes recover
 - **WHEN** a readiness label or comment succeeds remotely but its response or local acknowledgement is lost
-- **THEN** a subsequent eligible attempt reconciles observed labels and the stable comment marker before retrying, without a duplicate comment or another publication
+- **THEN** a subsequent eligible attempt reconciles observed labels and the stable comment marker before retrying, without a duplicate comment or another publication under the stated Gitea consistency and single-creator assumptions
 - **THEN** failed comment reconciliation prevents a blind POST and a newly observed head prevents stale ready delivery
 
 #### Scenario: Pause or write failure retains pending delivery
@@ -135,4 +135,3 @@ The human-check section SHALL be the PR body's `## Checks a human must make` sec
 #### Scenario: CI blocked assessment is reassessed until green
 - **WHEN** the delivered assessment for the current head is blocked on CI and a later poll finds CI green with no other blocker
 - **THEN** the PR moves to `merge:ready` with its one readiness comment updated, and later polls are cached
-

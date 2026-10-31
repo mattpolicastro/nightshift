@@ -50,14 +50,15 @@ def saved_delivery(tmp_path, round_id, attempt=None):
 
 
 @pytest.mark.scenario("pr-revision/legacy-result-marker-compatibility/old-round-markers-still-recognised")
+@pytest.mark.scenario("forge-interface/core-policy-preservation/revision-and-proposal-delivery-unchanged")
 @pytest.mark.parametrize("round_id", [None, "42", ROUND], ids=["unqualified", "event", "uuid"])
 def test_old_round_markers_still_recognised(remote, tmp_path, round_id):
     saved, stage = saved_delivery(tmp_path, round_id)
     token = marker(round_id)
-    # Complete tokens match anywhere, even in indented/fenced text; no rich-text parsing.
+    # Legacy identities remain valid as exact final-line markers.
     remote.comments[:] = [
         {"id": 81, "body": marker(round_id, ATTEMPT) if round_id else marker("42")},
-        {"id": 82, "body": f"Earlier response\n```\n    {token}\n```\nLater text"},
+        {"id": 82, "body": f"Earlier response\n{token}"},
     ]
     earlier = remote.comments[0].copy()
     assert tick(stage, tmp_path, module=restart()) == [saved["result"]]

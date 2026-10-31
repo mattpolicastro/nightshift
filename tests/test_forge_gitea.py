@@ -136,7 +136,8 @@ def test_transport_confinement_is_preserved(fake, path):
 
 
 @pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/fake-exercises-transport-behavior")
-def test_fake_can_ignore_filters_and_lose_an_accepted_write(fake):
+@pytest.mark.parametrize("completion_guard", [False, True])
+def test_fake_can_ignore_filters_and_lose_an_accepted_write(fake, completion_guard):
     stored = []
 
     def lose_response(call):
@@ -145,7 +146,8 @@ def test_fake_can_ignore_filters_and_lose_an_accepted_write(fake):
 
     fake.route("POST", WIRE_PATH, lose_response)
     fake.route("GET", WIRE_PATH, lambda call: Reply(stored))
-    forge = make_forge(fake)
+    completed = []
+    forge = make_forge(fake, after_request=(lambda: completed.append(True)) if completion_guard else None)
     body = {"id": 1, "name": "unfiltered"}
     with pytest.raises(ForgeError) as caught:
         forge._request("POST", PATH, json_body=body)
@@ -154,6 +156,7 @@ def test_fake_can_ignore_filters_and_lose_an_accepted_write(fake):
     assert rows == [body]
     assert [call.method for call in fake.calls] == ["POST", "GET"]
     assert fake.calls[-1].query == {"labels": ["absent"], "head": ["absent"]}
+    assert completed == ([True] if completion_guard else [])
 
 
 @pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/fake-exercises-transport-behavior")
@@ -165,21 +168,43 @@ def test_fake_can_ignore_filters_and_lose_an_accepted_write(fake):
     (Reply(status=302, headers={"Location": "https://foreign/" + SECRET}), False),
     (Reply(raw=SECRET.encode()), False),
 ])
-def test_only_transport_retries_and_safe_classification(fake, offline, method, outcome, transient):
+@pytest.mark.parametrize("completion_guard", [False, True])
+def test_only_transport_retries_and_safe_classification(fake, offline, method, outcome, transient, completion_guard):
     attempts = 3 if method == "GET" and transient else 1
     fake.route(method, WIRE_PATH, *([outcome] * attempts))
+    completed = []
     with pytest.raises(ForgeError) as caught:
-        make_forge(fake)._request(method, PATH)
+        make_forge(fake, after_request=(lambda: completed.append(True)) if completion_guard else None)._request(method, PATH)
     assert caught.value.transient is transient
     assert len(fake.calls) == attempts and offline == [0.1, 0.2][:attempts - 1]
     assert all(response.closed for response in fake.responses)
     assert SECRET not in "".join(traceback.format_exception(caught.value))
+    assert not completed
 
 
 def guard_error(kind):
     return {"http": lambda: http.GiteaHTTPError(503, SECRET, True),
             "forge": lambda: ForgeError(SECRET, transient=True),
             "os": lambda: OSError(SECRET), "pause": lambda: RuntimeError(SECRET)}[kind]()
+
+
+@pytest.mark.scenario("gitea-forge/failure-and-guard-boundaries/optional-completion-guard-preserves-identity")
+@pytest.mark.parametrize("kind", ["http", "forge", "os", "pause"])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_completion_guard_identity_never_reconciles(fake, kind, method):
+    error = guard_error(kind)
+    guards = []
+    def after_request():
+        guards.append(True)
+        raise error
+    forge = make_forge(fake, after_request=after_request)
+    fake.route(method, WIRE_PATH, Reply({}))
+    def forbidden():
+        pytest.fail("completion guard must not trigger transport reconciliation")
+    with pytest.raises(type(error)) as caught:
+        forge._request(method, PATH, blocking_fallback=True, reconcile=forbidden)
+    assert caught.value is error and len(fake.calls) == len(guards) == 1
+    assert forge._guard_error.get() is None
 
 
 @pytest.mark.scenario("gitea-forge/failure-and-guard-boundaries/guard-exception-identity")
@@ -1188,9 +1213,9 @@ def test_gitea_label_write_is_read_back(fake, label_repo, target):
     path = f"/gitea/api/v1/repos/owner/repo/issues/{target}/labels"
     calls = [call for call in fake.calls if call.path != WIRE_PATH]
     expected = [("GET", path, {}, None)]
-    for method, suffix, body in [("DELETE", "/4", None), ("DELETE", "/1", None),
-                                 ("POST", "", {"labels": [5]}),
-                                 ("POST", "", {"labels": [2]})]:
+    for method, suffix, body in [("POST", "", {"labels": [5]}),
+                                 ("POST", "", {"labels": [2]}),
+                                 ("DELETE", "/4", None), ("DELETE", "/1", None)]:
         expected.append((method, path + suffix, {}, body))
         expected.append(("GET", path, {}, None))
     assert [(call.method, call.path, call.query, call.body) for call in calls] == expected
@@ -1225,13 +1250,17 @@ def test_mutation_uses_recreated_label_and_refuses_overlap(fake, label_repo):
 @pytest.mark.parametrize("method", ["POST", "DELETE"])
 @pytest.mark.parametrize("failure", ["silent", "readback-malformed", "readback-http", "write-http"])
 def test_label_failure_stops_remaining_writes(fake, label_repo, target, method, failure):
-    _, issue, _ = label_repo
+    labels, issue, _ = label_repo
     path = f"/gitea/api/v1/repos/owner/repo/issues/{target}/labels"
     if failure == "silent":
         fake.silent_label_writes.add(method)
     elif failure.startswith("readback"):
         reply = Reply({"unexpected": SECRET}) if failure == "readback-malformed" else Reply(status=503)
-        fake.route("GET", path, Reply(issue["labels"]), reply, reply, reply)
+        prefix = [Reply(list(issue["labels"]))]
+        if method == "DELETE":
+            prefix.extend(Reply([*issue["labels"], *added])
+                          for added in ([labels[4]], [labels[4], labels[1]]))
+        fake.route("GET", path, *prefix, reply, reply, reply)
     else:
         fake.route(method, path + ("/4" if method == "DELETE" else ""), Reply(status=503))
     forge = make_forge(fake)
@@ -1240,10 +1269,142 @@ def test_label_failure_stops_remaining_writes(fake, label_repo, target, method, 
         relabel("owner/repo", target, add=["working", "later"],
                 remove=["ready", "other"] if method == "DELETE" else [])
     assert caught.value.transient is failure.endswith("http")
-    assert [call.method for call in fake.calls if call.method != "GET"] == [method]
+    assert [call.method for call in fake.calls if call.method != "GET"] == (
+        ["POST", "POST", "DELETE"] if method == "DELETE" else ["POST"])
     assert SECRET not in "".join(traceback.format_exception(caught.value))
     if failure == "write-http":
         assert fake.calls[-1].method == method
+
+
+@pytest.mark.scenario("gitea-forge/verified-label-mutations/silent-write-failure")
+@pytest.mark.scenario("gitea-forge/verified-label-mutations/interrupted-transition-retains-a-label")
+@pytest.mark.parametrize("target", [1, 2, "2"])
+@pytest.mark.parametrize("stop", range(4))
+@pytest.mark.parametrize("failure", [
+    "write-http", "lost-response", "silent", "readback-http", "readback-malformed",
+])
+def test_gitea_transition_never_leaves_neither_label(fake, label_repo, monkeypatch,
+                                                   target, stop, failure):
+    _, issue, pr = label_repo
+    item = issue if target == 1 else pr
+    path = f"/gitea/api/v1/repos/owner/repo/issues/{target}/labels"
+    original = fake._state_reply
+    writes, snapshots = [], []
+
+    def respond(call, page):
+        if call.method != "GET":
+            writes.append(call.method)
+            if call.method == "DELETE":
+                assert {"later", "working"} <= {row["name"] for row in item["labels"]}
+            failing = len(writes) == stop + 1
+            if failing and failure in ("write-http", "silent"):
+                reply = Reply(status=503) if failure == "write-http" else Reply()
+            else:
+                reply = original(call, page)
+            snapshots.append({row["name"] for row in item["labels"]})
+            return OSError("accepted response lost") if failing and failure == "lost-response" else reply
+        if call.path == path and len(writes) == stop + 1:
+            if failure == "readback-http":
+                return Reply(status=503)
+            if failure == "readback-malformed":
+                return Reply({"unexpected": SECRET})
+        return original(call, page)
+
+    monkeypatch.setattr(fake, "_state_reply", respond)
+    operation = "relabel_issue" if target == 1 else "relabel_pr"
+    changes = dict(add=["working", "later", "working"], remove=["ready", "other", "ready"])
+    with pytest.raises(ForgeError) as caught:
+        getattr(make_forge(fake), operation)("owner/repo", target, **changes)
+    assert caught.value.transient is (failure in ("write-http", "lost-response", "readback-http"))
+    assert writes == ["POST", "POST", "DELETE", "DELETE"][:stop + 1]
+    assert all("keep" in state and state & {"ready", "working"}
+               and state & {"other", "later"} for state in snapshots)
+    expected = ["GET"]
+    for method in writes[:-1]:
+        expected.extend([method, "GET"])
+    expected.append(writes[-1])
+    if failure not in ("write-http", "lost-response"):
+        expected.extend(["GET"] * (3 if failure == "readback-http" else 1))
+    assert [call.method for call in fake.calls if call.path.startswith(path)] == expected
+
+    # A new adapter reads actual state and skips every already accepted change.
+    monkeypatch.setattr(fake, "_state_reply", original)
+    before = len(fake.calls)
+    getattr(make_forge(fake), operation)("owner/repo", target, **changes)
+    applied = stop if failure in ("write-http", "silent") else stop + 1
+    assert [call.method for call in fake.calls[before:] if call.method != "GET"] == (
+        ["POST", "POST", "DELETE", "DELETE"][applied:])
+    assert fake.calls[before].path == WIRE_PATH
+    assert {row["name"] for row in item["labels"]} == {"keep", "later", "working"}
+    before = len(fake.calls)
+    getattr(make_forge(fake), operation)("owner/repo", target, **changes)
+    assert fake.calls[before].path == WIRE_PATH
+    assert all(call.method == "GET" for call in fake.calls[before:])
+
+
+@pytest.mark.scenario("gitea-forge/verified-label-mutations/needs-human-remains-a-safe-hold")
+@pytest.mark.parametrize("failure", ["lost-response", "readback-http"])
+def test_gitea_needs_human_holds_retained_trigger_across_restart(fake, tmp_path, monkeypatch, failure):
+    from nightshift import queue, specloop_intake
+    from nightshift.config import Repo
+    from test_specloop_label_authorization_recovery import restarted_intake
+
+    labels = queue.Labels()
+    rows = [label_row(i, name) for i, name in enumerate(
+        (labels.ready, labels.spec_draft, labels.needs_human, "keep"), 1)]
+    issue = candidate(1, [rows[1], rows[3]], user={"login": "owner"}, timeline=[
+        dict(id=1, type="label", label=rows[1], body="1", user={"login": "owner"},
+             created_at="2026-10-20T12:00:00Z")])
+    fake.repository("owner/repo", labels=rows, issues=[issue],
+                    facts={"owner": {"login": "owner", "type": "User"}})
+    repo = Repo("owner/repo", engine="specloop")
+    receipt = dict(change="owner__repo-issue-1", idea="Issue 1\n\nDetails",
+                   drafting_events={labels.spec_draft: 1}, round_id="a" * 32,
+                   result={"outcome": "needs_input", "questions": ["Clarify the request."]})
+    path = tmp_path / "proposals/owner__repo/1.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(receipt))
+    before = path.read_bytes()
+    label_path = "/gitea/api/v1/repos/owner/repo/issues/1/labels"
+
+    def accepted(call):
+        reply = fake._state_reply(call, None)
+        if failure == "lost-response":
+            return OSError("accepted response lost")
+        fake.route("GET", label_path, *(Reply(status=503) for _ in range(3)))
+        return reply
+
+    fake.route("POST", label_path, accepted)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Completed work must not run again during refusal recovery")
+
+    def poll(module):
+        monkeypatch.setattr(module, "GitHubForge", lambda runner: make_forge(fake, trusted_logins=["owner"]))
+        return module.propose_pending(repo, labels, tmp_path, specloop_runner=forbidden,
+                                      git_runner=forbidden, launcher=forbidden)
+
+    with pytest.raises(ForgeError):
+        poll(specloop_intake)
+    assert {row["name"] for row in issue["labels"]} == {labels.spec_draft, labels.needs_human, "keep"}
+    assert path.read_bytes() == before
+    comments = json.dumps(issue["comments"])
+    restarted = restarted_intake()
+    for module in (specloop_intake, specloop_intake, restarted):
+        start = len(fake.calls)
+        assert poll(module) == []
+        assert path.read_bytes() == before and json.dumps(issue["comments"]) == comments
+        assert all(call.method == "GET" for call in fake.calls[start:])
+
+    # Human resolution removes only the hold; the authorized trigger and receipt survive.
+    fake.routes.clear()
+    issue["labels"][:] = [row for row in issue["labels"] if row["name"] != labels.needs_human]
+    delivered, = poll(restarted)
+    assert delivered == {**receipt, "title": issue["title"], "delivered": True}
+    assert json.loads(path.read_text()) == delivered
+    assert json.dumps(issue["comments"]) == comments
+    assert {row["name"] for row in issue["labels"]} == {labels.needs_human, "keep"}
+    assert poll(restarted) == []
 
 
 @pytest.mark.scenario("gitea-forge/verified-label-mutations/silent-write-failure")
@@ -1684,13 +1845,15 @@ def test_gitea_status_nonempty_snapshot_disagreement(fake, problem):
 
 @pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/fake-exercises-transport-behavior")
 @pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/fake-serialization-preserves-test-evidence")
-def test_gitea_status_fake_serialization_preserves_evidence(fake):
+@pytest.mark.parametrize("completion_guard", [False, True])
+def test_gitea_status_fake_serialization_preserves_evidence(fake, completion_guard):
     rows = [{"id": 1, "state": "success"}, {"id": 2, "state": "success", "status": None},
             {"id": 3, "state": []}, {"id": 4}, {"id": 5, "status": "unknown"}]
     payload = combined(count=5, statuses=rows, unrelated="retained")
     original = json.loads(json.dumps(payload))
     fake.repository("owner/repo", labels=[], combined_statuses={SHA: payload}, page_size=50)
-    forge = make_forge(fake)
+    completed = []
+    forge = make_forge(fake, after_request=(lambda: completed.append(True)) if completion_guard else None)
     path = forge._repo_path("owner/repo", "commits", SHA, "status")
     _, headers, wire = forge._request("GET", path, query={"page": 1, "limit": 50})
     assert wire == {**payload, "statuses": [{"id": 1, "status": "success"},
@@ -1701,6 +1864,7 @@ def test_gitea_status_fake_serialization_preserves_evidence(fake):
     fake.route("GET", STATUS_PATH, Reply(payload), page=1)
     assert forge._request("GET", path, query={"page": 1, "limit": 50})[2] == original
     assert payload == original and all(response.closed for response in fake.responses)
+    assert len(completed) == (3 if completion_guard else 0)
 
 
 @pytest.mark.scenario("gitea-forge/exact-sha-combined-status/status-mapping")
@@ -1958,6 +2122,112 @@ def comment_repo(fake):
     return issue["comments"]
 
 
+LOOKUP_TEXT = " Résumé 🦉\r\n '$HOME' `literal` \n "
+
+
+def marker_lookup(forge, operation):
+    from nightshift import queue, specloop_intake as intake
+
+    marker = "<!-- nightshift:draft:gate -->"
+    body = f"{queue.SELF_COMMENT_PREFIX} {LOOKUP_TEXT}\n\n{marker}"
+    if operation == "rejection":
+        marker = "<!-- nightshift:draft:label-authorization-1:42 -->"
+        act = lambda: intake._comment_label_rejection("owner/repo", 1, "spec:draft",
+            {"id": 42, "actor": {"login": "outsider"}}, forge=forge)
+    elif operation == "delivery":
+        act = lambda: intake._comment("owner/repo", 1, "gate", LOOKUP_TEXT, forge=forge)
+    else:
+        act = lambda: forge.create_comment("owner/repo", 1, "issue", body)
+    return marker, act
+
+
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/human-copies-cannot-satisfy-daemon-lookup")
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/bot-ownership-gates-upserts")
+@pytest.mark.parametrize("operation", ["rejection", "delivery", "adapter"])
+@pytest.mark.parametrize("bot", [False, True])
+def test_gitea_marker_lookup_ignores_human_copies(fake, comment_repo, operation, bot):
+    forge = make_forge(fake)
+    marker, act = marker_lookup(forge, operation)
+    humans = [authored(1, body="human\r\n" + marker),
+              authored(2, body=" " + marker + "\ntrailing")]
+    comment_repo.extend(row.copy() for row in humans)
+    if bot:
+        comment_repo.append(authored(3, "rObOt", "old\r\n" + marker))
+    act()
+    writes = [c for c in fake.calls if c.method != "GET"]
+    expected = [] if bot and operation == "rejection" else ["PATCH" if bot else "POST"]
+    assert [c.method for c in writes] == expected
+    if writes:
+        assert writes[0].body == {"body": comment_repo[-1]["body"]}
+        assert comment_repo[-1]["body"].endswith("\n\n" + marker)
+        if operation != "rejection":
+            from nightshift import queue
+            assert comment_repo[-1]["body"] == f"{queue.SELF_COMMENT_PREFIX} {LOOKUP_TEXT}\n\n{marker}"
+    assert comment_repo[:2] == humans
+    assert [r["body"] for p in forge.comment_pages("owner/repo", 1) for r in p][:2] == [
+        row["body"] for row in humans]
+    assert [r["body"] for p in forge.bot_comment_pages("owner/repo", 1) for r in p] == [
+        comment_repo[-1]["body"]]
+    assert [r["body"] for r in forge.issue_for_draft("owner/repo", 1)["comments"]] == [
+        row["body"] for row in humans]
+    fake.calls.clear()
+    act()
+    assert [c.method for c in fake.calls if c.method != "GET"] == (
+        ["PATCH"] if operation == "delivery" else [])
+
+
+@pytest.mark.scenario("forge-interface/canonical-daemon-markers/inline-references-do-not-match")
+@pytest.mark.parametrize("operation", ["rejection", "delivery", "adapter"])
+@pytest.mark.parametrize("present", [False, True])
+def test_gitea_inline_a_final_b_selects_only_a(fake, comment_repo, operation, present):
+    marker, act = marker_lookup(make_forge(fake), operation)
+    original = authored(1, "Robot", "inline " + marker + " suffix\r\n" + MARKER)
+    comment_repo.append(original.copy())
+    if present:
+        comment_repo.append(authored(2, "Robot", "old\n" + marker))
+    act()
+    writes = [c for c in fake.calls if c.method != "GET"]
+    expected = [] if present and operation == "rejection" else ["PATCH" if present else "POST"]
+    assert [c.method for c in writes] == expected
+    assert comment_repo[0] == original and len(comment_repo) == 2
+    if writes:
+        assert writes[0].path == (ROOT + "/issues/comments/2" if present else COMMENT_PATH)
+        assert writes[0].body == {"body": comment_repo[1]["body"]}
+    assert comment_repo[1]["body"].endswith(marker)
+    if operation != "rejection":
+        from nightshift import queue
+        assert comment_repo[1]["body"] == f"{queue.SELF_COMMENT_PREFIX} {LOOKUP_TEXT}\n\n{marker}"
+
+
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/ambiguous-bot-evidence-refuses")
+@pytest.mark.parametrize("operation", ["rejection", "delivery", "adapter"])
+@pytest.mark.parametrize("evidence", ["malformed", "duplicate", "invalid-human", "unavailable"])
+def test_gitea_marker_lookup_refuses_bad_evidence(fake, comment_repo, operation, evidence):
+    marker, act = marker_lookup(make_forge(fake), operation)
+    comment_repo.append(authored(1, "Robot", marker))
+    if evidence == "unavailable":
+        fake.route("GET", COMMENT_PATH, Reply(status=403))
+    else:
+        comment_repo.append(authored(2, "Alice" if evidence == "invalid-human" else "Robot",
+            42 if evidence == "invalid-human" else " " + marker if evidence == "malformed" else marker))
+    before = [row.copy() for row in comment_repo]
+    with pytest.raises(ForgeError):
+        act()
+    assert all(c.method == "GET" for c in fake.calls)
+    assert comment_repo == before
+
+
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/ambiguous-bot-evidence-refuses")
+def test_gitea_delivery_rechecks_ownership_before_patch(fake, comment_repo):
+    marker, act = marker_lookup(make_forge(fake), "delivery")
+    comment_repo.append(authored(1, "Robot", marker))
+    fake.route("GET", COMMENT_DETAIL, Reply(authored(1, "Alice", marker)))
+    with pytest.raises(ForgeError, match="bot-owned"):
+        act()
+    assert [c.method for c in fake.calls] == ["GET", "GET"]
+    assert comment_repo[0]["body"] == marker
+
+
 @pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/deterministic-marker-matching")
 @pytest.mark.parametrize("namespace", ["draft", "admit", "publish", "revise", "approval",
     "draft-error", "admit-error", "publish-error", "revise-error"])
@@ -2002,9 +2272,15 @@ def test_malformed_comment_input_refused_before_dispatch(fake, body, operation):
 @pytest.mark.parametrize("body", [" " + MARKER, MARKER + "\ntrailing", MARKER + "\n" + MARKER])
 def test_malformed_existing_marker_is_not_absence(fake, comment_repo, login, body):
     comment_repo.append(authored(login=login, body=body))
-    with pytest.raises(ForgeError, match="marker"):
+    if login == "Alice":
         make_forge(fake).create_comment("owner/repo", 1, "issue", BODY)
-    assert all(c.method == "GET" for c in fake.calls) and comment_repo[0]["body"] == body
+        assert [c.method for c in fake.calls] == ["GET", "POST"]
+        assert comment_repo[-1]["body"] == BODY
+    else:
+        with pytest.raises(ForgeError, match="marker"):
+            make_forge(fake).create_comment("owner/repo", 1, "issue", BODY)
+        assert all(c.method == "GET" for c in fake.calls)
+    assert comment_repo[0]["body"] == body
 
 
 @pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/bot-ownership-gates-upserts")
@@ -2032,6 +2308,7 @@ def test_comment_upsert_ignores_humans_and_reads_all_pages(fake, comment_repo, b
 
 
 @pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/bot-ownership-gates-upserts")
+@pytest.mark.scenario("gitea-forge/bot-owned-marked-comments/ambiguous-bot-evidence-refuses")
 @pytest.mark.parametrize("login", ["Alice", None, "rObOt"])
 @pytest.mark.parametrize("upsert", [False, True])
 def test_every_patch_checks_current_ownership(fake, comment_repo, login, upsert):
@@ -2193,7 +2470,8 @@ def test_comment_create_does_not_reconcile_non_http_exceptions(fake, comment_rep
 
 @pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/live-suite-skips-without-url")
 @pytest.mark.parametrize("url", [None, ""])
-def test_contract_suite_skips_without_url(tmp_path, url):
+@pytest.mark.parametrize("other_credentials", [False, True])
+def test_contract_suite_skips_without_url(tmp_path, url, other_credentials):
     plugin = tmp_path / "forbid_contract_network.py"
     plugin.write_text('''
 import socket
@@ -2212,6 +2490,8 @@ def pytest_configure(config):
     for key in tuple(env):
         if key.startswith("GITEA_CONTRACT_"):
             env.pop(key)
+    if other_credentials:
+        env.update({k: v for k, v in configured_contract_env().items() if k != "GITEA_CONTRACT_URL"})
     if url is not None:
         env["GITEA_CONTRACT_URL"] = url
     env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(Path(__file__).parent),
@@ -2242,7 +2522,8 @@ def configured_contract_env():
 
 @pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/configured-live-setup-is-strict")
 @pytest.mark.parametrize("missing", ["TOKEN", "REPO", "BOT_LOGIN", "TRUSTED_LOGIN", "FIXTURE"])
-def test_configured_contract_requires_complete_setup(monkeypatch, missing):
+@pytest.mark.parametrize("empty", [None, "", " \t"])
+def test_configured_contract_requires_complete_setup(monkeypatch, missing, empty):
     from contract.conftest import live_contract
 
     def forbidden(*args, **kwargs):
@@ -2250,6 +2531,8 @@ def test_configured_contract_requires_complete_setup(monkeypatch, missing):
     monkeypatch.setattr(http, "build_opener", forbidden)
     env = configured_contract_env()
     del env["GITEA_CONTRACT_" + missing]
+    if empty is not None:
+        env["GITEA_CONTRACT_" + missing] = empty
     with pytest.raises(pytest.fail.Exception, match="Missing GITEA_CONTRACT_" + missing):
         live_contract(env)
 

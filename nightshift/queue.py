@@ -243,6 +243,14 @@ def _gh(args: list[str], *, sleep=time.sleep) -> str:
     )
 
 
+def _has_final_marker(body: str, marker: str) -> bool:
+    """Match an exact final physical line, ignoring only trailing empty lines."""
+    lines = body.replace("\r\n", "\n").split("\n")
+    while lines and lines[-1] == "":
+        lines.pop()
+    return bool(lines) and lines[-1] == marker
+
+
 def _reconcile_intake_comment(args: list[str], *, sleep) -> str | None:
     """Recover an ambiguous intake-comment create, or confirm it is absent.
 
@@ -262,7 +270,7 @@ def _reconcile_intake_comment(args: list[str], *, sleep) -> str | None:
         "api", f"repos/{repo}/issues/{args[2]}/comments", "--paginate", "--slurp",
     ], sleep=sleep))
     previous = next((comment for page in pages for comment in page
-                     if marker.group() in (comment.get("body") or "")), None)
+                     if _has_final_marker(comment.get("body") or "", marker.group())), None)
     if previous is None:
         return None
     return _gh(["api", f"repos/{repo}/issues/comments/{previous['id']}",

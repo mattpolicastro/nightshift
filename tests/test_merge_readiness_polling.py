@@ -6,17 +6,32 @@ import subprocess
 import pytest
 
 from merge_readiness_fixtures import PollingGitHub, PublicationOnlyGh, local_run
+from gitea_dispatch_fixtures import install_gitea
+from fake_gitea import Reply
+from nightshift import daemon
 from nightshift import queue, specloop_intake as intake
 from nightshift.config import Repo
 
 
 @pytest.fixture
-def polling(local_run, tmp_path):
+def polling(local_run, tmp_path, request, monkeypatch):
     e = local_run
     e.row.update(status="paused", pause={"reason": "human_checks", "detail": "(none)"})
     e.run.pause("human_checks", detail="(none)")
     e.repo = Repo("owner/repo", engine="specloop")
     e.gh = PollingGitHub(e.row)
+    e.forge = None
+    if getattr(request, "param", None) == "gitea":
+        e.tea = install_gitea(monkeypatch, e.repo, pulls=[dict(
+            number=1, **e.gh.pr, labels=[{"name": n} for n in e.gh.labels])])
+        e.forge = daemon.forge_for(e.tea.repo, cfg=e.tea.cfg)
+        e.pr = e.tea.remote["pulls"][0]
+        e.row["pr"] = e.pr["html_url"]
+        e.run.state.pr = e.row["pr"]
+        e.run.save()
+        e.statuses = {"sha": e.row["head"], "state": "success", "total_count": 1,
+                      "statuses": [{"id": 1, "status": "success"}]}
+        e.tea.remote["combined_statuses"][e.row["head"]] = e.statuses
     e.publication = dict(e.row, round_id="round", checks="(none)", delivered=True,
                          result={"outcome": "published", "pr": e.row["pr"]})
     e.admission_path = tmp_path / "admissions/owner__repo/1.json"
@@ -26,6 +41,9 @@ def polling(local_run, tmp_path):
     e.path = tmp_path / "merge-readiness/owner__repo/1.json"
     e.receipt = lambda: json.loads(e.path.read_text())
     e.gh.comments.append({"id": 1, "body": "human checks\n<!-- nightshift:publish:c:round -->"})
+    if e.forge is not None:
+        e.pr["comments"] = [{**e.gh.comments[0], "user": {"login": "Robot"}}]
+        e.readiness_comments = lambda: [c for c in e.pr["comments"] if ":merge-readiness -->" in c["body"]]
     e.calls, e.errors = [], []
 
     def status(args, **kwargs):
@@ -36,12 +54,110 @@ def polling(local_run, tmp_path):
     def poll(runner=None):
         e.gh.operations.clear()
         return intake.publish_pending(e.repo, queue.Labels(), tmp_path, runner=runner or e.gh,
-            specloop_runner=status, on_error=lambda n, exc: e.errors.append((n, exc)))
+            specloop_runner=status, on_error=lambda n, exc: e.errors.append((n, exc)),
+            **({"forge": e.forge} if e.forge is not None else {}))
 
     e.poll = poll
     protected = {p: p.read_bytes() for p in e.run.dir.iterdir() if p.is_file()}
     yield e
     assert {p: p.read_bytes() for p in protected} == protected
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("forge-interface/readiness-request-budget/gitea-adapter-read-budget")
+@pytest.mark.scenario("forge-interface/readiness-request-budget/cached-and-ci-blocked-polls")
+@pytest.mark.scenario("merge-readiness/advisory-ci-snapshot/green-checks-qualify")
+@pytest.mark.scenario("merge-readiness/advisory-ci-snapshot/ci-not-established-blocks")
+@pytest.mark.scenario("merge-readiness/advisory-ci-snapshot/base-provenance-is-delegated-to-landing")
+@pytest.mark.scenario("merge-readiness/head-bound-polling/matching-assessment-is-cached")
+@pytest.mark.scenario("merge-readiness/head-bound-polling/new-head-removes-ready")
+@pytest.mark.scenario("merge-readiness/head-bound-polling/unlabelled-head-is-reassessed")
+@pytest.mark.scenario("merge-readiness/recoverable-readiness-delivery/ready-pr-is-labelled-once")
+@pytest.mark.scenario("merge-readiness/recoverable-readiness-delivery/blocked-comment-lists-conditions")
+@pytest.mark.parametrize("polling", ["gitea"], indirect=True)
+@pytest.mark.parametrize("blocker", [None, "human", "pending", "absent", "malformed"])
+def test_gitea_readiness_request_budget(polling, blocker):
+    e = polling
+    if blocker == "human":
+        e.pr["body"] = "## Checks a human must make\n- [ ] Inspect deployment"
+    elif blocker in ("pending", "malformed"):
+        e.statuses["statuses"][0]["status"] = "pending" if blocker == "pending" else "unknown"
+        e.statuses["state"] = "pending"
+    elif blocker == "absent":
+        e.statuses.update(state="pending", statuses=[], total_count=0)
+    def poll(reads, ci):
+        e.tea.fake.calls.clear()
+        assert e.poll() == [] and not e.errors
+        calls = e.tea.fake.calls
+        assert sum(c.path == e.tea.root + "/pulls/1" for c in calls) == reads
+        status = [c for c in calls if "/commits/" in c.path]
+        assert bool(status) == ci
+        if ci:
+            assert all(c.path == e.tea.root + f"/commits/{e.pr['head']['sha']}/status" for c in status)
+            assert sum(c.query["page"] == ["1"] for c in status) == 1
+        assert not any("/git/commits/" in c.path for c in calls)
+    poll(2, True)
+    assert e.receipt()["label"] == ("merge:blocked" if blocker else "merge:ready")
+    body = e.readiness_comments()[0]["body"]
+    assert all(reason in body for reason in e.receipt()["reasons"])
+    publication = e.publication_path.read_bytes()
+    for _ in range(2):
+        ci = blocker in ("pending", "absent", "malformed")
+        poll(2 if ci else 1, ci)
+        assert all(c.method == "GET" and not c.path.endswith("/comments") for c in e.tea.fake.calls)
+    e.statuses.update(state="success", total_count=1, statuses=[{"id": 1, "status": "success"}])
+    e.pr["body"] = "## Checks a human must make\n(none)"
+    e.pr["labels"][:] = [d for d in e.pr["labels"] if d["name"] == "unrelated"]
+    poll(2, True)
+    assert e.receipt()["label"] == "merge:ready"
+    e.pr["head"]["sha"] = "b" * 40
+    e.tea.remote["combined_statuses"]["b" * 40] = dict(e.statuses, sha="b" * 40)
+    poll(2, True)
+    assert e.receipt()["label"] == "merge:blocked" and e.receipt()["head"] == "b" * 40
+    assert {d["name"] for d in e.pr["labels"]} == {"unrelated", "merge:blocked"}
+    assert len(e.readiness_comments()) == 1 and len(e.pr["comments"]) == 2
+    assert e.pr["comments"][0]["body"] == e.gh.comments[0]["body"]
+    assert e.publication_path.read_bytes() == publication
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("forge-interface/readiness-request-budget/readiness-delivery-unchanged")
+@pytest.mark.scenario("merge-readiness/recoverable-readiness-delivery/ambiguous-writes-recover")
+@pytest.mark.scenario("merge-readiness/recoverable-readiness-delivery/pause-or-write-failure-retains-pending-delivery")
+@pytest.mark.parametrize("polling", ["gitea"], indirect=True)
+@pytest.mark.parametrize("failure", ["accepted-comment", "accepted-label", "pause"])
+def test_gitea_readiness_recovers_delivery(polling, failure):
+    e = polling
+    path = e.tea.root + ("/issues/1/labels" if failure == "accepted-label" else "/issues/1/comments")
+    def accepted(call):
+        reply = e.tea.fake._state_reply(call, None)
+        if failure == "pause":
+            daemon.PAUSE_FILE.touch()
+            return reply
+        return TimeoutError("accepted response lost")
+    e.tea.fake.route("POST", path, accepted)
+    if failure == "accepted-comment":
+        e.tea.fake.route("GET", path, *[Reply(list(e.pr["comments"]))] * 2, *[Reply(status=503)] * 3)
+    def guard():
+        if daemon.paused():
+            raise intake.Paused()
+    e.forge = daemon.forge_for(e.tea.repo, cfg=e.tea.cfg, guard=guard)
+    if failure == "pause":
+        with pytest.raises(intake.Paused):
+            e.poll()
+    else:
+        e.poll()
+        assert len(e.errors) == 1
+    assert not e.receipt()["delivered"]
+    e.tea.fake.routes.clear()
+    daemon.PAUSE_FILE.unlink(missing_ok=True)
+    e.errors.clear()
+    e.forge = daemon.forge_for(e.tea.repo, cfg=e.tea.cfg, guard=guard)
+    for _ in range(2):
+        assert e.poll() == [] and not e.errors
+    assert e.receipt()["delivered"] and len(e.readiness_comments()) == 1 and len(e.pr["comments"]) == 2
+    assert e.pr["comments"][0]["body"] == e.gh.comments[0]["body"]
+    assert e.receipt()["label"] == "merge:ready"
 
 
 @pytest.mark.scenario("merge-readiness/published-run-eligibility/delivered-publication-is-assessed")

@@ -29,6 +29,7 @@ from specloop import state as run_state, tasks as run_tasks
 from . import queue, specloop_client, specloop_job
 from .config import Repo
 from .forge import Forge
+from .forge.gitea import GiteaForge
 from .forge.github import GitHubForge
 
 
@@ -251,6 +252,7 @@ def report_failure(repo, labels, number, stage, kind, exc, *, runner=None, forge
 def propose_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
     git_runner=None, launcher=None, on_error=None, on_pending=None, readiness=None,
+    forge: Forge | None = None,
 ) -> list[dict]:
     """Draft each armed issue and publish or escalate its durable receipt.
 
@@ -259,7 +261,7 @@ look like an absent label or an empty set of comments.
 """
     if repo.engine != "specloop":
         return []
-    forge = GitHubForge(runner or queue._gh)
+    forge = forge if forge is not None else GitHubForge(runner or queue._gh)
     pending = {}
     for label in (labels.ready, labels.spec_draft):
         for issue in forge.list_issues(repo.name, label):
@@ -436,11 +438,12 @@ def _issue_author_trusted(repo: str, number: int, gh=None, *, forge: Forge | Non
 def admit_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
     git_runner=None, launcher=None, status_runner=None, on_error=None, on_pending=None, readiness=None,
+    forge: Forge | None = None,
 ) -> list[dict]:
     """Admit approved spec branches and recover interrupted PR notifications."""
     if repo.engine != "specloop":
         return []
-    forge = GitHubForge(runner or queue._gh)
+    forge = forge if forge is not None else GitHubForge(runner or queue._gh)
     pending = forge.list_open_prs(repo.name, labels.spec_approved)
 
     def admit(number):
@@ -722,11 +725,12 @@ def _build_revision_args(receipt: dict, source: Path) -> list[str]:
 def revise_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
     git_runner=None, launcher=None, status_runner=None, on_error=None, on_pending=None, readiness=None,
+    forge: Forge | None = None,
 ) -> list[dict]:
     """Re-draft specs or queue review tasks for admitted changes on their PR."""
     if repo.engine != "specloop":
         return []
-    forge = GitHubForge(runner or queue._gh)
+    forge = forge if forge is not None else GitHubForge(runner or queue._gh)
     pending = forge.list_open_prs(repo.name, labels.revise)
 
     def revise(number):
@@ -1320,6 +1324,7 @@ def _readiness_evidence(row: dict, *, git_runner=None) -> list[str]:
 def publish_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
     on_error=None,
+    forge: Forge | None = None,
 ) -> list[dict]:
     """Publish only admitted daemon changes, preserving checks before the CLI
     replaces ready_to_publish with human_checks. Recover notification delivery
@@ -1335,7 +1340,7 @@ def publish_pending(
     if not isinstance(status.get("runs"), list):
         raise specloop_client.SpecloopError("status returned no runs list")
     runs = {run["change"]: run for run in status["runs"]}
-    forge = GitHubForge(runner or queue._gh)
+    forge = forge if forge is not None else GitHubForge(runner or queue._gh)
 
     def publish(admission_path):
         admission = json.loads(admission_path.read_text())
@@ -1528,8 +1533,10 @@ def _membership_status(repo: str, login: str, *, runner=None,
 
 def _label_actor_association(repo: str, event: dict, *, runner=None,
                              forge: Forge | None = None) -> str | None:
-    """Resolve only the label actor using current positive membership evidence."""
+    """Resolve only the label actor under the selected forge's trust policy."""
     actor = event.get("actor")
+    if isinstance(forge, GiteaForge):
+        return "OWNER" if forge._association(actor) == "OWNER" else None
     login = actor.get("login") if isinstance(actor, dict) else None
     if not _valid_actor_login(login):
         return None
@@ -1579,7 +1586,8 @@ def _comment_label_rejection(repo: str, number: int, label: str, event: dict, *,
     """
     marker = f"<!-- nightshift:draft:label-authorization-{number}:{event['id']} -->"
     forge = forge if forge is not None else GitHubForge(runner)
-    pages = forge.comment_pages(repo, number)
+    pages = (forge.bot_comment_pages(repo, number) if isinstance(forge, GiteaForge)
+             else forge.comment_pages(repo, number))
     malformed = f"malformed comment history for #{number}; retry next poll"
     if not isinstance(pages, list):
         raise RuntimeError(malformed)
@@ -1592,16 +1600,27 @@ def _comment_label_rejection(repo: str, number: int, label: str, event: dict, *,
                     or (comment.get("body") is not None and not isinstance(comment["body"], str))):
                 raise RuntimeError(malformed)
             bodies.append(comment.get("body") or "")
-    if any(marker in body for body in bodies):
+    if any(queue._has_final_marker(body, marker) for body in bodies):
         return
 
     actor = event.get("actor")
     login = actor.get("login") if isinstance(actor, dict) else None
     identity = f"`{login}`" if _valid_actor_login(login) else "an unavailable actor identity"
+    permission = (
+        "Only label actors with an OWNER, MEMBER, or COLLABORATOR relationship to this "
+        "repository may trigger this work."
+    )
+    if isinstance(forge, GiteaForge):
+        identity = (f"`{login}`" if isinstance(login, str)
+                    and re.fullmatch(r"[A-Za-z0-9_.-]+", login)
+                    else "an unavailable actor identity")
+        permission = (
+            "Only label actors in the configured Gitea trusted_logins allowlist may trigger "
+            "this work; the bot is always excluded."
+        )
     body = (
         f"{queue.SELF_COMMENT_PREFIX} Ignoring the `{label}` label applied by {identity}. "
-        "Only label actors with an OWNER, MEMBER, or COLLABORATOR relationship to this "
-        "repository may trigger this work.\n\n"
+        f"{permission}\n\n"
         f"To retry, a trusted actor must remove and reapply `{label}`. "
         "If both intake labels are present, remove the unauthorized alias or have a trusted "
         "actor remove and reapply it; both remaining labels must be authorized.\n\n"
@@ -1816,9 +1835,10 @@ def _comment(repo: str, number: int, change: str, body: str, *, runner=None,
     marker = f"<!-- nightshift:{action}:{change}{suffix} -->"
     body = f"{queue.SELF_COMMENT_PREFIX} {body}\n\n{marker}"
     forge = forge if forge is not None else GitHubForge(runner)
-    pages = forge.comment_pages(repo, number)
+    pages = (forge.bot_comment_pages(repo, number) if isinstance(forge, GiteaForge)
+             else forge.comment_pages(repo, number))
     comments = [comment for page in pages for comment in page]
-    previous = next((c for c in comments if marker in (c.get("body") or "")), None)
+    previous = next((c for c in comments if queue._has_final_marker(c.get("body") or "", marker)), None)
     if previous:
         forge.update_comment(repo, previous['id'], body)
     else:

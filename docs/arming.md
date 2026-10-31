@@ -52,9 +52,14 @@ including with force. An uncertain response gets one fresh logical label read,
 never a replacement POST; that read may paginate and use existing GET retries.
 
 Configured arming ([issue #131](https://github.com/mattpolicastro/nightshift/issues/131))
-does not enable Gitea daemon drafting, admission, revisions, publication or pending
-delivery. Force, allowlists and read-only preflight cannot bypass that hold.
-Landing remains GitHub-only; see [remaining limitations](../KNOWN-LIMITATIONS.md#open-gaps).
+uses verified bot-backed labels. Gitea daemon drafting, admission, revisions,
+publication and pending delivery now follow normal eligibility and foreign-journal
+gates ([issue #150](https://github.com/mattpolicastro/nightshift/issues/150)). Force
+or preflight cannot bypass actor authorization, health, pause or stopped-job holds.
+Trigger actors must be exact case-insensitive allowlist members other than the bot;
+arming with the bot token does not authorize a daemon round. A trusted human must
+remove and reapply the trigger. [Terminal Gitea landing](landing.md) uses the human
+token; Factory Land remains GitHub-only. See [remaining limitations](../KNOWN-LIMITATIONS.md#open-gaps).
 
 ## Issue template
 
@@ -231,9 +236,10 @@ acceptance by the drafter or critic. Later checks remain necessary.
 - On a real configured Gitea checkout, run check mode, then arm a suitable issue.
   Inspect `spec:draft` and unchanged unrelated labels; record sanitized results
   and review the guidance against the actual setup. This live check is pending.
-- Observe that issue drafting only after the separate daemon authorization and
-  durable-transition prerequisites permit it. Until then, confirm the hold and
-  leave the drafting observation pending; verified labels do not prove drafting.
+- After enrollment prerequisites and trusted human trigger application, observe
+  issue drafting and its WIP spec PR. Verify an unlisted actor is refused. Follow
+  the [enrollment checklist](../README.md#quickstart) for daemon token exclusion
+  and matching supervisor configuration; verified labels do not prove live drafting.
 - On the next few issues armed with this command, compare its findings with
   subsequent drafter/critic objections.
 - Record missed objections and false positives for refining the heuristics.

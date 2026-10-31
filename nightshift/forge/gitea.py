@@ -10,13 +10,14 @@ from urllib.parse import quote, urlsplit
 from nightshift.forge import ForgeError
 from nightshift.forge.http import GiteaHTTPError, GiteaTransport
 from nightshift.forge.types import ResponseText
-from nightshift.queue import FeedbackItem, Issue, _block, has_instructions
+from nightshift.queue import FeedbackItem, Issue, _block, _has_final_marker, has_instructions
 
 
 class GiteaForge:
     def __init__(self, base_url: str, token: str, *, trusted_logins: Iterable[str],
                  bot_login: str, wip_prefix: str = "WIP: ", opener=None,
-                 guard: Callable[[], None] | None = None, timeout: float = 30):
+                 guard: Callable[[], None] | None = None, timeout: float = 30,
+                 after_request: Callable[[], None] | None = None):
         if not isinstance(base_url, str):
             raise ValueError("Invalid Gitea base URL")
         if not isinstance(token, str):
@@ -38,6 +39,9 @@ class GiteaForge:
             raise ValueError("Invalid Gitea trusted logins")
         if guard is not None and not callable(guard):
             raise ValueError("Invalid Gitea guard")
+        if after_request is not None and not callable(after_request):
+            raise ValueError("Invalid Gitea completion guard")
+        self._after_request = after_request
         if opener is not None and any(not callable(getattr(opener, name, None))
                                       for name in ("open", "add_handler")):
             raise ValueError("Invalid Gitea opener")
@@ -78,12 +82,18 @@ class GiteaForge:
         """
         scope = self._guard_error.set(None)
         try:
-            return self._transport.request(method, path, query=query, json_body=json_body)
+            result = self._transport.request(method, path, query=query, json_body=json_body)
         except GiteaHTTPError as error:
             if self._guard_error.get() is error:
                 raise
             transient = error.transient
             ambiguous = transient or (error.status is not None and 200 <= error.status < 300)
+        else:
+            # Completion guards are not transport failures, even if their
+            # exception type matches one. Never reconcile or suppress them.
+            if self._after_request is not None:
+                self._after_request()
+            return result
         finally:
             self._guard_error.reset(scope)
         if reconcile is not None and ambiguous and reconcile():
@@ -128,6 +138,21 @@ class GiteaForge:
     def comment_pages(self, repo: str, number: int) -> list[list[dict]]:
         return self._pages(self._repo_path(repo, "issues", self._number(number), "comments"))
 
+    def bot_comment_pages(self, repo: str, number: int) -> list[list[dict]]:
+        """Validated daemon evidence, separate from factual human comments."""
+        pages = []
+        markers: set[str] = set()
+        for page in self.comment_pages(repo, number):
+            bots = [row for row in page if self._is_bot(row["user"])]
+            for row in bots:
+                marker = self._comment_marker(row["body"])
+                if marker is not None:
+                    if marker in markers:
+                        raise ForgeError("Ambiguous Gitea comment marker", transient=False)
+                    markers.add(marker)
+            pages.append(bots)
+        return pages
+
     @staticmethod
     def _comment_marker(body: str) -> str | None:
         if not isinstance(body, str):
@@ -145,14 +170,8 @@ class GiteaForge:
         return lines[-1]
 
     def _upsert_marked_comment(self, repo: str, number: int, body: str, marker: str) -> bool:
-        matches = []
-        for page in self.comment_pages(repo, number):
-            for row in page:
-                candidate = self._comment_marker(row["body"])
-                if candidate == marker and self._is_bot(row["user"]):
-                    matches.append(row)
-        if len(matches) > 1:
-            raise ForgeError("Ambiguous Gitea comment marker", transient=False)
+        matches = [row for page in self.bot_comment_pages(repo, number) for row in page
+                   if _has_final_marker(row["body"], marker)]
         if not matches:
             return False
         if matches[0]["body"] != body:
@@ -569,7 +588,9 @@ class GiteaForge:
         if set(add) & set(remove):
             raise ForgeError("Overlapping Gitea label changes", transient=False)
         current = set(self._read_issue_labels(path).values())
-        for adding, names in ((False, remove), (True, add)):
+        # Confirm every destination before removing any source, so interrupted
+        # transitions retain a discoverable label (or a needs-human hold).
+        for adding, names in ((True, add), (False, remove)):
             for name in sorted(set(names)):
                 label_id = labels[name]
                 if (label_id in current) == adding:

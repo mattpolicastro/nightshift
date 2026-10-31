@@ -146,9 +146,13 @@ and unrelated plugin GitHub paths retain their existing boundaries, and legacy
 worker recovery remains GitHub-only. Explicit engine publish/finish and critic
 context use the manifest-selected forge.
 
-Forge configuration, adapter construction and read-only preflight do not enable
-daemon execution. Gitea drafting, admission, revisions, publication and pending
-delivery all remain disabled; daemon status skips Gitea queue queries. Named
+Forge configuration, adapter construction and read-only preflight do not authorize
+individual workflows. Gitea drafting, admission, revisions, publication and pending
+delivery now use the selected bot adapter under normal authorization, health,
+pause, stopped-job and foreign-journal gates
+([issue #150](https://github.com/mattpolicastro/nightshift/issues/150)); see
+[enrollment recovery](specloop/README.md#enrollment-recovery).
+Daemon status still skips Gitea queue queries. Named
 GitHub definitions still use ambient `gh` authentication and host selection.
 The [module layout](../README.md#layout) separates factual backend operations
 (`forge/gitea.py` over `forge/http.py`) from queue transport and core policy;

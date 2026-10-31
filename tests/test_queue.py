@@ -11,6 +11,20 @@ REPO = "matt/sandbox"
 LABELS = Labels()
 
 
+@pytest.mark.scenario("forge-interface/canonical-daemon-markers/physical-line-matching-is-deterministic")
+@pytest.mark.parametrize("template,expected", [
+    ("{m}", True), ("text\r\n{m}\r\n\r\n", True), ("{m}\n\n", True),
+    ("```\n{m}", True), ("<div>\n{m}", True),
+    ("{m}\n ", False), ("{m}\n\t\n", False), (" {m}", False),
+    ("\t{m}", False), ("{m} ", False), ("prefix {m}", False),
+    ("{m} suffix", False), ("```\n{m}\n```", False), ("<div>{m}</div>", False),
+    ("text\r{m}", False), ("text\u2028{m}", False), ("{m}\r", False), ("\n\n", False),
+])
+def test_final_marker_uses_physical_lines(template, expected):
+    marker = "<!-- nightshift:draft:gate -->"
+    assert queue._has_final_marker(template.format(m=marker), marker) is expected
+
+
 class FakeGh:
     """Records `gh` invocations and answers `issue list` from a fixed state."""
 

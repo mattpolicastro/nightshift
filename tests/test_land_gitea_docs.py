@@ -125,6 +125,7 @@ def test_unique_limitations_boundary_links_landing_and_tracking():
     assert GUIDE in targets
     # No implementation PR has been verified; #130 is the approved reference.
     assert f"{REPOSITORY}/issues/130" in targets
+    assert f"{REPOSITORY}/issues/150" in targets
     assert f"{REPOSITORY}/issues/17" in {target for _, target in LINK.findall(document)}
 
 

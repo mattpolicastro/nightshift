@@ -21,6 +21,7 @@ from test_specloop_spec_revision import RevisionGh, Commands as RevisionCommands
 from test_specloop_build_revision import BuildCommands
 from test_specloop_publication import PublishCommands, DETAIL, CHECKS
 from merge_readiness_fixtures import PublicationOnlyGh
+from gitea_dispatch_fixtures import install_gitea, forbidden
 
 
 @pytest.fixture
@@ -557,6 +558,45 @@ def test_build_feedback_does_not_read_enrollment(enrollment, monkeypatch, name):
     assert receipt["delivered"] and gh.head == HEAD
     assert gh.labels == {"spec:review"} and len(gh.comments) == 1
     assert REVISED in gh.comments[0]["body"]
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/unhealthy-repository-still-takes-build-feedback")
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/pause-and-stop-still-prevail")
+@pytest.mark.parametrize("name", ["owner/sample", "owner/widget..js"])
+def test_gitea_build_feedback_uses_admitted_identity_during_hold(enrollment, monkeypatch, name):
+    path, _ = enrollment
+    path.unlink()
+    repo = Repo(name, manifest=path)
+    gh = RevisionGh()
+    e = install_gitea(monkeypatch, repo, pulls=[dict(number=8, headRefName=gh.branch,
+        headRefOid=HEAD, labels=[{"name": n} for n in gh.labels], body="Closes #7")])
+    pr = e.remote["pulls"][0]
+    gh.pr_url = pr["html_url"]
+    pr["comments"] = [dict(id=c["id"], body=c["body"], created_at=c["createdAt"],
+        user={"login": "Robot" if c["author"]["login"] == "bot" else "Alice"}) for c in gh.feedback]
+    commands = BuildCommands(gh)
+    seed_consumed(daemon.STATE_DIR)
+    directory = name.replace("/", "__")
+    if directory != "owner__sample":
+        (daemon.STATE_DIR / "revisions/owner__sample").rename(daemon.STATE_DIR / "revisions" / directory)
+    monkeypatch.setattr(manifest, "template", forbidden)
+    monkeypatch.setattr(daemon, "_reconcile_engine_switch", forbidden)
+    health = daemon.RepoHealth()
+    daemon.PAUSE_FILE.touch()
+    daemon.poll_specloop(e.cfg, health, runner=forbidden, specloop_runner=commands)
+    assert not commands.calls and not e.fake.calls
+    daemon.PAUSE_FILE.unlink()
+    for _ in range(2):
+        daemon.poll_specloop(e.cfg, health, runner=forbidden, specloop_runner=commands)
+    assert health.failures == {name: 2} and not health.item_failures
+    assert [c[1] for c in commands.calls] == ["status", "revise"]
+    assert json.loads(commands.feedback[0]) == ["**Alice:**\n\nHandle empty input"]
+    receipt = json.loads((daemon.STATE_DIR / "revisions" / directory / "8.json").read_text())
+    assert receipt["consumed_feedback_ids"] == ["conversation:101", "conversation:102"]
+    assert receipt["delivered"] and pr["head"]["sha"] == HEAD
+    assert {d["name"] for d in pr["labels"]} == {"spec:review"}
+    assert REVISED in pr["comments"][-1]["body"]
 
 
 @pytest.mark.scenario("config-resilience/health-gates-new-work-only/saved-work-survives-a-hold")

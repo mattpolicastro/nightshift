@@ -197,6 +197,7 @@ class MembershipGh:
     ("User", "OwNeR", NOT_FOUND, NOT_FOUND, "OWNER", 1),
     ("User", "helper", NO_CONTENT, NOT_FOUND, "COLLABORATOR", 2),
     ("User", "alice_acme", NO_CONTENT, NOT_FOUND, "COLLABORATOR", 2),
+    ("User", "Alice_Acme", NO_CONTENT, NOT_FOUND, "COLLABORATOR", 2),
     ("Organization", "helper", NO_CONTENT, NO_CONTENT, "COLLABORATOR", 2),
     ("Organization", "helper", NOT_FOUND, NO_CONTENT, "MEMBER", 3),
     ("Organization", "alice_acme", NOT_FOUND, NO_CONTENT, "MEMBER", 3),

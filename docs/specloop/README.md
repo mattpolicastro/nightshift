@@ -2,8 +2,9 @@
 
 Nightshift turns approved OpenSpec changes into reviewed, verified pull requests.
 The sole/default engine, specloop, takes an admitted change through
-its `tasks.md` one task at a time, and the daemon is its GitHub front end. For the
-JSON contract see [command-json.md](command-json.md); for dependency setup see
+its `tasks.md` one task at a time, and the daemon provides its GitHub and configured
+Gitea front end. For the JSON contract see [command-json.md](command-json.md);
+for dependency setup see
 [prepare.md](prepare.md).
 
 ## GitHub front door: Nightshift → specloop
@@ -35,20 +36,24 @@ Daemon forge selection defaults to GitHub independently of named table order. Op
 `repos.forge` selects an exact name; owner/repository collisions across forges
 are rejected ignoring case. See [forge configuration](../../config.example.toml).
 Gitea enrollment grants no GitHub landing authority; daemon status reports it
-as `not queried (gitea)`. Gitea daemon execution remains deferred.
+as `not queried (gitea)`. Gitea daemon drafting, admission, revisions, publication,
+readiness and pending delivery use the selected bot adapter subject to normal
+authorization, health, pause, stopped-job and foreign-journal gates
+([issue #150](https://github.com/mattpolicastro/nightshift/issues/150)).
 
 Gitea preflight provides read-only bot, forbidden-repository, label, exact
-protection-rule and clone credential-username evidence. It cannot enable
-daemon drafting, admission, revisions, publication or pending delivery, even with a
-populated allowlist or cleared foreign journal: core authorization and durable
-label-transition recovery are still missing. The GitHub token/probe checks
+protection-rule and clone credential-username evidence. It does not authorize
+individual label actors, and the daemon does not rerun it each poll. Eligible
+dispatch uses allowlist-only actors, bot-owned canonical marker evidence and
+add-first verified label transitions. Membership authorization remains unsupported.
+The GitHub token/probe checks
 remain prerequisites. Follow the [preflight and human enrollment checks](../../README.md#quickstart)
 with the real instance, daemon clone and bot environment; CI uses fake services
 and helpers and cannot establish live enrollment. Protection `unverified` is a
 failure, and matching helper usernames prove neither password ownership nor
 scope. Provision the independent supervisor's config and credential sources
 via [host setup](../../README.md#host-path-setup); frozen-wrapper prerequisites
-still apply. The [deferred Gitea gaps](../../KNOWN-LIMITATIONS.md) are tracked in
+still apply. The [remaining Gitea limits](../../KNOWN-LIMITATIONS.md) are tracked in
 [issue #128](https://github.com/mattpolicastro/nightshift/issues/128) and
 [issue #122](https://github.com/mattpolicastro/nightshift/issues/122).
 
@@ -59,7 +64,7 @@ still apply. The [deferred Gitea gaps](../../KNOWN-LIMITATIONS.md) are tracked i
 | `spec:approved` on the PR | A human requests admission; the daemon records that PR and starts the build. |
 | `agent:revise` on the PR, before admission | Re-draft the spec on the same branch with new review feedback. |
 | `agent:revise` on the PR, after admission | Append a review round of tasks and resume the run. |
-| `needs-human` on the issue or PR | Read and resolve the questions or refusal comment, remove this label, and reapply the stage's trigger label as described below. |
+| `needs-human` on the issue or PR | Inspect and resolve the refusal before removing this hold; distinguish retained-trigger recovery from a fresh round below. |
 
 An issue-body line such as `blocked-by: #9, #12` defers a new draft round
 while any dependency is open or unreadable. The trigger stays in place, so a
@@ -71,8 +76,10 @@ eligibility rules, including authorization
 
 For `spec:draft`, `agent:ready`, `spec:approved` and `agent:revise`, the actor
 on the latest application of each trigger must be an OWNER, MEMBER or
-COLLABORATOR. If both intake aliases remain, both must be authorized. An
-untrusted application gets an explanation and does not authorize work; have
+COLLABORATOR on GitHub. On Gitea, the login must exactly match `trusted_logins`
+ignoring case and excluding `bot_login`; owner shortcuts and organization/team
+membership cannot authorize it. If both intake aliases remain, both must be authorized.
+An untrusted application gets an explanation and does not authorize work; have
 a trusted actor remove and reapply the label (or remove an unauthorized
 intake alias). A failed actor lookup defers action for retry. Feedback authors
 are checked independently: a trusted trigger does not make untrusted comments
@@ -93,8 +100,20 @@ attempt; see [job control and retention](#pause-stop-and-the-supervisor)
 
 Draft questions or rejection remove both issue intake labels. Answer the
 questions or resolve the rejection on the issue, remove `needs-human`, and
-reapply `spec:draft` or `agent:ready` to retry. Removing `needs-human` alone
-does not requeue the issue.
+reapply `spec:draft` or `agent:ready` to retry. With both triggers removed,
+removing `needs-human` alone does not requeue the issue.
+
+Gitea confirms every label addition before removing source labels. An ambiguous
+addition can retain the trigger alongside `needs-human`; both labels safely hold
+the item across polls and restart. Inspect effects and resolve the refusal, then
+remove `needs-human` to permit ordinary authorized receipt processing. Completed
+work need not rerun, and clearing the hold does not itself promise a fresh round.
+For a fresh draft, admission or refused revision, use the existing edited-input
+or trusted remove-and-reapply rules. This adds no automatic recovery through
+`needs-human` ([issue #150](https://github.com/mattpolicastro/nightshift/issues/150)).
+See [daemon delivery assumptions](../../KNOWN-LIMITATIONS.md#open-gaps): resumed
+completion and publication-comment recovery retain results and full checklists,
+but comment/PR uniqueness is conditional across pause/resume and restart.
 
 For issue 7, "Add a gate", in `owner/sample`, the change is
 `owner__sample-issue-7-add-a-gate`, on `spec/owner__sample-issue-7-add-a-gate`. The draft PR
@@ -314,9 +333,10 @@ for intake and delivery, and `nightshift pause <change>` /
 
 ### Enrollment recovery
 
-For GitHub-kind repositories, each unpaused poll validates the enrollment template, checking regular-file
-status before opening it. Symlinks to regular files are supported; directories,
-FIFOs and devices are rejected without reading. Missing, unreadable or invalid
+For GitHub and eligible Gitea repositories, each unpaused poll validates the
+enrollment template, checking regular-file status before opening it.
+Symlinks to regular files are supported; directories, FIFOs and devices are
+rejected without reading. Missing, unreadable or invalid
 templates, or an omitted manifest path, cause repository-local health failures.
 The diagnostic identifies the repository, path and repair action. A continuing
 outage is notified once; recovery is logged and rearms notification. Healthy
@@ -329,24 +349,24 @@ changing configuration requires a daemon restart; there is no hot reload.
 Malformed config TOML, invalid engines and empty or wrongly typed manifest
 values remain configuration-loading errors.
 
-For GitHub-kind repositories, admitted runs continue publication and build-stage revisions with their copied
-manifest and recorded branch, even if enrollment becomes unhealthy. Durable run
-state counts as admission even while its notification is pending. Existing jobs
+Admitted runs continue publication and build-stage revisions on GitHub and otherwise
+eligible Gitea with their copied manifest and recorded branch, even if enrollment
+becomes unhealthy. Durable run state counts as admission even while its
+notification is pending. Existing jobs
 can finish and be collected; delivery needing an unavailable manifest-derived
 source path retains the successful result until repair, without re-drafting.
 Authorization, publication checks, pause and stopped-job holds still apply.
 
-Gitea is excluded from that health bypass: daemon drafting, admission, revisions,
-publication and pending delivery all remain disabled, including admitted work.
-Neither manifest repair, trusted logins nor passing preflight enables stages.
-The daemon reports a repository health hold, retaining triggers, receipts and
-feedback consumption. A direct JSON journal under
+Gitea's foreign-journal hold overrides that manifest-health bypass, retaining
+triggers, receipts and feedback consumption. A direct JSON journal under
 `~/.nightshift/engine-switch/<owner>__<repo>/`, even completed or malformed, or an
-unreadable location requires human inspection. The daemon never replays, migrates
-or deletes that evidence. Moving the journal out of the active location removes
-only that diagnostic; Gitea dispatch stays disabled across restart. Changing the
-forge to GitHub is not a recovery procedure. Global job reaping and independent
-supervisors can still persist local results.
+unreadable location holds all stages and pending delivery and requires human
+inspection. The daemon never replays, migrates or deletes that evidence.
+Moving the journal out of the active location removes
+that gate and permits otherwise eligible dispatch after polls or restart; missing,
+empty or nested-only locations do not hold. Worker recovery stays GitHub-only.
+Changing the forge to GitHub is not a recovery procedure. Global job reaping and
+independent supervisors can still persist local results.
 
 GitHub-only worker-to-specloop recovery runs before new intake on unpaused startup and polls,
 even with an unhealthy manifest. Orphaned `agent:working` issues with no claim or
@@ -636,13 +656,19 @@ timeouts and a 120-second request-start cutoff, not elapsed-time bounds: slow
 response bodies can overrun both. See [remaining risks](../../KNOWN-LIMITATIONS.md#open-gaps)
 and [issue #129](https://github.com/mattpolicastro/nightshift/issues/129).
 
-These explicit commands and critic reads do not enable Gitea daemon drafting,
-admission, revisions, publication or pending delivery.
+These explicit commands and critic reads are separate from daemon eligibility.
+Gitea daemon drafting, admission, revisions, publication and pending delivery
+retain authorization, health, pause, stopped-job and foreign-journal gates
+([issue #150](https://github.com/mattpolicastro/nightshift/issues/150)).
 [Explicit configured arming](../arming.md#configured-gitea) supports Gitea with bot
-credentials and verified label read-back; Land remains GitHub-only.
+credentials and verified label read-back. [Terminal landing](../landing.md) supports
+Gitea with the human `land_token_env`; Factory Land remains GitHub-only.
 Read-only preflight is not execution authorization. First real
 WIP publication and finish prefix removal, and live Paseo presentation, remain
 pending human checks in the approved design; CI fixtures do not prove them.
+The [enrollment checklist](../../README.md#quickstart) also requires daemon bot-token
+sourcing with every landing variable absent, matching supervisor configuration,
+real human-filed issue/WIP-PR observations and refusal of an unlisted label actor.
 
 ## Paseo Factory section and `nightshift act`
 
@@ -664,7 +690,8 @@ credentials in the Paseo host process using [engine setup](#explicit-forge-publi
 Factory's display-origin allowlist does not route or authorize writes: only
 HTTPS root `/owner/repo/pulls/N` Gitea PRs display. Engine-supported HTTP loopback
 or URL-prefix installations may require direct CLI use. Land remains GitHub-only;
-confirmation enables no daemon stage. The page shows results and refreshes.
+confirmation does not authorize daemon work, which follows its own
+[enrollment gates](#enrollment-recovery). The page shows results and refreshes.
 
 ### Factory landing
 

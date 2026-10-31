@@ -299,7 +299,8 @@ def test_constructor_binds_current_runner(monkeypatch):
 @pytest.mark.scenario("forge-interface/core-policy-preservation/revision-and-proposal-delivery-unchanged")
 @pytest.mark.scenario("issue-intake/forge-mediated-intake/existing-workflows-retain-transcripts")
 @pytest.mark.parametrize("recover", [False, True])
-def test_late_bound_runner_still_patchable(monkeypatch, repo, tmp_path, recover):
+@pytest.mark.parametrize("explicit_none", [False, True])
+def test_late_bound_runner_still_patchable(monkeypatch, repo, tmp_path, recover, explicit_none):
     # Intake and the backend were imported above, before any transport patch.
     forbidden = Mock(side_effect=AssertionError("unbound transport"))
     transcripts = []
@@ -322,6 +323,7 @@ def test_late_bound_runner_still_patchable(monkeypatch, repo, tmp_path, recover)
         rows = intake.propose_pending(
             repo, queue.Labels(), tmp_path / str(attempt),
             **({"runner": runner} if attempt == 2 else {}),
+            **({"forge": None} if explicit_none else {}),
             specloop_runner=commands, git_runner=commands,
         )
         constructor.assert_called_once_with(runner)
@@ -532,15 +534,17 @@ def test_membership_fake_keeps_status_parsing_in_core(intake_forge, response, ex
 
 
 @pytest.mark.scenario("forge-interface/core-policy-preservation/authorization-and-comments-unchanged")
-@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("existing", [False, True, "canonical"])
 def test_comment_fake_preserves_literal_marker_and_raw_body(intake_forge, existing):
     marker = "<!-- nightshift:draft:change:round -->"
-    intake_forge.comment_pages.return_value = [[], [{"id": 42, "body": "prefix " + marker + " suffix",
+    previous = "prefix\r\n" + marker if existing == "canonical" else "prefix " + marker + " suffix"
+    intake_forge.comment_pages.return_value = [[], [{"id": 42, "body": previous,
         "author_association": "NONE"}] if existing else []]
     intake._comment("o/r", 7, "change", BODY, round_id="round", forge=intake_forge)
     body = f"{queue.SELF_COMMENT_PREFIX} {BODY}\n\n{marker}"
     assert intake_forge.mock_calls == [call.comment_pages("o/r", 7),
-        call.update_comment("o/r", 42, body) if existing else call.create_comment("o/r", 7, "issue", body)]
+        call.update_comment("o/r", 42, body) if existing == "canonical"
+        else call.create_comment("o/r", 7, "issue", body)]
 
 
 @pytest.mark.real_trust
@@ -602,7 +606,8 @@ def test_failure_reporting_reuses_fake_and_labels_last(intake_forge, kind):
 @pytest.mark.scenario("forge-interface/late-bound-runners/default-runner-remains-patchable")
 @pytest.mark.scenario("issue-intake/forge-mediated-intake/existing-workflows-retain-transcripts")
 @pytest.mark.parametrize("stage", ["approval", "spec", "build"])
-def test_approval_and_revision_bind_each_poll(monkeypatch, repo, tmp_path, stage):
+@pytest.mark.parametrize("explicit_none", [False, True])
+def test_approval_and_revision_bind_each_poll(monkeypatch, repo, tmp_path, stage, explicit_none):
     forbidden = Mock(side_effect=AssertionError("unbound transport"))
     for attempt in range(3):
         state = tmp_path / str(attempt)
@@ -630,6 +635,7 @@ def test_approval_and_revision_bind_each_poll(monkeypatch, repo, tmp_path, stage
         constructor = Mock(return_value=forge)
         monkeypatch.setattr(intake, "GitHubForge", constructor)
         poll(repo, queue.Labels(), state, specloop_runner=commands, git_runner=commands,
+             **({"forge": None} if explicit_none else {}),
              **({"runner": runner} if attempt == 2 else {}))
         constructor.assert_called_once_with(runner)
         expected = ["list_open_prs", "pr_for_admission" if stage == "approval" else "pr_for_revision",
@@ -854,7 +860,8 @@ def test_readiness_delivery_through_one_forge(monkeypatch, polling, case):
 @pytest.mark.scenario("forge-interface/late-bound-runners/default-runner-remains-patchable")
 @pytest.mark.scenario("issue-intake/forge-mediated-intake/existing-workflows-retain-transcripts")
 @pytest.mark.parametrize("refused", [False, True])
-def test_publication_forge_late_binding_and_recovery(monkeypatch, publication_setup, tmp_path, refused):
+@pytest.mark.parametrize("explicit_none", [False, True])
+def test_publication_forge_late_binding_and_recovery(monkeypatch, publication_setup, tmp_path, refused, explicit_none):
     repo, gh, commands = publication_setup
     if refused:
         commands.publish_result = {"version": 1, "outcome": "refused", "reasons": ["held"]}
@@ -875,6 +882,7 @@ def test_publication_forge_late_binding_and_recovery(monkeypatch, publication_se
         monkeypatch.setattr(intake, "GitHubForge", constructor)
         errors = []
         intake.publish_pending(repo, queue.Labels(), tmp_path, specloop_runner=commands,
+            **({"forge": None} if explicit_none else {}),
             on_error=lambda n, exc: errors.append(exc), **({"runner": runner} if attempt == 2 else {}))
         constructor.assert_called_once_with(runner)
         receipt = json.loads(path.read_text())
@@ -939,7 +947,10 @@ def test_daemon_recovery_binds_each_invocation(monkeypatch, switched, tmp_path, 
 
 @pytest.mark.scenario("forge-interface/guarded-daemon-calls/engine-switch-recovery-unchanged")
 def test_recovery_preserves_existing_journals_and_order(switched, tmp_path, monkeypatch, recovery_forges):
+    factory = Mock(side_effect=AssertionError("GitHub recovery retains runner construction"))
+    monkeypatch.setattr(daemon, "forge_for", factory)
     recovery_tests.test_engine_switch_recovers_working_issues(switched, tmp_path, monkeypatch)
+    factory.assert_not_called()
     assert {c[0] for forge in recovery_forges for c in forge.mock_calls} == {
         "list_issues", "issue_labels", "comment_pages", "create_comment", "relabel_issue"}
 
