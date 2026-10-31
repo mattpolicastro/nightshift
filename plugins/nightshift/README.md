@@ -55,6 +55,13 @@ Finish does not merge the PR. After an action, the page shows the result and ref
 Resume and Accept leave further execution to the `nightshift serve` supervisor.
 These controls apply to specloop runs; Nightshift worker tasks remain read-only.
 
+**Search and sort.** The search field filters runs by change, PR, action
+headline, summary, repository or branch; every word must match. While a search
+is active, matching finished runs are listed after active ones without opening
+**Finished**. Sort by **Recent** (the default), **Oldest** or **A–Z**. Recency is
+a run's latest event or pause time. Paused runs stay first whatever the sort,
+and the summary counts always describe every run.
+
 ### Confirmed landing
 
 **Land** appears separately from Finish only for a verifiable, non-stale

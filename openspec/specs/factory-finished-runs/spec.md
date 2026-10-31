@@ -36,7 +36,8 @@ without adding overloads or options. Grouping SHALL use the separate
 ### Requirement: Finished disclosure
 
 The page SHALL render active rows first and, when finished runs exist, a
-`Finished (N)` button below them where N is the finished count. The disclosure
+`Finished (N)` button below them where N is the finished count, except while a
+search is active (see paseo-runs-page Search and sort). The disclosure
 SHALL start collapsed on section mount, expose its current boolean state through
 `accessibilityState.expanded`, and toggle on each press. Expanded finished rows
 SHALL use the existing Factory row content and controls. Toggling SHALL not

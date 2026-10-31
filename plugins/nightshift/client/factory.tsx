@@ -6,7 +6,7 @@ import {
   factoryLanding, factoryLand, factoryLandStop, type FactoryLandingSnapshot,
   type FactoryLandingOffer, type FactoryLandInput, type FactoryLandingAttempt,
 } from '../shared/factory';
-import { decideFactoryAction, factoryButtons, factoryDetails, factoryWaitingTime, groupFactoryRuns, matchWorkspace, type ActionDecision,
+import { arrangeFactoryRuns, type FactorySort, decideFactoryAction, factoryButtons, factoryDetails, factoryWaitingTime, groupFactoryRuns, matchWorkspace, type ActionDecision,
   factoryLandOffer, sameLandingOffer, landingAttemptNotice, retainLandingNotices, type LandingNotice } from './factory-model';
 
 type Colors = PluginSurfaceProps['theme']['colors'];
@@ -219,6 +219,8 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
   // Keep outcomes beside their rendered row, or above the list while folded or absent.
   const [notice, setNotice] = useState<{ change: string; text: string } | null>(null);
   const [finishedOpen, setFinishedOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [sort, setSort] = useState<FactorySort>('recent');
   const [loading, setLoading] = useState(false);
   const [acting, setActing] = useState(false);
   const [landings, setLandings] = useState<Record<string, FactoryLandingSnapshot>>({});
@@ -395,10 +397,18 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
     }, attempt);
   }
 
-  const { active, finished } = groupFactoryRuns(data?.runs ?? []);
-  const visibleChanges = new Set([...active, ...(finishedOpen ? finished : [])].map(run => run.change));
+  // Counts describe the whole snapshot; search and sort only change what is listed.
+  const totals = groupFactoryRuns(data?.runs ?? []);
+  const searching = query.trim() !== '';
+  const { active, finished } = groupFactoryRuns(arrangeFactoryRuns(data?.runs ?? [], query, sort));
+  // A search reaches finished runs without opening the fold.
+  const showFinished = finishedOpen || searching;
+  const visibleChanges = new Set([...active, ...(showFinished ? finished : [])].map(run => run.change));
   const noticeInRow = notice && (active.some(run => run.change === notice.change) ||
-    (finishedOpen && finished.some(run => run.change === notice.change)));
+    (showFinished && finished.some(run => run.change === notice.change)));
+  const sorts: { value: FactorySort; label: string }[] = [
+    { value: 'recent', label: 'Recent' }, { value: 'oldest', label: 'Oldest' }, { value: 'name', label: 'A–Z' },
+  ];
   const renderRow = (run: FactoryRun) => <FactoryRow key={run.change} run={run} colors={colors}
     disabled={acting} act={act} report={text => setNotice({ change: run.change, text })}
     notice={noticeInRow && notice?.change === run.change ? notice.text : null} host={host} navigation={navigation}
@@ -410,7 +420,7 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
   return <View style={{ gap: 12 }}>
     <Text accessibilityRole="header" style={{ color: colors.foreground, fontSize: 24, fontWeight: '700' }}>Factory</Text>
     <Text style={{ color: data?.stale || error ? colors.statusWarning : colors.foregroundMuted }}>
-      {data ? `${active.length} ${active.length === 1 ? 'run' : 'runs'}${finished.length ? ` · ${finished.length} finished` : ''}${data.stale || error ? ' · Stale' : ''}` : 'Loading Factory…'}
+      {data ? `${totals.active.length} ${totals.active.length === 1 ? 'run' : 'runs'}${totals.finished.length ? ` · ${totals.finished.length} finished` : ''}${data.stale || error ? ' · Stale' : ''}` : 'Loading Factory…'}
     </Text>
     <Pressable accessibilityRole="button" accessibilityLabel="Refresh Factory" disabled={loading || acting}
       onPress={() => void refresh()} style={{ paddingVertical: 8, paddingHorizontal: 12, alignSelf: 'flex-start',
@@ -423,9 +433,29 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
     {notice && !noticeInRow
       ? <Text accessibilityRole="alert" style={{ color: colors.foreground }}>{`${notice.change}: ${notice.text}`}</Text> : null}
     <LandingNotices notices={landingNotices.filter(item => !visibleChanges.has(item.change))} colors={colors} named />
-    {data && !active.length && !finished.length ? <Text style={{ color: colors.foreground }}>No Factory runs.</Text> : null}
+    {data?.runs.length ? <View style={{ gap: 8 }}>
+      <TextInput accessibilityLabel="Search Factory runs" value={query} onChangeText={setQuery}
+        placeholder="Search runs" placeholderTextColor={colors.foregroundMuted} autoCapitalize="none" autoCorrect={false}
+        style={{ color: colors.foreground, borderColor: colors.border, borderWidth: 1, borderRadius: 8, padding: 12, minHeight: 44 }} />
+      <View accessibilityRole="radiogroup" accessibilityLabel="Sort Factory runs" style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+        {sorts.map(option => {
+          const selected = option.value === sort;
+          return <Pressable key={option.value} accessibilityRole="radio" accessibilityLabel={`Sort by ${option.label}`}
+            accessibilityState={{ selected }} onPress={() => setSort(option.value)}
+            style={{ minHeight: 44, minWidth: 44, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1,
+              borderColor: selected ? colors.accent : colors.border, backgroundColor: selected ? colors.surface2 : colors.surface1,
+              alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ color: selected ? colors.foreground : colors.foregroundMuted, fontSize: 13, fontWeight: '600' }}>{option.label}</Text>
+          </Pressable>;
+        })}
+      </View>
+      {searching ? <Text style={{ color: colors.foregroundMuted }}>
+        {active.length + finished.length ? `${active.length + finished.length} of ${data.runs.length} match` : 'No runs match.'}
+      </Text> : null}
+    </View> : null}
+    {data && !totals.active.length && !totals.finished.length ? <Text style={{ color: colors.foreground }}>No Factory runs.</Text> : null}
     {active.map(renderRow)}
-    {finished.length ? <Pressable accessibilityRole="button" accessibilityLabel={`Finished (${finished.length})`}
+    {finished.length && !searching ? <Pressable accessibilityRole="button" accessibilityLabel={`Finished (${finished.length})`}
       accessibilityState={{ expanded: finishedOpen }} onPress={() => setFinishedOpen(open => !open)}
       style={{ paddingVertical: 10, alignSelf: 'flex-start', minHeight: 44,
         flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -434,6 +464,6 @@ export function FactorySection({ theme, host, navigation }: Pick<PluginSurfacePr
         style={{ width: 8, height: 8, borderRightWidth: 2, borderBottomWidth: 2,
           borderColor: colors.foregroundMuted, transform: [{ rotate: finishedOpen ? '225deg' : '45deg' }] }} />
     </Pressable> : null}
-    {finishedOpen ? finished.map(renderRow) : null}
+    {showFinished ? finished.map(renderRow) : null}
   </View>;
 }
