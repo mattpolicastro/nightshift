@@ -171,29 +171,50 @@ None of these follow-ups establishes live validation or a completed host rollout
   `mutation_skip` patterns are available as case-sensitive literal whole-line
   substring exclusions before sampling; styles are not automatically excluded
   ([PR #48](https://github.com/mattpolicastro/nightshift/pull/48)).
-- **GitHub-only automation:** the automated daemon front door and publication use
-  GitHub. Local drafting and verification do not require a GitHub host; they
-  do not provide automated intake or publication for other hosts. Explicit engine
-  publish/finish and Factory confirmations now support configured Gitea; see
+- **Gitea daemon eligibility:** enrolled Gitea supports drafting, admission,
+  revisions, publication, readiness and pending delivery through the selected bot
+  adapter, subject to authorization, health, pause and stopped-job gates
+  ([issue #150](https://github.com/mattpolicastro/nightshift/issues/150)). Local
+  drafting and verification do not require a hosted forge. Explicit engine
+  publish/finish and Factory confirmations also support configured Gitea; see
   [engine setup](docs/specloop/README.md#explicit-forge-publication).
-  Gitea daemon stages and pending delivery are disabled for every allowlist:
-  core's owner shortcut bypasses adapter allowlists, and multi-write label
-  transitions can lose their trigger after an accepted DELETE with a lost response.
-  Foreign engine-switch journals require inspection; clearing them, repairing
-  manifests or passing preflight does not enable execution
+  Direct JSON engine-switch journals or an unreadable journal location hold every
+  Gitea stage regardless of manifest health. Human inspection and clearing that
+  gate permit otherwise eligible dispatch, never GitHub-only worker recovery.
+  Preflight remains enrollment evidence, not per-item authorization
   ([issue #128](https://github.com/mattpolicastro/nightshift/issues/128),
   [issue #122](https://github.com/mattpolicastro/nightshift/issues/122)).
-- **Deferred Gitea workflow guarantees:** core authorization's User-owner
-  shortcut bypasses adapter allowlists; organization/team membership
-  authorization is unsupported. Label transitions lack durable intent/recovery:
-  deleting `spec:approved` before adding `needs-human` can lose the discovery
-  trigger if the DELETE succeeds but its response is lost. Core marker lookup
-  and reconciliation can accept human marker copies; the standalone adapter
-  still restricts comment updates to bot-owned comments. Drafts use a title
-  prefix rather than native draft state. These gaps keep daemon drafting, admission,
-  revisions, publication and pending delivery unconditionally disabled.
-  Foreign-journal inspection adds a diagnostic, not an alternative enabling
-  path. GitHub execution and saved revision-round guarantees are unchanged.
+- **Gitea workflow limits:** trigger actors must exactly match the casefolded
+  allowlist and differ from the bot; organization/team membership authorization
+  remains unsupported. Canonical daemon markers are bot-owned. Label additions
+  are verified before removals, not an atomic multi-label transaction. An ambiguous
+  addition may retain a trigger alongside `needs-human`, safely holding the item
+  across polls/restart. Inspect effects, resolve the refusal and remove the hold
+  for ordinary authorized receipt processing. A fresh round uses existing input
+  or trusted remove-and-reapply rules; completed work need not rerun. Drafts use
+  a WIP title prefix rather than native draft state.
+- **Gitea daemon create consistency:** lookup-before-create deduplication assumes
+  read-after-write consistency and no concurrent creator for the same marker or
+  branch. An accepted ambiguous comment or PR POST invisible to later successful
+  listings can cause a duplicate on a later daemon poll or after restart. This
+  is an accepted limit; no persistent create reservations or new recovery state
+  are introduced.
+  The deployed single-node premise is that a create commits before its response
+  and the next complete listing can reconcile it; revisit this assumption before
+  replicated Gitea or changed consistency. CI cannot prove server consistency.
+  Pause, inspect remote effects and resolve duplicate markers before resuming;
+  duplicate bot markers refuse. Inspection cannot prevent every automatic duplicate
+  or undo an already accepted request.
+
+  This conditional uniqueness also applies to resumed completion delivery and
+  publication-comment recovery across polls, pause/resume and restart. Completed
+  work remains retained without relaunch, normal eligibility gates still apply,
+  and a failed lookup never permits a blind create. Every publication-comment
+  attempt retains the matching receipt's full checklist, identity and stable
+  round marker, including the hosted-CI reminder. Historical receipts remain
+  unchanged, outstanding checks still block readiness, and recovery never
+  republishes solely to deliver a comment. Only uniqueness is conditional
+  ([issue #150](https://github.com/mattpolicastro/nightshift/issues/150)).
 - **Gitea evidence limits:** preflight's forbidden 404 cannot establish that the
   repository exists; a human must independently confirm it. Protection evidence
   proves only an exact base rule exists, not adequate policy; wildcard-only rules
@@ -225,13 +246,17 @@ None of these follow-ups establishes live validation or a completed host rollout
   forge. Gitea enrollment cannot authorize GitHub landing; daemon status skips
   its queue queries. Named GitHub definitions still use ambient `gh`
   authentication and host selection. Gitea daemon drafting, admission, revisions,
-  publication and pending delivery remain disabled; drafting must await the
-  separate hold prerequisites. Real issue arming, later drafting, and the first
-  real Gitea landing with merge-commit inspection remain pending human
+  publication and pending delivery follow normal eligibility and foreign-journal
+  gates ([issue #150](https://github.com/mattpolicastro/nightshift/issues/150)).
+  Real issue arming, drafting/WIP-PR and unlisted-actor refusal observations,
+  daemon bot-token sourcing with every landing variable absent, matching supervisor
+  forge configuration, and the first real Gitea landing with merge-commit
+  inspection remain pending human
   validation, not CI evidence.
 - **Config:**
   - Manifest failures now hold new drafting/admission/spec re-drafting locally;
-    admitted GitHub publication/build revisions continue. GitHub worker leftovers are released
+    admitted GitHub and otherwise eligible Gitea publication/build revisions continue.
+    GitHub worker leftovers are released
     or preserved for human inspection, and new names include the owner
     ([issue #13](https://github.com/mattpolicastro/nightshift/issues/13)). See
     [enrollment recovery](docs/specloop/README.md#enrollment-recovery).

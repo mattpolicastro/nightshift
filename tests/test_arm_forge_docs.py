@@ -9,7 +9,7 @@ import pytest
 from nightshift import arm, config
 from test_arm import issue_body
 from test_arm_forge import arming_io, configured
-from test_forge_publication_docs import commands_parse, links_resolve, passage
+from test_forge_publication_docs import commands_parse, links_resolve, passage, shell_example
 from test_specloop_documentation_integrity import ROOT
 
 HEADING = "## Configured Gitea"
@@ -17,13 +17,9 @@ COMMAND = "uv run python -m nightshift.arm --config /absolute/path/to/config.tom
 
 
 def arming_commands(text):
-    lines = passage(text, HEADING).splitlines()
-    fences = [line for line in lines if re.search(r"`{3,}|~{3,}", line)]
-    assert fences == ["```sh", "```"], "ambiguous physical fences"
-    start, end = lines.index("```sh"), lines.index("```")
-    assert start < end
+    lines = shell_example(passage(text, HEADING)).split("\n")
     commands = []
-    for line in lines[start + 1:end]:
+    for line in lines:
         if not line.strip():
             continue
         assert not re.search(r"[;&|<>\\$`{}]", line), "shell syntax or placeholder"
@@ -74,12 +70,17 @@ def test_physical_boundaries_fail_closed(surround):
     expected = arming_commands(valid)
     assert arming_commands(surround.format(valid)) == expected
     assert arming_commands(valid.replace("## End", "# End")) == expected
+    assert arming_commands(valid.replace("## End", "##   End")) == expected
+    assert arming_commands(valid.split("\n## End")[0]) == expected
     bad = ["", valid.replace(HEADING, " " + HEADING), valid + "\n" + HEADING,
            valid.replace("```sh", "```"), valid.replace("```sh", " ```sh"),
            valid.replace("\n```\n", "\n ```\n"), valid.replace("```sh\n", ""),
            valid.replace("\n```\n", "\n"), valid.replace("```sh", "```sh\n```sh"),
            valid.replace(COMMAND, COMMAND + " ```"), valid.replace("```sh", "~~~sh"),
-           valid.replace("```sh", "```\n```sh"), valid.replace("## End", "## End\n" + HEADING)]
+           valid.replace("```sh", "```\n```sh"), valid.replace("## End", "## End\n" + HEADING),
+           valid.replace(HEADING, "prefix\u2028" + HEADING),
+           valid.replace("```sh\n", "```sh\u2028"),
+           valid.replace("\n```\n", "\u2028```\n")]
     bad += [valid.replace(COMMAND, command) for command in (
         COMMAND + " && echo x", COMMAND + " \\", COMMAND + " <issue>",
         COMMAND + " $(id)", COMMAND.replace("nightshift.arm", "nightshift"))]

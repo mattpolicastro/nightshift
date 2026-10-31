@@ -25,6 +25,73 @@ REPOSITORY = "https://github.com/mattpolicastro/nightshift"
 LINK = re.compile(r"\[([^\[\]\n]+)\]\(([^\s)]+)\)")
 
 
+@pytest.mark.parametrize("path,heading", [
+    pytest.param(path, heading, marks=[pytest.mark.scenario(s) for s in scenarios])
+    for paths, scenarios in [
+        ((("README.md", "## How a specloop change flows"),
+          ("docs/specloop/README.md", "## GitHub front door: Nightshift → specloop")), (
+            "specloop-documentation/gitea-dispatch-recovery-guidance/retained-trigger-requires-human-inspection",
+            "specloop-documentation/front-door-guidance/dependencies-and-label-actors-gate-work",
+            "specloop-documentation/front-door-guidance/revision-feedback-survives-a-long-round",
+            "specloop-documentation/front-door-guidance/input-and-status-remain-usable",
+        )),
+        ((("README.md", "### Enroll a repository"),
+          ("docs/specloop/README.md", "### Enrollment recovery")), (
+            "forge-configuration/bounded-enrollment-guidance/limits-and-live-checks-are-explicit",
+            "specloop-documentation/configuration-resilience-guidance/operator-repairs-enrollment",
+            "specloop-documentation/configuration-resilience-guidance/operator-understands-names-and-limits",
+            "specloop-documentation/gitea-readiness-evidence-limits/preflight-does-not-enable-execution",
+        )),
+        ((("KNOWN-LIMITATIONS.md", "## Open gaps"),), (
+            "specloop-documentation/gitea-dispatch-recovery-guidance/delayed-creates-are-an-accepted-daemon-limit",
+            "paused-job-delivery/resume-pending-delivery/delayed-visibility-limits-resumed-delivery",
+            "issue-intake/design-checks-survive-publication/delayed-visibility-limits-publication-comment-uniqueness",
+            "specloop-documentation/current-limitations/fixed-limitations-leave-the-open-list",
+            "specloop-documentation/current-limitations/remaining-ledger-gaps-are-explicit",
+            "specloop-documentation/gitea-operation-limitations/operator-understands-residual-risks",
+        )),
+        ((("README.md", "## Layout"), ("docs/landing.md", "## Support boundaries")), (
+            "forge-interface/module-layout-guidance/layout-describes-staged-boundary",
+            "gitea-landing/gitea-operator-guidance/landing-guide-states-current-daemon-scope",
+            "gitea-landing/gitea-operator-guidance/operator-can-prepare-and-recover",
+        )),
+        ((("docs/specloop/README.md", "### Explicit forge publication"),), (
+            "specloop-documentation/explicit-forge-command-guidance/operator-selects-and-publishes",
+            "specloop-documentation/explicit-forge-command-guidance/explicit-commands-do-not-enable-the-daemon",
+        )),
+        ((("docs/arming.md", "## Configured Gitea"),), (
+            "specloop-documentation/gitea-arming-support-boundary/operator-understands-the-continuing-hold",
+        )),
+        ((("docs/specloop/README.md", "## Paseo Factory section and `nightshift act`"),), (
+            "specloop-documentation/factory-forge-action-guidance/factory-operator-understands-the-destination",
+        )),
+    ] for path, heading in paths
+])
+def test_dispatch_guidance_has_unambiguous_sections_and_resolving_links(path, heading):
+    from test_factory_land_docs import links_resolve
+    from test_forge_publication_docs import passage
+
+    document = (ROOT / path).read_text()
+    selected = passage(document, heading)
+    assert selected.strip() and LINK.findall(selected)
+    links_resolve(path, selected)
+    assert f"{REPOSITORY}/issues/150" in {target for _, target in LINK.findall(document)}
+
+
+@pytest.mark.scenario("specloop-documentation/gitea-dispatch-recovery-guidance/live-enrollment-remains-a-human-check")
+def test_dispatch_enrollment_checklists_remain_pending():
+    from test_forge_publication_docs import passage
+
+    change = "mattpolicastro__nightshift-issue-150-forge-enable-gitea-dispatch-atomic-safe"
+    designs = list((ROOT / "openspec/changes").glob(f"**/*{change}/design.md"))
+    design, = designs
+    for text, heading in ((design.read_text(), "## Human checks"),
+                          ((ROOT / "README.md").read_text(), "## Quickstart")):
+        checklist = passage(text, heading)
+        checks = re.findall(r"^- \[([ xX])\] ", checklist, re.M)
+        assert len(checks) == 4 and set(checks) == {" "}
+
+
 @pytest.mark.scenario(
     "specloop-documentation/configuration-resilience-guidance/operator-repairs-enrollment"
 )

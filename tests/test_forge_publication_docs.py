@@ -12,13 +12,23 @@ from test_specloop_documentation_integrity import LINK, ROOT, heading_ids
 
 
 def passage(text, heading):
-    lines = text.splitlines()
+    assert re.fullmatch(r"#{1,6} +\S.*", heading), "invalid heading boundary"
+    lines = text.split("\n")
     assert lines.count(heading) == 1, heading
     start = lines.index(heading) + 1
     level = len(heading.split()[0])
     end = next((i for i in range(start, len(lines))
-                if re.match(rf"^#{{1,{level}}} \S", lines[i])), len(lines))
+                if re.fullmatch(rf"#{{1,{level}}} +\S.*", lines[i])), len(lines))
     return "\n".join(lines[start:end])
+
+
+def shell_example(text):
+    lines = text.split("\n")
+    fences = [line for line in lines if re.search(r"`{3,}|~{3,}", line)]
+    assert fences == ["```sh", "```"], "ambiguous physical fences"
+    start, end = lines.index("```sh"), lines.index("```")
+    assert start < end
+    return "\n".join(lines[start + 1:end])
 
 
 def links_resolve(text, document, *, nonlinks=()):
@@ -66,6 +76,8 @@ def test_explicit_publication_examples_parse_without_dispatch(monkeypatch):
     text = passage(document.read_text(), "### Explicit forge publication")
     assert links_resolve(text, document)
     parsed = commands_parse(text)
+    examples = commands_parse(shell_example(text))
+    assert [args.cmd for args in examples] == ["publish", "finish"]
     assert {args.cmd for args in parsed} == {"publish", "finish"}
     assert all(args.handler is forbidden and args.change == "example-change" for args in parsed)
 
@@ -108,3 +120,17 @@ def test_physical_rules_and_fail_closed_ambiguity(surround):
                  "[x](README.md#missing)", "[x](README.md(foo))", "[ref]: README.md"):
         with pytest.raises(AssertionError):
             links_resolve(surround.format(link), document)
+
+
+@pytest.mark.scenario("specloop-documentation/forge-guidance-integrity/examples-remain-structurally-valid")
+@pytest.mark.parametrize("wrapper", ["{}", "```md\n{}\n```", "<!--\n{}\n-->"])
+def test_exact_heading_uses_lf_and_equal_or_shallower_boundary(wrapper):
+    heading = "### Selected"
+    body = "body\n#### Child\nchild\n  ## Indented\n##No-space\ntext\u2028## Not-a-line"
+    for end in ("\n### Next\noutside", "\n###   Next\noutside", "\n# Next\noutside"):
+        assert passage(wrapper.format(heading + "\n" + body + end), heading) == body
+    assert passage(heading + "\n" + body, heading) == body  # EOF is a boundary.
+    for bad in ("", " " + heading, heading + " ", "prefix\u2028" + heading,
+                heading + "\n" + wrapper.format(heading), heading.replace(" ", "\t")):
+        with pytest.raises(AssertionError):
+            passage(bad, heading)

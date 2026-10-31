@@ -12,6 +12,7 @@ from test_specloop_documentation_integrity import DOCS, LINK, REPOSITORY, ROOT
 @pytest.mark.scenario(
     "specloop-documentation/worker-retirement-guidance/new-enrollment-follows-one-engine"
 )
+@pytest.mark.scenario("forge-configuration/bounded-enrollment-guidance/examples-preserve-existing-consumers")
 @pytest.mark.parametrize("path", ("README.md", "docs/specloop/README.md"))
 def test_enrollment_examples_load_and_reject_worker(path, tmp_path):
     # Literal raw TOML lines, wherever they occur; duplicate keys/tables fail.
@@ -24,9 +25,11 @@ def test_enrollment_examples_load_and_reject_worker(path, tmp_path):
     selected = tmp_path / "config.toml"
     for engine in ('engine = "specloop"\n', ""):
         selected.write_text(example.replace('engine = "specloop"\n', engine))
-        repo, = config.load(selected).repos
+        cfg = config.load(selected)
+        repo, = cfg.repos
         assert repo.engine == "specloop" and str(repo.manifest) == row["manifest"]
         assert repo.verify == "" and repo.base == row["base"]
+        assert cfg.forge_for(repo).kind == "github"
     selected.write_text(example.replace('engine = "specloop"', 'engine = "worker"'))
     with pytest.raises(ValueError, match="worker engine is retired"):
         config.load(selected)
