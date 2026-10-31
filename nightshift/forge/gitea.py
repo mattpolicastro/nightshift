@@ -16,7 +16,8 @@ from nightshift.queue import FeedbackItem, Issue, _block, _has_final_marker, has
 class GiteaForge:
     def __init__(self, base_url: str, token: str, *, trusted_logins: Iterable[str],
                  bot_login: str, wip_prefix: str = "WIP: ", opener=None,
-                 guard: Callable[[], None] | None = None, timeout: float = 30):
+                 guard: Callable[[], None] | None = None, timeout: float = 30,
+                 after_request: Callable[[], None] | None = None):
         if not isinstance(base_url, str):
             raise ValueError("Invalid Gitea base URL")
         if not isinstance(token, str):
@@ -38,6 +39,9 @@ class GiteaForge:
             raise ValueError("Invalid Gitea trusted logins")
         if guard is not None and not callable(guard):
             raise ValueError("Invalid Gitea guard")
+        if after_request is not None and not callable(after_request):
+            raise ValueError("Invalid Gitea completion guard")
+        self._after_request = after_request
         if opener is not None and any(not callable(getattr(opener, name, None))
                                       for name in ("open", "add_handler")):
             raise ValueError("Invalid Gitea opener")
@@ -78,12 +82,18 @@ class GiteaForge:
         """
         scope = self._guard_error.set(None)
         try:
-            return self._transport.request(method, path, query=query, json_body=json_body)
+            result = self._transport.request(method, path, query=query, json_body=json_body)
         except GiteaHTTPError as error:
             if self._guard_error.get() is error:
                 raise
             transient = error.transient
             ambiguous = transient or (error.status is not None and 200 <= error.status < 300)
+        else:
+            # Completion guards are not transport failures, even if their
+            # exception type matches one. Never reconcile or suppress them.
+            if self._after_request is not None:
+                self._after_request()
+            return result
         finally:
             self._guard_error.reset(scope)
         if reconcile is not None and ambiguous and reconcile():

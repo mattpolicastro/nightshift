@@ -1,10 +1,14 @@
 """Committed design-only checks through real readiness, publication and recovery."""
 
 import json
+import subprocess
 
 import pytest
 
-from nightshift import specloop_intake as intake
+from nightshift import daemon, queue, specloop_intake as intake
+from nightshift.config import Repo
+from fake_gitea import Reply
+from gitea_dispatch_fixtures import TEA, install_gitea
 from nightshift.cli import main
 from specloop import cli, loop
 from test_specloop_base_publication import publication
@@ -19,7 +23,7 @@ SPEC_BODY = "Closes #7\n\nImplementation of the approved spec."
 
 
 @pytest.fixture
-def design_publication(publication, tmp_path, request):
+def design_publication(publication, tmp_path, request, monkeypatch):
     p, ctx = publication, publication.ctx
     # Remove the fixture's scenario checks from both the loaded and saved manifest.
     path = ctx.run.manifest_path
@@ -59,6 +63,56 @@ def design_publication(publication, tmp_path, request):
     p.calls.clear()
     p.fetches.clear()
     p.operations.clear()
+    p.tea = None
+    if getattr(request, "param", None) == "gitea":
+        p.tea = install_gitea(monkeypatch, Repo("owner/sample"), pulls=[dict(
+            number=8, headRefName="spec/c", headRefOid=p.ready["head"], body=SPEC_BODY, labels=[])])
+        pr = p.tea.remote["pulls"][0]
+        p.gh.pr_url = pr["html_url"]
+        p.gh.comments = pr["comments"]
+        ctx.run.state.pr = p.gh.pr_url
+        ctx.run.save()
+        path.write_text(path.read_text().replace('github = "owner/sample"',
+                                                'github = "forge.example/owner/sample"'))
+        ctx.m = cli._manifest(ctx.run)
+        config = tmp_path / "gitea.toml"
+        config.write_text('''[[forges]]
+name = "tea"
+kind = "gitea"
+url = "https://forge.example/gitea"
+token_env = "TEA_BOT"
+land_token_env = "TEA_LAND"
+bot_login = "Robot"
+trusted_logins = ["Alice"]
+''')
+        monkeypatch.setenv("NIGHTSHIFT_FORGE_CONFIG", str(config))
+        # Keep real destination validation, fetch and push; only the hosted
+        # transport destination maps to the fixture's local bare origin.
+        run = subprocess.run
+        origin = TEA.url + "/owner/sample.git"
+        def local_transport(args, **kwargs):
+            if args[-4:] == ["remote", "get-url", "--all", "origin"]:
+                return subprocess.CompletedProcess(args, 0, origin + "\n", "")
+            return run([str(p.env.origin) if arg == origin else arg for arg in args], **kwargs)
+        monkeypatch.setattr(subprocess, "run", local_transport)
+        p.ready = p.status()
+        p.tea.remote["combined_statuses"][p.ready["head"]] = {
+            "sha": p.ready["head"], "state": "success", "total_count": 1,
+            "statuses": [{"id": 1, "status": "success"}]}
+        def command(args, **kwargs):
+            if args[1] == "publish":
+                return p.publish()
+            assert args == ["specloop", "status", "--json"]
+            return subprocess.CompletedProcess(args, 0, json.dumps({"version": 1, "runs": [p.status()]}), "")
+        def poll_once(gh_runner=None):
+            errors = []
+            intake.publish_pending(p.tea.repo, queue.Labels(), tmp_path,
+                forge=daemon.forge_for(p.tea.repo, cfg=p.tea.cfg), specloop_runner=command,
+                on_error=lambda n, error: errors.append(error))
+            p.gh.labels = {label["name"] for label in pr["labels"]}
+            return errors
+        p.poll_once = poll_once
+        p.tea.command = command
     yield p
     assert historical.read_bytes() == before
     assert p.gh.body == SPEC_BODY
@@ -129,6 +183,8 @@ def test_design_checks_survive_base_preparation_handoff(design_publication):
 
 
 @pytest.mark.scenario("issue-intake/design-checks-survive-publication/recovery-retains-design-checks")
+@pytest.mark.scenario("forge-interface/eligible-gitea-dispatch/pending-delivery-retains-existing-recovery")
+@pytest.mark.parametrize("design_publication", ["github", pytest.param("gitea", marks=pytest.mark.real_trust)], indirect=True)
 @pytest.mark.parametrize("failure", ["publish_response", "comment_before", "comment_after", "ack"])
 def test_design_checks_survive_publication_recovery(design_publication, monkeypatch, failure):
     p = design_publication
@@ -150,7 +206,17 @@ def test_design_checks_survive_publication_recovery(design_publication, monkeypa
 
     with monkeypatch.context() as interruption:
         interruption.setattr(intake, "_save", interrupted_save)
+        if p.tea and failure in ("comment_before", "comment_after"):
+            endpoint = p.tea.root + "/issues/8/comments"
+            def accepted(call):
+                p.tea.fake._state_reply(call, None)
+                return TimeoutError("accepted comment response lost")
+            p.tea.fake.route("POST", endpoint, Reply(status=403) if failure == "comment_before" else accepted)
+            if failure == "comment_after":
+                p.tea.fake.route("GET", endpoint, *[Reply([])] * 2, *[Reply(status=503)] * 3)
         assert len(p.poll_once(interrupted_comment)) == 1
+    if p.tea:
+        p.tea.fake.routes.clear()
     pending = p.receipt()
     assert pending["checks"] == p.ready["pause"]["detail"]
     assert not pending.get("delivered")
@@ -163,7 +229,11 @@ def test_design_checks_survive_publication_recovery(design_publication, monkeypa
             raise OSError("comment reconciliation unavailable")
         return p.gh(args)
 
+    if p.tea:
+        p.tea.fake.route("GET", p.tea.root + "/issues/8/comments", *[Reply(status=503)] * 3)
     assert len(p.poll_once(unavailable_lookup)) == 1
+    if p.tea:
+        p.tea.fake.routes.clear()
     assert not p.receipt().get("delivered")
     assert p.gh.publication_comments == accepted
     p.ctx.run.reload()  # Simulate a fresh service poll using persisted CLI/receipt state.
@@ -177,6 +247,10 @@ def test_design_checks_survive_publication_recovery(design_publication, monkeypa
     assert p.fetches == [20]
     assert p.poll_once() == []  # Delivered polls assess readiness, never publish again.
     assert p.calls.count("publish") == 1 and len(p.gh.publication_comments) == 1
+    if p.tea:
+        assert sum(c.method == "POST" and c.path.endswith("/comments")
+                   for c in p.tea.fake.calls) == 2 + int(failure == "comment_before")
+        assert not any(c.method == "POST" and c.path.endswith("/pulls") for c in p.tea.fake.calls)
 
 
 @pytest.mark.scenario("issue-intake/design-checks-survive-publication/unannotated-design-check-blocks-readiness")
@@ -201,3 +275,29 @@ def test_design_receipt_blocks_merge_readiness(design_publication):
         p.status(), "## Checks a human must make\n(none)",
         publication_checks=p.receipt()["checks"]) == []  # Explicit PR body still takes precedence.
     assert p.calls.count("publish") == 1 and len(p.gh.publication_comments) == 1
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/unhealthy-repository-still-publishes")
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/pause-and-stop-still-prevail")
+@pytest.mark.scenario("issue-intake/design-checks-survive-publication/design-only-checks-reach-the-receipt")
+@pytest.mark.scenario("issue-intake/design-checks-survive-publication/unannotated-design-check-blocks-readiness")
+@pytest.mark.parametrize("design_publication", ["gitea"], indirect=True)
+def test_gitea_admitted_publication_uses_copied_manifest_during_hold(design_publication, tmp_path, monkeypatch):
+    p = design_publication
+    monkeypatch.setattr(daemon, "STATE_DIR", tmp_path)
+    health = daemon.RepoHealth()
+    daemon.PAUSE_FILE.touch()
+    daemon.poll_specloop(p.tea.cfg, health, specloop_runner=p.tea.command)
+    assert not p.tea.fake.calls and not p.receipt_path.exists()
+    daemon.PAUSE_FILE.unlink()
+    for _ in range(2):
+        daemon.poll_specloop(p.tea.cfg, health, specloop_runner=p.tea.command)
+    assert health.failures == {"owner/sample": 2} and not health.item_failures
+    assert_delivered(p)
+    assessment = json.loads(p.readiness_path.read_text())
+    assert assessment["label"] == "merge:blocked" and assessment["delivered"]
+    assert assessment["reasons"] == [
+        "human checks: outstanding or unknown post-deploy annotation for `cap/checks/observe`",
+    ]
+    assert p.calls.count("publish") == 1

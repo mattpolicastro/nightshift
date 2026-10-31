@@ -6,6 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 from nightshift import specloop_intake
+from nightshift import daemon
+from nightshift.config import Repo
+from gitea_dispatch_fixtures import install_gitea
 from specloop import cli, loop
 from test_specloop_base_sync import base_env, commit, controlled_verify, publish_env, sh
 
@@ -232,3 +235,20 @@ def test_new_pr_body_lists_design_checks(publish_env, monkeypatch):
     assert rows(created[0]) == ["- [ ] `cap/req/manual` — inspect the result",
                                "- [ ] `cap/req/other` — check the UI", "- [ ] Design check"]
     assert ctx.run.state.pr == env.url
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("issue-intake/design-checks-survive-publication/new-pr-body-lists-design-checks")
+def test_new_gitea_pr_body_retains_design_checks(publish_env, monkeypatch):
+    env, ctx = publish_env, publish_env.ctx
+    save_design(env, "## Human checks\n- [ ] Design check\n- [ ] Design check\n")
+    assert loop.finals(ctx, ctx.head()) is False
+    e = install_gitea(monkeypatch, Repo("example/repo"))
+    forge = daemon.forge_for(e.repo, cfg=e.cfg)
+    url = forge.create_draft_pr(e.repo.name, ctx.m.branch, ctx.m.pr_base,
+                               "Design checks", cli._pr_body(ctx)).stdout
+    pr, = e.remote["pulls"]
+    assert pr["html_url"] == url and pr["title"] == "Draft: Design checks"
+    assert rows(pr["body"]) == ["- [ ] `cap/req/manual` — inspect the result",
+                                "- [ ] `cap/req/other` — check the UI", "- [ ] Design check"]
+    assert [call.method for call in e.fake.calls] == ["POST"]

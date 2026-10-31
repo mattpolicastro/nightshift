@@ -252,6 +252,7 @@ def report_failure(repo, labels, number, stage, kind, exc, *, runner=None, forge
 def propose_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
     git_runner=None, launcher=None, on_error=None, on_pending=None, readiness=None,
+    forge: Forge | None = None,
 ) -> list[dict]:
     """Draft each armed issue and publish or escalate its durable receipt.
 
@@ -260,7 +261,7 @@ look like an absent label or an empty set of comments.
 """
     if repo.engine != "specloop":
         return []
-    forge = GitHubForge(runner or queue._gh)
+    forge = forge if forge is not None else GitHubForge(runner or queue._gh)
     pending = {}
     for label in (labels.ready, labels.spec_draft):
         for issue in forge.list_issues(repo.name, label):
@@ -437,11 +438,12 @@ def _issue_author_trusted(repo: str, number: int, gh=None, *, forge: Forge | Non
 def admit_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
     git_runner=None, launcher=None, status_runner=None, on_error=None, on_pending=None, readiness=None,
+    forge: Forge | None = None,
 ) -> list[dict]:
     """Admit approved spec branches and recover interrupted PR notifications."""
     if repo.engine != "specloop":
         return []
-    forge = GitHubForge(runner or queue._gh)
+    forge = forge if forge is not None else GitHubForge(runner or queue._gh)
     pending = forge.list_open_prs(repo.name, labels.spec_approved)
 
     def admit(number):
@@ -723,11 +725,12 @@ def _build_revision_args(receipt: dict, source: Path) -> list[str]:
 def revise_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
     git_runner=None, launcher=None, status_runner=None, on_error=None, on_pending=None, readiness=None,
+    forge: Forge | None = None,
 ) -> list[dict]:
     """Re-draft specs or queue review tasks for admitted changes on their PR."""
     if repo.engine != "specloop":
         return []
-    forge = GitHubForge(runner or queue._gh)
+    forge = forge if forge is not None else GitHubForge(runner or queue._gh)
     pending = forge.list_open_prs(repo.name, labels.revise)
 
     def revise(number):
@@ -1321,6 +1324,7 @@ def _readiness_evidence(row: dict, *, git_runner=None) -> list[str]:
 def publish_pending(
     repo: Repo, labels: queue.Labels, state_dir: Path, *, runner=None, specloop_runner=None,
     on_error=None,
+    forge: Forge | None = None,
 ) -> list[dict]:
     """Publish only admitted daemon changes, preserving checks before the CLI
     replaces ready_to_publish with human_checks. Recover notification delivery
@@ -1336,7 +1340,7 @@ def publish_pending(
     if not isinstance(status.get("runs"), list):
         raise specloop_client.SpecloopError("status returned no runs list")
     runs = {run["change"]: run for run in status["runs"]}
-    forge = GitHubForge(runner or queue._gh)
+    forge = forge if forge is not None else GitHubForge(runner or queue._gh)
 
     def publish(admission_path):
         admission = json.loads(admission_path.read_text())

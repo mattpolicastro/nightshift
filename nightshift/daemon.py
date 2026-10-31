@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from . import outcomes, notify, queue, specloop_intake, specloop_job
 from .config import Config, Repo
+from .forge import ForgeError
 from .forge.gitea import GiteaForge
 from .forge.github import GitHubForge
 
@@ -34,7 +35,7 @@ HEARTBEAT_FILE = STATE_DIR / "heartbeat.json"
 
 
 def forge_for(repo: Repo, *, cfg: Config, runner=None, guard=None):
-    """Construct an adapter without requests; Gitea daemon dispatch stays held."""
+    """Construct the configured adapter without requests."""
     definition = cfg.forge_for(repo)
     if definition.kind == "github":
         return GitHubForge(runner or queue._gh)
@@ -44,7 +45,7 @@ def forge_for(repo: Repo, *, cfg: Config, runner=None, guard=None):
             f"{definition.name}: missing bot credential {definition.token_env}")
     return GiteaForge(definition.url, token, trusted_logins=definition.trusted_logins,
                      bot_login=definition.bot_login, wip_prefix=definition.wip_prefix,
-                     guard=guard)
+                     guard=guard, after_request=guard)
 
 
 def _check_landing_environment(cfg: Config) -> None:
@@ -58,7 +59,7 @@ def _check_landing_environment(cfg: Config) -> None:
 def _gitea_held(repo: Repo, cfg: Config, health: RepoHealth) -> bool:
     if cfg.forge_for(repo).kind != "gitea":
         return False
-    detail = "Gitea daemon stages disabled: authorization and durable label transitions are not implemented"
+    detail = None
     root = STATE_DIR / "engine-switch" / repo.name.replace("/", "__")
     try:
         # iterdir surfaces inspection errors that glob may silently suppress.
@@ -68,6 +69,8 @@ def _gitea_held(repo: Repo, cfg: Config, health: RepoHealth) -> bool:
         pass
     except OSError:
         detail = f"Gitea engine-switch journal location cannot be inspected; inspect {root}"
+    if detail is None:
+        return False
     error = specloop_intake.ConfigurationError(detail)
     log.warning("%s — %s", repo.name, error)
     health.record(repo.name, error, cfg.slack_webhook)
@@ -408,6 +411,8 @@ def startup(cfg: Config, repo_dirs: dict[str, Path],
             break
         if _gitea_held(repo, cfg, health):
             continue
+        if cfg.forge_for(repo).kind == "gitea":
+            continue
         try:
             _reconcile_engine_switch(repo, cfg.labels)
         except specloop_intake.Paused:
@@ -457,12 +462,23 @@ def poll_specloop(cfg: Config, health: RepoHealth, *, runner=None, specloop_runn
             return
         if _gitea_held(repo, cfg, health):
             continue
+        selected = {}
+        if cfg.forge_for(repo).kind == "gitea":
+            try:
+                selected["forge"] = forge_for(repo, cfg=cfg, guard=check_running)
+            except specloop_intake.Paused:
+                return
+            except Exception as exc:
+                log.warning("forge construction %s failed — %s", repo.name, exc)
+                health.record(repo.name, exc, cfg.slack_webhook)
+                continue
         errors: list[Exception] = []
         readiness = specloop_intake.manifest_readiness(repo)
         if isinstance(readiness, specloop_intake.ConfigurationError):
             errors.append(readiness)
         try:
-            _reconcile_engine_switch(repo, cfg.labels, runner=gh)
+            if cfg.forge_for(repo).kind == "github":
+                _reconcile_engine_switch(repo, cfg.labels, runner=gh)
         except specloop_intake.Paused:
             return
         except Exception as exc:
@@ -485,15 +501,15 @@ def poll_specloop(cfg: Config, health: RepoHealth, *, runner=None, specloop_runn
             health.item_failures[key] = health.item_failures.get(key, 0) + 1
             log.warning("specloop %s %s #%s failed — %s", stage, repo.name, number, exc)
             # Give ambiguous failures time to reconcile with durable state.
-            # Unavailable GitHub reads remain repository outages, not holds on
+            # Unavailable forge reads remain repository outages, not holds on
             # items whose eligibility we could not establish.
-            transient_github = isinstance(exc, queue.GhError) and exc.transient
+            transient_forge = isinstance(exc, ForgeError) and exc.transient
             if (isinstance(exc, specloop_intake.DeliveryError)
-                    or (health.item_failures[key] >= health.threshold and not transient_github)):
+                    or (health.item_failures[key] >= health.threshold and not transient_forge)):
                 # Keep the receipt and arming label: after the human resolves
                 # the branch and removes needs-human, delivery can resume.
                 reporting_errors = specloop_intake.report_failure(
-                    repo, cfg.labels, number, stage, kind, exc, runner=gh,
+                    repo, cfg.labels, number, stage, kind, exc, runner=gh, **selected,
                 )
                 for error in reporting_errors:
                     log.warning("specloop %s %s #%s escalation failed — %s",
@@ -516,7 +532,7 @@ def poll_specloop(cfg: Config, health: RepoHealth, *, runner=None, specloop_runn
             if stage != "publish":
                 kwargs["readiness"] = readiness
             try:
-                action(repo, cfg.labels, STATE_DIR, runner=gh, on_error=item_failed, **kwargs)
+                action(repo, cfg.labels, STATE_DIR, runner=gh, on_error=item_failed, **selected, **kwargs)
             except specloop_intake.Paused:
                 return
             except Exception as exc:  # noqa: BLE001 — other stages must still run

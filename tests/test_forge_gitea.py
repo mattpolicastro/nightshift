@@ -136,7 +136,8 @@ def test_transport_confinement_is_preserved(fake, path):
 
 
 @pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/fake-exercises-transport-behavior")
-def test_fake_can_ignore_filters_and_lose_an_accepted_write(fake):
+@pytest.mark.parametrize("completion_guard", [False, True])
+def test_fake_can_ignore_filters_and_lose_an_accepted_write(fake, completion_guard):
     stored = []
 
     def lose_response(call):
@@ -145,7 +146,8 @@ def test_fake_can_ignore_filters_and_lose_an_accepted_write(fake):
 
     fake.route("POST", WIRE_PATH, lose_response)
     fake.route("GET", WIRE_PATH, lambda call: Reply(stored))
-    forge = make_forge(fake)
+    completed = []
+    forge = make_forge(fake, after_request=(lambda: completed.append(True)) if completion_guard else None)
     body = {"id": 1, "name": "unfiltered"}
     with pytest.raises(ForgeError) as caught:
         forge._request("POST", PATH, json_body=body)
@@ -154,6 +156,7 @@ def test_fake_can_ignore_filters_and_lose_an_accepted_write(fake):
     assert rows == [body]
     assert [call.method for call in fake.calls] == ["POST", "GET"]
     assert fake.calls[-1].query == {"labels": ["absent"], "head": ["absent"]}
+    assert completed == ([True] if completion_guard else [])
 
 
 @pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/fake-exercises-transport-behavior")
@@ -165,21 +168,43 @@ def test_fake_can_ignore_filters_and_lose_an_accepted_write(fake):
     (Reply(status=302, headers={"Location": "https://foreign/" + SECRET}), False),
     (Reply(raw=SECRET.encode()), False),
 ])
-def test_only_transport_retries_and_safe_classification(fake, offline, method, outcome, transient):
+@pytest.mark.parametrize("completion_guard", [False, True])
+def test_only_transport_retries_and_safe_classification(fake, offline, method, outcome, transient, completion_guard):
     attempts = 3 if method == "GET" and transient else 1
     fake.route(method, WIRE_PATH, *([outcome] * attempts))
+    completed = []
     with pytest.raises(ForgeError) as caught:
-        make_forge(fake)._request(method, PATH)
+        make_forge(fake, after_request=(lambda: completed.append(True)) if completion_guard else None)._request(method, PATH)
     assert caught.value.transient is transient
     assert len(fake.calls) == attempts and offline == [0.1, 0.2][:attempts - 1]
     assert all(response.closed for response in fake.responses)
     assert SECRET not in "".join(traceback.format_exception(caught.value))
+    assert not completed
 
 
 def guard_error(kind):
     return {"http": lambda: http.GiteaHTTPError(503, SECRET, True),
             "forge": lambda: ForgeError(SECRET, transient=True),
             "os": lambda: OSError(SECRET), "pause": lambda: RuntimeError(SECRET)}[kind]()
+
+
+@pytest.mark.scenario("gitea-forge/failure-and-guard-boundaries/optional-completion-guard-preserves-identity")
+@pytest.mark.parametrize("kind", ["http", "forge", "os", "pause"])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_completion_guard_identity_never_reconciles(fake, kind, method):
+    error = guard_error(kind)
+    guards = []
+    def after_request():
+        guards.append(True)
+        raise error
+    forge = make_forge(fake, after_request=after_request)
+    fake.route(method, WIRE_PATH, Reply({}))
+    def forbidden():
+        pytest.fail("completion guard must not trigger transport reconciliation")
+    with pytest.raises(type(error)) as caught:
+        forge._request(method, PATH, blocking_fallback=True, reconcile=forbidden)
+    assert caught.value is error and len(fake.calls) == len(guards) == 1
+    assert forge._guard_error.get() is None
 
 
 @pytest.mark.scenario("gitea-forge/failure-and-guard-boundaries/guard-exception-identity")
@@ -1820,13 +1845,15 @@ def test_gitea_status_nonempty_snapshot_disagreement(fake, problem):
 
 @pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/fake-exercises-transport-behavior")
 @pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/fake-serialization-preserves-test-evidence")
-def test_gitea_status_fake_serialization_preserves_evidence(fake):
+@pytest.mark.parametrize("completion_guard", [False, True])
+def test_gitea_status_fake_serialization_preserves_evidence(fake, completion_guard):
     rows = [{"id": 1, "state": "success"}, {"id": 2, "state": "success", "status": None},
             {"id": 3, "state": []}, {"id": 4}, {"id": 5, "status": "unknown"}]
     payload = combined(count=5, statuses=rows, unrelated="retained")
     original = json.loads(json.dumps(payload))
     fake.repository("owner/repo", labels=[], combined_statuses={SHA: payload}, page_size=50)
-    forge = make_forge(fake)
+    completed = []
+    forge = make_forge(fake, after_request=(lambda: completed.append(True)) if completion_guard else None)
     path = forge._repo_path("owner/repo", "commits", SHA, "status")
     _, headers, wire = forge._request("GET", path, query={"page": 1, "limit": 50})
     assert wire == {**payload, "statuses": [{"id": 1, "status": "success"},
@@ -1837,6 +1864,7 @@ def test_gitea_status_fake_serialization_preserves_evidence(fake):
     fake.route("GET", STATUS_PATH, Reply(payload), page=1)
     assert forge._request("GET", path, query={"page": 1, "limit": 50})[2] == original
     assert payload == original and all(response.closed for response in fake.responses)
+    assert len(completed) == (3 if completion_guard else 0)
 
 
 @pytest.mark.scenario("gitea-forge/exact-sha-combined-status/status-mapping")
@@ -2442,7 +2470,8 @@ def test_comment_create_does_not_reconcile_non_http_exceptions(fake, comment_rep
 
 @pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/live-suite-skips-without-url")
 @pytest.mark.parametrize("url", [None, ""])
-def test_contract_suite_skips_without_url(tmp_path, url):
+@pytest.mark.parametrize("other_credentials", [False, True])
+def test_contract_suite_skips_without_url(tmp_path, url, other_credentials):
     plugin = tmp_path / "forbid_contract_network.py"
     plugin.write_text('''
 import socket
@@ -2461,6 +2490,8 @@ def pytest_configure(config):
     for key in tuple(env):
         if key.startswith("GITEA_CONTRACT_"):
             env.pop(key)
+    if other_credentials:
+        env.update({k: v for k, v in configured_contract_env().items() if k != "GITEA_CONTRACT_URL"})
     if url is not None:
         env["GITEA_CONTRACT_URL"] = url
     env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(Path(__file__).parent),
@@ -2491,7 +2522,8 @@ def configured_contract_env():
 
 @pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/configured-live-setup-is-strict")
 @pytest.mark.parametrize("missing", ["TOKEN", "REPO", "BOT_LOGIN", "TRUSTED_LOGIN", "FIXTURE"])
-def test_configured_contract_requires_complete_setup(monkeypatch, missing):
+@pytest.mark.parametrize("empty", [None, "", " \t"])
+def test_configured_contract_requires_complete_setup(monkeypatch, missing, empty):
     from contract.conftest import live_contract
 
     def forbidden(*args, **kwargs):
@@ -2499,6 +2531,8 @@ def test_configured_contract_requires_complete_setup(monkeypatch, missing):
     monkeypatch.setattr(http, "build_opener", forbidden)
     env = configured_contract_env()
     del env["GITEA_CONTRACT_" + missing]
+    if empty is not None:
+        env["GITEA_CONTRACT_" + missing] = empty
     with pytest.raises(pytest.fail.Exception, match="Missing GITEA_CONTRACT_" + missing):
         live_contract(env)
 

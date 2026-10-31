@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from revision_result_fixtures import revision_success
+from gitea_dispatch_fixtures import install_gitea, forbidden
 
 from manifest_fixtures import manifest_text
 
@@ -661,7 +662,7 @@ def delivery_job(background, monkeypatch):
     monkeypatch.setattr(os, "kill", unexpected_stop)
     monkeypatch.setattr(os, "killpg", unexpected_stop)
 
-    def start(stage):
+    def start(stage, backend="github"):
         gh = (DraftGh(("spec:draft",)) if stage == "draft" else
               ApprovalGh() if stage == "admit" else RevisionGh())
         change = "sample-issue-7-add-a-gate"
@@ -697,7 +698,30 @@ def delivery_job(background, monkeypatch):
         monkeypatch.setattr(subprocess, "run", run)
         monkeypatch.setattr(specloop_intake, "run_git", run)
         job.runner = github
-        job.poll = lambda: daemon.poll_specloop(Config(repos=[repo]), job.health, runner=job.runner)
+        cfg = Config(repos=[repo])
+        job.tea = None
+        if backend.startswith("gitea"):
+            row = dict(number=7 if stage == "draft" else 8, title="Add a gate", body="Closes #7",
+                       labels=[{"name": n} for n in gh.labels],
+                       headRefName=f"spec/{change}", headRefOid=HEAD)
+            job.tea = install_gitea(monkeypatch, repo,
+                                   issues=[row] if stage == "draft" else [],
+                                   pulls=[] if stage == "draft" else [row])
+            cfg = job.tea.cfg
+            job.item = (job.tea.remote["issues"] or job.tea.remote["pulls"])[0]
+            if stage != "draft":
+                gh.pr_url = job.item["html_url"]
+                for run in runs:
+                    run["pr"] = gh.pr_url
+            if "revision" in stage:
+                job.item["comments"] = [dict(id=c["id"], body=c["body"],
+                    user={"login": "Robot" if c["author"]["login"] == "bot" else "Alice"},
+                    created_at=c["createdAt"]) for c in gh.feedback]
+                job.tea.remote["commits"] = [dict(sha=HEAD, parents=[],
+                    committer={"date": "2026-10-20T12:00:00Z"})]
+            job.runner = forbidden
+            monkeypatch.setattr(daemon, "_reconcile_engine_switch", forbidden)
+        job.poll = lambda: daemon.poll_specloop(cfg, job.health, runner=job.runner)
         job.poll()
         eventually(lambda: (root / "started").exists())
         directory = {"draft": "proposals", "admit": "admissions"}.get(stage, "revisions")
@@ -857,9 +881,12 @@ def _finish_while_paused(job):
 
 
 @pytest.mark.scenario("paused-job-delivery/resume-pending-delivery/resume-once-after-restart")
+@pytest.mark.scenario("forge-interface/eligible-gitea-dispatch/pending-delivery-retains-existing-recovery")
 @pytest.mark.parametrize("stage", ["draft", "admit", "spec_revision", "build_revision"])
-def test_finished_job_delivers_once_after_paused_restart(delivery_job, stage):
-    job = delivery_job(stage)
+@pytest.mark.parametrize("backend", ["github", pytest.param("gitea", marks=pytest.mark.real_trust),
+    pytest.param("gitea-interrupted", marks=pytest.mark.real_trust)])
+def test_finished_job_delivers_once_after_paused_restart(delivery_job, stage, backend):
+    job = delivery_job(stage, backend)
     # Reproduce a non-job entry without depending on intake to create one.
     idea = job.directory.parent / f"idea-{'f' * 32}.txt"
     idea.write_text("Drafting input fixture\n", encoding="utf-8")
@@ -874,23 +901,57 @@ def test_finished_job_delivers_once_after_paused_restart(delivery_job, stage):
     job.health = daemon.RepoHealth()
     _assert_paused_delivery_held(job)
     daemon.PAUSE_FILE.unlink()
+    if backend == "gitea-interrupted":
+        endpoint = job.tea.root + ("/pulls" if stage == "draft" else "/issues/8/comments")
+        def accepted(call):
+            reply = job.tea.fake._state_reply(call, None)
+            daemon.PAUSE_FILE.touch()
+            return reply
+        job.tea.fake.route("POST", endpoint, accepted)
+        job.poll()
+        assert not json.loads(job.path.read_text()).get("delivered")
+        assert job.tea.fake.calls[-1].path == endpoint
+        calls = list(job.tea.fake.calls)
+        effects = deepcopy(job.tea.remote)
+        _assert_paused_delivery_held(job)
+        assert job.tea.fake.calls == calls and job.tea.remote == effects
+        specloop_job._children.clear()
+        job.health = daemon.RepoHealth()
+        job.tea.fake.routes.clear()
+        daemon.PAUSE_FILE.unlink()
     job.poll()
     receipt = job.path.read_bytes()
     assert json.loads(receipt)["delivered"] is True
     assert json.loads(receipt)["result"] == job.result
     assert (job.directory / "collected.json").exists()
-    assert len(job.gh.comments) == comments_before + 1
-    assert len(job.gh.prs) == int(stage == "draft")
-    assert job.gh.labels == ({"spec:review"} if "revision" in stage else set())
     completion = {"draft": "Spec draft ready", "admit": "build has started",
                   "spec_revision": "Revised the spec", "build_revision": "build has resumed"}
-    assert completion[stage] in job.gh.comments[-1]["body"]
-    assert sum(call[:3] == ["gh", "pr", "create"] for call in job.calls) == int(stage == "draft")
-    kind = "issue" if stage == "draft" else "pr"
-    assert sum(call[:3] == ["gh", kind, "comment"] for call in job.calls) == 1
-    assert sum(call[0] == "git" and call[3] == "push" for call in job.calls) == int(
-        stage in ("draft", "spec_revision")
-    )
+    if backend == "github":
+        assert len(job.gh.comments) == comments_before + 1
+        assert len(job.gh.prs) == int(stage == "draft")
+        assert job.gh.labels == ({"spec:review"} if "revision" in stage else set())
+        assert completion[stage] in job.gh.comments[-1]["body"]
+        assert sum(call[:3] == ["gh", "pr", "create"] for call in job.calls) == int(stage == "draft")
+        kind = "issue" if stage == "draft" else "pr"
+        assert sum(call[:3] == ["gh", kind, "comment"] for call in job.calls) == 1
+    else:
+        assert completion[stage] in job.item["comments"][-1]["body"]
+        assert {d["name"] for d in job.item["labels"]} == (
+            {"spec:review"} if "revision" in stage else set())
+        assert sum(c.method == "POST" and c.path.endswith("/pulls")
+                   for c in job.tea.fake.calls) == int(stage == "draft")
+        assert sum(c.method == "POST" and c.path.endswith("/comments")
+                   for c in job.tea.fake.calls) == 1
+        remote = deepcopy(job.tea.remote)
+        http_count = len(job.tea.fake.calls)
+    if backend == "gitea-interrupted" and stage == "spec_revision":
+        # Existing spec-revision delivery repeats the idempotent push before
+        # reconciling its comment; it never relaunches the completed draft job.
+        assert sum(call[0] == "git" and call[3] == "push" for call in job.calls) == 2
+    else:
+        assert sum(call[0] == "git" and call[3] == "push" for call in job.calls) == int(
+            stage in ("draft", "spec_revision")
+        )
 
     effects = deepcopy((job.gh.labels, job.gh.comments, job.gh.prs))
     delivered_at = len(job.calls)
@@ -906,6 +967,9 @@ def test_finished_job_delivers_once_after_paused_restart(delivery_job, stage):
         assert len([p for p in job.directory.parent.iterdir() if p.is_dir()]) == 1
         assert idea.read_text(encoding="utf-8") == "Drafting input fixture\n"
         assert len((job.root / "started").read_text().splitlines()) == 1
+        if job.tea:
+            assert job.tea.remote == remote
+            assert all(c.method == "GET" for c in job.tea.fake.calls[http_count:])
     # Repeated polls may read status, but must dispatch no further delivery.
     for call in job.calls[delivered_at:]:
         assert not (call[0] == "git" and call[3] == "push")
@@ -913,6 +977,79 @@ def test_finished_job_delivers_once_after_paused_restart(delivery_job, stage):
                     and call[2] in ("create", "comment", "edit"))
         assert not (call[:2] == ["gh", "api"] and "PATCH" in call)
         assert call[:2] != ["specloop", "publish"]
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/saved-work-survives-a-hold")
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/pause-and-stop-still-prevail")
+@pytest.mark.parametrize("stage", ["draft", "admit", "spec_revision", "build_revision"])
+@pytest.mark.parametrize("stopped", [False, True])
+def test_gitea_finished_job_survives_enrollment_hold(delivery_job, stage, stopped):
+    job = delivery_job(stage, "gitea")
+    _finish_while_paused(job)
+    if stopped:
+        specloop_job.save(job.directory / "stop.json", {"state": "stopping"})
+    manifest = job.tea.repo.manifest
+    valid = manifest.read_bytes()
+    manifest.unlink()
+    if stage == "admit":
+        job.runs.append(dict(change=json.loads(job.path.read_text())["change"],
+                             pr=job.gh.pr_url, status="running"))
+    remote = deepcopy(job.tea.remote)
+    calls = list(job.tea.fake.calls)
+    specloop_job._children.clear()
+    job.health = daemon.RepoHealth()
+    job.poll()
+    assert job.tea.remote == remote and job.tea.fake.calls == calls
+    daemon.PAUSE_FILE.unlink()
+    for _ in range(3):
+        job.poll()
+    assert job.health.failures == {job.tea.repo.name: 3} and not job.health.item_failures
+    receipt = json.loads(job.path.read_text())
+    assert bool(receipt.get("delivered")) == (stage in ("admit", "build_revision") and not stopped)
+    if stopped:
+        assert "result" not in receipt and not (job.directory / "collected.json").exists()
+        assert job.tea.remote == remote
+    else:
+        assert receipt["result"] == job.result
+    manifest.write_bytes(valid)
+    job.health = daemon.RepoHealth()
+    job.poll()
+    assert bool(json.loads(job.path.read_text()).get("delivered")) == (not stopped)
+    assert len(job.children) == 1 and len((job.root / "started").read_text().splitlines()) == 1
+    assert job.result_path.exists() and not job.health.failures
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("config-resilience/health-gates-new-work-only/foreign-journal-overrides-admitted-delivery")
+@pytest.mark.scenario("config-resilience/foreign-recovery-journal-hold/journal-location-is-uncertain-or-clear")
+@pytest.mark.parametrize("stage", ["draft", "admit", "spec_revision", "build_revision"])
+def test_gitea_foreign_journal_holds_completed_jobs_until_removed(delivery_job, stage):
+    job = delivery_job(stage, "gitea")
+    _finish_while_paused(job)
+    journal = daemon.STATE_DIR / "engine-switch/owner__sample/8.json"
+    specloop_job.save(journal, {"done": True})
+    saved = {p: p.read_bytes() for p in daemon.STATE_DIR.rglob("*") if p.is_file()}
+    calls = list(job.tea.fake.calls)
+    manifest = job.tea.repo.manifest
+    valid = manifest.read_bytes()
+    daemon.PAUSE_FILE.unlink()
+    for broken in (True, False):
+        manifest.write_bytes(b"[broken" if broken else valid)
+        specloop_job._children.clear()
+        job.health = daemon.RepoHealth()
+        daemon.startup(job.tea.cfg, {}, job.health)
+        job.poll()
+        assert job.tea.fake.calls == calls
+        assert {p: p.read_bytes() for p in saved} == saved
+        assert job.health.failures == {job.tea.repo.name: 2} and not job.health.item_failures
+    journal.unlink()
+    job.health = daemon.RepoHealth()
+    daemon.startup(job.tea.cfg, {}, job.health)
+    job.poll()
+    assert json.loads(job.path.read_text())["delivered"]
+    assert not job.health.failures and len(job.children) == 1
+    assert len((job.root / "started").read_text().splitlines()) == 1
 
 
 @pytest.mark.scenario("paused-job-delivery/independent-supervisor-boundary/admission-already-committed")
