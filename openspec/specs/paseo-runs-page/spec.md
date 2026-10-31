@@ -323,3 +323,31 @@ Factory Publish and Finish SHALL warn that they push to the forge selected by th
 - **WHEN** a displayed run has a configured Gitea PR and its allowed Publish or Finish action is confirmed
 - **THEN** the same manifest-based warning precedes the unchanged literal `nightshift act` invocation and the engine selects and validates the forge
 - **THEN** Finish removes the Gitea WIP prefix through the engine and does not merge; Gitea has no usable Land action and display configuration does not authorize writes
+
+### Requirement: Search and sort
+
+When a loaded snapshot has runs, Factory SHALL offer a search field labelled
+`Search Factory runs` and a `Sort Factory runs` radio group of `Recent`
+(default), `Oldest` and `A–Z`. Search SHALL match case-insensitively, requiring
+every whitespace-separated term to appear in the run's change, PR, action
+headline, or context summary, repository or branch. A run's activity SHALL be
+the latest of its parseable `context.recent` times and `pause.since`; runs with
+neither sort last under both recency orders, and ties keep source order. `A–Z`
+sorts by change. The model SHALL export `arrangeFactoryRuns(runs, query, sort)`,
+which filters and sorts without mutating its input, and the page SHALL apply it
+before `groupFactoryRuns`, so paused runs stay first. Summary counts and the
+empty message SHALL describe the whole snapshot. While a search is non-empty,
+the page SHALL list matching finished runs after active ones without the
+Finished disclosure, show `N of M match` or `No runs match.`, and leave the
+disclosure's state unchanged for when the search is cleared. Search and sort
+SHALL NOT initiate an RPC or workspace lookup.
+
+#### Scenario: Search reaches finished runs
+- **WHEN** a snapshot has one active and two finished runs and the search matches only one finished run
+- **THEN** only that run is listed, with no Finished disclosure, `1 of 3 match` is shown, and the summary still reads `1 run · 2 finished`
+- **WHEN** the search is cleared
+- **THEN** the active run is listed and `Finished (2)` returns collapsed
+
+#### Scenario: Sort reorders within groups
+- **WHEN** runs with differing activity are sorted by Recent, Oldest or A–Z
+- **THEN** each group follows that order, paused runs remain first among active runs, and undated runs come last under Recent and Oldest

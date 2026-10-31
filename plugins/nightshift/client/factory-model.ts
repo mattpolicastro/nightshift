@@ -58,6 +58,35 @@ export function groupFactoryRuns(runs: readonly FactoryRun[]): { active: Factory
   };
 }
 
+export type FactorySort = 'recent' | 'oldest' | 'name';
+
+// Latest known activity: the newest recent event or the pause, in milliseconds.
+export function factoryActivity(run: FactoryRun): number {
+  const since = run.pause?.since;
+  const times = [
+    ...(run.context?.recent ?? []).map(event => Date.parse(event.at)),
+    typeof since === 'number' ? since * 1000 : NaN,
+  ].filter(Number.isFinite);
+  return times.length ? Math.max(...times) : -Infinity;
+}
+
+// Filter and order before grouping, so paused-first and the finished fold still apply.
+export function arrangeFactoryRuns(runs: readonly FactoryRun[], query: string, sort: FactorySort): FactoryRun[] {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const matched = runs.filter(run => {
+    const haystack = [run.change, run.pr, run.action?.headline, run.context?.summary,
+      run.context?.repo, run.context?.branch].filter(Boolean).join('\n').toLowerCase();
+    return terms.every(term => haystack.includes(term));
+  });
+  if (sort === 'name') return matched.sort((a, b) => a.change.localeCompare(b.change));
+  // Undated runs sort last either way; ties keep source order.
+  const key = (run: FactoryRun) => {
+    const time = factoryActivity(run);
+    return time === -Infinity ? Infinity : sort === 'recent' ? -time : time;
+  };
+  return matched.sort((a, b) => key(a) === key(b) ? 0 : key(a) < key(b) ? -1 : 1);
+}
+
 export function factoryWaitingTime(
   run: FactoryRun, nowMs = Date.now(),
 ): { text: string; warning: boolean } | null {

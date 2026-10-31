@@ -346,7 +346,7 @@ function runWith(actions: Verb[]): FactoryRun {
   };
 }
 const actionButtons = (page: ReturnType<typeof styleView>) => page.nodes().filter(node =>
-  node.type === 'Pressable' && node.props.accessibilityLabel !== 'Refresh Factory' &&
+  node.type === 'Pressable' && node.props.accessibilityLabel !== 'Refresh Factory' && node.props.accessibilityRole !== 'radio' &&
   node.props.accessibilityLabel !== 'Details for styled-run');
 
 function assertActions(page: ReturnType<typeof styleView>, verbs: Verb[], roles: Role[], tokens = colors, disabled = false) {

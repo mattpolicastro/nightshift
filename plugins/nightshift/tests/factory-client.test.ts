@@ -221,3 +221,31 @@ test('orderFactoryRuns separates active from finished', async t => {
     assert.deepEqual(input, [a, c, b, e]);
   });
 });
+
+test('paseo-runs-page/search-and-sort/model: filters on change and context, orders by name or activity', async () => {
+  const { arrangeFactoryRuns, factoryActivity } = await import('../client/factory-model');
+  const at = (change: string, time: string | null, extra: Partial<FactoryRun> = {}): FactoryRun => ({
+    change, status: 'done', tasks: { done: 1, total: 1 }, pr: '', ...extra,
+    ...(time ? { context: { summary: '', repo: '~/Projects/x', branch: `spec/${change}`, task: null, detail: '',
+      recent: [{ at: time, text: 'finished' }, { at: '2026-01-01T00:00:00Z', text: 'older' }], github: '' } } : {}),
+  });
+  const beta = at('beta', '2026-10-20T00:00:00Z');
+  const alpha = at('Alpha', '2026-10-22T00:00:00Z', { pr: 'https://github.com/owner/flight/pull/9' });
+  const gamma = at('gamma', null, { status: 'paused', pause: { since: Date.parse('2026-10-21T00:00:00Z') / 1000 } });
+  const undated = at('undated', null);
+  const input = Object.freeze([undated, beta, gamma, alpha]);
+
+  assert.equal(factoryActivity(beta), Date.parse('2026-10-20T00:00:00Z'));
+  assert.equal(factoryActivity(gamma), Date.parse('2026-10-21T00:00:00Z'));
+  assert.equal(factoryActivity(undated), -Infinity);
+  const names = (runs: FactoryRun[]) => runs.map(run => run.change);
+  assert.deepEqual(names(arrangeFactoryRuns(input, '', 'recent')), ['Alpha', 'gamma', 'beta', 'undated']);
+  assert.deepEqual(names(arrangeFactoryRuns(input, '', 'oldest')), ['beta', 'gamma', 'Alpha', 'undated']);
+  assert.deepEqual(names(arrangeFactoryRuns(input, '', 'name')), ['Alpha', 'beta', 'gamma', 'undated']);
+  assert.deepEqual(names(arrangeFactoryRuns(input, '  FLIGHT ', 'recent')), ['Alpha']);
+  assert.deepEqual(names(arrangeFactoryRuns(input, 'spec/ beta', 'recent')), ['beta']);
+  assert.deepEqual(names(arrangeFactoryRuns(input, 'nothing', 'recent')), []);
+  assert.deepEqual(names(input as FactoryRun[]), ['undated', 'beta', 'gamma', 'Alpha']);
+  // Arranged order feeds grouping, which still lists paused runs first.
+  assert.deepEqual(names(groupFactoryRuns(arrangeFactoryRuns(input, '', 'name')).active), ['gamma']);
+});

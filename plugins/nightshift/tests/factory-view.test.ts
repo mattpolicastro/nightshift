@@ -740,3 +740,44 @@ test('factory-finished-runs/existing-interactions-remain-intact/failed-refresh-r
     });
   }
 });
+
+test('paseo-runs-page/search-and-sort/page: search reaches finished runs and sort reorders rows', async t => {
+  const finished = (change: string, at: string): FactoryRun => ({
+    ...run, change, status: 'done', action: undefined, context: { ...run.context!, recent: [{ at, text: 'finished' }] },
+  });
+  const page = view({ runs: [finished('zeta-old', '2026-10-01T00:00:00Z'), finished('alpha-new', '2026-10-30T00:00:00Z'), run] });
+  t.after(page.dispose);
+  await page.settle();
+  const rows = () => page.nodes().map(node => node.props.accessibilityLabel)
+    .filter((label): label is string => typeof label === 'string' && label.startsWith('Details for '));
+  assert.ok(page.text().includes('1 run · 2 finished'));
+  assert.deepEqual(rows(), ['Details for factory-context']);
+  assert.equal(page.find('Sort by Recent')?.props.accessibilityState.selected, true);
+
+  page.find('Search Factory runs')!.props.onChangeText('ALPHA');
+  await page.settle();
+  assert.deepEqual(rows(), ['Details for alpha-new']);
+  assert.equal(page.find('Finished (1)'), undefined);
+  assert.ok(page.text().includes('1 of 3 match'));
+  assert.ok(page.text().includes('1 run · 2 finished'), 'counts describe the whole snapshot');
+
+  page.find('Search Factory runs')!.props.onChangeText('spec/');
+  await page.settle();
+  assert.deepEqual(rows(), ['Details for factory-context', 'Details for alpha-new', 'Details for zeta-old']);
+  await page.press('Sort by Oldest');
+  assert.deepEqual(rows(), ['Details for factory-context', 'Details for zeta-old', 'Details for alpha-new']);
+  await page.press('Sort by A–Z');
+  assert.deepEqual(rows(), ['Details for factory-context', 'Details for alpha-new', 'Details for zeta-old']);
+
+  page.find('Search Factory runs')!.props.onChangeText('no-such-run');
+  await page.settle();
+  assert.deepEqual(rows(), []);
+  assert.ok(page.text().includes('No runs match.'));
+
+  page.find('Search Factory runs')!.props.onChangeText('');
+  await page.settle();
+  assert.deepEqual(rows(), ['Details for factory-context']);
+  assert.equal(page.find('Finished (2)')?.props.accessibilityState.expanded, false);
+  assert.deepEqual(page.calls.actions, []);
+  assert.equal(page.calls.reads, 1, 'search and sort never read');
+});
