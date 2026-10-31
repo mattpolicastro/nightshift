@@ -76,8 +76,15 @@ class FakeGitea:
                     if call.path == root + "/commits/" + sha + "/status":
                         assert page is not None
                         size = min(state["page_size"], int(call.query["limit"][0]))
-                        return Reply({**combined, "statuses":
-                                      combined["statuses"][(page - 1) * size:page * size]})
+                        rows = [dict(row) if isinstance(row, dict) else row
+                                for row in combined["statuses"][(page - 1) * size:page * size]]
+                        for row in rows:
+                            if isinstance(row, dict):
+                                if "status" not in row and isinstance(row.get("state"), str):
+                                    row["status"] = row["state"]
+                                row.pop("state", None)
+                        return Reply({**combined, "statuses": rows} if rows else
+                                     {**combined, "state": "pending", "total_count": 0, "statuses": None})
             if call.method == "POST" and call.path == root + "/pulls":
                 assert set(call.body) == {"title", "body", "head", "base"}
                 number = max((row["number"] for row in [*state["issues"], *state["pulls"]]), default=0) + 1

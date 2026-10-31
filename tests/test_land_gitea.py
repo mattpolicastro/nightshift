@@ -1419,7 +1419,7 @@ def status_path(head=HEAD, page=1):
 
 
 def combined(state="success", *, head=HEAD, rows=None, count=None):
-    rows = [{"id": 1, "state": state}] if rows is None else rows
+    rows = [{"id": 1, "status": state}] if rows is None else rows
     return {"sha": head, "state": state, "total_count": len(rows) if count is None else count,
             "statuses": rows}
 
@@ -1429,7 +1429,7 @@ def expect_status(opener, state="success", *, head=HEAD, empty=False, timeout=30
     if count:
         opener.expect("GET", status_path(head), combined(state, head=head), timeout=timeout)
     opener.expect("GET", status_path(head, 2 if count else 1),
-                  combined(state, head=head, rows=[], count=count), timeout=timeout)
+                  {"sha": head, "state": "pending", "total_count": 0, "statuses": None}, timeout=timeout)
 
 
 def expect_ci(opener, remote, state="success", *, empty=False, timeout=30):
@@ -1501,7 +1501,7 @@ def test_gitea_ci_waiting_expires_without_new_dispatch(config_path, scripted_run
     {**combined(), "state": "unknown"}, {**combined(), "state": True},
     {**combined(), "total_count": True}, {**combined(), "total_count": -1},
     {**combined(), "statuses": None}, combined(rows=[None]),
-    combined(rows=[{"id": 1, "state": "unknown"}]), combined(rows=[{"state": "success"}]),
+    combined(rows=[{"id": 1, "status": "unknown"}]), combined(rows=[{"status": "success"}]),
 ])
 def test_gitea_malformed_status_refuses(config_path, scripted_runner, opener, evidence):
     identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
@@ -1531,13 +1531,13 @@ def test_gitea_inconsistent_status_pages_refuse(config_path, scripted_runner, op
     elif problem == "incomplete":
         first["total_count"] = second["total_count"] = 2
     elif problem in {"repeat", "conflict"}:
-        second["statuses"] = [{"id": 1, "state": "success" if problem == "repeat" else "failure"}]
+        second["statuses"] = [{"id": 1, "status": "success" if problem == "repeat" else "failure"}]
     elif problem == "header-count":
         headers = {"X-Total-Count": "2"}
     elif problem == "terminal-next":
         headers = {"X-Next-Page": "3"}
     elif problem.startswith("success-with-"):
-        first["statuses"][0]["state"] = problem.removeprefix("success-with-").removeprefix("only-")
+        first["statuses"][0]["status"] = problem.removeprefix("success-with-").removeprefix("only-")
     opener.expect("GET", PR_PATH, PR)
     opener.expect("GET", status_path(), first)
     opener.expect("GET", status_path(page=2), second, headers=headers)
@@ -1551,8 +1551,8 @@ def test_gitea_success_requires_complete_pages(config_path, scripted_runner, ope
     identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
     opener.expect("GET", PR_PATH, PR)
     opener.expect("GET", status_path(), combined(count=2))
-    opener.expect("GET", status_path(page=2), combined(rows=[{"id": 2, "state": "skipped"}], count=2))
-    opener.expect("GET", status_path(page=3), combined(rows=[], count=2))
+    opener.expect("GET", status_path(page=2), combined(rows=[{"id": 2, "status": "skipped"}], count=2))
+    opener.expect("GET", status_path(page=3), {"sha": HEAD, "state": "pending", "total_count": 0, "statuses": None})
     opener.expect("GET", PR_PATH, PR)
     land.wait_for_ci(identity, HEAD, ops)
 
@@ -1581,7 +1581,7 @@ def test_gitea_ci_requests_share_deadline(config_path, scripted_runner, opener, 
     path, facts = status_path(), combined()
     if expiry in {"page", "after-bracket"}:
         opener.expect("GET", path, facts, timeout=2)
-        path, facts = status_path(page=2), combined(rows=[], count=1)
+        path, facts = status_path(page=2), {"sha": HEAD, "state": "pending", "total_count": 0, "statuses": None}
     if expiry == "after-bracket":
         opener.expect("GET", path, facts, timeout=2)
         path, facts = PR_PATH, PR
@@ -1616,7 +1616,7 @@ def test_gitea_ci_retry_and_pages_consume_original_budget(config_path, scripted_
         clock.sleep(1)
         return combined()
     opener.expect("GET", status_path(), first_page, timeout=4)
-    opener.expect("GET", status_path(page=2), combined(rows=[], count=1), timeout=3)
+    opener.expect("GET", status_path(page=2), {"sha": HEAD, "state": "pending", "total_count": 0, "statuses": None}, timeout=3)
     opener.expect("GET", PR_PATH, PR, timeout=3)
     land.wait_for_ci(identity, HEAD, ops)
     assert ops.remaining() == 3
