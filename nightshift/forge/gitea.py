@@ -336,6 +336,8 @@ class GiteaForge:
             r"(?P<inline>pulls/[1-9][0-9]*/reviews/[1-9][0-9]*))/comments", path)
         if comments:
             return self._read_comments(path, inline=comments.group("inline") is not None)
+        timeline = re.fullmatch(
+            r"/api/v1/repos/[^/?#]+/[^/?#]+/issues/[1-9][0-9]*/timeline", path) is not None
         fixed_query = dict(query or {})
         pages: list[list[dict]] = []
         seen: dict[int, dict] = {}
@@ -353,6 +355,8 @@ class GiteaForge:
             _, headers, rows = result
             if unpack is not None:
                 rows = unpack(rows)
+            if timeline and rows is None:
+                rows = []
             if not isinstance(rows, list):
                 raise ForgeError("Invalid Gitea page", transient=False)
             count = headers.get("X-Total-Count")
@@ -363,9 +367,11 @@ class GiteaForge:
                     current_total = int(count)
                 except ValueError:
                     raise ForgeError("Invalid Gitea pagination metadata", transient=False) from None
-                if total is not None and current_total != total:
-                    raise ForgeError("Inconsistent Gitea total", transient=False)
-                total = current_total
+                # Timeline counts describe individual pages, not the whole listing.
+                if not timeline:
+                    if total is not None and current_total != total:
+                        raise ForgeError("Inconsistent Gitea total", transient=False)
+                    total = current_total
             next_page = headers.get("X-Next-Page")
             if next_page is not None and next_page not in ("", "0", str(page + 1)):
                 raise ForgeError("Invalid Gitea next page", transient=False)

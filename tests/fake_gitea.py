@@ -140,6 +140,10 @@ class FakeGitea:
                                         if "body" not in row and type(row.get("removed")) is bool:
                                             row["body"] = "" if row["removed"] else "1"
                                         row.pop("removed", None)
+                                assert page is not None
+                                size = min(state["page_size"], int(call.query["limit"][0]))
+                                rows = rows[(page - 1) * size:page * size]
+                                return Reply(rows or None, headers={"X-Total-Count": str(len(rows))})
                     review_path = root + f'/pulls/{issue["number"]}/reviews'
                     if call.path == review_path:
                         rows = issue.get("reviews", [])
