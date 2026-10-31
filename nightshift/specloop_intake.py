@@ -1529,8 +1529,10 @@ def _membership_status(repo: str, login: str, *, runner=None,
 
 def _label_actor_association(repo: str, event: dict, *, runner=None,
                              forge: Forge | None = None) -> str | None:
-    """Resolve only the label actor using current positive membership evidence."""
+    """Resolve only the label actor under the selected forge's trust policy."""
     actor = event.get("actor")
+    if isinstance(forge, GiteaForge):
+        return "OWNER" if forge._association(actor) == "OWNER" else None
     login = actor.get("login") if isinstance(actor, dict) else None
     if not _valid_actor_login(login):
         return None
@@ -1600,10 +1602,21 @@ def _comment_label_rejection(repo: str, number: int, label: str, event: dict, *,
     actor = event.get("actor")
     login = actor.get("login") if isinstance(actor, dict) else None
     identity = f"`{login}`" if _valid_actor_login(login) else "an unavailable actor identity"
+    permission = (
+        "Only label actors with an OWNER, MEMBER, or COLLABORATOR relationship to this "
+        "repository may trigger this work."
+    )
+    if isinstance(forge, GiteaForge):
+        identity = (f"`{login}`" if isinstance(login, str)
+                    and re.fullmatch(r"[A-Za-z0-9_.-]+", login)
+                    else "an unavailable actor identity")
+        permission = (
+            "Only label actors in the configured Gitea trusted_logins allowlist may trigger "
+            "this work; the bot is always excluded."
+        )
     body = (
         f"{queue.SELF_COMMENT_PREFIX} Ignoring the `{label}` label applied by {identity}. "
-        "Only label actors with an OWNER, MEMBER, or COLLABORATOR relationship to this "
-        "repository may trigger this work.\n\n"
+        f"{permission}\n\n"
         f"To retry, a trusted actor must remove and reapply `{label}`. "
         "If both intake labels are present, remove the unauthorized alias or have a trusted "
         "actor remove and reapply it; both remaining labels must be authorized.\n\n"
