@@ -54,5 +54,5 @@ prerequisites SHALL remain valid.
 
 #### Scenario: Limits and live checks are explicit
 - **WHEN** an operator reads README, KNOWN-LIMITATIONS and the engine guide
-- **THEN** they can distinguish Gitea configuration and negative controls from disabled daemon execution, including the core owner shortcut bypassing allowlists, unsupported membership authorization, lost-trigger label transitions and core marker ownership gaps
-- **THEN** docs identify GitHub-only command boundaries, unconditional Gitea dispatch holds and additional foreign-journal diagnostics, supervisor config/credential provisioning, protection and credential evidence limits, and the pending real-instance preflight check
+- **THEN** they can distinguish configuration and negative controls from per-item authorization; eligible Gitea dispatch uses allowlist-only actors, bot-owned canonical markers and add-first verified labels, while membership authorization remains unsupported
+- **THEN** docs identify GitHub-only command boundaries, Gitea foreign-journal holds and normal eligibility gates, supervisor config/credential provisioning, protection and credential evidence limits, and the pending real-instance preflight/front-door checks, including daemon bot-token sourcing, absence of all declared landing variables and matching supervisor forge configuration

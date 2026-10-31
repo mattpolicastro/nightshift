@@ -313,14 +313,15 @@ label handling SHALL remain unchanged.
 
 Receipts without `delivery_attempt` SHALL retain their original unqualified or
 round-qualified revision markers during recovery. Matching SHALL use the
-complete literal marker including its closing delimiter, never a round prefix
-or a fallback alias. Attempt-qualified delivery SHALL leave earlier markers
+complete literal marker including its closing delimiter, as the comment's
+canonical final line, never a round prefix, a fallback alias or a marker
+elsewhere in the body. Attempt-qualified delivery SHALL leave earlier markers
 and comments intact. Unrelated receipt fields and other delivery namespaces
 SHALL retain their existing behavior.
 
 #### Scenario: Old round markers still recognised
 - **WHEN** a pending legacy result with an unqualified, event-derived or UUID-round marker is recovered after restart without attempt metadata
-- **THEN** the existing comment is reconciled using the exact old marker without a second create or retroactive attempt field
+- **THEN** the existing comment whose final line is that exact old marker is reconciled without a second create or retroactive attempt field
 - **THEN** the saved result, consumption history and unknown receipt fields remain available under existing recovery rules
 
 #### Scenario: Initial markers and build replay remain compatible

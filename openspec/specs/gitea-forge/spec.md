@@ -44,6 +44,11 @@ write reconciliation. Diagnostics SHALL exclude credentials and remote bodies.
 - **THEN** the exact same exception object escapes, no later request occurs, and no empty fallback or successful reconciliation result is returned
 - **THEN** request-local guard-origin tracking cannot misclassify a later transport failure as a prior guard failure
 
+#### Scenario: Optional completion guard preserves identity
+- **WHEN** daemon-injected after_request raises after a successful transport request, including after an accepted final write and including a GiteaHTTPError exception object
+- **THEN** that same object escapes outside transport reconciliation, no further request or successful receipt acknowledgement occurs, and accepted remote effects remain available for recovery
+- **THEN** omitting after_request preserves every existing pre-request guard count, exception identity, GET retry and standalone adapter assertion
+
 ### Requirement: Complete endpoint pagination
 
 The backend SHALL use independent page/limit loops for paginated list endpoints,
@@ -94,7 +99,13 @@ without any label filter query parameter or automatic label creation.
 
 Issue and PR label changes SHALL use resolved IDs, preserve unrelated labels,
 reject overlapping add/remove requests and read labels back after every
-successful write. A silently ignored mutation or failed read-back SHALL raise
+successful write. All requested additions SHALL be verified present before any
+requested removal, retaining sorted unique ordering within each group.
+For a transition whose source was present, interrupted writes SHALL leave at
+least source or destination present, absent concurrent external removal.
+An accepted needs-human addition with a lost response SHALL remain a human hold,
+even with its source trigger retained; existing early skips and pending-receipt
+logic SHALL NOT be bypassed for automatic recovery. A silently ignored mutation or failed read-back SHALL raise
 and prevent later writes. The adapter SHALL NOT replay a failed write.
 
 #### Scenario: Write is read back
@@ -105,6 +116,16 @@ and prevent later writes. The adapter SHALL NOT replay a failed write.
 #### Scenario: Silent write failure
 - **WHEN** Gitea acknowledges but ignores a label change, or verification cannot complete
 - **THEN** the operation raises rather than reporting success and dispatches no remaining label writes
+
+#### Scenario: Interrupted transition retains a label
+- **WHEN** an issue or PR transition from a present source to a destination loses a write response or fails read-back before or after any addition or removal
+- **THEN** no removal occurs before every addition is confirmed, no failed write is replayed in that call, and labels contain the source, destination or both, never neither absent concurrent external edits
+- **THEN** later eligible retries read actual state, skip satisfied changes and preserve unrelated labels
+
+#### Scenario: Needs human remains a safe hold
+- **WHEN** adding needs-human is accepted but its response or verification is lost while the source trigger remains
+- **THEN** later polls and restart retain the existing needs-human hold without automatic refusal delivery, receipt bypass or rerunning completed work
+- **THEN** after human inspection and resolution, removing needs-human permits the retained authorized trigger to re-enter ordinary eligibility and receipt handling; a fresh round still follows existing input or trusted remove-and-reapply rules
 
 ### Requirement: Label timeline evidence
 
@@ -227,9 +248,15 @@ not interpreted as a root commit. The adapter SHALL NOT decide provenance.
 
 Comment creation SHALL recognize markers with the deterministic final-line
 rule in the design, refuse ambiguous marker structure and search complete
-comment pages for bot-owned matches. Marker upserts SHALL edit only bot-authored
+comment listings for bot-owned matches using exact canonical final-marker selection. Marker upserts SHALL edit only bot-authored
 comments. Direct updates SHALL verify bot ownership before PATCH. Human copies
 SHALL neither authorize edits nor count as successful create reconciliation.
+Bot ownership SHALL be tested before marker syntax: malformed human marker
+strings SHALL be ignored, while malformed bot marker evidence SHALL refuse.
+A separate bot_comment_pages view SHALL supply daemon marker consumers without
+filtering factual comment_pages, drafting input or human feedback. Duplicate
+canonical bot markers SHALL refuse. Canonical selection SHALL use the shared
+final-line predicate without relaxing existing outgoing marker validation.
 
 #### Scenario: Deterministic marker matching
 - **WHEN** comment bodies contain valid final-line markers, misplaced or multiple marker tokens, indentation, CRLF, fences or HTML-like content
@@ -240,6 +267,15 @@ SHALL neither authorize edits nor count as successful create reconciliation.
 - **WHEN** a marker lookup sees human copies, one bot match or multiple bot matches, or a direct update names a human comment
 - **THEN** human comments remain unchanged, one bot match may be updated, multiple bot matches refuse and a direct human update dispatches no PATCH
 - **THEN** comment_pages retains human records for factual reads and every edit verifies current bot authorship
+
+#### Scenario: Human copies cannot satisfy daemon lookup
+- **WHEN** rejection or delivery lookup encounters human copies, including malformed marker strings, and zero or one valid bot-owned canonical match
+- **THEN** it ignores the human marker strings, creates when no bot match exists, and only considers the bot match for suppression or upsert
+- **THEN** human comments remain byte-for-byte unchanged and factual comment_pages and drafting retain their existing human-record behavior
+
+#### Scenario: Ambiguous bot evidence refuses
+- **WHEN** daemon marker lookup or adapter upsert encounters malformed bot marker structure or duplicate canonical bot markers
+- **THEN** it refuses without POST or PATCH; a fresh direct-update ownership check also refuses if authorship no longer matches bot_login
 
 ### Requirement: Ambiguous comment reconciliation
 
@@ -278,8 +314,19 @@ Existing tests and assertions SHALL remain intact except the exact obsolete
 shape fixtures inventoried in this change's design, which SHALL be replaced
 under Timeline wire pages and Combined status wire pages. Previously established
 #165 body-action and complete-comment corrections SHALL remain intact. All
-GitHub assertions and `tests/contract/` SHALL remain unchanged. These narrowly
+GitHub assertions and `tests/contract/` SHALL remain unchanged except the single
+GitHub inline-marker fixture migration below. These narrowly
 enumerated fixture corrections SHALL NOT weaken refusal or landing assertions.
+
+The following additional assertion migrations SHALL be permitted, and no others:
+- `test_gitea_label_write_is_read_back` SHALL expect verified POST additions before DELETE removals; `test_label_failure_stops_remaining_writes` SHALL inject removal faults after verified additions and retain its no-later-write and error-classification checks (Verified label mutations).
+- Human (`Alice`) cases of `test_malformed_existing_marker_is_not_absence` SHALL expect malformed human marker strings to be ignored rather than blocking a bot create; bot cases SHALL still refuse (Bot owned marked comments).
+- `test_gitea_daemon_stages_are_disabled` and its blanket `held`/`check_hold` expectations SHALL be replaced by eligible dispatch coverage; only nested-only and post-removal blanket-hold expectations in `test_gitea_repo_with_engine_switch_journal_is_held` SHALL change. Direct-journal and unreadable-location holds and every mixed GitHub assertion SHALL remain (Eligible Gitea dispatch; Foreign recovery journal hold).
+- The sole GitHub exception SHALL be `test_comment_fake_preserves_literal_marker_and_raw_body`: its inline-only `"prefix " + marker + " suffix"` case SHALL expect create_comment, and an added canonical-final-line case SHALL expect update_comment while preserving raw body bytes (Core policy preservation; Canonical daemon markers).
+
+All other GitHub and unrelated assertions SHALL remain intact. Existing #165
+and #170 exceptions above SHALL remain in force; tests/contract/ SHALL remain
+unchanged.
 
 #### Scenario: Fake exercises transport behavior
 - **WHEN** adapter tests and shared contracts run with FakeGitea
