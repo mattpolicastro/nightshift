@@ -126,8 +126,7 @@ class GiteaForge:
         return self._record(self._detail(self._repo_path(repo, "issues", self._number(number))))
 
     def comment_pages(self, repo: str, number: int) -> list[list[dict]]:
-        pages = self._pages(self._repo_path(repo, "issues", self._number(number), "comments"))
-        return [[self._record(row) for row in page] for page in pages]
+        return self._pages(self._repo_path(repo, "issues", self._number(number), "comments"))
 
     @staticmethod
     def _comment_marker(body: str) -> str | None:
@@ -223,12 +222,14 @@ class GiteaForge:
                 if row.get("type") != "label":
                     continue
                 label = row.get("label")
+                # Gitea encodes label actions in body; removed is not action evidence.
+                body = row.get("body")
                 if (not isinstance(label, dict) or not isinstance(label.get("name"), str)
                         or not label["name"].strip() or self._login(row.get("user")) is None
-                        or type(row.get("removed")) is not bool
+                        or not isinstance(body, str) or body not in ("1", "")
                         or not isinstance(row.get("created_at"), str) or not row["created_at"]):
                     raise ForgeError("Invalid Gitea label event", transient=False)
-                events.append({"id": row["id"], "event": "unlabeled" if row["removed"] else "labeled",
+                events.append({"id": row["id"], "event": "labeled" if body == "1" else "unlabeled",
                                "actor": {"login": self._login(row["user"])},
                                "author_association": self._association(row["user"]),
                                "label": label, "created_at": row["created_at"]})
@@ -292,13 +293,51 @@ class GiteaForge:
                 items.append(FeedbackItem(f'{source}:{row["id"]}', block))
         return items
 
+    def _read_comments(self, path: str, *, inline: bool = False) -> list[list[dict]]:
+        """Validate a complete comment response; never follow continuation hints."""
+        _, headers, rows = self._request("GET", path)
+        if not isinstance(rows, list):
+            raise ForgeError("Invalid Gitea comment listing", transient=False)
+        count = headers.get("X-Total-Count")
+        if count is not None:
+            if not re.fullmatch(r"[0-9]+", count):
+                raise ForgeError("Invalid Gitea comment total", transient=False)
+            try:
+                total = int(count)
+            except ValueError:
+                raise ForgeError("Invalid Gitea comment total", transient=False) from None
+            if total != len(rows):
+                raise ForgeError("Incomplete Gitea comment listing", transient=False)
+        if headers.get("X-Next-Page") not in (None, "", "0") or any(re.search(
+                r';\s*rel\s*=\s*(?:"[^\"]*\bnext\b[^\"]*"|next\b)',
+                link, re.IGNORECASE) is not None for link in headers.get_all("Link", [])):
+            raise ForgeError("Incomplete Gitea comment listing", transient=False)
+        records = []
+        seen = set()
+        for row in rows:
+            if (not isinstance(row, dict) or type(row.get("id")) is not int
+                    or row["id"] <= 0 or row["id"] in seen):
+                raise ForgeError("Invalid or duplicate Gitea comment ID", transient=False)
+            seen.add(row["id"])
+            record = self._record(row)
+            # Inline aggregation compares raw identities before user projection.
+            records.append(row if inline else record)
+        return [records] if records else []
+
     def _pages(self, path: str, query=None, *, strict: bool = True,
                unpack: Callable[[object], list] | None = None) -> list[list[dict]]:
-        """Read through an empty page or refuse the entire listing.
+        """Read complete comments or paginate through an empty terminal page.
 
         Keep queries endpoint-local and treat response links only as evidence,
-        never as request destinations. Identical IDs are deduplicated.
+        never as request destinations. Paginated listings deduplicate identical IDs.
         """
+        comments = re.fullmatch(
+            r"/api/v1/repos/[^/?#]+/[^/?#]+/(?:issues/[1-9][0-9]*|"
+            r"(?P<inline>pulls/[1-9][0-9]*/reviews/[1-9][0-9]*))/comments", path)
+        if comments:
+            return self._read_comments(path, inline=comments.group("inline") is not None)
+        timeline = re.fullmatch(
+            r"/api/v1/repos/[^/?#]+/[^/?#]+/issues/[1-9][0-9]*/timeline", path) is not None
         fixed_query = dict(query or {})
         pages: list[list[dict]] = []
         seen: dict[int, dict] = {}
@@ -316,6 +355,8 @@ class GiteaForge:
             _, headers, rows = result
             if unpack is not None:
                 rows = unpack(rows)
+            if timeline and rows is None:
+                rows = []
             if not isinstance(rows, list):
                 raise ForgeError("Invalid Gitea page", transient=False)
             count = headers.get("X-Total-Count")
@@ -326,9 +367,11 @@ class GiteaForge:
                     current_total = int(count)
                 except ValueError:
                     raise ForgeError("Invalid Gitea pagination metadata", transient=False) from None
-                if total is not None and current_total != total:
-                    raise ForgeError("Inconsistent Gitea total", transient=False)
-                total = current_total
+                # Timeline counts describe individual pages, not the whole listing.
+                if not timeline:
+                    if total is not None and current_total != total:
+                        raise ForgeError("Inconsistent Gitea total", transient=False)
+                    total = current_total
             next_page = headers.get("X-Next-Page")
             if next_page is not None and next_page not in ("", "0", str(page + 1)):
                 raise ForgeError("Invalid Gitea next page", transient=False)
@@ -384,32 +427,42 @@ class GiteaForge:
 
         def unpack(payload: object) -> list:
             nonlocal snapshot
-            if not isinstance(payload, dict):
+            if not isinstance(payload, dict) or not {"sha", "state", "total_count", "statuses"} <= payload.keys():
                 raise ForgeError("Invalid Gitea combined status", transient=False)
             state, count, rows = (payload.get(key) for key in ("state", "total_count", "statuses"))
             if (self._sha(payload.get("sha")).lower() != sha.lower()
                     or not isinstance(state, str) or state not in buckets
-                    or type(count) is not int or count < 0 or not isinstance(rows, list)):
+                    or type(count) is not int or count < 0):
+                raise ForgeError("Invalid Gitea combined status", transient=False)
+            if rows is None:
+                if count != 0:
+                    raise ForgeError("Invalid Gitea combined status", transient=False)
+                return []  # Terminal envelopes do not describe the nonempty snapshot.
+            if not isinstance(rows, list):
                 raise ForgeError("Invalid Gitea combined status", transient=False)
             current = (state, count)
             if snapshot is not None and snapshot != current:
                 raise ForgeError("Inconsistent Gitea combined status", transient=False)
-            snapshot = current
+            if not rows and snapshot is None and count:
+                raise ForgeError("Incomplete Gitea combined status", transient=False)
             for row in rows:
-                if (not isinstance(row, dict) or not isinstance(row.get("state"), str)
-                        or row["state"] not in buckets):
+                if (not isinstance(row, dict) or not isinstance(row.get("status"), str)
+                        or row["status"] not in buckets):
                     raise ForgeError("Invalid Gitea status record", transient=False)
+            if rows:
+                snapshot = current
             return rows
 
         pages = self._pages(self._repo_path(repo, "commits", sha, "status"), unpack=unpack)
-        assert snapshot is not None  # Even the empty terminal page has an envelope.
+        if snapshot is None:
+            return ResponseText("[]")
         state, count = snapshot
         if sum(len(page) for page in pages) != count:
             raise ForgeError("Incomplete Gitea combined status", transient=False)
         if state == "success" and count:
             # Skipped checks are neutral, not successful evidence. Inspect the
             # complete set so a later pending/failing row cannot become green.
-            states = {row["state"] for page in pages for row in page}
+            states = {row["status"] for page in pages for row in page}
             if "success" not in states or states - {"success", "skipped"}:
                 raise ForgeError("Contradictory Gitea combined status", transient=False)
         checks = ([{"name": "Gitea combined status", "bucket": buckets[state], "state": state}]

@@ -43,7 +43,8 @@ class FakeGitea:
         """Install factual read/write routes; deliberately ignore label/head filters.
 
         Issues may carry comments and timeline arrays; PRs may additionally
-        carry reviews with nested comments. Each list paginates independently.
+        carry reviews with nested comments. Both comment endpoints return complete lists;
+        other lists paginate independently.
         """
         self.repositories[repo] = dict(labels=labels, issues=list(issues),
                                        pulls=list(pulls), page_size=page_size,
@@ -75,8 +76,15 @@ class FakeGitea:
                     if call.path == root + "/commits/" + sha + "/status":
                         assert page is not None
                         size = min(state["page_size"], int(call.query["limit"][0]))
-                        return Reply({**combined, "statuses":
-                                      combined["statuses"][(page - 1) * size:page * size]})
+                        rows = [dict(row) if isinstance(row, dict) else row
+                                for row in combined["statuses"][(page - 1) * size:page * size]]
+                        for row in rows:
+                            if isinstance(row, dict):
+                                if "status" not in row and isinstance(row.get("state"), str):
+                                    row["status"] = row["state"]
+                                row.pop("state", None)
+                        return Reply({**combined, "statuses": rows} if rows else
+                                     {**combined, "state": "pending", "total_count": 0, "statuses": None})
             if call.method == "POST" and call.path == root + "/pulls":
                 assert set(call.body) == {"title", "body", "head", "base"}
                 number = max((row["number"] for row in [*state["issues"], *state["pulls"]]), default=0) + 1
@@ -129,12 +137,26 @@ class FakeGitea:
                     for endpoint in ("comments", "timeline"):
                         if call.path == detail_path + "/" + endpoint:
                             rows = issue.get(endpoint, [])
+                            if endpoint == "comments":
+                                return Reply(rows)
+                            if endpoint == "timeline":
+                                # Convert legacy fixtures only at the state-backed wire boundary.
+                                rows = [dict(row) if isinstance(row, dict) else row for row in rows]
+                                for row in rows:
+                                    if isinstance(row, dict) and row.get("type") == "label":
+                                        if "body" not in row and type(row.get("removed")) is bool:
+                                            row["body"] = "" if row["removed"] else "1"
+                                        row.pop("removed", None)
+                                assert page is not None
+                                size = min(state["page_size"], int(call.query["limit"][0]))
+                                rows = rows[(page - 1) * size:page * size]
+                                return Reply(rows or None, headers={"X-Total-Count": str(len(rows))})
                     review_path = root + f'/pulls/{issue["number"]}/reviews'
                     if call.path == review_path:
                         rows = issue.get("reviews", [])
                     for review in issue.get("reviews", []):
                         if call.path == review_path + f'/{review["id"]}/comments':
-                            rows = review.get("comments", [])
+                            return Reply(review.get("comments", []))
                 path = root + f'/issues/{issue["number"]}/labels'
                 if call.method == "GET" and call.path == path:
                     return Reply(issue["labels"])

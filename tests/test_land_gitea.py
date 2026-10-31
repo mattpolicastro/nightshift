@@ -558,9 +558,7 @@ def comment_path(id):
 
 
 def pages(opener, *rows):
-    # Require the terminal empty page even for short pages and declared totals.
-    for number, page in enumerate([*rows, []], 1):
-        opener.expect("GET", f"{COMMENTS_PATH}?page={number}&limit=50", page)
+    opener.expect("GET", COMMENTS_PATH, [row for group in rows for row in group])
 
 
 def attestation_body(sources, *, actor="operator", head=HEAD):
@@ -755,8 +753,7 @@ def test_lost_post_reconciles_complete_history_once(config_path, scripted_runner
     opener.expect("POST", COMMENTS_PATH, response, body={"body": body})
     found = comment(body, id=20, login="owner" if outcome == "untrusted" else "operator")
     if outcome == "unreadable":
-        opener.expect("GET", COMMENTS_PATH + "?page=1&limit=50", [comment("unrelated")])
-        opener.expect("GET", COMMENTS_PATH + "?page=2&limit=50", b"unreadable", status=403)
+        opener.expect("GET", COMMENTS_PATH, b"unreadable", status=403)
     else:
         matches = [] if outcome == "absent" else [found]
         if outcome == "duplicates":
@@ -795,6 +792,7 @@ def test_unresolved_create_can_be_retried_next_invocation(config_path, scripted_
 
 @pytest.mark.scenario("gitea-landing/allowlisted-landing-evidence/untrusted-evidence-blocks-attestation")
 @pytest.mark.scenario("gitea-landing/landing-lifecycle-parity/changed-inputs-refuse")
+@pytest.mark.scenario("gitea-landing/existing-human-check-semantics/complete-comment-evidence-remains-mandatory")
 @pytest.mark.parametrize("failure", ["later-page", "body", "null-body", "missing-body", "id", "conflict", "repeated",
                                     "total", "next", "date", "naive-date"])
 def test_unreadable_comment_evidence_refuses_before_mutations(config_path, scripted_runner, opener, capsys, failure):
@@ -813,17 +811,13 @@ def test_unreadable_comment_evidence_refuses_before_mutations(config_path, scrip
         first["created_at"] = "not-a-date"
     elif failure == "naive-date":
         first["created_at"] = "2026-10-01T00:00:00"
-    headers = {"X-Next-Page": "5"} if failure == "next" else None
-    opener.expect("GET", COMMENTS_PATH + "?page=1&limit=50", [first], headers=headers)
-    if failure == "later-page":
-        opener.expect("GET", COMMENTS_PATH + "?page=2&limit=50", b"denied", status=403)
-    elif failure in {"repeated", "conflict"}:
-        second = dict(first, body="conflicting") if failure == "conflict" else first
-        opener.expect("GET", COMMENTS_PATH + "?page=2&limit=50", [second])
-    elif failure == "total":
-        opener.expect("GET", COMMENTS_PATH + "?page=2&limit=50", [], headers={"X-Total-Count": "2"})
-    elif failure not in {"id", "next"}:
-        opener.expect("GET", COMMENTS_PATH + "?page=2&limit=50", [])
+    headers = {"X-Next-Page": "5"} if failure == "next" else (
+        {"X-Total-Count": "2"} if failure == "total" else None)
+    rows = [first]
+    if failure in {"repeated", "conflict"}:
+        rows.append(dict(first, body="conflicting") if failure == "conflict" else first)
+    opener.expect("GET", COMMENTS_PATH, b"denied" if failure == "later-page" else rows,
+                  status=403 if failure == "later-page" else 200, headers=headers)
     assert invoke(config_path, scripted_runner, opener, URL, "--checks-done") == 1
     assert "publication comment discovery" in capsys.readouterr().err
     assert all(req.get_method() == "GET" for req, _ in opener.calls)
@@ -1090,7 +1084,7 @@ def test_comment_reads_cannot_outlive_current_budget(config_path, scripted_runne
             clock.sleep(2)
             return [comment()]
         response = expired_page
-    opener.expect("GET", COMMENTS_PATH + "?page=1&limit=50", response, timeout=2)
+    opener.expect("GET", COMMENTS_PATH, response, timeout=2)
     with pytest.raises(land.Refusal, match="shared CI deadline expired"):
         land.read_comments(identity, bounded)
     assert len(opener.calls) == 1
@@ -1340,18 +1334,14 @@ def test_gitea_pages_and_retries_bind_replaced_operations(config_path, scripted_
     clock = FakeClock()
     bounded = replace(ops, monotonic=clock.monotonic, deadline=clock.monotonic() + 3)
     monkeypatch.setattr(http, "sleep", lambda _: clock.sleep(1))
-    opener.expect("GET", COMMENTS_PATH + "?page=1&limit=50", URLError("lost"), timeout=3)
-    def first_page():
-        clock.sleep(1)
+    opener.expect("GET", COMMENTS_PATH, URLError("lost"), timeout=3)
+    def complete_response():
+        clock.sleep(2)
         return [comment()]
-    opener.expect("GET", COMMENTS_PATH + "?page=1&limit=50", first_page, timeout=2)
-    def last_page():
-        clock.sleep(1)
-        return []
-    opener.expect("GET", COMMENTS_PATH + "?page=2&limit=50", last_page, timeout=1)
+    opener.expect("GET", COMMENTS_PATH, complete_response, timeout=2)
     with pytest.raises(land.Refusal, match="shared CI deadline expired"):
         land.read_comments(identity, bounded)
-    assert [timeout for _, timeout in opener.calls] == [30, 3, 2, 1]
+    assert [timeout for _, timeout in opener.calls] == [30, 3, 2]
 
 
 @pytest.mark.scenario("gitea-landing/initial-gitea-base-ancestry/ancestry-determines-update-need")
@@ -1429,7 +1419,7 @@ def status_path(head=HEAD, page=1):
 
 
 def combined(state="success", *, head=HEAD, rows=None, count=None):
-    rows = [{"id": 1, "state": state}] if rows is None else rows
+    rows = [{"id": 1, "status": state}] if rows is None else rows
     return {"sha": head, "state": state, "total_count": len(rows) if count is None else count,
             "statuses": rows}
 
@@ -1439,7 +1429,7 @@ def expect_status(opener, state="success", *, head=HEAD, empty=False, timeout=30
     if count:
         opener.expect("GET", status_path(head), combined(state, head=head), timeout=timeout)
     opener.expect("GET", status_path(head, 2 if count else 1),
-                  combined(state, head=head, rows=[], count=count), timeout=timeout)
+                  {"sha": head, "state": "pending", "total_count": 0, "statuses": None}, timeout=timeout)
 
 
 def expect_ci(opener, remote, state="success", *, empty=False, timeout=30):
@@ -1511,7 +1501,7 @@ def test_gitea_ci_waiting_expires_without_new_dispatch(config_path, scripted_run
     {**combined(), "state": "unknown"}, {**combined(), "state": True},
     {**combined(), "total_count": True}, {**combined(), "total_count": -1},
     {**combined(), "statuses": None}, combined(rows=[None]),
-    combined(rows=[{"id": 1, "state": "unknown"}]), combined(rows=[{"state": "success"}]),
+    combined(rows=[{"id": 1, "status": "unknown"}]), combined(rows=[{"status": "success"}]),
 ])
 def test_gitea_malformed_status_refuses(config_path, scripted_runner, opener, evidence):
     identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
@@ -1541,13 +1531,13 @@ def test_gitea_inconsistent_status_pages_refuse(config_path, scripted_runner, op
     elif problem == "incomplete":
         first["total_count"] = second["total_count"] = 2
     elif problem in {"repeat", "conflict"}:
-        second["statuses"] = [{"id": 1, "state": "success" if problem == "repeat" else "failure"}]
+        second["statuses"] = [{"id": 1, "status": "success" if problem == "repeat" else "failure"}]
     elif problem == "header-count":
         headers = {"X-Total-Count": "2"}
     elif problem == "terminal-next":
         headers = {"X-Next-Page": "3"}
     elif problem.startswith("success-with-"):
-        first["statuses"][0]["state"] = problem.removeprefix("success-with-").removeprefix("only-")
+        first["statuses"][0]["status"] = problem.removeprefix("success-with-").removeprefix("only-")
     opener.expect("GET", PR_PATH, PR)
     opener.expect("GET", status_path(), first)
     opener.expect("GET", status_path(page=2), second, headers=headers)
@@ -1561,8 +1551,8 @@ def test_gitea_success_requires_complete_pages(config_path, scripted_runner, ope
     identity, ops, _ = bounded_operations(config_path, scripted_runner, opener)
     opener.expect("GET", PR_PATH, PR)
     opener.expect("GET", status_path(), combined(count=2))
-    opener.expect("GET", status_path(page=2), combined(rows=[{"id": 2, "state": "skipped"}], count=2))
-    opener.expect("GET", status_path(page=3), combined(rows=[], count=2))
+    opener.expect("GET", status_path(page=2), combined(rows=[{"id": 2, "status": "skipped"}], count=2))
+    opener.expect("GET", status_path(page=3), {"sha": HEAD, "state": "pending", "total_count": 0, "statuses": None})
     opener.expect("GET", PR_PATH, PR)
     land.wait_for_ci(identity, HEAD, ops)
 
@@ -1591,7 +1581,7 @@ def test_gitea_ci_requests_share_deadline(config_path, scripted_runner, opener, 
     path, facts = status_path(), combined()
     if expiry in {"page", "after-bracket"}:
         opener.expect("GET", path, facts, timeout=2)
-        path, facts = status_path(page=2), combined(rows=[], count=1)
+        path, facts = status_path(page=2), {"sha": HEAD, "state": "pending", "total_count": 0, "statuses": None}
     if expiry == "after-bracket":
         opener.expect("GET", path, facts, timeout=2)
         path, facts = PR_PATH, PR
@@ -1626,7 +1616,7 @@ def test_gitea_ci_retry_and_pages_consume_original_budget(config_path, scripted_
         clock.sleep(1)
         return combined()
     opener.expect("GET", status_path(), first_page, timeout=4)
-    opener.expect("GET", status_path(page=2), combined(rows=[], count=1), timeout=3)
+    opener.expect("GET", status_path(page=2), {"sha": HEAD, "state": "pending", "total_count": 0, "statuses": None}, timeout=3)
     opener.expect("GET", PR_PATH, PR, timeout=3)
     land.wait_for_ci(identity, HEAD, ops)
     assert ops.remaining() == 3
