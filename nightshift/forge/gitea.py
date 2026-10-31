@@ -336,6 +336,8 @@ class GiteaForge:
             r"(?P<inline>pulls/[1-9][0-9]*/reviews/[1-9][0-9]*))/comments", path)
         if comments:
             return self._read_comments(path, inline=comments.group("inline") is not None)
+        timeline = re.fullmatch(
+            r"/api/v1/repos/[^/?#]+/[^/?#]+/issues/[1-9][0-9]*/timeline", path) is not None
         fixed_query = dict(query or {})
         pages: list[list[dict]] = []
         seen: dict[int, dict] = {}
@@ -353,6 +355,8 @@ class GiteaForge:
             _, headers, rows = result
             if unpack is not None:
                 rows = unpack(rows)
+            if timeline and rows is None:
+                rows = []
             if not isinstance(rows, list):
                 raise ForgeError("Invalid Gitea page", transient=False)
             count = headers.get("X-Total-Count")
@@ -363,9 +367,11 @@ class GiteaForge:
                     current_total = int(count)
                 except ValueError:
                     raise ForgeError("Invalid Gitea pagination metadata", transient=False) from None
-                if total is not None and current_total != total:
-                    raise ForgeError("Inconsistent Gitea total", transient=False)
-                total = current_total
+                # Timeline counts describe individual pages, not the whole listing.
+                if not timeline:
+                    if total is not None and current_total != total:
+                        raise ForgeError("Inconsistent Gitea total", transient=False)
+                    total = current_total
             next_page = headers.get("X-Next-Page")
             if next_page is not None and next_page not in ("", "0", str(page + 1)):
                 raise ForgeError("Invalid Gitea next page", transient=False)
@@ -421,32 +427,42 @@ class GiteaForge:
 
         def unpack(payload: object) -> list:
             nonlocal snapshot
-            if not isinstance(payload, dict):
+            if not isinstance(payload, dict) or not {"sha", "state", "total_count", "statuses"} <= payload.keys():
                 raise ForgeError("Invalid Gitea combined status", transient=False)
             state, count, rows = (payload.get(key) for key in ("state", "total_count", "statuses"))
             if (self._sha(payload.get("sha")).lower() != sha.lower()
                     or not isinstance(state, str) or state not in buckets
-                    or type(count) is not int or count < 0 or not isinstance(rows, list)):
+                    or type(count) is not int or count < 0):
+                raise ForgeError("Invalid Gitea combined status", transient=False)
+            if rows is None:
+                if count != 0:
+                    raise ForgeError("Invalid Gitea combined status", transient=False)
+                return []  # Terminal envelopes do not describe the nonempty snapshot.
+            if not isinstance(rows, list):
                 raise ForgeError("Invalid Gitea combined status", transient=False)
             current = (state, count)
             if snapshot is not None and snapshot != current:
                 raise ForgeError("Inconsistent Gitea combined status", transient=False)
-            snapshot = current
+            if not rows and snapshot is None and count:
+                raise ForgeError("Incomplete Gitea combined status", transient=False)
             for row in rows:
-                if (not isinstance(row, dict) or not isinstance(row.get("state"), str)
-                        or row["state"] not in buckets):
+                if (not isinstance(row, dict) or not isinstance(row.get("status"), str)
+                        or row["status"] not in buckets):
                     raise ForgeError("Invalid Gitea status record", transient=False)
+            if rows:
+                snapshot = current
             return rows
 
         pages = self._pages(self._repo_path(repo, "commits", sha, "status"), unpack=unpack)
-        assert snapshot is not None  # Even the empty terminal page has an envelope.
+        if snapshot is None:
+            return ResponseText("[]")
         state, count = snapshot
         if sum(len(page) for page in pages) != count:
             raise ForgeError("Incomplete Gitea combined status", transient=False)
         if state == "success" and count:
             # Skipped checks are neutral, not successful evidence. Inspect the
             # complete set so a later pending/failing row cannot become green.
-            states = {row["state"] for page in pages for row in page}
+            states = {row["status"] for page in pages for row in page}
             if "success" not in states or states - {"success", "skipped"}:
                 raise ForgeError("Contradictory Gitea combined status", transient=False)
         checks = ([{"name": "Gitea combined status", "bucket": buckets[state], "state": state}]

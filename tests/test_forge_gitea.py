@@ -2,6 +2,7 @@
 
 import json
 import inspect
+from email.message import Message
 import os
 from pathlib import Path
 import socket
@@ -306,6 +307,7 @@ def label_event(identity=1, **extra):
 
 
 @pytest.mark.scenario("gitea-forge/label-timeline-evidence/label-actions-and-actors")
+@pytest.mark.scenario("gitea-forge/timeline-wire-pages/timeline-safeguards-remain")
 def test_timeline_actions_sorted_and_projected(fake):
     rows = [label_event(4, user={"login": "ROBOT"}),
             {"id": 2, "type": "comment", "body": "Alice applied ready"},
@@ -327,6 +329,7 @@ def test_timeline_actions_sorted_and_projected(fake):
 
 
 @pytest.mark.scenario("gitea-forge/label-timeline-evidence/unknown-label-evidence")
+@pytest.mark.scenario("gitea-forge/timeline-wire-pages/timeline-safeguards-remain")
 @pytest.mark.parametrize("patch", [{"id": None}, {"id": True}, {"id": 0}, {"id": "2"},
     {"user": None}, {"user": {}}, {"user": {"login": ""}}, {"user": {"login": True}},
     {"label": None}, {"label": {}}, {"label": {"name": ""}}, {"label": {"name": 1}},
@@ -444,9 +447,138 @@ def test_gitea_label_event_rejects_missing_evidence(fake, missing):
     assert all(call.method == "GET" and call.path == path for call in fake.calls)
 
 
+@pytest.mark.scenario("gitea-forge/timeline-wire-pages/null-terminal-timeline")
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("repo", ["owner/repo", "a&b/r#é"])
+def test_gitea_timeline_null_terminal_page(fake, empty, repo):
+    rows = [] if empty else [label_event(2, body=""), label_event(1)]
+    fake.repository(repo, labels=[], issues=[candidate(1, [], timeline=rows)], page_size=1)
+    forge = make_forge(fake)
+    path = forge._repo_path(repo, "issues", "1", "timeline")
+    # Inspect real serialized bodies and headers, including initially empty timelines.
+    for page, expected in enumerate([*([row] for row in rows), None], 1):
+        _, headers, wire = forge._request("GET", path, query={"page": page, "limit": 50})
+        assert wire == expected
+        assert headers["X-Total-Count"] == ("0" if expected is None else "1")
+    fake.calls.clear()
+    result = forge.label_event_pages(repo, 1)
+    assert result == ([] if empty else [[
+        {"id": identity, "event": action, "actor": {"login": "Alice"},
+         "author_association": "OWNER", "label": {"name": "ready"}, "created_at": STAMP}
+        for identity, action in [(1, "labeled"), (2, "unlabeled")]]])
+    assert [(c.method, c.path, c.query) for c in fake.calls] == [
+        ("GET", "/gitea" + path, {"page": [str(page)], "limit": ["50"]})
+        for page in range(1, len(rows) + 2)]
+
+
+@pytest.mark.scenario("gitea-forge/timeline-wire-pages/per-page-timeline-counts")
+@pytest.mark.scenario("gitea-forge/timeline-wire-pages/timeline-safeguards-remain")
+@pytest.mark.scenario("gitea-forge/complete-endpoint-pagination/short-intermediate-page")
+@pytest.mark.parametrize("counts", [("1", "1", "0"), ("9", "3", "7"), (None, None, None)])
+@pytest.mark.parametrize("overlap", [False, True])
+def test_gitea_timeline_per_page_total_is_not_a_listing_total(fake, counts, overlap):
+    path = "/api/v1/repos/owner/repo/issues/1/timeline"
+    rows = [[label_event(2)], ([label_event(2)] if overlap else []) + [label_event(1)], None]
+    for page, (records, count) in enumerate(zip(rows, counts), 1):
+        headers = {} if count is None else {"X-Total-Count": count}
+        if records:
+            headers.update({"X-Next-Page": str(page + 1),
+                            "Link": '<https://foreign/secret?page=90>; rel="next"'})
+        fake.route("GET", "/gitea" + path, Reply(records, headers=headers), page=page)
+    query = {"state": "all", "page": 99, "limit": 1}
+    assert make_forge(fake)._pages(path, query) == [[label_event(2)], [label_event(1)]]
+    assert query == {"state": "all", "page": 99, "limit": 1}
+    assert [(c.method, c.path, c.query) for c in fake.calls] == [
+        ("GET", "/gitea" + path, {"state": ["all"], "page": [str(page)], "limit": ["50"]})
+        for page in (1, 2, 3)]
+
+
+@pytest.mark.scenario("gitea-forge/timeline-wire-pages/null-terminal-timeline")
+@pytest.mark.scenario("gitea-forge/timeline-wire-pages/timeline-safeguards-remain")
+@pytest.mark.scenario("gitea-forge/complete-endpoint-pagination/incomplete-listing-refused")
+@pytest.mark.parametrize("second", [
+    *[Reply(rows) for rows in ({}, "bad", 1, [None], [{}], [{"id": True}],
+                              [label_event(1, body="")], [label_event(1)])],
+    *[Reply(None, headers={"X-Total-Count": count})
+      for count in ("", "-1", "1.0", " 1", "２", "9" * 5000)],
+    *[Reply(None, headers={"X-Total-Count": "0", "X-Next-Page": value})
+      for value in ("3", "1", "00")],
+    Reply(None, headers=[("X-Total-Count", "0"),
+                         ("Link", '<https://foreign/prev>; rel="prev"'),
+                         ("link", '<https://foreign/next>; rel="prev NEXT"')]),
+    Reply(None, headers={"Link": '<https://foreign/next>; rel=next'}),
+    Reply([label_event(2)], headers={"X-Next-Page": "0",
+                                    "Link": '<https://foreign/next>; rel="next"'}),
+    Reply(status=503), Reply(raw=b"not JSON"),
+])
+def test_gitea_timeline_incomplete_evidence_refuses(fake, second):
+    path = ROOT + "/issues/1/timeline"
+    fake.route("GET", path, Reply([label_event()], headers={"X-Total-Count": "1"}), page=1)
+    fake.route("GET", path, second, second, second, page=2)
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).label_event_pages("owner/repo", 1)
+    assert caught.value.transient is (second.status == 503)
+    assert [(c.method, c.path, c.query["page"]) for c in fake.calls] == [
+        ("GET", path, [str(page)]) for page in ([1, 2, 2, 2] if second.status == 503 else [1, 2])]
+
+
+@pytest.mark.scenario("gitea-forge/timeline-wire-pages/timeline-safeguards-remain")
+@pytest.mark.parametrize("end", ["", "0"])
+def test_gitea_timeline_declared_end_refuses_more_rows(fake, end):
+    path = ROOT + "/issues/1/timeline"
+    fake.route("GET", path, Reply([label_event()], headers={"X-Next-Page": end}), page=1)
+    fake.route("GET", path, Reply([label_event(2)]), page=2)
+    with pytest.raises(ForgeError, match="termination") as caught:
+        make_forge(fake).label_event_pages("owner/repo", 1)
+    assert not caught.value.transient and len(fake.calls) == 2
+
+
+@pytest.mark.scenario("gitea-forge/timeline-wire-pages/timeline-safeguards-remain")
+def test_gitea_timeline_guard_preserves_identity(fake):
+    path = ROOT + "/issues/1/timeline"
+    fake.route("GET", path, Reply([label_event()]), page=1)
+    error = http.GiteaHTTPError(503, SECRET, True)
+
+    def guard():
+        if fake.calls:
+            raise error
+
+    with pytest.raises(http.GiteaHTTPError) as caught:
+        make_forge(fake, guard=guard).label_event_pages("owner/repo", 1)
+    assert caught.value is error and len(fake.calls) == 1
+
+
+@pytest.mark.scenario("gitea-forge/timeline-wire-pages/other-endpoint-pagination-remains-strict")
+@pytest.mark.parametrize("path", [PATH, "/api/v1/repos/o/r/pulls/1/reviews",
+    "/api/v1/repos/o/r/commits/" + "a" * 40 + "/status",
+    *["/api/v1/repos/o/r/" + suffix for suffix in (
+        "issues/0/timeline", "issues/-1/timeline", "issues/01/timeline", "pulls/1/timeline",
+        "issues/1/timeline/extra", "issues/1/timeline-extra", "extra/issues/1/timeline",
+        "issues/1/timeline?q=1", "issues/1/timeline#fragment")],
+    "/api/v1/repos//r/issues/1/timeline", "/api/v1/repos/o//issues/1/timeline",
+    "/api/v1/other/o/r/issues/1/timeline"])
+@pytest.mark.parametrize("null", [False, True])
+def test_gitea_timeline_exception_is_exact(fake, monkeypatch, path, null):
+    # Isolate endpoint matching even for paths that transport itself would reject.
+    calls = []
+
+    def request(method, requested, **kwargs):
+        calls.append((method, requested, kwargs["query"]))
+        headers = Message()
+        headers["X-Total-Count"] = str(len(calls))
+        return 200, headers, None if null else [{"id": len(calls)}]
+
+    forge = make_forge(fake)
+    monkeypatch.setattr(forge, "_request", request)
+    with pytest.raises(ForgeError, match="Invalid Gitea page" if null else "Inconsistent Gitea total"):
+        forge._pages(path)
+    assert calls == [("GET", path, {"page": page, "limit": 50})
+                     for page in range(1, 2 if null else 3)]
+
+
 @pytest.mark.scenario("gitea-forge/unpaginated-comment-listings/issue-comments-read-once")
 @pytest.mark.scenario("gitea-forge/unpaginated-comment-listings/private-listing-callers-share-endpoint-rules")
-@pytest.mark.parametrize("count", [None, 0, 1, 51])
+@pytest.mark.parametrize("count", [None, 0, 1, 51, 101])
 @pytest.mark.parametrize("direct", [False, True])
 @pytest.mark.parametrize("repo", ["owner/repo", "a&b/r#é"])
 def test_gitea_issue_comments_read_in_one_request(fake, count, direct, repo):
@@ -458,6 +590,7 @@ def test_gitea_issue_comments_read_in_one_request(fake, count, direct, repo):
     path = forge._repo_path(repo, "issues", "1", "comments")
     query = {"page": 99, "limit": 1}
     result = forge._pages(path, query) if direct else forge.comment_pages(repo, 1)
+    assert [r["id"] for page in result for r in page] == [r["id"] for r in rows]
     assert len(result) == int(bool(count))
     assert [(r["id"], r["body"], r["user"], r["author_association"]) for page in result for r in page] == [
         (i + 1, "Text" if i else "", {"login": "Alice" if i % 2 else "Robot"},
@@ -473,7 +606,7 @@ def test_gitea_issue_comments_read_in_one_request(fake, count, direct, repo):
 
 @pytest.mark.scenario("gitea-forge/unpaginated-comment-listings/invalid-complete-comment-response-refuses")
 @pytest.mark.parametrize("rows", [None, {}, "bad", [None], [[]], [{}],
-    *[[{"id": value}] for value in (None, True, False, 0, -1, 1.0, "1")],
+    *[[{"id": value}] for value in (None, True, False, 0, -1, 1.0, "1", "01")],
     [{"id": 1, "body": []}], [authored(), authored()],
     [authored(), authored(body="conflicting")]])
 @pytest.mark.parametrize("direct", [False, True])
@@ -491,7 +624,7 @@ def test_gitea_issue_comments_invalid_complete_response(fake, rows, direct):
 
 @pytest.mark.scenario("gitea-forge/unpaginated-comment-listings/contradictory-comment-metadata-refuses")
 @pytest.mark.parametrize("headers", [
-    {"X-Total-Count": value} for value in ("", "-1", "1.0", " 1", "２", "0", "2", "9" * 5000)
+    {"X-Total-Count": value} for value in ("", "-1", "+1", "1.0", " 1", "２", "0", "2", "9" * 5000)
 ] + [{"X-Next-Page": value} for value in ("1", "2", "00", " ")] + [
     [("Link", '<https://foreign/first>; rel="prev"'),
      ("Link", '<https://foreign/secret>; rel="prev NEXT"')],
@@ -556,7 +689,7 @@ def test_issue_draft_repository_and_blocker_facts(fake):
 @pytest.mark.scenario("gitea-forge/unpaginated-comment-listings/private-listing-callers-share-endpoint-rules")
 @pytest.mark.scenario("gitea-forge/complete-endpoint-pagination/short-intermediate-page")
 @pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/fake-exercises-transport-behavior")
-@pytest.mark.parametrize("count", [0, 1, 51])
+@pytest.mark.parametrize("count", [0, 1, 51, 101])
 @pytest.mark.parametrize("direct", [False, True])
 @pytest.mark.parametrize("repo", ["owner/repo", "a&b/r#é"])
 def test_gitea_review_comments_read_in_one_request(fake, count, direct, repo):
@@ -914,17 +1047,21 @@ def test_multiple_link_fields_without_next_allow_empty_termination(fake):
 
 
 @pytest.mark.scenario("gitea-forge/complete-endpoint-pagination/incomplete-listing-refused")
+@pytest.mark.scenario("gitea-forge/timeline-wire-pages/timeline-safeguards-remain")
 @pytest.mark.parametrize("terminal", [False, True])
-def test_thousand_page_bound_requires_empty_termination(fake, terminal):
+@pytest.mark.parametrize("path", [PATH, "/api/v1/repos/owner/repo/issues/1/timeline"])
+def test_thousand_page_bound_requires_empty_termination(fake, terminal, path):
     for page in range(1, 1001):
         rows = [] if terminal and page == 1000 else [{"id": page}]
-        fake.route("GET", WIRE_PATH, Reply(rows), page=page)
+        reply = Reply(rows) if path == PATH else Reply(
+            rows or None, headers={"X-Total-Count": str(len(rows))})
+        fake.route("GET", "/gitea" + path, reply, page=page)
     forge = make_forge(fake)
     if terminal:
-        assert len(forge._pages(PATH)) == 999
+        assert len(forge._pages(path)) == 999
     else:
         with pytest.raises(ForgeError, match="limit exceeded") as caught:
-            forge._pages(PATH)
+            forge._pages(path)
         assert not caught.value.transient
     assert len(fake.calls) == 1000
 
@@ -1463,7 +1600,107 @@ STATUS_PATH = ROOT + "/commits/" + SHA + "/status"
 
 def combined(state="success", count=1, **changes):
     return {"sha": SHA, "state": state, "total_count": count,
-            "statuses": [{"id": n + 1, "state": state} for n in range(count)], **changes}
+            "statuses": [{"id": n + 1, "status": state} for n in range(count)], **changes}
+
+
+@pytest.mark.scenario("gitea-forge/combined-status-wire-pages/rows-use-status")
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/status-mapping")
+@pytest.mark.scenario("gitea-forge/exact-sha-combined-status/sha-and-status-refusal")
+@pytest.mark.parametrize("status,bucket", [("success", "pass"), ("pending", "pending"),
+    ("failure", "fail"), ("error", "fail"), ("warning", "fail"), ("skipped", "skipping"),
+    (None, None), (True, None), ([], None), ("unknown", None), ("missing", None)])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_gitea_status_rows_read_status_field(fake, status, bucket, legacy):
+    row = {"id": 1, **({"state": "failure" if status == "success" else "success"} if legacy else {})}
+    if status != "missing":
+        row["status"] = status
+    fake.route("GET", STATUS_PATH, Reply(combined(status if bucket else "success", statuses=[row])), page=1)
+    fake.route("GET", STATUS_PATH, Reply(combined("pending", 0, statuses=None)), page=2)
+    forge = make_forge(fake)
+    if bucket:
+        assert json.loads(forge.checks_for_sha("owner/repo", SHA).stdout) == [
+            {"name": "Gitea combined status", "bucket": bucket, "state": status}]
+    else:
+        with pytest.raises(ForgeError, match="Invalid Gitea status record") as caught:
+            forge.checks_for_sha("owner/repo", SHA)
+        assert not caught.value.transient
+    assert len(fake.calls) == (2 if bucket else 1)
+
+
+@pytest.mark.scenario("gitea-forge/combined-status-wire-pages/null-terminal-status-envelope")
+@pytest.mark.scenario("gitea-forge/combined-status-wire-pages/no-status-rows")
+@pytest.mark.parametrize("state,bucket", [("success", "pass"), ("pending", "pending"), ("failure", "fail")])
+@pytest.mark.parametrize("populated", [False, True])
+@pytest.mark.parametrize("terminal", [None, []])
+def test_gitea_status_null_terminal_envelope(fake, state, bucket, populated, terminal):
+    if populated:
+        payload = combined(state, 2)
+        for page, rows in enumerate(([payload["statuses"][0]], payload["statuses"]), 1):
+            fake.route("GET", STATUS_PATH, Reply({**payload, "statuses": rows}), page=page)
+    end = combined(state if populated and terminal == [] else "pending",
+                   2 if populated and terminal == [] else 0, statuses=terminal)
+    fake.route("GET", STATUS_PATH, Reply(end), page=3 if populated else 1)
+    assert json.loads(make_forge(fake).checks_for_sha("owner/repo", SHA).stdout) == ([
+        {"name": "Gitea combined status", "bucket": bucket, "state": state}] if populated else [])
+    assert [c.query for c in fake.calls] == [
+        {"page": [str(p)], "limit": ["50"]} for p in range(1, 4 if populated else 2)]
+
+
+@pytest.mark.scenario("gitea-forge/combined-status-wire-pages/null-terminal-status-envelope")
+@pytest.mark.parametrize("patch,headers", [
+    *[({key: "missing"}, {}) for key in ("sha", "state", "total_count", "statuses")],
+    ({"sha": "b" * 40}, {}), ({"state": "unknown"}, {}), ({"state": []}, {}),
+    *[({"total_count": count}, {}) for count in (1, True, -1, 0.0, "0")],
+    ({}, {"X-Next-Page": "3"}), ({}, {"Link": '<https://foreign/>; rel="next"'}),
+    ({}, {"X-Total-Count": "0"}), ({"incomplete": True}, {})])
+def test_gitea_status_invalid_null_terminal_refuses(fake, patch, headers):
+    fake.route("GET", STATUS_PATH, Reply(combined(total_count=2 if "incomplete" in patch else 1),
+                                         headers={"X-Total-Count": "1"}), page=1)
+    terminal = combined("pending", 0, statuses=None)
+    for key, value in patch.items():
+        if value == "missing":
+            terminal.pop(key)
+        elif key != "incomplete":
+            terminal[key] = value
+    fake.route("GET", STATUS_PATH, Reply(terminal, headers=headers), page=2)
+    with pytest.raises(ForgeError) as caught:
+        make_forge(fake).checks_for_sha("owner/repo", SHA)
+    assert not caught.value.transient and len(fake.calls) == 2
+
+
+@pytest.mark.scenario("gitea-forge/combined-status-wire-pages/nonempty-status-disagreement-refuses")
+@pytest.mark.parametrize("problem", ["state", "count", "contradiction"])
+def test_gitea_status_nonempty_snapshot_disagreement(fake, problem):
+    first = combined(count=2, statuses=[{"id": 1, "status": "success", "state": "failure"}])
+    second = combined(count=3 if problem == "count" else 2,
+                      state="pending" if problem == "state" else "success",
+                      statuses=[{"id": 2, "status": "pending", "state": "success"}])
+    for page, payload in enumerate((first, second, combined("pending", 0, statuses=None)), 1):
+        fake.route("GET", STATUS_PATH, Reply(payload), page=page)
+    with pytest.raises(ForgeError, match="Contradictory" if problem == "contradiction" else "Inconsistent"):
+        make_forge(fake).checks_for_sha("owner/repo", SHA)
+    assert len(fake.calls) == (3 if problem == "contradiction" else 2)
+
+
+@pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/fake-exercises-transport-behavior")
+@pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/fake-serialization-preserves-test-evidence")
+def test_gitea_status_fake_serialization_preserves_evidence(fake):
+    rows = [{"id": 1, "state": "success"}, {"id": 2, "state": "success", "status": None},
+            {"id": 3, "state": []}, {"id": 4}, {"id": 5, "status": "unknown"}]
+    payload = combined(count=5, statuses=rows, unrelated="retained")
+    original = json.loads(json.dumps(payload))
+    fake.repository("owner/repo", labels=[], combined_statuses={SHA: payload}, page_size=50)
+    forge = make_forge(fake)
+    path = forge._repo_path("owner/repo", "commits", SHA, "status")
+    _, headers, wire = forge._request("GET", path, query={"page": 1, "limit": 50})
+    assert wire == {**payload, "statuses": [{"id": 1, "status": "success"},
+        {"id": 2, "status": None}, {"id": 3}, {"id": 4}, {"id": 5, "status": "unknown"}]}
+    assert list(headers.items()) == []
+    assert forge._request("GET", path, query={"page": 2, "limit": 50})[2] == {
+        **payload, "state": "pending", "total_count": 0, "statuses": None}
+    fake.route("GET", STATUS_PATH, Reply(payload), page=1)
+    assert forge._request("GET", path, query={"page": 1, "limit": 50})[2] == original
+    assert payload == original and all(response.closed for response in fake.responses)
 
 
 @pytest.mark.scenario("gitea-forge/exact-sha-combined-status/status-mapping")
@@ -1487,7 +1724,7 @@ def test_gitea_ci_status_mapping(fake, state, bucket, count):
     *[[state] for state in ("pending", "failure", "error", "warning")],
     *[["success", state] for state in ("pending", "failure", "error", "warning")]])
 def test_success_refuses_contradictory_status_rows(fake, states):
-    rows = [{"id": n + 1, "state": state} for n, state in enumerate(states)]
+    rows = [{"id": n + 1, "status": state} for n, state in enumerate(states)]
     fake.repository("owner/repo", labels=[], combined_statuses={
         SHA: combined(count=len(rows), statuses=rows)})
     with pytest.raises(ForgeError) as caught:
@@ -1502,7 +1739,7 @@ def test_success_refuses_contradictory_status_rows(fake, states):
 @pytest.mark.parametrize("states", [("success", "skipped"), ("skipped", "success")])
 def test_success_with_skipped_rows_requires_successful_evidence(fake, states):
     fake.repository("owner/repo", labels=[], combined_statuses={SHA: combined(
-        count=2, statuses=[{"id": n + 1, "state": state} for n, state in enumerate(states)])})
+        count=2, statuses=[{"id": n + 1, "status": state} for n, state in enumerate(states)])})
     result = make_forge(fake).checks_for_sha("owner/repo", SHA)
     assert json.loads(result.stdout) == [
         {"name": "Gitea combined status", "bucket": "pass", "state": "success"}]
@@ -1529,8 +1766,8 @@ def test_exact_sha_required_before_dispatch(fake, method, sha):
     *[combined(state=state, statuses=[]) for state in (None, "", "unknown", "SUCCESS", [], {})],
     *[combined(total_count=count) for count in (None, True, -1, 1.0, "1", 0, 2)],
     *[combined(statuses=rows) for rows in (None, {}, [], [None], [{}],
-        [{"id": True, "state": "success"}], [{"id": 0, "state": "success"}],
-        [{"id": 1}], [{"id": 1, "state": []}], [{"id": 1, "state": "unknown"}])]])
+        [{"id": True, "status": "success"}], [{"id": 0, "status": "success"}],
+        [{"id": 1}], [{"id": 1, "status": []}], [{"id": 1, "status": "unknown"}])]])
 def test_combined_status_malformed_evidence_refused(fake, payload):
     fake.repository("owner/repo", labels=[], combined_statuses={SHA: combined()})
     fake.route("GET", STATUS_PATH, Reply(payload), page=1)
@@ -1543,8 +1780,8 @@ def test_combined_status_malformed_evidence_refused(fake, payload):
 @pytest.mark.parametrize("second", [
     combined(sha="b" * 40, statuses=[]), combined(state="pending", statuses=[]),
     combined(total_count=2, statuses=[]), combined(statuses=None), combined(),
-    combined(statuses=[{"id": 1, "state": "failure"}]),
-    combined(statuses=[{"id": 2, "state": "success"}])])
+    combined(statuses=[{"id": 1, "status": "failure"}]),
+    combined(statuses=[{"id": 2, "status": "success"}])])
 def test_combined_status_inconsistent_later_pages_refused(fake, second):
     fake.repository("owner/repo", labels=[], combined_statuses={SHA: combined()})
     fake.route("GET", STATUS_PATH, Reply(second), page=2)
@@ -1993,6 +2230,7 @@ def pytest_configure(config):
     assert all(case.find("skipped") is not None for case in live)
     assert all("GITEA_CONTRACT_URL" in case.find("skipped").attrib["message"] for case in live)
     assert all(not list(case) for case in fake)
+    assert not ET.parse(report).findall(".//error") and not ET.parse(report).findall(".//failure")
 
 
 def configured_contract_env():
@@ -2052,6 +2290,9 @@ def test_configured_contract_requires_provisioned_evidence(missing):
     comments = [call for call in contract.fake.calls if call.path.endswith("/comments")]
     assert all(call.query == {} for call in comments)
     assert len(comments) == len({call.path for call in comments})
+    if missing == "status":
+        statuses = [call for call in contract.fake.calls if call.path.endswith("/status")]
+        assert len(statuses) == 1 and statuses[0].query == {"page": ["1"], "limit": ["50"]}
 
 
 @pytest.mark.scenario("gitea-forge/complete-endpoint-pagination/incomplete-listing-refused")
