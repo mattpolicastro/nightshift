@@ -552,6 +552,128 @@ def test_issue_draft_repository_and_blocker_facts(fake):
     assert forge.open_blockers("owner/repo", [3, 2, 1, 2]) == [2, 1, 2]
 
 
+@pytest.mark.scenario("gitea-forge/unpaginated-comment-listings/review-comments-read-once-per-review")
+@pytest.mark.scenario("gitea-forge/unpaginated-comment-listings/private-listing-callers-share-endpoint-rules")
+@pytest.mark.scenario("gitea-forge/complete-endpoint-pagination/short-intermediate-page")
+@pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/fake-exercises-transport-behavior")
+@pytest.mark.parametrize("count", [0, 1, 51])
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("repo", ["owner/repo", "a&b/r#é"])
+def test_gitea_review_comments_read_in_one_request(fake, count, direct, repo):
+    rows = [authored(i + 1, "Alice" if i % 2 == 0 else "Robot", path="src/λ.py", position=4)
+            for i in range(count)]
+    reviews = [authored(1, state="COMMENT", comments=[]),
+               authored(2, "Mallory", state="COMMENT", comments=rows),
+               authored(3, state="COMMENT")]
+    fake.repository(repo, labels=[], pulls=[candidate(1, [], reviews=reviews)], page_size=1)
+    forge = make_forge(fake)
+    path = forge._repo_path(repo, "pulls", "1", "reviews")
+    query = {"page": 99, "limit": 1}
+    if direct:
+        for review in reviews:
+            expected = review.get("comments", [])
+            assert forge._pages(path + f'/{review["id"]}/comments', query) == (
+                [expected] if expected else [])
+        assert query == {"page": 99, "limit": 1}
+    else:
+        records = forge.pr_feedback_records(repo, 1)
+        inline = [row for source, row in records if source == "inline"]
+        assert [row["id"] for row in inline] == list(range(1, count + 1, 2))
+        assert all(row["author_association"] == "OWNER" and row["user"] == {"login": "Alice"}
+                   and row["path"] == "src/λ.py" and row["line"] == 4
+                   and row["created_at"] == STAMP for row in inline)
+        assert [c.query for c in fake.calls if c.path == "/gitea" + path] == [
+            {"page": [str(page)], "limit": ["50"]} for page in (1, 2, 3, 4)]
+    assert [(c.method, c.path, c.query) for c in fake.calls if c.path.startswith("/gitea" + path + "/")] == [
+        ("GET", "/gitea" + path + f"/{i}/comments", {}) for i in (1, 2, 3)]
+    for review in reviews:
+        for supplied in (None, query):
+            assert forge._request("GET", path + f'/{review["id"]}/comments', query=supplied)[2] == (
+                review.get("comments", []))
+    assert all(response.closed for response in fake.responses)
+
+
+@pytest.mark.scenario("gitea-forge/unpaginated-comment-listings/invalid-complete-comment-response-refuses")
+@pytest.mark.parametrize("rows", [None, {}, "bad", [None], [[]], [{}],
+    *[[{"id": value}] for value in (None, True, False, 0, -1, 1.0, "1")],
+    [{"id": 1, "body": []}], [authored(), authored()],
+    [authored(), authored(body="conflicting")]])
+@pytest.mark.parametrize("direct", [False, True])
+def test_gitea_review_comments_invalid_complete_response(fake, rows, direct):
+    fake.repository("owner/repo", labels=[], pulls=[candidate(1, [], reviews=[authored(state="COMMENT")])])
+    path = ROOT + "/pulls/1/reviews/1/comments"
+    fake.route("GET", path, Reply(rows))
+    forge = make_forge(fake)
+    with pytest.raises(ForgeError) as caught:
+        if direct:
+            forge._pages(path.removeprefix("/gitea"), {"page": 99, "limit": 1})
+        else:
+            forge.pr_feedback_records("owner/repo", 1)
+    assert not caught.value.transient
+    assert [(c.method, c.query) for c in fake.calls if c.path == path] == [("GET", {})]
+    assert all(c.method == "GET" for c in fake.calls)
+
+
+@pytest.mark.scenario("gitea-forge/unpaginated-comment-listings/contradictory-comment-metadata-refuses")
+@pytest.mark.parametrize("headers, valid", [
+    *[({"X-Total-Count": value}, False) for value in ("", "-1", "1.0", " 1", "２", "0", "2", "9" * 5000)],
+    *[({"X-Next-Page": value}, False) for value in ("1", "2", "00", " ")],
+    ([("Link", '<https://foreign/first>; rel="prev"'),
+      ("link", '<https://foreign/secret>; rel="prev NEXT"')], False),
+    ({"Link": '<https://foreign/secret>; rel=next'}, False),
+    *[({"X-Total-Count": "1", "X-Next-Page": value,
+        "Link": '<https://foreign/first>; rel="prev"'}, True) for value in ("", "0")],
+    ({}, True)])
+def test_gitea_review_comments_complete_metadata(fake, headers, valid):
+    path = ROOT + "/pulls/1/reviews/1/comments"
+    fake.route("GET", path, Reply([authored()], headers=headers))
+    forge = make_forge(fake)
+    if valid:
+        assert forge._pages(path.removeprefix("/gitea")) == [[authored()]]
+    else:
+        with pytest.raises(ForgeError) as caught:
+            forge._pages(path.removeprefix("/gitea"))
+        assert not caught.value.transient
+    assert [(c.method, c.path, c.query) for c in fake.calls] == [("GET", path, {})]
+
+
+@pytest.mark.scenario("gitea-forge/unpaginated-comment-listings/private-listing-callers-share-endpoint-rules")
+@pytest.mark.parametrize("suffix", ["pulls/0/reviews/1/comments", "pulls/1/reviews/0/comments",
+    "pulls/1/reviews/-1/comments", "pulls/1/reviews/1/comments/extra", "pulls/1/comments",
+    "issues/1/reviews/1/comments", "pulls/1/reviews/1/comments-extra"])
+def test_gitea_review_comment_endpoint_match_is_exact(fake, suffix):
+    path = "/api/v1/repos/owner/repo/" + suffix
+    fake.route("GET", "/gitea" + path, Reply([{"id": 1}]), page=1)
+    fake.route("GET", "/gitea" + path, Reply([]), page=2)
+    assert make_forge(fake)._pages(path, {"state": "all"}) == [[{"id": 1}]]
+    assert [c.query for c in fake.calls] == [
+        {"state": ["all"], "page": [str(page)], "limit": ["50"]} for page in (1, 2)]
+
+
+@pytest.mark.scenario("gitea-forge/unpaginated-comment-listings/invalid-complete-comment-response-refuses")
+@pytest.mark.parametrize("stop", [False, True])
+def test_gitea_review_comment_retry_preserves_guard_identity(fake, stop):
+    path = ROOT + "/pulls/1/reviews/1/comments"
+    fake.route("GET", path, Reply(status=503), Reply([authored()]))
+    error = http.GiteaHTTPError(503, SECRET, True)
+    attempts = []
+
+    def guard():
+        attempts.append(1)
+        if stop and len(attempts) == 2:
+            raise error
+
+    forge = make_forge(fake, guard=guard)
+    if stop:
+        with pytest.raises(http.GiteaHTTPError) as caught:
+            forge._pages(path.removeprefix("/gitea"))
+        assert caught.value is error
+    else:
+        assert forge._pages(path.removeprefix("/gitea")) == [[authored()]]
+    assert len(attempts) == 2
+    assert [(c.method, c.path, c.query) for c in fake.calls] == [("GET", path, {})] * (1 if stop else 2)
+
+
 @pytest.fixture
 def feedback_repo(fake):
     rows = [authored(i, body=body, state="COMMENT", submitted_at=STAMP, path="src/λ.py", position=4)
@@ -583,17 +705,19 @@ def test_complete_feedback_records_and_existing_format(fake, feedback_repo):
         FeedbackItem("review:1", "**Alice (changes requested):**\n\nChange λ\n\nKeep 🦉"),
         FeedbackItem("inline:1", "**Alice on `src/λ.py:4`:**\n\nChange λ\n\nKeep 🦉"),
         FeedbackItem("inline:7", "**Alice on `old.py:9`:**\n\nChange λ\n\nKeep 🦉")]
-    assert all(call.method == "GET" and (call.query == {} if call.path == COMMENT_PATH
+    assert all(call.method == "GET" and (call.query == {} if call.path.endswith("/comments")
                else call.query["limit"] == ["50"]) for call in fake.calls)
     assert sum(call.path == COMMENT_PATH for call in fake.calls) == 2
     assert {call.path for call in fake.calls} == {ROOT + "/issues/1/comments", ROOT + "/pulls/1/reviews",
                      *(ROOT + f"/pulls/1/reviews/{i}/comments" for i in range(1, 7))}
-    assert all(any(call.path == path and call.query["page"] != ["1"] for call in fake.calls)
-               for path in (ROOT + "/pulls/1/reviews",
-                            ROOT + "/pulls/1/reviews/1/comments", ROOT + "/pulls/1/reviews/4/comments"))
+    assert [call.query for call in fake.calls if call.path == ROOT + "/pulls/1/reviews"] == [
+        {"page": [str(page)], "limit": ["50"]} for page in (1, 2, 3, 4) * 2]
+    assert all(sum(call.path == ROOT + f"/pulls/1/reviews/{i}/comments" for call in fake.calls) == 2
+               for i in range(1, 7))
 
 
 @pytest.mark.scenario("gitea-forge/issue-and-feedback-records/complete-identified-feedback")
+@pytest.mark.scenario("gitea-forge/complete-endpoint-pagination/incomplete-listing-refused")
 @pytest.mark.parametrize("endpoint", ["issues/1/comments", "pulls/1/reviews", "pulls/1/reviews/1/comments"])
 @pytest.mark.parametrize("failure", ["transport", "missing-id", "conflict", "malformed-page"])
 @pytest.mark.parametrize("method", ["pr_feedback_records", "pr_feedback_items"])
@@ -609,10 +733,10 @@ def test_feedback_partial_reads_refused(fake, feedback_repo, endpoint, failure, 
         reply = Reply({"secret": SECRET})
     else:
         reply = Reply(status=503, raw=SECRET.encode())
-    if endpoint == "issues/1/comments" and failure == "conflict":
+    if endpoint.endswith("/comments") and failure == "conflict":
         reply = Reply([feedback_repo["comments"][0], row])
     fake.route("GET", ROOT + "/" + endpoint, reply, reply, reply,
-               page=None if endpoint == "issues/1/comments" else 2)
+               page=None if endpoint.endswith("/comments") else 2)
     with pytest.raises(ForgeError) as caught:
         getattr(make_forge(fake), method)("owner/repo", 1)
     assert caught.value.transient is (failure == "transport")
@@ -1831,7 +1955,8 @@ def test_comment_create_does_not_reconcile_non_http_exceptions(fake, comment_rep
 
 
 @pytest.mark.scenario("gitea-forge/offline-fake-and-optional-live-contracts/live-suite-skips-without-url")
-def test_contract_suite_skips_without_url(tmp_path):
+@pytest.mark.parametrize("url", [None, ""])
+def test_contract_suite_skips_without_url(tmp_path, url):
     plugin = tmp_path / "forbid_contract_network.py"
     plugin.write_text('''
 import socket
@@ -1850,6 +1975,8 @@ def pytest_configure(config):
     for key in tuple(env):
         if key.startswith("GITEA_CONTRACT_"):
             env.pop(key)
+    if url is not None:
+        env["GITEA_CONTRACT_URL"] = url
     env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(Path(__file__).parent),
                                         env.get("PYTHONPATH", "")))
     report = tmp_path / "contracts.xml"
@@ -1922,6 +2049,9 @@ def test_configured_contract_requires_provisioned_evidence(missing):
     with pytest.raises(pytest.fail.Exception, match="Missing required Gitea contract fixture evidence"):
         require_evidence(contract)
     assert all(call.method == "GET" for call in contract.fake.calls)
+    comments = [call for call in contract.fake.calls if call.path.endswith("/comments")]
+    assert all(call.query == {} for call in comments)
+    assert len(comments) == len({call.path for call in comments})
 
 
 @pytest.mark.scenario("gitea-forge/complete-endpoint-pagination/incomplete-listing-refused")
@@ -1932,11 +2062,11 @@ def test_contract_later_page_failure_refuses_feedback(endpoint):
 
     contract = fake_contract()
     contract.fake.route("GET", ROOT + "/" + endpoint, Reply(status=403),
-                        page=None if endpoint == "issues/2/comments" else 2)
+                        page=None if endpoint.endswith("/comments") else 2)
     with pytest.raises(ForgeError):
         contract.forge.pr_feedback_records(contract.repo, contract.evidence["pr"])
     assert contract.fake.calls[-1].path == ROOT + "/" + endpoint
-    assert contract.fake.calls[-1].query == ({} if endpoint == "issues/2/comments"
+    assert contract.fake.calls[-1].query == ({} if endpoint.endswith("/comments")
                                             else {"page": ["2"], "limit": ["50"]})
     assert all(call.method == "GET" for call in contract.fake.calls)
 

@@ -43,7 +43,7 @@ class FakeGitea:
         """Install factual read/write routes; deliberately ignore label/head filters.
 
         Issues may carry comments and timeline arrays; PRs may additionally
-        carry reviews with nested comments. Issue comments return a complete list;
+        carry reviews with nested comments. Both comment endpoints return complete lists;
         other lists paginate independently.
         """
         self.repositories[repo] = dict(labels=labels, issues=list(issues),
@@ -145,7 +145,7 @@ class FakeGitea:
                         rows = issue.get("reviews", [])
                     for review in issue.get("reviews", []):
                         if call.path == review_path + f'/{review["id"]}/comments':
-                            rows = review.get("comments", [])
+                            return Reply(review.get("comments", []))
                 path = root + f'/issues/{issue["number"]}/labels'
                 if call.method == "GET" and call.path == path:
                     return Reply(issue["labels"])

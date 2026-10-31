@@ -293,7 +293,7 @@ class GiteaForge:
                 items.append(FeedbackItem(f'{source}:{row["id"]}', block))
         return items
 
-    def _read_comments(self, path: str) -> list[list[dict]]:
+    def _read_comments(self, path: str, *, inline: bool = False) -> list[list[dict]]:
         """Validate a complete comment response; never follow continuation hints."""
         _, headers, rows = self._request("GET", path)
         if not isinstance(rows, list):
@@ -319,7 +319,9 @@ class GiteaForge:
                     or row["id"] <= 0 or row["id"] in seen):
                 raise ForgeError("Invalid or duplicate Gitea comment ID", transient=False)
             seen.add(row["id"])
-            records.append(self._record(row))
+            record = self._record(row)
+            # Inline aggregation compares raw identities before user projection.
+            records.append(row if inline else record)
         return [records] if records else []
 
     def _pages(self, path: str, query=None, *, strict: bool = True,
@@ -329,8 +331,11 @@ class GiteaForge:
         Keep queries endpoint-local and treat response links only as evidence,
         never as request destinations. Paginated listings deduplicate identical IDs.
         """
-        if re.fullmatch(r"/api/v1/repos/[^/?#]+/[^/?#]+/issues/[1-9][0-9]*/comments", path):
-            return self._read_comments(path)
+        comments = re.fullmatch(
+            r"/api/v1/repos/[^/?#]+/[^/?#]+/(?:issues/[1-9][0-9]*|"
+            r"(?P<inline>pulls/[1-9][0-9]*/reviews/[1-9][0-9]*))/comments", path)
+        if comments:
+            return self._read_comments(path, inline=comments.group("inline") is not None)
         fixed_query = dict(query or {})
         pages: list[list[dict]] = []
         seen: dict[int, dict] = {}
