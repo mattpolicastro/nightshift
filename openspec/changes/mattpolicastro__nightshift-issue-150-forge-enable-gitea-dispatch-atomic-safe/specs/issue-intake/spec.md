@@ -1,6 +1,6 @@
 ## Purpose
 
-Authorize Gitea label actors and explain rejections without changing GitHub relationship resolution or existing intake lifecycle rules.
+Authorize Gitea label actors, explain rejections and qualify publication-comment uniqueness by the accepted consistency assumption, preserving GitHub relationship resolution and existing intake lifecycle rules.
 
 ## ADDED Requirements
 
@@ -65,3 +65,42 @@ assertion migration is specified by Core policy preservation.
 - **WHEN** drafting, approval, revision, publication delivery and their recovery or failure-reporting paths run through GitHubForge
 - **THEN** existing runner-form tests pass without assertion or fixture edits, with the same GitHub calls, git operations, outputs and receipt effects
 - **THEN** backend construction causes no read and no operation bypasses the forge to construct GitHub argv in intake
+
+### Requirement: Design checks survive publication
+
+Collected design checks SHALL flow through readiness detail into the publication receipt's `checks`, the delivered human-check comment and newly generated PR bodies. Recovery SHALL preserve these checks under existing publication contracts, without ticking items or rewriting historical receipts.
+
+For Gitea, exactly-one publication-comment recovery SHALL assume
+read-after-write-consistent complete listings and no concurrent creator for
+the same marker. If an accepted ambiguous comment POST remains invisible to
+a later successful lookup, a later eligible daemon poll MAY create a duplicate
+publication comment, including after pause/resume or restart. This accepted
+limitation SHALL NOT weaken checklist preservation or permit republishing
+solely for comment delivery. Failed comment lookups SHALL still prevent blind
+creates; no persistent create reservations or other new recovery state SHALL
+be introduced. GitHub recovery guarantees and assertions SHALL remain unchanged.
+
+#### Scenario: Design only checks reach the receipt
+- **WHEN** a change with no task/scenario human checks and an unchecked committed design check completes readiness and publishes to its adopted spec PR
+- **THEN** the ready detail, matching saved publication receipt's `checks`, and delivered human-check comment all contain the design item
+- **THEN** the ready detail contains the item before receipt capture, retaining its existing header and `Next:` line, and publication preserves base-sync gates and JSON contracts
+- **THEN** the existing adopted PR is reused and its body is not rewritten
+
+#### Scenario: New PR body lists design checks
+- **WHEN** publication creates a PR for a change with collected design items
+- **THEN** its `## Checks a human must make` section lists existing task/scenario checks first and the deduplicated design additions afterward
+
+#### Scenario: Recovery retains design checks
+- **WHEN** publication succeeds but its response is lost, or comment delivery is interrupted before acknowledgement
+- **THEN** existing recovery retains the matching receipt's complete checklist and delivers or reconciles exactly one publication comment under the stated Gitea consistency and single-creator assumptions, without republishing solely for comment delivery on either forge
+- **THEN** receipt identity `(change, head, pr)`, round markers and retry behavior remain unchanged, the comment retains the hosted-CI reminder, and unrelated historical receipts are not rewritten
+
+#### Scenario: Unannotated design check blocks readiness
+- **WHEN** a delivered front-door publication contains an unannotated or unmapped design check and the adopted PR body lacks an explicit human-check section
+- **THEN** existing merge readiness reads the receipt fallback and blocks for outstanding or unknown human checks even when other readiness conditions pass
+- **THEN** collection does not tick the item, infer a post-deploy exemption, or change PR-body precedence
+
+#### Scenario: Delayed visibility limits publication comment uniqueness
+- **WHEN** an accepted ambiguous Gitea publication-comment POST remains invisible to a later successful lookup across polls, pause/resume or restart
+- **THEN** another comment create is possible under the documented daemon limitation, but every attempted delivery uses the matching receipt's complete checklist and stable round marker without republishing solely for comment delivery
+- **THEN** checklist contents, receipt identity, the hosted-CI reminder, historical receipts and outstanding-check readiness blocking remain governed by the unchanged preservation rules; the exception concerns comment uniqueness only

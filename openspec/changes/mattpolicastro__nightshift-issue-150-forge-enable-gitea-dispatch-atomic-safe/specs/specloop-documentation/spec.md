@@ -22,6 +22,7 @@ Documentation SHALL cite issue #150 without inventing an implementation PR.
 - **WHEN** an operator reads KNOWN-LIMITATIONS.md before unattended Gitea use
 - **THEN** it states that deduplication assumes read-after-write consistency and no concurrent creator, and an accepted ambiguous comment or PR POST invisible to later listings can cause a duplicate on a later daemon poll or after restart
 - **THEN** it explains the deployed single-node commit-before-response assumption, requires revisiting it for replicated Gitea, and retains pause/inspect/resolve guidance without reservations, permanent false holds or a claim that manual inspection prevents every automatic duplicate
+- **THEN** it explicitly applies that assumption to resumed completion delivery and publication-comment recovery after pause/resume or restart, while preserving completed results, full publication checklists and the rule against republishing solely for comment delivery
 
 #### Scenario: Live enrollment remains a human check
 - **WHEN** offline front-door tests pass and the implementation PR is prepared

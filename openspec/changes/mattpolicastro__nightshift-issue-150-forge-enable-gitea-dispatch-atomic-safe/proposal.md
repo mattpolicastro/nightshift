@@ -28,6 +28,9 @@ those fixes rather than restoring the obsolete fake-server assumptions.
   disabled dispatch. Document read-after-write consistency and absence of a
   concurrent creator as assumptions behind create deduplication; delayed
   visibility after an ambiguous POST can duplicate on later daemon polls.
+  Explicitly qualify resumed completion delivery and publication-comment
+  uniqueness under the same Gitea assumptions, preserving retained work,
+  checklists and the prohibition on republishing solely to deliver a comment.
 - Permit only the inventoried Gitea assertion migrations and the single
   approved GitHub inline-marker fixture exception. Preserve all other GitHub
   behavior and assertions, unrelated assertions, and `tests/contract/`.
@@ -47,7 +50,10 @@ Modified capabilities:
   explicit compatibility exceptions.
 - `forge-interface`: exact markers, selected stage forwarding, eligible Gitea
   dispatch, transient failures and forge-specific readiness read budgets.
-- `issue-intake`: allowlist actor resolution and rejection explanations.
+- `issue-intake`: allowlist actor resolution, rejection explanations and the
+  consistency assumption for publication-comment recovery.
+- `paused-job-delivery`: the same Gitea consistency assumption for resumed
+  completion delivery, without changing pause or completed-job handling.
 - `config-resilience`: preserve journal holds while admitting eligible Gitea work.
 - `merge-readiness`: Gitea CI requests and explicit recovery assumptions.
 - `forge-configuration`: enrollment guidance after the hold lifts.

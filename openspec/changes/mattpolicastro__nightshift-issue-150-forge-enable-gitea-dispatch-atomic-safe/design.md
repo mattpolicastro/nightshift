@@ -169,7 +169,26 @@ Gitea or changed consistency requires revisiting this assumption before rollout.
 Duplicate bot markers refuse; operator guidance says pause, inspect effects and
 resolve duplicates before resuming, without claiming pause retroactively avoids
 an accepted request. CI can exercise visible accepted writes, not prove server
-consistency. The merge-readiness delta explicitly scopes its no-duplicate claim.
+consistency. The MODIFIED deltas for `merge-readiness` / Recoverable readiness
+delivery, `issue-intake` / Rejection comment idempotency and Design checks
+survive publication, and `paused-job-delivery` / Resume pending delivery
+explicitly scope their Gitea no-duplicate claims to these same assumptions.
+The latter two replace unconditional uniqueness wording because enabling Gitea
+dispatch exposes their delivery paths to the already accepted delayed-visibility
+limitation. This changes the guarantee, not the receipt algorithm: resume still
+does not relaunch completed jobs; publication recovery still retains the full
+checklist, receipt identity and marker, never ticks checks or rewrites historical
+receipts, and never republishes solely to deliver a comment. GitHub guarantees
+and assertions remain unchanged. Failed listings still prevent blind creates;
+the exception concerns successful listings that omit an accepted create.
+
+Task 1.4's existing visible-write/restart coverage verifies once-only resumed
+delivery and publication comments under these assumptions, including retained
+checks and no repeated publish command. Reuse the existing background delivery
+and design-publication regression fixtures/assertions; no new engine behavior
+or delayed-visibility prevention mechanism is required. Task 1.5 documents
+that both resumed completion and publication-comment delivery share the
+accepted limitation, even across pause/resume and restart.
 
 Readiness keeps one core PR read. Gitea `pr_checks` may read the PR once more
 before its one logical combined-status snapshot (which may paginate); cached
