@@ -154,3 +154,41 @@ enumerated fixture corrections SHALL NOT weaken refusal or landing assertions.
 - **WHEN** live contract selection has a URL but missing credentials, identity, repository or required fixture evidence
 - **THEN** setup fails rather than skipping assertions or claiming a live pass
 - **THEN** tests can verify this failure path offline with networking forbidden, and run-owned cleanup never deletes preexisting fixture resources
+
+### Requirement: Unpaginated comment listings
+
+The adapter SHALL read `/repos/{o}/{r}/issues/{n}/comments` and
+`/repos/{o}/{r}/pulls/{n}/reviews/{id}/comments` with one GET per listing, without
+page/limit or a terminal-page request. Complete reads SHALL preserve the existing
+page-shaped interface, record validation, normalization, transport retries and
+guards, and SHALL refuse malformed or duplicate-ID evidence. FakeGitea SHALL
+model both endpoints as unpaginated.
+
+#### Scenario: Issue comments read once
+- **WHEN** comment_pages reads an issue or PR with zero, one or more than fifty comments
+- **THEN** one successful GET without query returns every validated record in the existing page-shaped interface, including human and bot records for factual consumers
+- **THEN** an empty listing returns `[]`; a nonempty listing returns one page containing all records, with existing validation and normalization
+- **THEN** drafting, marker lookup and reconciliation each use a fresh complete listing when required, without an empty terminal request
+- **THEN** FakeGitea returns the same complete list even when a direct test request includes page/limit or uses a small configured page_size
+
+#### Scenario: Review comments read once per review
+- **WHEN** feedback reads multiple pages of reviews with empty and nonempty inline-comment lists
+- **THEN** reviews still paginate to an empty page and each review's comments use one successful GET without query
+- **THEN** each complete reader result is `[]` for an empty listing or one page containing all records otherwise
+- **THEN** all inline records remain available for existing trust filtering, context rendering and cross-review identity checks
+- **THEN** FakeGitea ignores page/limit on each per-review comments endpoint
+
+#### Scenario: Invalid complete comment response refuses
+- **WHEN** either comment endpoint returns a non-list, a non-object row, a missing ID, an ID that is not an exact positive integer (including booleans), duplicate IDs (including identical rows), or invalid record fields
+- **THEN** the operation raises a nontransient ForgeError without returning partial data or authorizing a mutation
+- **THEN** transport failures and guard exceptions retain their existing classification and identity behavior; the one-GET rule permits existing guarded transport retries on transient failures
+
+#### Scenario: Contradictory comment metadata refuses
+- **WHEN** a complete comment response claims a malformed or mismatching total, a nonterminal next-page value, or a next relation in any Link header
+- **THEN** the read refuses without a continuation request or following a response URL
+- **THEN** an optional X-Total-Count must contain decimal digits and equal the complete row count, and X-Next-Page may only be absent, empty or `0`
+
+#### Scenario: Private listing callers share endpoint rules
+- **WHEN** a caller such as unchanged contract provisioning invokes _pages directly for either exact comment endpoint, including with page/limit query values
+- **THEN** it receives complete validated evidence through one GET without query and the same empty/nonempty return shape
+- **THEN** other endpoint paths keep today's query, termination and refusal rules, except the timeline null terminal page and per-page count rules and the combined-status `status` field and null-statuses terminal envelope rules that this change's **Complete endpoint pagination** and **Exact SHA combined status** deltas define

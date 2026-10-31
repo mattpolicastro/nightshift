@@ -49,7 +49,11 @@ readers. **Exact SHA combined status** is modified because valid terminal
 envelopes need not share the nonempty snapshot and rows use another wire key.
 **Offline fake and optional live contracts** is modified only to model these
 shapes and enumerate the new fixture exceptions alongside #165's established
-ones. All other requirements remain unchanged, including label actions,
+ones. **Unpaginated comment listings** is modified only to qualify its other
+endpoint preservation clause with the timeline and combined-status exceptions
+defined by **Complete endpoint pagination** and **Exact SHA combined status**.
+Its remaining text and #165's unpaginated readers and scenarios stay word for
+word unchanged. All other requirements remain unchanged, including label actions,
 allowlist projection, exact-head landing policy and GitHub transcripts.
 
 ### Timeline specialization stays inside the existing loop
