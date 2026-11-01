@@ -124,6 +124,7 @@ def _fetch_publish_base(ctx: Ctx, remote: str | None = None, *, timeout: float) 
     requested = f"refs/heads/{ctx.m.pr_base}"
     destination = "refs/specloop/publish-base"
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    credential_boundary = False
     try:
         if remote is None:
             remote = subprocess.run(
@@ -136,11 +137,24 @@ def _fetch_publish_base(ctx: Ctx, remote: str | None = None, *, timeout: float) 
         # Relative filesystem origins are relative to the source, not repo.git.
         if not re.match(r"^[^/]+:", remote):
             remote = str((ctx.m.repo / remote).resolve())
-        subprocess.run(
-            ["git", *seal.SAFE_FLAGS, "-C", str(ctx.repo), "fetch", "--no-tags",
-             "--no-recurse-submodules", "--", remote, f"+{requested}:{destination}"],
-            capture_output=True, text=True, check=True, timeout=timeout, env=env,
-        )
+        # Discovery and helper-bearing errors must bypass the legacy formatter.
+        credential_boundary = True
+        helpers = _source_credential_helpers(ctx.m.repo, timeout=timeout)
+        argv = ["git", *seal.SAFE_FLAGS, "-C", str(ctx.repo), "fetch", "--no-tags",
+                "--no-recurse-submodules", "--", remote, f"+{requested}:{destination}"]
+        if helpers:
+            operation = f"fetch {requested} from source origin"
+            try:
+                subprocess.run(argv, capture_output=True, check=True, timeout=timeout,
+                               env=_credential_transport_env(helpers))
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                raise _credential_transport_error(operation, exc, helpers) from None
+            except (OSError, ValueError):
+                raise RuntimeError(f"{operation} could not start") from None
+        else:
+            credential_boundary = False
+            subprocess.run(argv, capture_output=True, text=True, check=True, timeout=timeout, env=env)
+        credential_boundary = False
         return git(ctx.repo, "rev-parse", "--verify", f"{destination}^{{commit}}").decode().strip()
     except subprocess.TimeoutExpired as exc:
         diagnostic = exc.stderr or exc.stdout or ""
@@ -149,6 +163,8 @@ def _fetch_publish_base(ctx: Ctx, remote: str | None = None, *, timeout: float) 
         raise RuntimeError(f"fetch {requested} from source origin timed out after {timeout:g}s: "
                            f"{diagnostic.strip()[:400]}") from exc
     except (subprocess.CalledProcessError, OSError, RuntimeError) as exc:
+        if credential_boundary:
+            raise exc from None
         diagnostic = (exc.stderr or exc.stdout or f"git exited {exc.returncode}") \
             if isinstance(exc, subprocess.CalledProcessError) else str(exc)
         if isinstance(diagnostic, bytes):

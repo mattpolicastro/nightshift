@@ -261,7 +261,11 @@ def test_fetch_failure_diagnostic_is_stripped_and_capped_at_400(
     else:
         error = error_type(1, ["git", "fetch"], **{output_arg: output})
 
+    real_run = subprocess.run
+
     def fail_fetch(args, **kwargs):
+        if args[3:] == ["config", "--local", "--null", "--get-all", "credential.helper"]:
+            return real_run(args, **kwargs)
         assert "fetch" in args
         raise error
 
