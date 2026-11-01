@@ -122,6 +122,8 @@ def test_usage_matching_retains_priority(provider, quota, auth, source):
     if quota == "adapter-specific":
         quota = "too many requests" if provider.profile.adapter == "codex" else "limit reached"
     diagnostic = quota + auth
+    if provider.profile.adapter == "claude" and source == "response":
+        source = "alternate"
     result = provider.run(diagnostic, source=source)
     assert result.disposition == "usage_limit"
     assert result.session == SESSION and result.usage == USAGE

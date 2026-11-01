@@ -10,6 +10,22 @@ import pytest
 from specloop import agents, state
 
 
+def test_fake_homes_remain_isolated_without_directory_scans(isolated_home_factory, monkeypatch):
+    def unexpected_scan(*args, **kwargs):
+        pytest.fail("allocating a fake home must not scan previous test directories")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "scandir", unexpected_scan)
+        first = isolated_home_factory()
+        (first / "probe").write_text("first test's state")
+        second = isolated_home_factory()
+        assert first != second
+        assert not (second / "probe").exists()
+        (second / "probe").write_text("second test's state")
+        assert (first / "probe").read_text() == "first test's state"
+        assert (second / "probe").read_text() == "second test's state"
+
+
 def assert_descriptor_guard(root):
     fd = os.open(Path(root).parent, os.O_RDONLY)
     try:

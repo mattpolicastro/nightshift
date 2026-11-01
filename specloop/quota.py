@@ -2,8 +2,8 @@
 
 For Codex on a ChatGPT login this asks `codex app-server` over its read-only
 JSON-RPC (initialize, then account/rateLimits/read; no thread or turn is ever
-created). For anything else, or
-when the read fails, the answer is a fixed back-off.
+created). Claude supplies its structured reset snapshot. Unknown or stale
+resets, including failed Codex reads, use a fixed back-off.
 """
 
 import json
@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 from nightshift.host_paths import tool_path
+from nightshift.trace import RateLimit
 
 FALLBACK_SECONDS = 30 * 60
 
@@ -69,9 +70,12 @@ def codex_limits(home: Path, timeout: float = 20) -> dict | None:
             child.kill()
 
 
-def resume_at(limits: dict | None, now: float | None = None) -> float:
+def resume_at(limits: dict | None, now: float | None = None, *, rate_limit: RateLimit | None = None) -> float:
     """Epoch seconds when the exhausted window resets; a back-off if unknown."""
-    now = now or time.time()
+    now = time.time() if now is None else now
+    if rate_limit is not None:
+        reset = rate_limit.resets_at
+        return reset + 60 if type(reset) is int and reset > 0 and reset > now else now + FALLBACK_SECONDS
     bucket = (limits or {}).get("rateLimits") or {}
     windows = [w for w in (bucket.get("primary"), bucket.get("secondary")) if isinstance(w, dict)]
     full = [w["resetsAt"] for w in windows
