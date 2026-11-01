@@ -6,4 +6,4 @@
 
 ## 2. Acceptance fixes
 
-- [ ] 2.1 Make the harness's verification pass on the branch head: (details: tests: expected exit 0, got timeout (FAIL, 900.05s))
+- [x] 2.1 Make the harness's verification pass on the branch head: (details: tests: expected exit 0, got timeout (FAIL, 900.05s))
