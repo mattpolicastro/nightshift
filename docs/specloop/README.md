@@ -620,8 +620,8 @@ not create a driver `base_fetch` pause or permit a push using a stale base.
 ### Explicit forge publication
 
 The manifest's `run.github` selects the engine destination: `owner/repo` and
-`github.com/owner/repo` retain GitHub behavior and argv. For Gitea, set it to
-`forge.example/owner/repo`; that hostname must uniquely match a Gitea URL in
+`github.com/owner/repo` retain GitHub behavior and unchanged `gh` argv. For Gitea,
+set it to `forge.example/owner/repo`; that hostname must uniquely match a Gitea URL in
 [forge configuration](../../config.example.toml). Multiple definitions on the
 same host refuse even with different ports or prefixes; `repos.forge` does not
 route these commands. The host field is a hostname, not a URL or port selector.
@@ -636,6 +636,24 @@ effective port, encoded URL prefix and case-sensitive owner/repository, allowing
 an optional terminal `.git`. Explicit default ports are equivalent; SSH, scp
 and local origins cannot prove the configured installation identity and refuse.
 
+Base fetch and both publish and finish pushes reread the enrolled source clone's
+local `credential.helper` entries before each transport, including retries.
+They forward every value in order, including empty resets, through the child
+Git config environment for that command's lifetime. Nothing is copied into
+`repo.git/config`, the source config, run state or logs; no manual helper copying
+is needed. Existing global helpers remain available unless an empty reset clears
+them. Git transport with no source-local helpers keeps its existing argv,
+options and behavior. Helper-bearing pushes use Git safety flags and disable
+terminal prompting; fetch retains those protections.
+
+Helpers run from the isolated run repository. Use absolute executable paths
+when needed: relative paths and working-directory assumptions are not rewritten.
+The service account needs the helper binaries and access to the host keychain
+or credential store; forwarding does not provision credentials or replace the
+separate forge API bot token. Live source-local authentication through base fetch,
+publish and finish remains pending human validation under
+[issue #174](https://github.com/mattpolicastro/nightshift/issues/174).
+
 After existing base preparation and checks, use:
 
 ```sh
@@ -646,10 +664,10 @@ uv run nightshift finish <change>
 Complete the PR's human checks before finish. Publication refuses changes under
 `.gitea/workflows/`, `.github/workflows/` or `.forgejo/` on either forge before
 push or PR writes. Gitea publish reuses an exact existing PR or creates a
-WIP-prefixed title, not native draft state. Finish archives and pushes, removes
-one configured WIP prefix with a title-only PATCH and reads back the result;
-it does not merge. Inspect remote effects before retrying an ambiguous create
-failure: lookup-before-create cannot prevent concurrent or late-visible duplicates.
+WIP-prefixed title, not native draft state. Finish archives and pushes, then marks
+the PR ready by removing one configured WIP prefix with a title-only PATCH and
+reading back the result; it does not merge. Inspect remote effects before retrying
+an ambiguous create failure: lookup-before-create cannot prevent concurrent or late-visible duplicates.
 Title edits between GET and PATCH can be overwritten without conflict detection;
 verification proves only the resulting title. Critic uses 30-second socket
 timeouts and a 120-second request-start cutoff, not elapsed-time bounds: slow

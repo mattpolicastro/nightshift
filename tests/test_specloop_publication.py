@@ -284,7 +284,7 @@ def test_publication_recovers_through_cli_json(setup, tmp_path, monkeypatch, cap
     run.pause("ready_to_publish", detail=DETAIL)
     monkeypatch.setattr(cli, "_ctx", lambda run: SimpleNamespace(
         repo=tmp_path, ref=f"refs/heads/spec/{CHANGE}", head=lambda: HEAD, pause=run.pause, run=run,
-        m=SimpleNamespace(github="owner/sample"),
+        m=SimpleNamespace(github="owner/sample", repo=tmp_path),
     ))
     monkeypatch.setattr(cli, "_remote", lambda ctx, target=None: "test-origin")
     # The state-only transport fixture has an unchanged base; exercise push recovery.
@@ -294,6 +294,10 @@ def test_publication_recovers_through_cli_json(setup, tmp_path, monkeypatch, cap
     unavailable = True
 
     def push(args, **kwargs):
+        if "config" in args:
+            assert args == ["git", "-C", str(tmp_path), "config", "--local", "--null", "--get-all", "credential.helper"]
+            assert kwargs == {"capture_output": True, "timeout": 20}
+            return subprocess.CompletedProcess(args, 1, b"", b"")
         if "diff" in args:
             assert args[args.index("diff"):] == ["diff", "--no-renames", "--name-only", "-z", f"{HEAD}..{HEAD}", "--"]
             return subprocess.CompletedProcess(args, 0, b"", b"")

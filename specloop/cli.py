@@ -555,9 +555,21 @@ def _pr_body(ctx: loop.Ctx) -> str:
             f"🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
 
 
-def _push(repo: Path, url: str, ref: str) -> None:
+def _push(repo: Path, url: str, ref: str, *, source: Path | None = None) -> None:
     # Deliberately not seal.git: that helper drops the global config, and with
     # it the user's credential helper. Pushing is the user's own act.
+    helpers = loop._source_credential_helpers(source, timeout=300) if source is not None else ()
+    if helpers:
+        operation = f"push {ref} to source origin"
+        try:
+            subprocess.run(["git", *loop.seal.SAFE_FLAGS, "-C", str(repo), "push", "-q", url, f"{ref}:{ref}"],
+                           check=True, timeout=300, capture_output=True,
+                           env=loop._credential_transport_env(helpers))
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise loop._credential_transport_error(operation, exc, helpers) from None
+        except (OSError, ValueError):
+            raise RuntimeError(f"{operation} could not start") from None
+        return
     subprocess.run(["git", "-C", str(repo), "push", "-q", url, f"{ref}:{ref}"], check=True, timeout=300)
 
 
@@ -667,7 +679,7 @@ def _publish(args, run: Run) -> int:
         print(reason, file=sys.stderr)
         return 1
     _check_publish_paths(ctx, base, head)
-    _push(ctx.repo, remote, ctx.ref)
+    _push(ctx.repo, remote, ctx.ref, source=ctx.m.repo)
     url = st.pr
     if not url:
         # Creation may have succeeded before its response or local state was
@@ -776,7 +788,7 @@ def _finish(args, run: Run) -> int:
             git(work, "push", "-q", str(ctx.repo), f"HEAD:{ctx.ref}")
     # The branch itself records the archive durably. Retry external operations
     # from that commit without requiring a separate state write to have survived.
-    _push(ctx.repo, remote, ctx.ref)
+    _push(ctx.repo, remote, ctx.ref, source=ctx.m.repo)
     if target is not None and target.forge is not None:
         _gitea_ready(target, st.pr)
     else:

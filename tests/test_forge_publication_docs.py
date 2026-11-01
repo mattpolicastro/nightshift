@@ -14,11 +14,12 @@ from test_specloop_documentation_integrity import LINK, ROOT, heading_ids
 def passage(text, heading):
     assert re.fullmatch(r"#{1,6} +\S.*", heading), "invalid heading boundary"
     lines = text.split("\n")
+    assert [line for line in lines if line.lstrip() == heading] == [heading], heading
     assert lines.count(heading) == 1, heading
     start = lines.index(heading) + 1
     level = len(heading.split()[0])
     end = next((i for i in range(start, len(lines))
-                if re.fullmatch(rf"#{{1,{level}}} +\S.*", lines[i])), len(lines))
+                if re.match(rf"#{{1,{level}}} ", lines[i])), len(lines))
     return "\n".join(lines[start:end])
 
 
@@ -65,6 +66,7 @@ def commands_parse(text):
 
 
 @pytest.mark.scenario("specloop-documentation/explicit-forge-command-guidance/operator-selects-and-publishes")
+@pytest.mark.scenario("specloop-documentation/source-local-credential-guidance/operator-publishes-and-finishes-with-local-helpers")
 @pytest.mark.scenario("specloop-documentation/explicit-forge-command-guidance/explicit-commands-do-not-enable-the-daemon")
 @pytest.mark.scenario("specloop-documentation/forge-guidance-integrity/examples-remain-structurally-valid")
 def test_explicit_publication_examples_parse_without_dispatch(monkeypatch):
@@ -127,10 +129,11 @@ def test_physical_rules_and_fail_closed_ambiguity(surround):
 def test_exact_heading_uses_lf_and_equal_or_shallower_boundary(wrapper):
     heading = "### Selected"
     body = "body\n#### Child\nchild\n  ## Indented\n##No-space\ntext\u2028## Not-a-line"
-    for end in ("\n### Next\noutside", "\n###   Next\noutside", "\n# Next\noutside"):
+    for end in ("\n### Next\noutside", "\n###   Next\noutside", "\n# Next\noutside", "\n## \noutside"):
         assert passage(wrapper.format(heading + "\n" + body + end), heading) == body
     assert passage(heading + "\n" + body, heading) == body  # EOF is a boundary.
     for bad in ("", " " + heading, heading + " ", "prefix\u2028" + heading,
-                heading + "\n" + wrapper.format(heading), heading.replace(" ", "\t")):
+                heading + "\n" + wrapper.format(heading), heading.replace(" ", "\t"),
+                heading + "\n " + heading, heading + "\n\t" + heading):
         with pytest.raises(AssertionError):
             passage(bad, heading)
