@@ -45,8 +45,10 @@ jobs:
 
   plugin-canary:
     # The manifest has no upper bound, so check the plugin against SDKs it has not been built with.
+    # Schedule and dispatch only: a failing canary must not show as a failed PR check, because
+    # landing treats any failing check as not green.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    continue-on-error: ${{ github.event_name != 'schedule' }}
     strategy:
       fail-fast: false
       matrix:
@@ -63,7 +65,8 @@ jobs:
           cache-dependency-path: plugins/nightshift/package-lock.json
       - run: npm ci --ignore-scripts
       - run: npm install --no-save --ignore-scripts @getpaseo/plugin@${{ matrix.sdk }}
-      - run: npm ls @getpaseo/plugin
+      # Print, don't validate: `npm ls` errors whenever the SDK differs from the pinned version.
+      - run: node -p "'@getpaseo/plugin ' + require('@getpaseo/plugin/package.json').version"
       - run: npm run typecheck
       - run: npm test
 
