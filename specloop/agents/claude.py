@@ -15,6 +15,7 @@ the run onto metered billing (see the nightshift CLAUDE.md).
 import json
 import re
 
+from nightshift.trace import parse_rate_limit
 from specloop.agents import Call, Result, base_env, read_jsonl, spawn
 
 SETTINGS = {"sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True, "allowUnsandboxedCommands": False}}
@@ -58,15 +59,23 @@ def env(call: Call) -> dict:
 def run(call: Call) -> Result:
     code, timeout = spawn(argv(call), env(call), call, stdin=call.prompt)
     session, final = "", None
+    rate_limit = None
     for e in read_jsonl(call.transcript):
+        if not isinstance(e, dict):
+            continue
+        if (decoded := parse_rate_limit(e)) is not None:
+            rate_limit = decoded
         if e.get("type") == "system" and e.get("subtype") == "init":
             session = e.get("session_id", "")
         elif e.get("type") == "result":
             final = e
     usage = (final or {}).get("usage", {})
-    if timeout:
-        return Result("infra", session=session, detail=timeout, usage=usage)
-    if not final or final.get("is_error") or final.get("subtype") != "success":
+    overage = rate_limit is not None and rate_limit.using_overage
+    status = rate_limit.status if rate_limit else "unknown"
+    if timeout and not overage:
+        return Result("infra", session=session, detail=timeout, usage=usage, rate_limit=rate_limit)
+    limited = overage or status == "rejected"
+    if limited or not final or final.get("is_error") or final.get("subtype") != "success":
         stderr = call.transcript.with_suffix(".stderr").read_text(errors="replace")[-800:]
         text = json.dumps(final or {})[:800] + stderr
         # Token counts and other result metadata are not provider diagnostics.
@@ -76,9 +85,13 @@ def run(call: Call) -> Result:
         # Keep decoded whitespace so multiline messages retain their word boundaries.
         diagnostic = "\n".join(value for value in [(final or {}).get("result"), *errors, stderr]
                                if isinstance(value, str))
-        kind = "usage_limit" if USAGE.search(text) else "unavailable" if UNAVAILABLE.search(diagnostic) else "infra"
-        return Result(kind, session=session, detail=f"exit {code}: {text}", usage=usage)
+        usage_diagnostic = "\n".join(value for value in [*errors, stderr] if isinstance(value, str))
+        limited = limited or (status not in ("allowed", "allowed_warning")
+                              and USAGE.search(usage_diagnostic) is not None)
+        kind = "usage_limit" if limited else "unavailable" if UNAVAILABLE.search(diagnostic) else "infra"
+        return Result(kind, session=session, detail=f"exit {code}: {text}", usage=usage, rate_limit=rate_limit)
     out = final.get("structured_output")
     if not isinstance(out, dict):
-        return Result("invalid_output", session=session, detail="no structured_output in result", usage=usage)
-    return Result("ok", out, session, usage=usage)
+        return Result("invalid_output", session=session, detail="no structured_output in result",
+                      usage=usage, rate_limit=rate_limit)
+    return Result("ok", out, session, usage=usage, rate_limit=rate_limit)
