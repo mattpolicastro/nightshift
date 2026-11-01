@@ -165,7 +165,7 @@ def test_archived_link_quotes_resolved_path(admitted, monkeypatch, capsys, faile
         target = directory.parent / "archive" / "2026-10-20-change"
         target.parent.mkdir()
         directory.rename(target)
-    def push(*args):
+    def push(*args, **kwargs):
         if failed_push:
             raise RuntimeError("external push failed")
     with monkeypatch.context() as m:

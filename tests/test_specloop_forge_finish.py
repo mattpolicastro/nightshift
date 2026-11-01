@@ -34,9 +34,9 @@ def finish_service(service, configured, monkeypatch):
     monkeypatch.setattr(http, "sleep", lambda _: None)
     real_push = cli._push
 
-    def push(repo, url, ref):
+    def push(repo, url, ref, **kwargs):
         assert url == origin
-        real_push(repo, str(s.remote), ref)
+        real_push(repo, str(s.remote), ref, **kwargs)
 
     monkeypatch.setattr(cli, "_push", push)
     monkeypatch.setattr(cli, "_gh", lambda *a: pytest.fail("Gitea finish called gh"))

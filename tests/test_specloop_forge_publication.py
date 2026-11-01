@@ -57,7 +57,13 @@ def publication(admitted, configured, monkeypatch, tmp_path, request):
     monkeypatch.setattr(cli.loop, "_fetch_publish_base", fresh)
     monkeypatch.setattr(cli, "_gh", github)
     run.pause("ready_to_publish")
-    return run, remote, fake, pushes, gh
+    source_config = (source / ".git/config").read_bytes()
+    run_config = (run.dir / "repo.git/config").read_bytes()
+    yield run, remote, fake, pushes, gh
+    assert (source / ".git/config").read_bytes() == source_config
+    assert (run.dir / "repo.git/config").read_bytes() == run_config
+    for repo in (source, run.dir / "repo.git"):
+        assert cli.loop._source_credential_helpers(repo, timeout=20) == ()
 
 
 def pr(number=1, **changes):

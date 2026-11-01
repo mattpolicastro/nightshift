@@ -175,11 +175,11 @@ def service(admitted, tmp_path, monkeypatch):
     run.pause("human_checks", detail="Inspect behavior")
     real_push = cli._push
 
-    def push(repo, url, ref):
+    def push(repo, url, ref, **kwargs):
         fake.pushes.append(git(repo, "rev-parse", ref))
         if fake.failure == "push":
             raise RuntimeError("push unavailable")
-        real_push(repo, url, ref)
+        real_push(repo, url, ref, **kwargs)
 
     monkeypatch.setattr(cli.openspec, "archive", fake.archive)
     monkeypatch.setattr(cli, "_push", push)

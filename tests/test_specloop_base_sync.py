@@ -772,7 +772,7 @@ def publish_env(base_env, monkeypatch):
     env.url = "https://github.com/example/repo/pull/17"
     env.existing_pr = ""
 
-    def push(repo, remote, ref):
+    def push(repo, remote, ref, **kwargs):
         assert env.operations[-1] == ("fetch", 20)
         assert (repo, remote, ref) == (ctx.repo, str(env.origin), ctx.ref)
         env.operations.append(("push", ctx.head()))
@@ -834,7 +834,7 @@ def test_moved_base_is_merged_and_verified_before_publish(publish_env, monkeypat
     assert ctx.run.state.pause.reason == "ready_to_publish"
     if failed_push:
         with monkeypatch.context() as failure:
-            def fail(*args):
+            def fail(*args, **kwargs):
                 raise RuntimeError("push unavailable")
             failure.setattr(cli, "_push", fail)
             publish_without_preparing(failure, ["publish", "c", "--json"], 1)

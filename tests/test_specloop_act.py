@@ -325,7 +325,7 @@ def test_direct_push_holds_lock_against_act_abort(admitted, monkeypatch, capfd, 
     run.pause("ready_to_publish" if command == "publish" else "human_checks")
     pushes = []
 
-    def push(*args):
+    def push(*args, **kwargs):
         pushes.append(args)
         before = (run.dir / "state.json").read_bytes()
         assert "locked" in act(capfd, run, "abort", code=1)["detail"]
@@ -720,7 +720,7 @@ def test_publish_failure_returns_refused_json(admitted, monkeypatch, capfd):
     # The fake transport supplies an unchanged base before the failing push.
     monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise RuntimeError("push failed")
 
     monkeypatch.setattr(cli, "_push", fail)
@@ -846,7 +846,7 @@ def test_publish_ignores_unrelated_pr(admitted, monkeypatch, capfd, repository, 
 
     monkeypatch.setattr(cli, "_gh", gh)
     monkeypatch.setattr(cli, "_remote", lambda ctx, target=None: "unused")
-    monkeypatch.setattr(cli, "_push", lambda *args: None)
+    monkeypatch.setattr(cli, "_push", lambda *args, **kwargs: None)
     # PR matching uses a fake transport with an unchanged base.
     monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
     act(capfd, run, "publish")
@@ -882,11 +882,11 @@ def test_finish_restarts_from_archive(admitted, tmp_path, monkeypatch, capfd, fa
         target.parent.mkdir()
         directory.rename(target)
 
-    def push(repo, url, ref):
+    def push(repo, url, ref, **kwargs):
         pushes.append(git(repo, "rev-parse", ref))
         if unavailable and failure == "push":
             raise RuntimeError("network unavailable")
-        real_push(repo, url, ref)
+        real_push(repo, url, ref, **kwargs)
 
     def gh(*args):
         nonlocal draft
@@ -978,7 +978,7 @@ def test_status_after_partial_finish(admitted, template, tmp_path, monkeypatch, 
         target.parent.mkdir()
         directory.rename(target)
 
-    def fail_push(repo, url, ref):
+    def fail_push(repo, url, ref, **kwargs):
         pushes.append(git(repo, "rev-parse", ref))
         raise RuntimeError("network unavailable")
 
@@ -1117,7 +1117,7 @@ def test_act_refuses_a_pause_other_than_the_one_shown(paused, capfd, expect, out
         assert Run.for_change("change").state.pause.reason == "stuck"
 
 
-def no_push(*args):
+def no_push(*args, **kwargs):
     pytest.fail("publishing must not push to a remote it cannot vouch for")
 
 
@@ -1163,7 +1163,7 @@ def test_publish_pushes_to_an_origin_matching_the_manifest(admitted, monkeypatch
     # Validate hosted URLs without contacting them; the fetched base is unchanged.
     monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
     pushes = []
-    monkeypatch.setattr(cli, "_push", lambda repo, url, ref: pushes.append(url))
+    monkeypatch.setattr(cli, "_push", lambda repo, url, ref, **kwargs: pushes.append(url))
     act(capfd, run, "publish")
     assert pushes == [origin] and run.state.pause.reason == "human_checks"
 
