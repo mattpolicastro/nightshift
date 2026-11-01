@@ -166,9 +166,16 @@ In task 1.3 inventory `_push` replacements/wrappers in
 `tests/test_specloop_act.py`, `tests/test_specloop_command_json.py`,
 `tests/test_specloop_base_sync.py`, `tests/test_specloop_base_publication.py`,
 `tests/test_specloop_forge_selection.py`, `tests/test_specloop_forge_finish.py`,
-`tests/test_specloop_design_publication.py` and `tests/test_finish_expect_head.py`.
-Accept and forward optional keywords without weakening positional/effect/order
-assertions. Keep no-helper exact argv/kwargs in
+`tests/test_specloop_design_publication.py`, `tests/test_finish_expect_head.py`
+and `tests/test_status_json_forge_link.py`. Accept and forward optional keywords
+without weakening positional/effect/order assertions. In the status-link suite,
+`test_archived_link_quotes_resolved_path` installs a `push(*args)` double that
+must also accept the new keyword. Preserve both `failed_push` parameterizations:
+the failure still raises `RuntimeError("external push failed")`, success still
+finishes, and all archived URL, head/tasks, status and available-action assertions
+remain intact. Run this suite in task 1.3 and again after task 1.4 supplies
+`source=ctx.m.repo`; a signature TypeError must not replace either intended path.
+Keep no-helper exact argv/kwargs in
 `tests/test_specloop_forge_publication.py` intact. Prepare reusable offline
 credential fixtures in `tests/credential_transport_support.py`, exercised by
 no-helper compatibility tests in this task. Do not add a permissive catch-all
