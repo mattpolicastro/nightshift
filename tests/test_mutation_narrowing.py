@@ -70,9 +70,9 @@ Path("visited").touch()
     calls = []
     real_run = verify.run_extracted
 
-    def run(src, head, steps, run_m, run_out):
+    def run(src, head, steps, run_m, run_out, *, run_dir=None):
         calls.append((src, run_m, run_out))
-        return real_run(src, head, steps, run_m, run_out)
+        return real_run(src, head, steps, run_m, run_out, run_dir=run_dir)
 
     monkeypatch.setattr(verify, "run_extracted", run)
     return repo, m, tmp_path / "out", calls
@@ -139,8 +139,8 @@ def test_narrowed_survivor_confirmed_on_full_steps(narrowing, survives, monkeypa
     initial = {}
     real_run = verify.run_extracted
 
-    def snapshot(src, head, steps, run_m, run_out):
-        saved = real_run(src, head, steps, run_m, run_out)
+    def snapshot(src, head, steps, run_m, run_out, *, run_dir=None):
+        saved = real_run(src, head, steps, run_m, run_out, run_dir=run_dir)
         if run_out == out / "mutant-1":
             for name in ("receipts.json", "test.log", "build/artifacts/source.txt", "build/artifacts/phase.txt"):
                 initial[name] = (run_out / name).read_bytes()
@@ -282,7 +282,7 @@ def test_both_phases_use_assigned_full_baseline(narrowing, monkeypatch, invalid_
     durations = [(11.25, 0.1, 21, 0), (17, 13, 12, 50)]
     limits = [(33.75, 30, 63, 120), (51, 39, 36, 120)]
 
-    def run(src, head, steps, run_m, run_out):
+    def run(src, head, steps, run_m, run_out, *, run_dir=None):
         calls.append(run_out)
         ids = ("prepare", "inspect", "test", "later")
         if run_out in baselines:
@@ -326,10 +326,10 @@ def test_unexpected_error_does_not_publish_partial_index(narrowing, monkeypatch)
     repo, m, out, _ = narrowing
     real_run = verify.run_extracted
 
-    def fail_confirmation(src, head, steps, run_m, run_out):
+    def fail_confirmation(src, head, steps, run_m, run_out, *, run_dir=None):
         if run_out.name == "confirmation":
             raise RuntimeError("confirmation crashed")
-        return real_run(src, head, steps, run_m, run_out)
+        return real_run(src, head, steps, run_m, run_out, run_dir=run_dir)
 
     monkeypatch.setattr(verify, "run_extracted", fail_confirmation)
     with pytest.raises(RuntimeError, match="confirmation crashed"):
@@ -494,9 +494,9 @@ print((src / "calc.py").read_text(), end="")
     error = RuntimeError("confirmation crashed with sibling active")
     real_run, real_cleanup = verify.run_extracted, verify.cleanup
 
-    def run(src, head, steps, run_m, run_out):
+    def run(src, head, steps, run_m, run_out, *, run_dir=None):
         if run_out == out:
-            return real_run(src, head, steps, run_m, run_out)
+            return real_run(src, head, steps, run_m, run_out, run_dir=run_dir)
         phase = "confirmation" if run_out.name == "confirmation" else "narrowed"
         worker = run_out.parent if phase == "confirmation" else run_out
         number = int(worker.name.split("-")[1])
@@ -509,7 +509,7 @@ print((src / "calc.py").read_text(), end="")
         assert not (src / "calc.py").samefile(out / "src/calc.py")
         assert (out / "src/calc.py").read_text() == original
         assert (out / "build/visited").exists()
-        result = real_run(src, head, steps, run_m, run_out)
+        result = real_run(src, head, steps, run_m, run_out, run_dir=run_dir)
         assert all(r.passed for r in result)
         if prepared:
             assert (run_out / "build/project/calc.py").read_text() == expected

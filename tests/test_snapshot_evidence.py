@@ -69,7 +69,7 @@ def test_evidence_snapshot_phases(candidate, tmp_path, monkeypatch, mode):
     pair = Barrier(2)
     run_commands = verify._run_commands
 
-    def observe(scheduled, values, build, run_out, path):
+    def observe(scheduled, values, build, run_out, path, *, run_dir=None):
         baseline = run_out in (out, out / "baseline-2")
         clone = Path(values["snapshot:deps"])
         assert clone == build / "snapshots/deps" and clone not in paths
@@ -93,7 +93,7 @@ def test_evidence_snapshot_phases(candidate, tmp_path, monkeypatch, mode):
         (clone / "dependency").write_text(values["mutant_path"])
         if not baseline:
             pair.wait(timeout=10)  # Check after the sibling also writes its clone.
-        receipts = run_commands(scheduled, values, build, run_out, path)
+        receipts = run_commands(scheduled, values, build, run_out, path, run_dir=run_dir)
         assert verify.ok(receipts, tuple(s for s, _ in scheduled)), verify.summary(receipts)
         assert [r.id for r in receipts] == ["prepare", "other" if run_out == out / "baseline-2"
                                                or "mutant-2" in run_out.parts else "check"]

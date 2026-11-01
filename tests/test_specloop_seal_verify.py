@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import traceback
 from dataclasses import replace
 from pathlib import Path
@@ -296,6 +297,66 @@ def test_a_base_submodule_is_not_a_violation(tmp_path):
 
 def steps(*specs):
     return tuple(manifest.Step(i, tuple(run), expect, timeout) for i, run, expect, timeout in specs)
+
+
+def output_receipt(repo, tmp_path, monkeypatch, entry, raw, phase, code, root, snapshots=False):
+    bare, _, sha = repo
+    out = tmp_path / "run" / "task" / "a1" / "verify"
+    run_dir = tmp_path / "run" if root == "owning" else tmp_path / "other"
+    kwargs = {} if root == "omitted" else {"run_dir": run_dir}
+    if snapshots:
+        kwargs["snapshots"] = verify.SnapshotContext(tmp_path / "snapshots")
+    step = manifest.Step("output", (sys.executable, "-c",
+                         f"import os; os.write(1, {raw!r}); raise SystemExit({code})"))
+    m = replace(M, prepare=(step,) if phase == "prepare" else (),
+                verify=() if phase == "prepare" else (step,))
+    monkeypatch.setattr(verify, "wrap", lambda argv, sb: argv)
+    if entry == "run_extracted":
+        verify.extract(bare, sha, out / "src")
+    source = bare if entry == "run_steps" else out / "src"
+    receipt, = getattr(verify, entry)(source, sha, m.verify, m, out, **kwargs)
+    assert (receipt.id, receipt.exit, receipt.passed) == ("output", code, code == 0)
+    verify.cleanup(out)
+    assert not (out / "src").exists() and not (out / "build").exists()
+    assert (out / "output.log").read_bytes() == raw
+    saved, = json.loads((out / "receipts.json").read_text())
+    assert set(saved) == {"id", "argv", "expect", "exit", "passed", "seconds", "tail"}
+    assert saved["tail"] == receipt.tail
+    return receipt.tail
+
+
+@pytest.mark.scenario("verify-output/truncated-tails-identify-retained-logs/long-output-names-the-full-log")
+@pytest.mark.scenario("verify-output/truncated-tails-identify-retained-logs/byte-boundaries-preserve-decoding")
+@pytest.mark.scenario("verify-output/truncated-tails-identify-retained-logs/direct-invocation-uses-its-output-directory")
+@pytest.mark.parametrize("entry", ["run_steps", "run_extracted"])
+@pytest.mark.parametrize("raw,phase,code,root,snapshots", [
+    (b"x" * 2001, "check", 0, "omitted", False),
+    (b"x" * 4000 + b"\n \t", "prepare", 0, "owning", True),
+    (b"x" * 3000, "prepare", 1, "omitted", True),
+    (b"x" * 3000, "check", 1, "owning", False),
+    ("€".encode() + b"x" * 1999, "check", 1, "outside", True),
+    (b"x" * 2000 + b"\xff\n", "prepare", 1, "owning", False),
+], ids=["2001", "large-prepare", "failed-prepare", "failed-check", "split-utf8", "invalid-utf8"])
+def test_truncated_verify_tail_names_full_log(repo, tmp_path, monkeypatch, entry, raw, phase, code, root, snapshots):
+    tail = output_receipt(repo, tmp_path, monkeypatch, entry, raw, phase, code, root, snapshots)
+    path = {"omitted": "output.log", "owning": "task/a1/verify/output.log",
+            "outside": "../run/task/a1/verify/output.log"}[root]
+    assert tail == (f"[showing the last 2000 of {len(raw)} bytes; full log: {path}]\n"
+                    + raw[-2000:].decode("utf-8", errors="replace"))
+
+
+@pytest.mark.scenario("verify-output/truncated-tails-identify-retained-logs/short-output-stays-unchanged")
+@pytest.mark.scenario("verify-output/truncated-tails-identify-retained-logs/byte-boundaries-preserve-decoding")
+@pytest.mark.parametrize("entry", ["run_steps", "run_extracted"])
+@pytest.mark.parametrize("raw,phase,code", [
+    (b"", "check", 0), (b" " + b"x" * 1996 + b"\t\n", "prepare", 0),
+    (b"x" * 1999 + b"\n", "check", 1), (b"\xff \n", "prepare", 1),
+    ("€".encode() * 666 + b" \n", "check", 0),
+], ids=["empty", "1999", "2000", "invalid-utf8", "multibyte-2000"])
+def test_short_verify_output_has_no_marker(repo, tmp_path, monkeypatch, entry, raw, phase, code):
+    tail = output_receipt(repo, tmp_path, monkeypatch, entry, raw, phase, code, "omitted")
+    assert tail == raw.decode("utf-8", errors="replace")
+    assert "[showing the last" not in tail
 
 
 def test_receipts_expected_exits_and_stop_at_first_failure(repo, tmp_path):

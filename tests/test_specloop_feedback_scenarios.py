@@ -61,8 +61,9 @@ def env(tmp_path, monkeypatch):
     return ctx, src
 
 
-def verification(monkeypatch, seen):
-    def run_steps(repo, head, steps, m, out):
+def verification(monkeypatch, seen, ctx):
+    def run_steps(repo, head, steps, m, out, *, run_dir=None):
+        assert run_dir == ctx.run.dir
         out.mkdir(parents=True, exist_ok=True)
         (out / "tests.log").write_text("\n".join(sorted(seen)))
         return [verify.Receipt(s.id, list(s.run), s.expect, s.expect, True, 0, "") for s in steps]
@@ -75,7 +76,7 @@ def verification(monkeypatch, seen):
 @pytest.mark.parametrize("covered", [False, True])
 def test_review_feedback_only_accepts_existing_scenario_ids(env, tmp_path, monkeypatch, covered):
     ctx, src = env
-    verification(monkeypatch, {KNOWN} if covered else set())
+    verification(monkeypatch, {KNOWN} if covered else set(), ctx)
     head = ctx.head()
     original = ctx.tasks_text(head)
     parsed = tasks.parse(original)
@@ -129,7 +130,7 @@ def test_known_scenarios_preserve_candidate_order_and_exact_membership():
 @pytest.mark.scenario("specloop-interface/known-runtime-scenario-references/paths-in-review-feedback")
 def test_evidence_uses_scenarios_from_evaluated_revision(env, monkeypatch):
     ctx, src = env
-    verification(monkeypatch, {KNOWN})
+    verification(monkeypatch, {KNOWN}, ctx)
     evaluated = ctx.head()
     # The current branch now defines a/b/c, but the older evaluated revision does not.
     data = json.loads((src / SCENARIOS_PATH).read_text())

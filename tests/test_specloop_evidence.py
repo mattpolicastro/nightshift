@@ -111,7 +111,7 @@ def test_evidence_event_counts_only_test_timeout_mutants(tmp_path, monkeypatch, 
     ev = evidence.Evidence(1, covered=["c/r/s"], uncovered=["c/r/missing"] if uncovered else [])
     for number, (stage, exit_code) in enumerate(outcomes, 1):
         receipt = verify.Receipt(stage, [], 0, exit_code, exit_code == 0, 1, "")
-        monkeypatch.setattr(verify, "run_extracted", lambda *args, receipt=receipt: [receipt])
+        monkeypatch.setattr(verify, "run_extracted", lambda *args, receipt=receipt, run_dir=None: [receipt])
         mut = evidence.Mutant("calc.py", 1, "int", "x = 1", f"x = {number + 1}")
         mut.result = evidence._mutate_one(number, mut, source, "head", m.verify, m, tmp_path / "out")
         ev.mutants.append(mut)
@@ -223,7 +223,7 @@ def test_timeout_results_match_serial_despite_parallel_completion_order(tmp_path
         completed = []
         lock = Lock()
 
-        def run(src, head, steps, run_m, run_out):
+        def run(src, head, steps, run_m, run_out, *, run_dir=None):
             number = int(run_out.name.split("-")[1])
             assert (src / "calc.py").read_text() == selected[number - 1].after + "\n"
             assert bool(run_m.prepare) is prepared
@@ -697,7 +697,7 @@ def test_gate_measures_a_guard_clause_change(tmp_path, monkeypatch):
     observed = {}
     fallback = "available"
 
-    def run(src, sha, steps, run_m, run_out):
+    def run(src, sha, steps, run_m, run_out, *, run_dir=None):
         assert sha == head and src == run_out / "src" and src != repo
         assert not run_m.prepare and [step.id for step in steps] == ["test"]
         private_source = (src / "calc.py").read_text()
@@ -1003,17 +1003,17 @@ if grep -Fq '# signal' "{source}"; then kill -TERM $$; fi
     lock = Lock()
     active = peak = 0
 
-    def run(src, sha, steps, run_m, run_out):
+    def run(src, sha, steps, run_m, run_out, *, run_dir=None):
         nonlocal active, peak
         if run_out == out:
-            return real_run(src, sha, steps, run_m, run_out)
+            return real_run(src, sha, steps, run_m, run_out, run_dir=run_dir)
         with lock:
             active += 1
             peak = max(peak, active)
         try:
             if parallel == 2 and run_out.name in ("mutant-1", "mutant-2"):
                 overlap.wait(timeout=10)
-            return real_run(src, sha, steps, run_m, run_out)
+            return real_run(src, sha, steps, run_m, run_out, run_dir=run_dir)
         finally:
             with lock:
                 active -= 1
@@ -1096,7 +1096,7 @@ def test_timeout_at_manifest_ceiling_keeps_invalid_step_precedence(tmp_path, mon
         (run_out / "src/calc.py").write_text(CODE)
         return [baseline_receipt]
 
-    def run(src, head, steps, run_m, run_out):
+    def run(src, head, steps, run_m, run_out, *, run_dir=None):
         assert run_m.prepare + steps == (step,)  # fallback or cap, never the 30/60-second budget
         # Only the first failure determines classification, even if a caller
         # supplies later failures with a different step kind or exit status.
@@ -1147,7 +1147,7 @@ def test_mutant_timeout_overrides_are_exact_and_immutable(tmp_path, monkeypatch,
 
     calls = []
 
-    def run_mutant(src, head, steps, bounded, run_out):
+    def run_mutant(src, head, steps, bounded, run_out, *, run_dir=None):
         assert m == original
         assert bounded is not m
         assert steps == tuple(replace(s, timeout=t) for s, t in zip(selected, expected))
@@ -1245,11 +1245,11 @@ def test_real_mutant_step_timeout_stops_its_process_group(tmp_path, monkeypatch,
     real_run = verify.run_extracted
     observed = []
 
-    def run(src, sha, steps, run_m, run_out):
+    def run(src, sha, steps, run_m, run_out, *, run_dir=None):
         scheduled = run_m.prepare + steps
         observed.append(run_out)
         assert all(s.timeout == (10 if run_out == out else 1.0) for s in scheduled)
-        receipts = real_run(src, sha, steps, run_m, run_out)
+        receipts = real_run(src, sha, steps, run_m, run_out, run_dir=run_dir)
         if run_out == out:
             # Control baseline timing only; all commands and timeout handling are real.
             for receipt in receipts:
@@ -1291,9 +1291,9 @@ def test_concurrent_private_workers_release_processes_and_trees(tmp_path, monkey
     barrier = Barrier(3)
     real_run = verify.run_extracted
 
-    def overlapping_run(src, sha, steps, run_m, run_out):
+    def overlapping_run(src, sha, steps, run_m, run_out, *, run_dir=None):
         barrier.wait(timeout=10)
-        return real_run(src, sha, steps, run_m, run_out)
+        return real_run(src, sha, steps, run_m, run_out, run_dir=run_dir)
 
     monkeypatch.setattr(verify, "run_extracted", overlapping_run)
     try:
@@ -1550,10 +1550,10 @@ print(source, end="")
         executed, completed, cleaned = [], [], []
         active = peak = 0
 
-        def run(src, sha, steps, run_m, run_out):
+        def run(src, sha, steps, run_m, run_out, *, run_dir=None):
             nonlocal active, peak
             if run_out == out:
-                return real_run(src, sha, steps, run_m, run_out)
+                return real_run(src, sha, steps, run_m, run_out, run_dir=run_dir)
             number = int(run_out.name.split("-")[1])
             with lock:
                 executed.append(number)
@@ -1568,7 +1568,7 @@ print(source, end="")
                     assert second_cleaned.wait(20)
                 expected = code.replace(selected[number - 1].before, selected[number - 1].after)
                 assert (src / "calc.py").read_text() == expected
-                receipts = real_run(src, sha, steps, run_m, run_out)
+                receipts = real_run(src, sha, steps, run_m, run_out, run_dir=run_dir)
                 if prepared:
                     assert (run_out / "build/project/calc.py").read_text() == expected
                 return receipts
@@ -1688,13 +1688,13 @@ sys.exit(3 if "# failure" in source else 0)
     active = peak = 0
     baseline_calls = []
 
-    def run(src, sha, selected_steps, run_m, run_out):
+    def run(src, sha, selected_steps, run_m, run_out, *, run_dir=None):
         nonlocal active, peak
         assert m == original
         if run_out == out:
             baseline_calls.append(run_out)
             assert selected_steps == checks and run_m.prepare == preparation
-            receipts = real_run(src, sha, selected_steps, run_m, run_out)
+            receipts = real_run(src, sha, selected_steps, run_m, run_out, run_dir=run_dir)
             for receipt in receipts:
                 receipt.seconds = baseline_seconds[receipt.id]
             return receipts
@@ -1710,7 +1710,7 @@ sys.exit(3 if "# failure" in source else 0)
         try:
             if number <= 2:
                 overlap.wait(timeout=60)
-            return real_run(src, sha, selected_steps, run_m, run_out)
+            return real_run(src, sha, selected_steps, run_m, run_out, run_dir=run_dir)
         finally:
             with lock:
                 active -= 1
@@ -1769,7 +1769,7 @@ def test_mutant_dispatch_waits_for_baseline_and_obeys_limit(tmp_path, monkeypatc
     calls, completed = [], []
     active = peak = 0
 
-    def run(src, sha, steps, m, run_out):
+    def run(src, sha, steps, m, run_out, *, run_dir=None):
         nonlocal active, peak
         with lock:
             calls.append(run_out)
@@ -1840,10 +1840,10 @@ def test_failed_baseline_never_dispatches_mutants(tmp_path, monkeypatch, stage, 
     calls = []
     real_run = verify.run_extracted
 
-    def run(src, sha, steps, run_m, run_out):
+    def run(src, sha, steps, run_m, run_out, *, run_dir=None):
         calls.append(run_out)
         assert run_out == out
-        return real_run(src, sha, steps, run_m, run_out)
+        return real_run(src, sha, steps, run_m, run_out, run_dir=run_dir)
 
     def unexpected_pool(*args, **kwargs):
         pytest.fail("failed baseline must not create a worker pool")
@@ -1917,9 +1917,9 @@ def test_worker_exception_drains_active_worker_before_baseline_cleanup(tmp_path,
     cleaned = []
     real_run, real_cleanup = verify.run_extracted, verify.cleanup
 
-    def run(src, sha, steps, m, run_out):
+    def run(src, sha, steps, m, run_out, *, run_dir=None):
         if run_out == out:
-            return real_run(src, sha, steps, m, run_out)
+            return real_run(src, sha, steps, m, run_out, run_dir=run_dir)
         artifacts = run_out / "build" / "artifacts"
         artifacts.mkdir(parents=True)
         (artifacts / "source.txt").write_text((src / "calc.py").read_text())
@@ -2016,7 +2016,7 @@ cat "{src}/calc.py"
     runs = []
     overlap = Barrier(2)
 
-    def observe(src, sha, steps, m, run_out):
+    def observe(src, sha, steps, m, run_out, *, run_dir=None):
         assert not (src / "calc.py").stat().st_mode & 0o222
         if run_out != out:
             assert src == run_out / "src"
@@ -2027,7 +2027,7 @@ cat "{src}/calc.py"
             assert (out / "build" / "visited").exists()
             if parallel > 1 and run_out.name in ("mutant-1", "mutant-2"):
                 overlap.wait(timeout=10)
-        result = real_run(src, sha, steps, m, run_out)
+        result = real_run(src, sha, steps, m, run_out, run_dir=run_dir)
         assert (out / "src" / "calc.py").read_text() == CODE
         if run_out != out:
             number = int(run_out.name.split("-")[1])

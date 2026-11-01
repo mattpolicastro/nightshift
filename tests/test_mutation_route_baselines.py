@@ -49,13 +49,13 @@ def routed(tmp_path, monkeypatch):
             target.write_text(mut.before + "\n")
         (src / "baseline-origin").write_text(str(src.parent.relative_to(out)))
 
-    def run(src, head, steps, run_m, run_out):
+    def run(src, head, steps, run_m, run_out, *, run_dir=None):
         baseline = not run_out.name.startswith("mutant-")
         calls.append((run_out, tuple(s.id for s in steps)))
         if baseline:
             assert run_m.vars.get("mutant_path", "") == ""
             assert all(s.timeout == 120 for s in run_m.prepare + steps)
-        receipts = real_run(src, head, steps, run_m, run_out)
+        receipts = real_run(src, head, steps, run_m, run_out, run_dir=run_dir)
         if baseline:
             # Different sequences deliberately measure shared IDs differently.
             for receipt in receipts:
@@ -170,7 +170,7 @@ def test_later_failed_baseline_stops_all_mutants(tmp_path, monkeypatch, routed, 
     m, mutants, out, calls = routed
     real_run = verify.run_extracted
 
-    def run(src, head, steps, run_m, run_out):
+    def run(src, head, steps, run_m, run_out, *, run_dir=None):
         if run_out == out / "baseline-2":
             script = "raise SystemExit(3)" if failure == "exit" else "import time; time.sleep(60)"
             bad = manifest.Step(stage, (sys.executable, "-c", script), timeout=120)
@@ -180,7 +180,7 @@ def test_later_failed_baseline_stops_all_mutants(tmp_path, monkeypatch, routed, 
                 run_m = replace(run_m, prepare=(bad,))
             else:
                 steps = tuple(bad if s.id == stage else s for s in steps)
-        return real_run(src, head, steps, run_m, run_out)
+        return real_run(src, head, steps, run_m, run_out, run_dir=run_dir)
 
     if failure == "timeout":
         real_wait = verify.subprocess.Popen.wait
