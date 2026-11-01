@@ -28,6 +28,22 @@ class RateLimit:
     using_overage: bool
 
 
+def parse_rate_limit(event: dict) -> RateLimit | None:
+    """Decode one snapshot; malformed payloads must not erase earlier telemetry."""
+    if not isinstance(event, dict) or event.get("type") != "rate_limit_event":
+        return None
+    info = event.get("rate_limit_info")
+    if not isinstance(info, dict):
+        return None
+    status, window, reset = info.get("status"), info.get("rateLimitType"), info.get("resetsAt")
+    return RateLimit(
+        status=status if isinstance(status, str) else "unknown",
+        type=window if isinstance(window, str) else "unknown",
+        resets_at=reset if type(reset) is int and reset > 0 else 0,
+        using_overage=info.get("isUsingOverage") is True,
+    )
+
+
 @dataclass
 class Denial:
     tool: str
@@ -120,13 +136,8 @@ def parse(events: str) -> Result | None:
         elif event.get("type") == "result":
             result_event = event
         elif event.get("type") == "rate_limit_event":
-            info = event.get("rate_limit_info") or {}
-            rate_limit = RateLimit(
-                status=info.get("status", "unknown"),
-                type=info.get("rateLimitType", "unknown"),
-                resets_at=info.get("resetsAt", 0),
-                using_overage=bool(info.get("isUsingOverage")),
-            )
+            if (decoded := parse_rate_limit(event)) is not None:
+                rate_limit = decoded
 
     if result_event is None:
         return None

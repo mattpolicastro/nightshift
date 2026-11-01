@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nightshift.host_paths import tool_path
+from nightshift.trace import RateLimit
 from specloop.manifest import Profile
 from specloop.state_locks import writer
 
@@ -31,6 +32,7 @@ class Result:
     session: str = ""
     detail: str = ""
     usage: dict = field(default_factory=dict)
+    rate_limit: RateLimit | None = None
 
 
 @dataclass(frozen=True)
@@ -139,7 +141,7 @@ def run(call: Call) -> Result:
     result = adapter.run(call)
     if result.disposition == "ok":
         if (err := validate(result.output, call.schema)):
-            return Result("invalid_output", result.output, result.session, err, result.usage)
+            return Result("invalid_output", result.output, result.session, err, result.usage, result.rate_limit)
     return result
 
 

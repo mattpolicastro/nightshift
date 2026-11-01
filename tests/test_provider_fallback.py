@@ -85,6 +85,7 @@ def test_single_profile_chain_still_pauses_on_infra(setup, disposition):
         for _ in range(2 if disposition == "infra" else 1):
             dispatch(ctx, disposition, detail)
         pause = Run(ctx.run.dir).state.pause
+        assert Run(ctx.run.dir).state.tasks[TASK.key] == ts
         assert pause.reason == "infra" and pause.detail == detail
         assert pause.resume_at == now[0] + 900
         assert ts.infra == (2 if disposition == "infra" else 0) and ts.attempts == 2
@@ -164,6 +165,7 @@ def test_manual_resume_reconciles_provider_deadline(setup, monkeypatch, single, 
         assert loop.run(ctx) == "paused"
     ctx = restart(ctx)
     # A new failure at the same clock time supersedes the historical manual resume.
+    assert ctx.run.state.task(TASK.key).auto_resumes == 2
     assert loop._pick(ctx, role) is None
     assert ctx.run.state.exhausted == deadlines
     if should_probe:
@@ -187,6 +189,7 @@ def test_all_profiles_unavailable_pauses_with_earliest_retry(setup):
     assert "other" not in pause.detail
     assert ctx.run.state.task(TASK.key).attempts == 0
     assert [notice.kind for notice in notices] == [messages.FYI, messages.ACTION]
+    assert Run(ctx.run.dir).state.pause == pause
 
 
 @pytest.mark.scenario("provider-fallback/compatible-all-blocked-pauses/mixed-blocks-retain-bounded-recovery")
@@ -203,6 +206,7 @@ def test_mixed_blocks_keep_infra_recovery_cap(setup, monkeypatch, quota_first):
         dispatch(ctx, "infra" if quota_first else "usage_limit")
         pause = ctx.run.state.pause
         assert pause.reason == "infra" and pause.resume_at == now[0] + 100
+        assert Run(ctx.run.dir).state.pause == pause
         assert ("a usage-limited" if quota_first else "b usage-limited") in pause.detail
         assert ("b unavailable: offline" if quota_first else "a unavailable: offline") in pause.detail
         now[0] = pause.resume_at
@@ -232,6 +236,7 @@ def test_quota_only_recovery_stays_uncapped(setup, monkeypatch, history):
         dispatch(ctx, "usage_limit")
         pause = ctx.run.state.pause
         assert pause.reason == "usage_limit" and pause.resume_at == until
+        assert Run(ctx.run.dir).state.pause == pause
         assert "usage-limited (a, b)" in pause.detail
         assert notices[-1].kind == messages.FYI
         now[0] = until

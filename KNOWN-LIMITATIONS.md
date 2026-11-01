@@ -334,7 +334,12 @@ real-host Stop/evidence inspection remain human checks, not fixture evidence.
   be detected; discovery does not retrieve them or inject landing tokens into the
   daemon. Custom supervisor config paths and bot credential sources require
   [operator provisioning](README.md#host-path-setup).
-- Quota is handled by detecting a usage-limit error, not read ahead of time.
+- Quota is observed after a session, not read ahead of time. Claude structured
+  telemetry supplies reset-based waits and an overage hold requiring human
+  resume; it cannot interrupt a live call or prevent already-incurred charges.
+  See [quota recovery](docs/specloop/README.md#how-the-engine-works) for event evidence and
+  deadlines. Real-limit validation remains pending; synthetic fixtures are not
+  proof of provider behavior ([issue #162](https://github.com/mattpolicastro/nightshift/issues/162)).
 
 ## Platform assumptions
 

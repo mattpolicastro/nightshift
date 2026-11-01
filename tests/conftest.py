@@ -1,4 +1,5 @@
 import os
+from itertools import count
 from pathlib import Path
 import subprocess
 
@@ -44,9 +45,24 @@ def trust_fakes_without_associations(request, monkeypatch):
     monkeypatch.setattr(specloop_intake, "_issue_author_trusted", lambda repo, number, gh: True)
 
 
+@pytest.fixture(scope="session")
+def isolated_home_factory(tmp_path_factory):
+    # Number once per worker, then allocate without rescanning all earlier
+    # homes for every test. Keep these outside individual tests' tmp_path.
+    root = tmp_path_factory.mktemp("test-homes")
+    numbers = count()
+
+    def create():
+        home = root / str(next(numbers))
+        home.mkdir(mode=0o700)
+        return home
+
+    return create
+
+
 @pytest.fixture(autouse=True)
-def isolate_outcome_store(tmp_path_factory, monkeypatch):
-    home = tmp_path_factory.mktemp("test-home")
+def isolate_outcome_store(isolated_home_factory, monkeypatch):
+    home = isolated_home_factory()
     state = home / ".nightshift"
     state.mkdir()
     monkeypatch.setenv("HOME", str(home))
