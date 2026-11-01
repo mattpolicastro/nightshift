@@ -1218,7 +1218,7 @@ shared across roles and retained across restarts. At expiry it becomes eligible
 in the original chain order with a fresh retry allowance. The same task,
 pending candidate or gate continues without charging a coding attempt; an
 `unavailable` event records the diagnostic and an FYI names the successor.
-Provider recovery pauses only when every profile in that role's chain is
+Except for the overage hold below, ordinary provider recovery pauses only when every profile in that role's chain is
 blocked, with its earliest deadline as the retry time. Quota-only chains use
 `usage_limit`, with uncapped automatic resumes by `serve`; any unavailable
 profile, including a mix with quota blocks, uses `infra`, still limited to two
@@ -1229,6 +1229,22 @@ deadlines and the automatic-resume cap remain unchanged. This recovery applies
 to admitted build work; drafting, feasibility, the spec critic and the one-shot
 arbiter keep their existing behavior
 ([issue #72](https://github.com/mattpolicastro/nightshift/issues/72)).
+
+**Claude quota telemetry** classifies structured rejections as usage limits;
+allowed/warning snapshots do not trigger usage matching. Without a recognized
+status, failed calls fall back to stderr and explicit provider errors, never
+agent-authored prose. Inspect `exhausted.rate_limit` in `events.jsonl` for
+`status`, `type`, `resets_at` and `using_overage`, and `exhausted.until` for the
+chosen deadline: a future reset plus 60 seconds, or a 30-minute backoff when
+missing, invalid or stale. Ordinary quota waits survive restart and `serve`
+resumes them when due. Reported overage instead records an `overage` event with
+the same telemetry and pauses the run, even with a usable fallback. This hold
+has no automatic deadline; inspect billing settings, then explicitly use
+`nightshift resume <change>` to continue. Another overage report pauses again.
+Telemetry is handled after the CLI returns: it neither interrupts a live call
+nor prevents already-incurred charges. Real-limit validation remains pending;
+synthetic fixtures do not prove the CLI's behavior at a real limit
+([issue #162](https://github.com/mattpolicastro/nightshift/issues/162)).
 
 **Providers are pluggable.** Two adapters: `codex` (`codex exec`) and `claude`
 (`claude -p`). Each can use its CLI's subscription login or a local

@@ -19,6 +19,51 @@ GUIDE = ROOT / "docs/specloop/README.md"
 CHANGE = "nightshift-issue-72-providers-fall-back-to-the-next-profile"
 
 
+def telemetry_paragraph(text):
+    lines = text.split("\n")  # Physical lines; Markdown contexts have no special meaning.
+    starts = [i for i, line in enumerate(lines) if line.startswith("**Claude quota telemetry**")]
+    assert len(starts) == 1
+    passage = []
+    for line in lines[starts[0]:]:
+        if not line.strip():
+            break
+        assert not re.match(r"^#{1,6} +\S", line)
+        passage.append(line)
+    content = "\n".join(passage).removeprefix("**Claude quota telemetry**").strip()
+    assert content
+    return content
+
+
+@pytest.mark.scenario("specloop-documentation/structured-quota-guidance/operator-distinguishes-a-quota-wait-from-an-overage-hold")
+def test_telemetry_guidance_boundary_and_issue_link():
+    passage = telemetry_paragraph(GUIDE.read_text())
+    issue = "https://github.com/mattpolicastro/nightshift/issues/162"
+    assert issue in [target for _, target in LINK.findall(passage)]
+    assert issue in [target for _, target in LINK.findall((ROOT / "KNOWN-LIMITATIONS.md").read_text())]
+
+
+@pytest.mark.parametrize("text,valid", [
+    ("", False), (" **Claude quota telemetry** content", False),
+    ("**Claude quota telemetry**", False),
+    ("**Claude quota telemetry** a\n\n**Claude quota telemetry** b", False),
+    ("**Claude quota telemetry** a\n```\n**Claude quota telemetry** b", False),
+    *[(f"**Claude quota telemetry** a\n{'#' * n} Heading", False) for n in range(1, 7)],
+    ("**Claude quota telemetry** a\n```\n# Heading", False),
+    ("**Claude quota telemetry** a\n<!--\n# Heading", False),
+    ("**Claude quota telemetry** a\n \n# Heading", True),
+    ("```\n**Claude quota telemetry** a\n```", True),
+    ("<!--\n**Claude quota telemetry** a\n-->", True),
+    ("**Claude quota telemetry** a\n # Heading\n####### Heading\n#No-space\n#\tTab", True),
+    ("**Claude quota telemetry** a\n **Claude quota telemetry** b", True),
+])
+def test_telemetry_passage_uses_literal_physical_boundaries(text, valid):
+    if valid:
+        assert telemetry_paragraph(text)
+    else:
+        with pytest.raises(AssertionError):
+            telemetry_paragraph(text)
+
+
 def usage_paragraph():
     matches = re.findall(r"^\*\*Usage limits\*\*[^\n]*(?:\n[^\n]+)*", GUIDE.read_text(), re.MULTILINE)
     assert len(matches) == 1

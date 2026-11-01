@@ -976,12 +976,20 @@ def _infra(ctx: Ctx, task: tasks.Task | None, ts: TaskState, res: agents.Result,
            key: str = "") -> bool:
     retries = _infra_retries(ctx)
     key = task.key if task else key
+    telemetry = {"rate_limit": vars(res.rate_limit)} if res.rate_limit is not None else {}
+    if res.rate_limit is not None and res.rate_limit.using_overage:
+        ctx.run.event("overage", task=key, role=role, profile=call.profile.name,
+                      detail=res.detail[:300], **telemetry)
+        ctx.pause("overage", task, f"{key}: {role} profile {call.profile.name} reported overage; "
+                  "inspect billing settings before resuming.", key, resume_at=0)
+        return True
     if res.disposition == "usage_limit":
         p = call.profile
         limits = quota.codex_limits(call.home) if p.adapter == "codex" and not p.base_url and not p.auth else None
-        until = quota.resume_at(limits)
+        until = (quota.resume_at(limits, rate_limit=res.rate_limit) if res.rate_limit is not None
+                 else quota.resume_at(limits))
         ctx.run.state.exhausted[p.name] = until
-        ctx.run.event("exhausted", profile=p.name, until=until, detail=res.detail[:300])
+        ctx.run.event("exhausted", profile=p.name, until=until, detail=res.detail[:300], **telemetry)
         nxt = _pick(ctx, role)
         if nxt is None:
             _all_exhausted(ctx, task, role, key)
