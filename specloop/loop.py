@@ -54,6 +54,65 @@ class Ctx:
                                        pr=self.run.state.pr, resume_at=resume_at))
 
 
+def _source_credential_helpers(source: Path, *, timeout: float) -> tuple[bytes, ...]:
+    """Read only source-local helpers, retaining byte values and empty resets."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source), "config", "--local", "--null", "--get-all", "credential.helper"],
+            capture_output=True, timeout=min(timeout, 20),
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeError("could not read source-local credential helpers") from None
+    if result.returncode == 1 and not result.stdout and not result.stderr:
+        return ()
+    if result.returncode == 0 and result.stdout and result.stdout.endswith(b"\0"):
+        return tuple(result.stdout[:-1].split(b"\0"))
+    raise RuntimeError("could not read source-local credential helpers") from None
+
+
+def _credential_transport_env(helpers: tuple[bytes, ...]) -> dict[str, str]:
+    """Append helpers to child-only indexed config without changing inherited pairs."""
+    env = dict(os.environ)
+    if not helpers:
+        return env
+    error = "invalid inherited Git config environment"
+    count_text = env.get("GIT_CONFIG_COUNT", "0")
+    if not re.fullmatch(r"[0-9]+", count_text):
+        raise RuntimeError(error) from None
+    try:
+        count = int(count_text)
+    except ValueError:
+        raise RuntimeError(error) from None
+    for i in range(count):
+        if not env.get(f"GIT_CONFIG_KEY_{i}") or f"GIT_CONFIG_VALUE_{i}" not in env:
+            raise RuntimeError(error) from None
+    for i, helper in enumerate(helpers, count):
+        env[f"GIT_CONFIG_KEY_{i}"] = "credential.helper"
+        env[f"GIT_CONFIG_VALUE_{i}"] = os.fsdecode(helper)
+    env["GIT_CONFIG_COUNT"] = str(count + len(helpers))
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _credential_transport_error(
+    operation: str, exc: subprocess.CalledProcessError | subprocess.TimeoutExpired,
+    helpers: tuple[bytes, ...],
+) -> RuntimeError:
+    """Sanitize the complete binary stderr before decoding and selecting its tail.
+
+    Callers must raise the returned error from None at the subprocess boundary.
+    Unexpected text output is omitted because byte-level redaction cannot cover it.
+    """
+    diagnostic = exc.stderr if isinstance(exc.stderr, bytes) else b""
+    patterns = {part for helper in helpers for part in (helper, *helper.splitlines()) if part}
+    for pattern in sorted(patterns, key=len, reverse=True):
+        diagnostic = diagnostic.replace(pattern, b"[REDACTED]")
+    tail = diagnostic.decode("utf-8", errors="replace").strip()[-400:]
+    status = (f"timed out after {exc.timeout:g}s" if isinstance(exc, subprocess.TimeoutExpired)
+              else f"failed (git exited {exc.returncode})")
+    return RuntimeError(f"{operation} {status}" + (f": {tail}" if tail else ""))
+
+
 def _fetch_publish_base(ctx: Ctx, remote: str | None = None, *, timeout: float) -> str:
     """Fetch the source origin's base, never falling back to a previous fetch.
 
