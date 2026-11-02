@@ -71,11 +71,17 @@ def _unsafe(path: str) -> str | None:
         return "unsafe path"
     if any(p in ("", ".", "..") for p in parts):
         return "unsafe path"
-    if any(p.lower() in (".git", ".codex") for p in parts):
+    if any(p.lower() == ".git" for p in parts):
         return "tool metadata path"
     if any(ord(c) < 32 for c in path):
         return "control character in path"
     return None
+
+
+def _steering(path: str) -> bool:
+    """Instruction integrity is independent of manifest allowances."""
+    return any(p.lower() in {"agents.md", "claude.md", ".claude", ".codex", ".mcp.json"}
+               for p in path.split("/"))
 
 
 def _base_tree(repo: Path, base: str) -> dict[str, tuple[str, str]]:
@@ -163,7 +169,7 @@ def seal(repo: Path, work: Path, base: str, m: Manifest, message: str, secrets: 
     edits += [(p, None, None) for p, v in changes.items() if v is None]
 
     for path, mode, sha in sorted(edits):
-        if matches(path, m.frozen):
+        if _steering(path) or matches(path, m.frozen):
             result.violations.append(f"{path}: frozen path (change reverted)")
         elif not matches(path, m.allowed):
             result.violations.append(f"{path}: outside the allowed paths (change reverted)")

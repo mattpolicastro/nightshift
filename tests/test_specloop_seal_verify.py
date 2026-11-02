@@ -51,6 +51,121 @@ def tree(bare, sha):
     return set(sh(bare, "git", "ls-tree", "-r", "--name-only", sha).splitlines())
 
 
+STEERING_PATHS = ("AGENTS.md", "CLAUDE.md", ".claude/settings.json", ".codex/config.toml", ".mcp.json")
+
+
+@pytest.mark.scenario("agent-steering-seal/unconditional-steering-freeze/protected-paths-without-manifest-entries")
+@pytest.mark.scenario("agent-steering-seal/frozen-edit-results/existing-steering-edits-are-reverted-and-reported")
+@pytest.mark.scenario("agent-steering-seal/frozen-edit-results/only-protected-changes-produce-no-commit")
+@pytest.mark.scenario("agent-steering-seal/frozen-edit-results/unchanged-steering-files-remain-quiet")
+@pytest.mark.parametrize("name", STEERING_PATHS)
+@pytest.mark.parametrize("prefix", ["", "src/nested/"])
+@pytest.mark.parametrize("edit", ["add", "content", "delete", "mode", "unchanged"])
+@pytest.mark.parametrize("companion", [False, True])
+def test_agent_steering_files_frozen_without_manifest_entry(repo, name, prefix, edit, companion):
+    bare, work, base = repo
+    path = prefix + name
+    m = manifest.parse({**M_DATA, "paths": {"allowed": [*STEERING_PATHS, "src/**"]}})
+    assert m.frozen == () and manifest.matches(path, m.allowed)
+    if edit != "add":
+        base = seal.commit_files(bare, base, {path: "trusted instructions\n"}, "trusted base")
+        sh(work, "git", "fetch", "-q", str(bare), base)
+        sh(work, "git", "reset", "--hard", base)
+    f = work / path
+    if edit in ("add", "content"):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("attempted instructions\n")
+    elif edit == "delete":
+        f.unlink()
+    elif edit == "mode":
+        f.chmod(0o755)
+    if companion:
+        (work / "src/a.txt").write_text("admissible edit\n")
+
+    s = seal.seal(bare, work, base, m, "msg")
+    assert s.changed == (["src/a.txt"] if companion else [])
+    assert s.violations == ([] if edit == "unchanged" else [f"{path}: frozen path (change reverted)"])
+    assert s.secret_paths == []
+    if companion:
+        assert s.sha is not None
+        # ls-tree compares both the protected blob and mode (or its absence).
+        assert sh(bare, "git", "ls-tree", s.sha, path) == sh(bare, "git", "ls-tree", base, path)
+        assert tree(bare, s.sha) == tree(bare, base)
+        assert sh(bare, "git", "show", f"{s.sha}:src/a.txt") == "admissible edit"
+        assert sh(bare, "git", "rev-parse", f"{s.sha}^") == base
+    else:
+        assert s.sha is None
+
+
+@pytest.mark.scenario("agent-steering-seal/unconditional-steering-freeze/manifest-allowances-cannot-override-protection")
+@pytest.mark.parametrize("frozen", [[], ["openspec/**"]], ids=["empty", "unrelated"])
+@pytest.mark.parametrize("allowance", ["exact", "directory"])
+def test_manifest_cannot_unfreeze_steering_files(repo, frozen, allowance):
+    bare, work, base = repo
+    paths = [prefix + name for prefix in ("", "src/nested/") for name in STEERING_PATHS]
+    allowed = paths if allowance == "exact" else ["AGENTS.md", "CLAUDE.md", ".mcp.json",
+                                                 ".claude/**", ".codex/**", "src/**"]
+    m = manifest.parse({**M_DATA, "paths": {"allowed": [*allowed, "src/a.txt"], "frozen": frozen}})
+    for path in paths:
+        assert manifest.matches(path, m.allowed) and not manifest.matches(path, m.frozen)
+        f = work / path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("attempted instructions\n")
+    (work / "src/a.txt").write_text("admissible edit\n")
+    s = seal.seal(bare, work, base, m, "msg")
+    assert s.sha is not None and s.changed == ["src/a.txt"]
+    assert s.violations == [f"{path}: frozen path (change reverted)" for path in sorted(paths)]
+    assert tree(bare, s.sha) == tree(bare, base)
+    assert sh(bare, "git", "show", f"{s.sha}:src/a.txt") == "admissible edit"
+
+
+@pytest.mark.scenario("agent-steering-seal/unconditional-steering-freeze/component-matching-is-precise")
+@pytest.mark.parametrize("prefix", ["", "src/nested/"])
+@pytest.mark.parametrize("name,protected", [
+    ("agents.MD", True), ("cLaUdE.mD", True), (".ClAuDe/settings.json", True),
+    (".CoDeX/config.toml", True), (".MCP.JSON", True),
+    ("AGENTS.md/child.txt", True), ("CLAUDE.md/child.txt", True),
+    (".mcp.json/child.txt", True), (".claude", True), (".codex", True),
+    ("AGENTS.md.example", False), ("CLAUDE.md.example", False),
+    (".claude-backup/settings.json", False), (".codex-backup/config.toml", False),
+    (".mcp.json.example", False), ("prefixAGENTS.md", False),
+    ("AGENTS.md.example/child.txt", False),
+])
+def test_steering_component_boundaries(repo, prefix, name, protected):
+    bare, work, base = repo
+    path = prefix + name
+    m = manifest.parse({**M_DATA, "paths": {"allowed": [path, "src/a.txt"]}})
+    assert manifest.matches(path, m.allowed)
+    f = work / path
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("new file\n")
+    (work / "src/a.txt").write_text("admissible edit\n")
+    s = seal.seal(bare, work, base, m, "msg")
+    assert s.sha is not None
+    assert s.changed == sorted(["src/a.txt"] + ([] if protected else [path]))
+    assert s.violations == ([f"{path}: frozen path (change reverted)"] if protected else [])
+    assert tree(bare, s.sha) == tree(bare, base) | (set() if protected else {path})
+    if not protected:
+        assert sh(bare, "git", "show", f"{s.sha}:{path}") == "new file"
+
+
+@pytest.mark.parametrize("path", ["AGENTS.md", "src/nested/.codex/config.toml"])
+def test_steering_symlink_is_still_rejected_without_reading(repo, path):
+    bare, work, base = repo
+    base = seal.commit_files(bare, base, {path: "trusted instructions\n"}, "trusted base")
+    sh(work, "git", "fetch", "-q", str(bare), base)
+    sh(work, "git", "reset", "--hard", base)
+    f = work / path
+    f.unlink()
+    f.symlink_to(work / "missing-target")
+    (work / "src/a.txt").write_text("admissible edit\n")
+    m = manifest.parse({**M_DATA, "paths": {"allowed": [path, "src/**"]}})
+    s = seal.seal(bare, work, base, m, "msg")
+    assert s.sha is not None and s.changed == ["src/a.txt"]
+    assert s.violations == [f"{path}: not a regular file"]
+    assert sh(bare, "git", "ls-tree", s.sha, path) == sh(bare, "git", "ls-tree", base, path)
+
+
 def test_allowed_changes_land_and_violations_are_reverted(repo):
     bare, work, base = repo
     (work / "src" / "a.txt").write_text("changed\n")
