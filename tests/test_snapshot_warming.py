@@ -71,9 +71,10 @@ def test_snapshot_warms_only_on_base_commit(warming, tmp_path, snapshot_env, mon
     import shutil
     monkeypatch.setattr(verify, "_clone_api", lambda: lambda src, dst, flags: (shutil.copyfile(src, dst), 0)[1])
     checked, run_steps = [], verify.run_steps
-    def check(repo, sha, steps, m, out, *, snapshots=None):
+    def check(repo, sha, steps, m, out, *, snapshots=None, run_dir=None):
+        assert run_dir == ctx.run.dir
         assert snapshots is ctx.snapshots
-        rs = run_steps(repo, sha, steps, m, out, snapshots=snapshots)
+        rs = run_steps(repo, sha, steps, m, out, snapshots=snapshots, run_dir=run_dir)
         assert [r.id for r in rs] == ["ordinary", steps[0].id] and all(r.passed for r in rs)
         assert rs[0].argv[-1] == rs[1].argv[-1] == str(out / "build/snapshots/deps")
         for mode in ("prepare", "verify"):

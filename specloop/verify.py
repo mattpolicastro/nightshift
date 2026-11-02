@@ -406,17 +406,17 @@ def _consume_snapshots(src: Path, sha: str, m: Manifest, out: Path,
 
 
 def run_steps(repo: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out: Path, *,
-              snapshots: SnapshotContext | None = None) -> list[Receipt]:
+              snapshots: SnapshotContext | None = None, run_dir: Path | None = None) -> list[Receipt]:
     """Extract once, prepare dependencies, then run the requested offline checks."""
     src = out / "src"
     extract(repo, sha, src)
     if snapshots is None:
-        return run_extracted(src, sha, steps, m, out)
-    return run_extracted(src, sha, steps, m, out, snapshots=snapshots)
+        return run_extracted(src, sha, steps, m, out, run_dir=run_dir)
+    return run_extracted(src, sha, steps, m, out, snapshots=snapshots, run_dir=run_dir)
 
 
 def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out: Path, *,
-                  snapshots: SnapshotContext | None = None) -> list[Receipt]:
+                  snapshots: SnapshotContext | None = None, run_dir: Path | None = None) -> list[Receipt]:
     """Prepare a fresh build from an already read-only source tree, then check it."""
     path = tool_path()
     build = out / "build"
@@ -432,11 +432,11 @@ def run_extracted(src: Path, sha: str, steps: tuple[Step, ...], m: Manifest, out
     values = {**m.vars, "src": str(src), "build": str(build), "sha": sha,
               **_consume_snapshots(src, sha, m, out, snapshots)}
     scheduled = [(s, prep_sb) for s in m.prepare] + [(s, sb) for s in steps]
-    return _run_commands(scheduled, values, build, out, path)
+    return _run_commands(scheduled, values, build, out, path, run_dir=run_dir)
 
 
 def _run_commands(scheduled: list[tuple[Step, Path]], values: dict[str, str],
-                  build: Path, out: Path, path: str) -> list[Receipt]:
+                  build: Path, out: Path, path: str, *, run_dir: Path | None = None) -> list[Receipt]:
     base_env = {"PATH": path, "HOME": str(build / "home"), "TMPDIR": str(build / "tmp"),
                 "LANG": "en_US.UTF-8", "COPYFILE_DISABLE": "1"}
     receipts = []
@@ -461,7 +461,12 @@ def _run_commands(scheduled: list[tuple[Step, Path]], values: dict[str, str],
                 except OSError:
                     pass
                 p.wait()
-        tail = log.read_bytes()[-2000:].decode(errors="replace")
+        output = log.read_bytes()
+        tail = output[-2000:].decode(errors="replace")
+        if len(output) > 2000:
+            root = (run_dir if run_dir is not None else out).resolve()
+            relative = Path(os.path.relpath(log.resolve(), root)).as_posix()
+            tail = f"[showing the last 2000 of {len(output)} bytes; full log: {relative}]\n{tail}"
         passed = code is not None and code >= 0 and code == step.expect
         receipts.append(Receipt(step.id, argv, step.expect, code, passed, round(time.monotonic() - t0, 2), tail))
         if not passed:
@@ -481,7 +486,7 @@ def summary(receipts: list[Receipt]) -> str:
         lines.append(f"- {r.id}: expected exit {r.expect}, got {got} ({'pass' if r.passed else 'FAIL'}, {r.seconds}s)")
     bad = next((r for r in receipts if not r.passed), None)
     if bad:
-        lines.append(f"\nOutput tail of `{bad.id}`:\n```\n{bad.tail[-1500:]}\n```")
+        lines.append(f"\nOutput tail of `{bad.id}`:\n```\n{bad.tail}\n```")
     return "\n".join(lines)
 
 

@@ -433,8 +433,10 @@ def _mutate_one(number: int, mut: Mutant, baseline_src: Path, head: str,
             # Keep the same mutation and baseline budgets in this worker slot.
             # A separate output directory gives confirmation fresh preparation
             # and builds without overwriting the narrowed diagnostics.
-            receipts = verify.run_extracted(src, head, steps, run_m, run_out,
-                                           **({"snapshots": snapshots} if snapshots is not None else {}))
+            if snapshots is None:
+                receipts = verify.run_extracted(src, head, steps, run_m, run_out)
+            else:
+                receipts = verify.run_extracted(src, head, steps, run_m, run_out, snapshots=snapshots)
             if run_phases is not None:
                 run_phases.append("confirmation" if run_out != mutant_out else
                                   "narrowed" if narrowed else "full")
@@ -494,8 +496,10 @@ def mutate(repo: Path, head: str, mutants: list[Mutant], m: Manifest, out: Path,
                 full_manifest = replace(m, vars={**m.vars, "mutant_path": ""})
             baseline_out = out if number == 1 else out / f"baseline-{number}"
             baseline_dirs.append(baseline_out)
-            receipts = verify.run_steps(repo, head, steps, full_manifest, baseline_out,
-                                       **({"snapshots": snapshots} if snapshots is not None else {}))
+            if snapshots is None:
+                receipts = verify.run_steps(repo, head, steps, full_manifest, baseline_out)
+            else:
+                receipts = verify.run_steps(repo, head, steps, full_manifest, baseline_out, snapshots=snapshots)
             baselines[number - 1]["receipts"] = (baseline_out / "receipts.json").relative_to(out).as_posix()
             if not verify.ok(receipts, m.prepare + steps):
                 baselines[number - 1]["failed"] = True

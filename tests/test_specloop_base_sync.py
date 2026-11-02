@@ -397,7 +397,8 @@ def controlled_verify(monkeypatch, ctx, exit_code=0, error=False):
     """Portable receipts, with the same retained and transient files as verify."""
     calls = []
 
-    def check(repo, head, steps, m, out):
+    def check(repo, head, steps, m, out, *, run_dir=None):
+        assert run_dir == ctx.run.dir
         assert repo == ctx.repo and head == ctx.head()
         assert steps == m.verify and m is ctx.m
         saved = state.Run(ctx.run.dir, require_existing=True).state.base_sync
@@ -594,7 +595,8 @@ def test_driver_checks_merged_head_before_readiness(base_env, monkeypatch):
     forbid_publication(monkeypatch)
     stages = []
 
-    def verify(repo, head, steps, m, out):
+    def verify(repo, head, steps, m, out, *, run_dir=None):
+        assert run_dir == ctx.run.dir
         assert len(fetches) == 1
         assert head == ctx.head() != old and repo == ctx.repo
         assert sh(repo, "git", "show", "-s", "--format=%P", head).split() == [old, base]
@@ -926,7 +928,8 @@ def test_pending_verification_schedules_preparation(publish_env, monkeypatch, ca
     assert ctx.head() == entry_head and env.operations == [("fetch", 20)]
     verified = []
 
-    def verify(repo, current, steps, m, out):
+    def verify(repo, current, steps, m, out, *, run_dir=None):
+        assert run_dir == ctx.run.dir
         saved = state.Run(ctx.run.dir, require_existing=True).state
         assert saved.status == "running" and saved.pause is None
         assert saved.base_sync["retry_verify"] and not saved.base_sync["verified_head"]

@@ -124,7 +124,7 @@ def test_equivalent_and_timeout_only_evidence_is_unmeasured(tmp_path, monkeypatc
         (out / "src/calc.py").write_text(source)
         return [verify.Receipt(step.id, [], 0, 0, True, 0.1, "") for step in steps]
 
-    def run_mutant(src, head, steps, m, out):
+    def run_mutant(src, head, steps, m, out, *, run_dir=None):
         changed = (src / "calc.py").read_text().splitlines()
         changed_lines = [i for i, (before, after) in enumerate(zip(source_lines, changed)) if before != after]
         assert len(changed_lines) == 1
@@ -277,7 +277,7 @@ def filtered_measurement(monkeypatch, measurement_manifest):
             (out / "src/calc.py").write_text(baseline_source)
             return receipts_for(out / "src", steps, run_m, out, "survived")
 
-        def run_mutant(src, head, steps, run_m, run_out):
+        def run_mutant(src, head, steps, run_m, run_out, *, run_dir=None):
             assert baseline_calls == [out] and head == "head"
             number = int(run_out.name.removeprefix("mutant-"))
             assert number in executable, "mismatches and equivalents must execute no commands"
