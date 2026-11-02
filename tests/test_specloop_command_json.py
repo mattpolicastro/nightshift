@@ -841,7 +841,7 @@ def test_publish_failure_is_json_and_remains_ready(template, monkeypatch, capfd,
     # This transport fake models an unchanged base before the failing push.
     monkeypatch.setattr(cli.loop, "_fetch_publish_base", lambda ctx, remote, **kw: ctx.head())
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise RuntimeError("push failed")
 
     monkeypatch.setattr(cli, "_push", fail)

@@ -39,7 +39,8 @@ wip_prefix = "Draft: "
 @pytest.mark.scenario("specloop-forge/manifest-forge-selection/gitea-host-selects-configured-credentials")
 @pytest.mark.parametrize("override", [False, True])
 @pytest.mark.parametrize("file_token", [False, True])
-def test_selection_uses_trusted_bot_configuration(configured, monkeypatch, override, file_token):
+@pytest.mark.parametrize("repository", ["forge.example/Owner/Repo", "FORGE.EXAMPLE/Owner/Repo/"])
+def test_selection_uses_trusted_bot_configuration(configured, monkeypatch, override, file_token, repository):
     path, env = configured
     if override:
         monkeypatch.setenv("NIGHTSHIFT_FORGE_CONFIG", str(path))
@@ -49,7 +50,7 @@ def test_selection_uses_trusted_bot_configuration(configured, monkeypatch, overr
     before = dict(os.environ)
     guarded = []
     guard = lambda: guarded.append(True)
-    target = cli._forge_target("FORGE.EXAMPLE/Owner/Repo/", guard=guard)
+    target = cli._forge_target(repository, guard=guard)
     assert target.repository == "Owner/Repo"
     forge = target.forge
     assert isinstance(forge, cli.GiteaForge)
@@ -69,8 +70,10 @@ def test_github_selection_precedes_config_reads(configured, monkeypatch, github)
     monkeypatch.setenv("NIGHTSHIFT_FORGE_CONFIG", "invalid-relative-path")
     monkeypatch.setattr(config, "parse_forges", lambda *a: pytest.fail("read config"))
     monkeypatch.setattr(config, "parse_env_file", lambda: pytest.fail("read credentials"))
+    before = dict(os.environ)
     target = cli._forge_target(github)
     assert target.repository == "Owner/Repo" and target.forge is target.definition is None
+    assert dict(os.environ) == before
 
 
 @pytest.fixture
@@ -114,6 +117,7 @@ def refuses(destination, command, capfd):
     run.pause("ready_to_publish" if command == "publish" else "human_checks")
     before = (run.dir / "state.json").read_bytes()
     head = git(run.dir / "repo.git", "rev-parse", BRANCH)
+    parent = dict(os.environ)
     detail = act(capfd, run, command, code=1)["detail"]
     assert detail and not any(secret in detail for secret in (
         "file-bot", "file-land", "process-bot", "manifest-bot", "ambient-gh", "SECRET"))
@@ -125,6 +129,7 @@ def refuses(destination, command, capfd):
         assert main([command, CHANGE]) == 1
         assert detail in capfd.readouterr().err
     assert not effects
+    assert dict(os.environ) == parent
     assert (run.dir / "state.json").read_bytes() == before
     assert git(run.dir / "repo.git", "rev-parse", BRANCH) == head
     return detail
@@ -229,7 +234,7 @@ def test_matching_gitea_origin_permits_saved_pr_publication(destination, configu
     run.state.pr = run.state.pr.replace(":8443", "")
     origin = f"https://FORGE.EXAMPLE{port}/git/example/repo{suffix}"
     git(source, "remote", "set-url", "origin", origin)
-    monkeypatch.setattr(cli, "_push", lambda *args: effects.append(args))
+    monkeypatch.setattr(cli, "_push", lambda *args, **kwargs: effects.append(args))
     run.pause("ready_to_publish")
     assert cli._remote(cli._ctx(run)) == origin
     act(capfd, run, "publish")

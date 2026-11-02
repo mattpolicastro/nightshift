@@ -100,14 +100,14 @@ run = ["/usr/bin/true"]
             p.operations.append(("fetch", kwargs["timeout"]))
         return real_run(args, **kwargs)
 
-    def push(*args):
+    def push(*args, **kwargs):
         assert p.fetches[-1] == 20
         p.push_attempts.append(ctx.head())
         p.operations.append(("push", ctx.head()))
         if p.fail_push:
             p.fail_push = False
             raise OSError("injected push transport failure")
-        real_push(*args)  # Push to the local bare origin, never a hosted service.
+        real_push(*args, **kwargs)  # Push to the local bare origin, never a hosted service.
         gh.head = ctx.head()
         p.pushes.append(ctx.head())
 
@@ -280,14 +280,14 @@ def recover_merged_publication(p, monkeypatch, failure):
     # Inspect the durable M receipt before any external publication effect.
     real_push, captured = cli._push, []
 
-    def push(*args):
+    def push(*args, **kwargs):
         receipt = p.receipt()
         assert (receipt["change"], receipt["head"], receipt["pr"]) == ("c", merged, p.gh.pr_url)
         assert receipt["checks"] == ready["pause"]["detail"]
         assert receipt["round_id"] != old_receipt["round_id"]
         assert not receipt.get("delivered") and "result" not in receipt
         captured.append(receipt)
-        return real_push(*args)
+        return real_push(*args, **kwargs)
 
     monkeypatch.setattr(cli, "_push", push)
     comment_attempts = []

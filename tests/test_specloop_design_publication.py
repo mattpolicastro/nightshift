@@ -143,10 +143,10 @@ def test_design_human_checks_reach_publication(design_publication, monkeypatch):
     p = design_publication
     push = cli._push
 
-    def captured_before_push(*args):
+    def captured_before_push(*args, **kwargs):
         assert p.receipt()["checks"] == p.ready["pause"]["detail"]
         assert "result" not in p.receipt() and not p.receipt().get("delivered")
-        return push(*args)
+        return push(*args, **kwargs)
 
     monkeypatch.setattr(cli, "_push", captured_before_push)
     assert p.poll_once() == []
