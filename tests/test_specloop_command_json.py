@@ -2,12 +2,13 @@ import json
 import subprocess
 import tomllib
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 from nightshift.cli import main
 
-from specloop import agents, cli, critic, openspec, seal, state, tasks
+from specloop import agents, cli, critic, openspec, propose, seal, state, tasks
 from specloop.state import Run
 from test_specloop_messages import parse_build_hint
 
@@ -17,6 +18,7 @@ BRANCH = f"spec/{CHANGE}"
 TASKS = "## 1. Core\n\n- [ ] 1.1 Implement `cap/req/example`\n"
 CONTRADICTION = {"task": "1.1", "problem": "a frozen checker rejects it", "evidence": "tools/check.py:63"}
 RISK = 'The behavior for "empty" input is vague.\nClarify it.'
+REAL_VALIDATE = openspec.validate
 
 
 def git(repo, *args):
@@ -81,6 +83,157 @@ def review(monkeypatch, contradictions=()):
         print("feasibility progress")
         return agents.Result("ok", {"contradictions": list(contradictions), "risks": [RISK]})
     monkeypatch.setattr(agents, "run", agent)
+
+
+@pytest.fixture
+def validator_process(monkeypatch):
+    process = Mock()
+    run = subprocess.run
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: (
+        process(argv, **kw) if argv[0] == "npx" else run(argv, **kw)))
+    return process
+
+
+@pytest.fixture
+def drafting_calls(monkeypatch):
+    calls = []
+
+    def agent(call):
+        assert call.access == "write", "failed lint must prevent reviews"
+        calls.append(call)
+        task_file = openspec.change_dir(call.cwd, CHANGE) / "tasks.md"
+        task_file.write_text(TASKS + f"\nDraft {len(calls)}\n")
+        print("draft progress")
+        return agents.Result("ok", {"status": "drafted", "summary": "", "questions": []})
+
+    monkeypatch.setattr(agents, "run", agent)
+    monkeypatch.setattr(critic, "open_pr_files", lambda *a: pytest.fail("lookup after failed lint"))
+    monkeypatch.setattr(propose, "publish_branch", lambda *a: pytest.fail("publication after failed lint"))
+    return calls
+
+
+@pytest.mark.scenario("specloop-interface/validator-availability-classification/validator-timeout-is-transient")
+def test_validator_timeout_is_transient_not_refusal(tmp_path, validator_process):
+    timeout = subprocess.TimeoutExpired("npx", 120)
+    validator_process.side_effect = timeout
+    with pytest.raises(openspec.ValidatorUnavailable) as raised:
+        openspec._run(tmp_path, "validate", CHANGE, "--strict")
+    assert isinstance(raised.value, openspec.SpecError) and raised.value.__cause__ is timeout
+    assert f"validate {CHANGE} --strict" in str(raised.value) and "120" in str(raised.value)
+    validator_process.assert_called_once()
+    argv, = validator_process.call_args.args
+    assert argv == ["npx", "-y", "--prefer-offline", openspec.PACKAGE, "validate", CHANGE, "--strict", "--json"]
+    assert validator_process.call_args.kwargs["timeout"] == 120
+    assert all(validator_process.call_args.kwargs["env"][key] == value for key, value in openspec.ENV.items())
+
+
+@pytest.mark.scenario("specloop-interface/validator-availability-classification/registry-failure-is-transient")
+@pytest.mark.parametrize("code", ["ENOTFOUND", "ETIMEDOUT", "ECONNRESET", "EAI_AGAIN", "ECONNREFUSED"])
+@pytest.mark.parametrize("prefix", ["npm error ", "x" * 450 + "\n"])
+def test_validator_registry_failure_is_transient(tmp_path, validator_process, code, prefix):
+    stderr = prefix + f"({code}): registry unavailable"
+    validator_process.return_value = subprocess.CompletedProcess([], 1, "not JSON", stderr)
+    with pytest.raises(openspec.ValidatorUnavailable) as raised:
+        openspec._run(tmp_path, "show", CHANGE)
+    assert str(raised.value) == f"openspec show {CHANGE}: exit 1, no JSON: {stderr[:400]}"
+    validator_process.assert_called_once()
+    assert validator_process.call_args.kwargs["timeout"] == 120
+
+
+@pytest.mark.scenario("specloop-interface/validator-availability-classification/other-failures-retain-classification")
+@pytest.mark.parametrize("stderr", ["unknown failure", "enotfound", "XENOTFOUND", "ENOTFOUND_extra", "EAI_AGAIN2"])
+def test_other_validator_failures_remain_spec_errors(tmp_path, validator_process, stderr):
+    validator_process.return_value = subprocess.CompletedProcess([], 1, "", stderr)
+    with pytest.raises(openspec.SpecError) as raised:
+        openspec._run(tmp_path, "validate", CHANGE)
+    assert type(raised.value) is openspec.SpecError
+    assert str(raised.value) == f"openspec validate {CHANGE}: exit 1, no JSON: {stderr}"
+    validator_process.assert_called_once()
+
+
+@pytest.mark.scenario("specloop-interface/command-json/admission-validator-unavailable")
+@pytest.mark.parametrize("boundary", ["validate", "scenarios"])
+@pytest.mark.parametrize("json_mode", [True, False])
+def test_admit_validator_unavailable_emits_error_envelope(template, monkeypatch, capfd, boundary, json_mode):
+    path, repo = template
+    before = git(repo, "show-ref")
+    failure = Mock(side_effect=openspec.ValidatorUnavailable("validator unavailable"))
+    monkeypatch.setattr(openspec, boundary, failure)
+    monkeypatch.setattr(cli.feasibility, "check", lambda *a: pytest.fail("review after outage"))
+    command = admission(path, *(["--json"] if json_mode else []))
+    if json_mode:
+        assert main(command) == 1
+        assert json.loads(capfd.readouterr().out) == {"version": 1, "error": "validator unavailable"}
+    else:
+        with pytest.raises(openspec.ValidatorUnavailable, match="validator unavailable"):
+            main(command)
+        assert not capfd.readouterr().out
+    failure.assert_called_once()
+    run = Run.for_change(CHANGE)
+    assert list(run.dir.iterdir()) == [run.dir / "lock"]
+    assert git(repo, "show-ref") == before
+
+
+@pytest.mark.scenario("specloop-interface/command-json/draft-validator-unavailable")
+@pytest.mark.scenario("spec-critic/ordered-proposal-gates/validator-unavailability-bypasses-correction")
+@pytest.mark.parametrize("boundary", ["validate", "scenarios"])
+@pytest.mark.parametrize("json_mode", [True, False])
+def test_propose_validator_unavailable_emits_error_envelope(
+        template, drafting_calls, monkeypatch, capfd, boundary, json_mode):
+    path, repo = template
+    before = git(repo, "show-ref")
+    failure = Mock(side_effect=openspec.ValidatorUnavailable("validator unavailable"))
+    monkeypatch.setattr(openspec, boundary, failure)
+    command = ["propose", str(path), CHANGE, "--idea", "feature", *(["--json"] if json_mode else [])]
+    if json_mode:
+        assert main(command) == 1
+        output = capfd.readouterr()
+        assert json.loads(output.out) == {"version": 1, "error": "validator unavailable"}
+        assert "draft progress" in output.err
+    else:
+        with pytest.raises(openspec.ValidatorUnavailable, match="validator unavailable"):
+            main(command)
+    failure.assert_called_once()
+    assert len(drafting_calls) == 1 and git(repo, "show-ref") == before
+
+
+@pytest.mark.scenario("specloop-interface/command-json/real-validation-failure-still-refuses")
+@pytest.mark.scenario("specloop-interface/validator-availability-classification/other-failures-retain-classification")
+@pytest.mark.parametrize("command", ["admit", "propose"])
+def test_real_validation_failure_still_refuses(
+        template, drafting_calls, validator_process, monkeypatch, capfd, command):
+    path, _ = template
+    monkeypatch.setattr(openspec, "validate", REAL_VALIDATE)
+    validator_process.return_value = subprocess.CompletedProcess(
+        [], 1, json.dumps({"items": [{"issues": [{"path": "spec.md", "message": "invalid requirement"}]}]}),
+        "npm error ENOTFOUND")
+    args = admission(path) if command == "admit" else ["propose", str(path), CHANGE, "--idea", "feature"]
+    assert main([*args, "--json"]) == 1
+    document = json.loads(capfd.readouterr().out)
+    assert document["version"] == 1 and "error" not in document
+    assert document["outcome"] == ("refused" if command == "admit" else "rejected")
+    assert "spec.md: invalid requirement" in "\n".join(document["reasons" if command == "admit" else "problems"])
+    assert validator_process.call_count == (1 if command == "admit" else 4)
+    assert len(drafting_calls) == (0 if command == "admit" else 4)
+    for call in drafting_calls[1:]:
+        assert "spec.md: invalid requirement" in call.prompt
+
+
+@pytest.mark.parametrize("command", ["admit", "propose"])
+@pytest.mark.parametrize("boundary", ["validate", "scenarios"])
+def test_plain_spec_error_retains_cli_outcome(template, drafting_calls, monkeypatch, capfd, command, boundary):
+    path, _ = template
+    failure = Mock(side_effect=openspec.SpecError("ordinary validator failure"))
+    monkeypatch.setattr(openspec, boundary, failure)
+    args = admission(path) if command == "admit" else ["propose", str(path), CHANGE, "--idea", "feature"]
+    assert main([*args, "--json"]) == 1
+    document = json.loads(capfd.readouterr().out)
+    assert document["version"] == 1 and "error" not in document
+    assert document["outcome"] == ("refused" if command == "admit" else "rejected")
+    assert "ordinary validator failure" in "\n".join(document["reasons" if command == "admit" else "problems"])
+    assert failure.call_count == (4 if command == "propose" and boundary == "scenarios" else 1)
+    for call in drafting_calls[1:]:
+        assert "ordinary validator failure" in call.prompt
 
 
 def daemon_draft_evidence(change):

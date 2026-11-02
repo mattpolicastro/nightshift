@@ -348,8 +348,8 @@ def test_critic_correction_is_bounded_and_never_clears_unresolved_findings(
 
 
 @pytest.mark.scenario(FAILED_GATE)
-@pytest.mark.parametrize("gate", ["lint", "feasibility", "feasibility-error", "questions", "drafter-error"])
-def test_failed_correction_stops_at_earlier_gate(env, invoke_cli, gate):
+@pytest.mark.parametrize("gate", ["lint", "scenario-lookup", "feasibility", "feasibility-error", "questions", "drafter-error"])
+def test_failed_correction_stops_at_earlier_gate(env, invoke_cli, monkeypatch, gate):
     body = CORRECTED
     if gate == "questions":
         body = agents.Result("ok", {"status": "needs_input", "questions": ["Which sign convention?"]})
@@ -366,6 +366,13 @@ def test_failed_correction_stops_at_earlier_gate(env, invoke_cli, gate):
             yield CORRECTED
 
         agent.bodies = bodies()
+    if gate == "scenario-lookup":
+        def lookup(repo, change):
+            if env.events.count("write") == 2:
+                raise openspec.SpecError("scenario lookup failed")
+            return {"calc/sign/zero": ""}
+
+        monkeypatch.setattr(openspec, "scenarios", lookup)
     d = invoke_cli(agent, questions=gate == "questions")
     assert len(agent.prompts("write")) == 2 and len(agent.prompts("critic")) == 1
     if gate == "questions":
@@ -377,6 +384,9 @@ def test_failed_correction_stops_at_earlier_gate(env, invoke_cli, gate):
         assert d.problems
         if gate == "lint":
             assert "task 1.1: unknown scenario `calc/sign/unknown`" in d.problems
+        elif gate == "scenario-lookup":
+            assert d.problems == ["scenario lookup failed"]
+            assert d.contradictions == FINDINGS
         elif gate == "feasibility-error":
             assert d.problems == ["feasibility review failed: infra: review crashed"]
         else:
@@ -422,6 +432,49 @@ def test_critic_failure_stops_without_redrafting(env, invoke_cli, failure, diagn
     assert env.lookups == [("org/repo", f"spec/{CHANGE}")]
 
 
+@pytest.mark.scenario("spec-critic/single-critic-correction/validator-unavailable-during-critic-correction")
+@pytest.mark.scenario("specloop-interface/command-json/draft-validator-unavailable")
+@pytest.mark.parametrize("boundary", ["validate", "scenarios"])
+def test_validator_unavailable_during_critic_correction(env, monkeypatch, capfd, boundary):
+    agent = Script(env, bodies=(INITIAL, CORRECTED), critics=(BLOCKED,))
+    original = getattr(openspec, boundary)
+    calls = []
+
+    def validate(*args):
+        calls.append(args)
+        if len(calls) == 2:
+            raise openspec.ValidatorUnavailable("validator unavailable during correction")
+        return original(*args)
+
+    def run(call):
+        result = agent(call)
+        if env.events[-1] == "critic":
+            call.transcript.write_text(json.dumps(result.output) + "\n")
+        return result
+
+    monkeypatch.setattr(openspec, boundary, validate)
+    monkeypatch.setattr(agents, "run", run)
+    monkeypatch.setattr(manifest, "template", lambda path, **kw: (
+        replace(env.m, change=kw["change"], branch=kw["branch"]), ""))
+    monkeypatch.setattr(propose, "publish_branch", lambda *a: pytest.fail("publication after outage"))
+    refs = git(env.source, "show-ref")
+    assert main(["propose", "unused.toml", "--change", CHANGE, "--branch", f"spec/{CHANGE}",
+                 "--idea", "Define sign", "--json"]) == 1
+    assert json.loads(capfd.readouterr().out) == {
+        "version": 1, "error": "validator unavailable during correction",
+    }
+    assert len(calls) == 2
+    assert env.events == ["write", "lint", "feasibility", "lookup", "critic", "write", "lint"]
+    assert env.lookups == [("org/repo", f"spec/{CHANGE}")]
+    assert len(agent.prompts("write")) == 2 and len(agent.prompts("critic")) == 1
+    assert git(env.source, "show-ref") == refs
+    out = state.proposals_dir() / CHANGE
+    assert json.loads((out / "critic-1/critic.json").read_text()) == BLOCKED
+    assert json.loads((out / "critic-1/critic.jsonl").read_text()) == BLOCKED
+    assert not (out / "critic-2").exists() and not (out / "feasibility-2").exists()
+    assert not (out / "draft.json").exists()
+
+
 @pytest.mark.scenario(EARLIER)
 @pytest.mark.parametrize("gate", ["lint", "feasibility", "feasibility-error", "questions"])
 def test_context_lookup_is_lazy_until_all_earlier_gates_pass(env, invoke_cli, gate):
@@ -452,8 +505,9 @@ def test_context_lookup_is_lazy_until_all_earlier_gates_pass(env, invoke_cli, ga
 
 @pytest.mark.scenario(EARLIER)
 @pytest.mark.scenario(EXHAUSTED)
-@pytest.mark.parametrize("gate", ["lint", "feasibility"])
-def test_earlier_gate_retry_uses_last_attempt_before_critic_blocker(env, invoke_cli, gate):
+@pytest.mark.parametrize("gate", ["lint", "feasibility", pytest.param("scenario-lookup", marks=pytest.mark.scenario(
+    "spec-critic/ordered-proposal-gates/ordinary-scenario-lookup-failure-retains-correction"))])
+def test_earlier_gate_retry_uses_last_attempt_before_critic_blocker(env, invoke_cli, monkeypatch, gate):
     agent = Script(env, bodies=(INITIAL, CORRECTED), critics=(BLOCKED,),
                    feasibility=(INFEASIBLE, PASS) if gate == "feasibility" else (PASS,))
     if gate == "lint":
@@ -464,12 +518,21 @@ def test_earlier_gate_retry_uses_last_attempt_before_critic_blocker(env, invoke_
             yield CORRECTED
 
         agent.bodies = bodies()
+    if gate == "scenario-lookup":
+        def lookup(repo, change):
+            if env.events.count("write") == 1:
+                raise openspec.SpecError("scenario lookup failed")
+            return {"calc/sign/zero": ""}
+
+        monkeypatch.setattr(openspec, "scenarios", lookup)
     d = invoke_cli(agent, rounds=2)
     assert len(agent.prompts("write")) == 2
     feedback = agent.prompts("write")[1]
     if gate == "lint":
         assert "unknown scenario `calc/sign/unknown`" in feedback
         assert "scenario `calc/sign/zero` is not covered by any task" in feedback
+    elif gate == "scenario-lookup":
+        assert "scenario lookup failed" in feedback
     else:
         for finding in INFEASIBLE["contradictions"]:
             assert all(value in feedback for value in finding.values())
