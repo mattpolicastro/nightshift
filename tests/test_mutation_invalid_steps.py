@@ -112,7 +112,7 @@ def test_configured_receipt_classification(source, monkeypatch, ids, stage, inva
                 mutation_routes=(manifest.MutationRoute(("*.py",), tuple(s.id for s in steps)),) if routed else ())
     original = asdict(m)
 
-    def run(src, head, steps, run_m, run_out):
+    def run(src, head, steps, run_m, run_out, *, run_dir=None):
         baseline = run_out == out
         current_phase = "confirmation" if run_out.name == "confirmation" else (
             "narrowed" if phase != "full" else "full")

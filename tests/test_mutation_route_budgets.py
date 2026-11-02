@@ -67,7 +67,7 @@ def test_sequence_budgets_survive_bounded_queue(tmp_path, monkeypatch, source, p
     lock = Lock()
     active = peak = 0
 
-    def run(src, head, steps, run_m, run_out):
+    def run(src, head, steps, run_m, run_out, *, run_dir=None):
         nonlocal active, peak
         assert m == original
         with lock:
@@ -184,7 +184,7 @@ def test_routed_timeout_stops_process_group_and_later_steps(tmp_path, monkeypatc
     real_run = verify.run_extracted
     finished = Event()
 
-    def run(src, head, steps, run_m, run_out):
+    def run(src, head, steps, run_m, run_out, *, run_dir=None):
         baseline = run_out == out
         assert all(s.timeout == (100 if baseline else 1.0) for s in run_m.prepare + steps)
         if not baseline:
@@ -192,7 +192,7 @@ def test_routed_timeout_stops_process_group_and_later_steps(tmp_path, monkeypatc
                 overlap.wait(timeout=10)
             else:
                 assert finished.is_set()
-        receipts = real_run(src, head, steps, run_m, run_out)
+        receipts = real_run(src, head, steps, run_m, run_out, run_dir=run_dir)
         if baseline:
             for receipt in receipts:
                 receipt.seconds = 0.01

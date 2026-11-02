@@ -7,7 +7,7 @@ import pytest
 
 from nightshift.cli import main
 
-from specloop import agents, cli, loop, manifest, openspec, quota, seal, state
+from specloop import agents, cli, loop, manifest, openspec, quota, seal, state, verify
 from specloop.state import Run
 
 TASKS = """\
@@ -151,6 +151,53 @@ def test_verify_failure_feeds_the_retry_and_seeds_its_diff(env):
     loop.run(ctx_for(run, m, a))
     assert "has-content" in seen["feedback"] and seen["seeded"] == "BAD\n"
     assert run.state.pause.reason == "phase_gate"
+
+
+@pytest.fixture(params=[
+    pytest.param("[showing the last 2000 of 4321 bytes; full log: task/a1/verify/check.log]\n"
+                 + ("```\n<html>\n  diagnostic\n" + "x" * 2000)[:2000], id="marked",
+                 marks=pytest.mark.scenario("verify-output/retry-feedback-preserves-receipt-output/retry-retains-marker-and-payload")),
+    *[pytest.param(tail, id=name, marks=pytest.mark.scenario(
+        "verify-output/retry-feedback-preserves-receipt-output/unmarked-tails-pass-through"))
+      for name, tail in [("empty", ""), ("1501", "a" * 1501),
+                         ("2000", " \n" + "b" * 1996 + "\t\n")]],
+])
+def receipt_tail(request):
+    return request.param
+
+
+def test_verification_summary_preserves_opaque_tail(receipt_tail):
+    passed = verify.Receipt("ok", [], 0, 0, True, 0.1, "successful output")
+    failed = verify.Receipt("check", [], 0, 1, False, 0.2, receipt_tail)
+    later = verify.Receipt("later", [], 0, None, False, 0.3, "not the first failure")
+    status = "- ok: expected exit 0, got 0 (pass, 0.1s)"
+    assert verify.summary([passed]) == status
+    assert verify.summary([passed, failed, later]) == (
+        status + "\n- check: expected exit 0, got 1 (FAIL, 0.2s)"
+        "\n- later: expected exit 0, got timeout (FAIL, 0.3s)"
+        f"\n\nOutput tail of `check`:\n```\n{receipt_tail}\n```")
+
+
+def test_retry_feedback_preserves_receipt_tail(env, monkeypatch, receipt_tail):
+    run, m, _ = env
+    receipt = verify.Receipt("check", [], 0, 1, False, 0.2, receipt_tail)
+
+    def failing(repo, sha, steps, m, out, *, run_dir=None):
+        assert run_dir == run.dir
+        return [receipt]
+
+    monkeypatch.setattr(verify, "run_steps", failing)
+    agent = Script(write("hello"), write("hello"))
+    loop.run(ctx_for(run, m, agent))
+    assert run.state.pause.reason == "stuck" and len(agent.calls) == 2
+    retry = agent.calls[1]
+    feedback_path = retry.cwd.parent / "context" / "feedback.md"
+    assert str(feedback_path) in retry.prompt
+    assert feedback_path.read_text() == (
+        "The previous attempt's diff is already applied to your workspace; correct it.\n\n"
+        "The harness's verification failed:\n" + verify.summary([receipt]) + "\n")
+    assert f"\n```\n{receipt_tail}\n```\n" in feedback_path.read_text()
+    assert feedback_path.read_text().count("[showing the last") == receipt_tail.count("[showing the last")
 
 
 def test_review_fail_then_pass_and_followups(env):

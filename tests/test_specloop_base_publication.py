@@ -111,7 +111,8 @@ run = ["/usr/bin/true"]
         gh.head = ctx.head()
         p.pushes.append(ctx.head())
 
-    def verify(repo, head, steps, m, out):
+    def verify(repo, head, steps, m, out, *, run_dir=None):
+        assert run_dir == ctx.run.dir
         saved = state.Run.for_change("c", require_existing=True).state
         assert saved.status == "running" and saved.pause is None
         assert saved.base_sync["retry_verify"] and not saved.base_sync["verified_head"]

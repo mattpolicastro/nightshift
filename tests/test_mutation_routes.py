@@ -404,13 +404,13 @@ def test_manifest_without_routes_unchanged(tmp_path, monkeypatch, enabled, fallb
     real_run = verify.run_extracted
     calls, saved = [], []
 
-    def run(src, head, steps, run_m, run_out):
+    def run(src, head, steps, run_m, run_out, *, run_dir=None):
         calls.append(run_out)
         assert [s.id for s in run_m.prepare + steps] == ["dependencies", "build", "tests"]
         assert run_m.vars == {"custom": "unchanged"}
         assert [s.timeout for s in run_m.prepare + steps] == (
             [33, 30, 300] if run_out.name.startswith("mutant-") else [300] * 3)
-        result = real_run(src, head, steps, run_m, run_out)
+        result = real_run(src, head, steps, run_m, run_out, run_dir=run_dir)
         if not run_out.name.startswith("mutant-"):
             for receipt, seconds in zip(result, (11, 0.1, 0)):
                 receipt.seconds = seconds

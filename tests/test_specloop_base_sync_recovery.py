@@ -69,7 +69,8 @@ class Interrupted(BaseException):
 def verification(monkeypatch, ctx, *, passing=True):
     calls = []
 
-    def check(repo, head, steps, m, out):
+    def check(repo, head, steps, m, out, *, run_dir=None):
+        assert run_dir == ctx.run.dir
         saved = state.Run(ctx.run.dir, require_existing=True).state.base_sync
         assert head == ctx.head() and saved["verified_head"] == ""
         assert saved["retry_verify"] and str(out) in saved["receipts"]
@@ -185,8 +186,9 @@ def test_receipts_only_authorize_the_exact_verified_head(base_env, monkeypatch, 
         descendant = seal.commit_files(ctx.repo, head, {"out/new": "changed\n"}, "changed head")
         seal.git(ctx.repo, "update-ref", ctx.ref, descendant, head)
 
-    def change_during_verify(*args):
-        receipts = real_verify(*args)
+    def change_during_verify(*args, run_dir=None):
+        assert run_dir == ctx.run.dir
+        receipts = real_verify(*args, run_dir=run_dir)
         advance()
         return receipts
 

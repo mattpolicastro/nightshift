@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import traceback
 from dataclasses import replace
 from pathlib import Path
@@ -48,6 +49,121 @@ M = manifest.parse(M_DATA)
 
 def tree(bare, sha):
     return set(sh(bare, "git", "ls-tree", "-r", "--name-only", sha).splitlines())
+
+
+STEERING_PATHS = ("AGENTS.md", "CLAUDE.md", ".claude/settings.json", ".codex/config.toml", ".mcp.json")
+
+
+@pytest.mark.scenario("agent-steering-seal/unconditional-steering-freeze/protected-paths-without-manifest-entries")
+@pytest.mark.scenario("agent-steering-seal/frozen-edit-results/existing-steering-edits-are-reverted-and-reported")
+@pytest.mark.scenario("agent-steering-seal/frozen-edit-results/only-protected-changes-produce-no-commit")
+@pytest.mark.scenario("agent-steering-seal/frozen-edit-results/unchanged-steering-files-remain-quiet")
+@pytest.mark.parametrize("name", STEERING_PATHS)
+@pytest.mark.parametrize("prefix", ["", "src/nested/"])
+@pytest.mark.parametrize("edit", ["add", "content", "delete", "mode", "unchanged"])
+@pytest.mark.parametrize("companion", [False, True])
+def test_agent_steering_files_frozen_without_manifest_entry(repo, name, prefix, edit, companion):
+    bare, work, base = repo
+    path = prefix + name
+    m = manifest.parse({**M_DATA, "paths": {"allowed": [*STEERING_PATHS, "src/**"]}})
+    assert m.frozen == () and manifest.matches(path, m.allowed)
+    if edit != "add":
+        base = seal.commit_files(bare, base, {path: "trusted instructions\n"}, "trusted base")
+        sh(work, "git", "fetch", "-q", str(bare), base)
+        sh(work, "git", "reset", "--hard", base)
+    f = work / path
+    if edit in ("add", "content"):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("attempted instructions\n")
+    elif edit == "delete":
+        f.unlink()
+    elif edit == "mode":
+        f.chmod(0o755)
+    if companion:
+        (work / "src/a.txt").write_text("admissible edit\n")
+
+    s = seal.seal(bare, work, base, m, "msg")
+    assert s.changed == (["src/a.txt"] if companion else [])
+    assert s.violations == ([] if edit == "unchanged" else [f"{path}: frozen path (change reverted)"])
+    assert s.secret_paths == []
+    if companion:
+        assert s.sha is not None
+        # ls-tree compares both the protected blob and mode (or its absence).
+        assert sh(bare, "git", "ls-tree", s.sha, path) == sh(bare, "git", "ls-tree", base, path)
+        assert tree(bare, s.sha) == tree(bare, base)
+        assert sh(bare, "git", "show", f"{s.sha}:src/a.txt") == "admissible edit"
+        assert sh(bare, "git", "rev-parse", f"{s.sha}^") == base
+    else:
+        assert s.sha is None
+
+
+@pytest.mark.scenario("agent-steering-seal/unconditional-steering-freeze/manifest-allowances-cannot-override-protection")
+@pytest.mark.parametrize("frozen", [[], ["openspec/**"]], ids=["empty", "unrelated"])
+@pytest.mark.parametrize("allowance", ["exact", "directory"])
+def test_manifest_cannot_unfreeze_steering_files(repo, frozen, allowance):
+    bare, work, base = repo
+    paths = [prefix + name for prefix in ("", "src/nested/") for name in STEERING_PATHS]
+    allowed = paths if allowance == "exact" else ["AGENTS.md", "CLAUDE.md", ".mcp.json",
+                                                 ".claude/**", ".codex/**", "src/**"]
+    m = manifest.parse({**M_DATA, "paths": {"allowed": [*allowed, "src/a.txt"], "frozen": frozen}})
+    for path in paths:
+        assert manifest.matches(path, m.allowed) and not manifest.matches(path, m.frozen)
+        f = work / path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("attempted instructions\n")
+    (work / "src/a.txt").write_text("admissible edit\n")
+    s = seal.seal(bare, work, base, m, "msg")
+    assert s.sha is not None and s.changed == ["src/a.txt"]
+    assert s.violations == [f"{path}: frozen path (change reverted)" for path in sorted(paths)]
+    assert tree(bare, s.sha) == tree(bare, base)
+    assert sh(bare, "git", "show", f"{s.sha}:src/a.txt") == "admissible edit"
+
+
+@pytest.mark.scenario("agent-steering-seal/unconditional-steering-freeze/component-matching-is-precise")
+@pytest.mark.parametrize("prefix", ["", "src/nested/"])
+@pytest.mark.parametrize("name,protected", [
+    ("agents.MD", True), ("cLaUdE.mD", True), (".ClAuDe/settings.json", True),
+    (".CoDeX/config.toml", True), (".MCP.JSON", True),
+    ("AGENTS.md/child.txt", True), ("CLAUDE.md/child.txt", True),
+    (".mcp.json/child.txt", True), (".claude", True), (".codex", True),
+    ("AGENTS.md.example", False), ("CLAUDE.md.example", False),
+    (".claude-backup/settings.json", False), (".codex-backup/config.toml", False),
+    (".mcp.json.example", False), ("prefixAGENTS.md", False),
+    ("AGENTS.md.example/child.txt", False),
+])
+def test_steering_component_boundaries(repo, prefix, name, protected):
+    bare, work, base = repo
+    path = prefix + name
+    m = manifest.parse({**M_DATA, "paths": {"allowed": [path, "src/a.txt"]}})
+    assert manifest.matches(path, m.allowed)
+    f = work / path
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("new file\n")
+    (work / "src/a.txt").write_text("admissible edit\n")
+    s = seal.seal(bare, work, base, m, "msg")
+    assert s.sha is not None
+    assert s.changed == sorted(["src/a.txt"] + ([] if protected else [path]))
+    assert s.violations == ([f"{path}: frozen path (change reverted)"] if protected else [])
+    assert tree(bare, s.sha) == tree(bare, base) | (set() if protected else {path})
+    if not protected:
+        assert sh(bare, "git", "show", f"{s.sha}:{path}") == "new file"
+
+
+@pytest.mark.parametrize("path", ["AGENTS.md", "src/nested/.codex/config.toml"])
+def test_steering_symlink_is_still_rejected_without_reading(repo, path):
+    bare, work, base = repo
+    base = seal.commit_files(bare, base, {path: "trusted instructions\n"}, "trusted base")
+    sh(work, "git", "fetch", "-q", str(bare), base)
+    sh(work, "git", "reset", "--hard", base)
+    f = work / path
+    f.unlink()
+    f.symlink_to(work / "missing-target")
+    (work / "src/a.txt").write_text("admissible edit\n")
+    m = manifest.parse({**M_DATA, "paths": {"allowed": [path, "src/**"]}})
+    s = seal.seal(bare, work, base, m, "msg")
+    assert s.sha is not None and s.changed == ["src/a.txt"]
+    assert s.violations == [f"{path}: not a regular file"]
+    assert sh(bare, "git", "ls-tree", s.sha, path) == sh(bare, "git", "ls-tree", base, path)
 
 
 def test_allowed_changes_land_and_violations_are_reverted(repo):
@@ -296,6 +412,66 @@ def test_a_base_submodule_is_not_a_violation(tmp_path):
 
 def steps(*specs):
     return tuple(manifest.Step(i, tuple(run), expect, timeout) for i, run, expect, timeout in specs)
+
+
+def output_receipt(repo, tmp_path, monkeypatch, entry, raw, phase, code, root, snapshots=False):
+    bare, _, sha = repo
+    out = tmp_path / "run" / "task" / "a1" / "verify"
+    run_dir = tmp_path / "run" if root == "owning" else tmp_path / "other"
+    kwargs = {} if root == "omitted" else {"run_dir": run_dir}
+    if snapshots:
+        kwargs["snapshots"] = verify.SnapshotContext(tmp_path / "snapshots")
+    step = manifest.Step("output", (sys.executable, "-c",
+                         f"import os; os.write(1, {raw!r}); raise SystemExit({code})"))
+    m = replace(M, prepare=(step,) if phase == "prepare" else (),
+                verify=() if phase == "prepare" else (step,))
+    monkeypatch.setattr(verify, "wrap", lambda argv, sb: argv)
+    if entry == "run_extracted":
+        verify.extract(bare, sha, out / "src")
+    source = bare if entry == "run_steps" else out / "src"
+    receipt, = getattr(verify, entry)(source, sha, m.verify, m, out, **kwargs)
+    assert (receipt.id, receipt.exit, receipt.passed) == ("output", code, code == 0)
+    verify.cleanup(out)
+    assert not (out / "src").exists() and not (out / "build").exists()
+    assert (out / "output.log").read_bytes() == raw
+    saved, = json.loads((out / "receipts.json").read_text())
+    assert set(saved) == {"id", "argv", "expect", "exit", "passed", "seconds", "tail"}
+    assert saved["tail"] == receipt.tail
+    return receipt.tail
+
+
+@pytest.mark.scenario("verify-output/truncated-tails-identify-retained-logs/long-output-names-the-full-log")
+@pytest.mark.scenario("verify-output/truncated-tails-identify-retained-logs/byte-boundaries-preserve-decoding")
+@pytest.mark.scenario("verify-output/truncated-tails-identify-retained-logs/direct-invocation-uses-its-output-directory")
+@pytest.mark.parametrize("entry", ["run_steps", "run_extracted"])
+@pytest.mark.parametrize("raw,phase,code,root,snapshots", [
+    (b"x" * 2001, "check", 0, "omitted", False),
+    (b"x" * 4000 + b"\n \t", "prepare", 0, "owning", True),
+    (b"x" * 3000, "prepare", 1, "omitted", True),
+    (b"x" * 3000, "check", 1, "owning", False),
+    ("€".encode() + b"x" * 1999, "check", 1, "outside", True),
+    (b"x" * 2000 + b"\xff\n", "prepare", 1, "owning", False),
+], ids=["2001", "large-prepare", "failed-prepare", "failed-check", "split-utf8", "invalid-utf8"])
+def test_truncated_verify_tail_names_full_log(repo, tmp_path, monkeypatch, entry, raw, phase, code, root, snapshots):
+    tail = output_receipt(repo, tmp_path, monkeypatch, entry, raw, phase, code, root, snapshots)
+    path = {"omitted": "output.log", "owning": "task/a1/verify/output.log",
+            "outside": "../run/task/a1/verify/output.log"}[root]
+    assert tail == (f"[showing the last 2000 of {len(raw)} bytes; full log: {path}]\n"
+                    + raw[-2000:].decode("utf-8", errors="replace"))
+
+
+@pytest.mark.scenario("verify-output/truncated-tails-identify-retained-logs/short-output-stays-unchanged")
+@pytest.mark.scenario("verify-output/truncated-tails-identify-retained-logs/byte-boundaries-preserve-decoding")
+@pytest.mark.parametrize("entry", ["run_steps", "run_extracted"])
+@pytest.mark.parametrize("raw,phase,code", [
+    (b"", "check", 0), (b" " + b"x" * 1996 + b"\t\n", "prepare", 0),
+    (b"x" * 1999 + b"\n", "check", 1), (b"\xff \n", "prepare", 1),
+    ("€".encode() * 666 + b" \n", "check", 0),
+], ids=["empty", "1999", "2000", "invalid-utf8", "multibyte-2000"])
+def test_short_verify_output_has_no_marker(repo, tmp_path, monkeypatch, entry, raw, phase, code):
+    tail = output_receipt(repo, tmp_path, monkeypatch, entry, raw, phase, code, "omitted")
+    assert tail == raw.decode("utf-8", errors="replace")
+    assert "[showing the last" not in tail
 
 
 def test_receipts_expected_exits_and_stop_at_first_failure(repo, tmp_path):
