@@ -33,7 +33,13 @@ Publication exceptions (such as a failed or timed-out push) exit 1 with
 `{"version":1,"error":"..."}` instead of a domain outcome. The daemon records
 the failure in repository health and keeps publication eligible for a later
 poll; it does not cache the failure as a delivered refusal. A `needs-human`
-label still holds retries until removed.
+label still holds retries until removed. Transient OpenSpec validator failures during
+`admit` or `propose`, including scenario discovery and critic-correction lint,
+also exit 1 with only `version` and a nonempty `error`, without an `outcome`,
+validation retry or drafting correction. Partial admission is cleaned up.
+The daemon retains approval/arming triggers for later eligible polls; existing
+eligibility holds and the failure threshold for `needs-human` still apply.
+Ordinary validation problems keep their refusal/rejection behavior.
 
 Unused lists are empty; an unavailable head or commit is an empty string.
 Draft contradictions retain their `task`, `problem`, and `evidence` fields.

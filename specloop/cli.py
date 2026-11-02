@@ -88,6 +88,8 @@ def problems_with(repo: Path, rev: str, m: manifest.Manifest) -> list[str]:
         found = openspec.validate(Path(tmp), m.change)
         try:
             known = openspec.scenarios(Path(tmp), m.change)
+        except openspec.ValidatorUnavailable:
+            raise
         except openspec.SpecError as e:
             return found + [str(e)]
         task_file = openspec.change_dir(Path(tmp), m.change) / "tasks.md"
@@ -200,6 +202,9 @@ def _admit_locked(args, run: Run, m: manifest.Manifest, text: str, roles: dict) 
             if review.get("contradictions"):
                 raise ValueError("tasks that are impossible as written:\n" + "\n".join(
                     f"  - {c['task']}: {c['problem']}\n      evidence: {c['evidence']}" for c in review["contradictions"]))
+    except openspec.ValidatorUnavailable:
+        _clear_admission(run)
+        raise
     except Exception as e:
         _clear_admission(run)
         _outcome(args, reasons=[str(e)])
@@ -1384,6 +1389,14 @@ def dispatch(args) -> int:
     with _diagnostics_to_stderr():
         try:
             code = execute()
+        except openspec.ValidatorUnavailable as e:
+            if args.cmd in ("admit", "propose"):
+                args.document = {"version": 1, "error": str(e) or type(e).__name__}
+            elif args.cmd == "publish":
+                args.document = {"version": 1, "error": str(e)}
+            else:
+                args.document["reasons"] = [str(e)]
+            code = 1
         except Exception as e:
             if args.cmd == "publish" or isinstance(e, Busy):
                 # An interrupted push is retryable, not a domain refusal that

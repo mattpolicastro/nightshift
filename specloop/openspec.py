@@ -23,16 +23,26 @@ class SpecError(RuntimeError):
     pass
 
 
+class ValidatorUnavailable(SpecError):
+    """The validator could not run because of a transient infrastructure failure."""
+
+
 def _run(repo: Path, *args: str) -> tuple[int, dict]:
     env = {**os.environ, **ENV}
-    p = subprocess.run(
-        ["npx", "-y", "--prefer-offline", PACKAGE, *args, "--json"],
-        cwd=repo, env=env, capture_output=True, text=True, timeout=120,
-    )
+    try:
+        p = subprocess.run(
+            ["npx", "-y", "--prefer-offline", PACKAGE, *args, "--json"],
+            cwd=repo, env=env, capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ValidatorUnavailable(f"openspec {' '.join(args)}: timed out after {e.timeout} seconds") from e
     try:
         return p.returncode, json.loads(p.stdout)
     except json.JSONDecodeError:
-        raise SpecError(f"openspec {' '.join(args)}: exit {p.returncode}, no JSON: {p.stderr.strip()[:400]}")
+        error = (ValidatorUnavailable if re.search(
+            r"\b(?:ENOTFOUND|ETIMEDOUT|ECONNRESET|EAI_AGAIN|ECONNREFUSED)\b", p.stderr,
+        ) else SpecError)
+        raise error(f"openspec {' '.join(args)}: exit {p.returncode}, no JSON: {p.stderr.strip()[:400]}")
 
 
 def slug(s: str) -> str:

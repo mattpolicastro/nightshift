@@ -205,6 +205,8 @@ def lint(work: Path, change: str) -> list[str]:
     problems = openspec.validate(work, change)
     try:
         known = openspec.scenarios(work, change)
+    except openspec.ValidatorUnavailable:
+        raise
     except openspec.SpecError as e:
         return problems + [str(e)]
     task_file = openspec.change_dir(work, change) / "tasks.md"

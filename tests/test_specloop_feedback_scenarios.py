@@ -171,7 +171,9 @@ def test_authored_unknown_ids_still_fail_drafting_and_admission(env):
 
 @pytest.mark.scenario("specloop-interface/known-runtime-scenario-references/strict-validation-and-failed-lookup")
 @pytest.mark.parametrize("coverage_step", ["tests", ""])
-def test_failed_lookup_cannot_pass_evidence_or_append_tasks(env, monkeypatch, coverage_step):
+@pytest.mark.scenario("specloop-interface/validator-availability-classification/runtime-fallbacks-remain-effective")
+@pytest.mark.parametrize("error", [openspec.SpecError, openspec.ValidatorUnavailable])
+def test_failed_lookup_cannot_pass_evidence_or_append_tasks(env, monkeypatch, coverage_step, error):
     ctx, _ = env
     ctx.m = replace(ctx.m, coverage_step=coverage_step)
     head = ctx.head()
@@ -179,7 +181,7 @@ def test_failed_lookup_cannot_pass_evidence_or_append_tasks(env, monkeypatch, co
     before = asdict(ctx.run.state)
 
     def failed_lookup(repo, change):
-        raise openspec.SpecError("scenario service unavailable")
+        raise error("scenario service unavailable")
 
     def unexpected(*args, **kwargs):
         pytest.fail("a failed scenario lookup must stop before evidence or task writes")
@@ -197,12 +199,14 @@ def test_failed_lookup_cannot_pass_evidence_or_append_tasks(env, monkeypatch, co
 
 
 @pytest.mark.scenario("specloop-interface/known-runtime-scenario-references/strict-validation-and-failed-lookup")
-def test_context_lookup_failures_keep_diagnostics(env, tmp_path, monkeypatch):
+@pytest.mark.scenario("specloop-interface/validator-availability-classification/runtime-fallbacks-remain-effective")
+@pytest.mark.parametrize("error", [openspec.SpecError, openspec.ValidatorUnavailable])
+def test_context_lookup_failures_keep_diagnostics(env, tmp_path, monkeypatch, error):
     ctx, src = env
     task = tasks.parse(ctx.tasks_text(ctx.head()))[-1]
 
     def failed_lookup(repo, change):
-        raise openspec.SpecError("scenario service unavailable")
+        raise error("scenario service unavailable")
 
     monkeypatch.setattr(openspec, "scenarios", failed_lookup)
     implementation = tmp_path / "implementation"
