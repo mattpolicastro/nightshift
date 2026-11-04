@@ -37,6 +37,10 @@ None of these follow-ups establishes live validation or a completed host rollout
 
 ## Open gaps
 
+- **Readiness test-only fallback:** with evidence enabled, the missing-event
+  fallback recognizes only repository-root `tests/` paths after excluding the
+  harness-owned tasks file. Layouts such as `packages/*/test/` still block
+  without evidence.
 - **Codex session scratch:** cleanup now attempts to remove disposable
   `<stem>.tmp` at adapter finalization after the existing runner returns or
   setup/spawning/result interpretation raises

@@ -1249,6 +1249,8 @@ def _readiness_evidence(row: dict, *, git_runner=None) -> list[str]:
         manifest = manifests.load(run.manifest_path)
         if manifest.change != change or manifest.branch != f"spec/{change}":
             raise ValueError("manifest identity does not match status")
+        if not manifest.evidence:
+            return []
 
         def git(*args):
             return (git_runner or run_git)(["git", "--git-dir", str(run.dir / "repo.git"), *args],

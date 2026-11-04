@@ -73,6 +73,8 @@ allowed = ["out/**"]
 [[verify]]
 id = "ok"
 run = ["/usr/bin/true"]
+[gates]
+evidence = true
 [coverage.exempt]
 "gate/manual/audition" = "Audition the gate."
 "gate/manual/reopen" = "Save and reopen."
@@ -81,6 +83,8 @@ run = ["/usr/bin/true"]
     ctx.run.state.pr = gh.pr_url
     ctx.run.state.tasks["1.1"] = state.TaskState(status="passed", attempts=2)
     ctx.run.state.gates_passed = [1]
+    # Keep setup offline; readiness still blocks on the missing evidence event.
+    ctx.run.state.evidenced = [1]
     ctx.run.save()
     p = SimpleNamespace(env=env, ctx=ctx, gh=gh, calls=[], documents=[], verified=[],
                         merges=[], fetches=[], pushes=[], lose_response=False,
