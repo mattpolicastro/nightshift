@@ -478,3 +478,117 @@ def test_validate_unavailable_inputs(feature_copy, monkeypatch, name, failure, m
 
         monkeypatch.setattr(Path, "read_text", fail_read)
     assert speckit.validate(repo, CHANGE) == [f"specs/{CHANGE}/{name}:1: {message}"]
+
+
+@pytest.mark.scenario("speckit-format/clarification-questions/collect-questions-with-locations")
+def test_questions_from_clarification_markers():
+    bare = "[NEEDS CLARIFICATION]"
+    question = "[NEEDS CLARIFICATION: which gate?]"
+    spaced = "[NEEDS CLARIFICATION \t: retain spacing ]"
+    text = (f"# Feature\n{bare} and {question} and {bare}\n"
+            f"```md\n{question}\n```\n<!--\n{spaced}\n-->\n"
+            f"    {bare}\n[NEEDS CLARIFICATION: incomplete\n[needs clarification]\n")
+    spec = speckit.parse_spec(text)
+    expected = [(bare, 2), (question, 2), (bare, 2), (question, 4), (spaced, 7), (bare, 9)]
+    assert [(marker.text, marker.line) for marker in spec.clarifications] == expected
+    assert speckit.questions(spec) == [marker for marker, _ in expected]
+    assert speckit.questions(speckit.parse_spec("# Feature\nNo questions.\n")) == []
+    assert speckit.questions(speckit.parse_spec("")) == []
+
+
+@pytest.mark.scenario("speckit-format/plan-human-checks/collect-literal-pending-checks")
+def test_human_checks_keep_order_duplicates_and_literal_examples():
+    plan = ("- [ ] Outside\n### Verification and human rollout checklist\n- [ ] Legacy\n"
+            " \t## Human checks\t \n \t- [ ] Repeated\t \n### Detail\n"
+            "- [ ]\tKeep  internal\tspacing\n```md\n- [ ] Fenced\n```\n"
+            "<!--\n    - [ ] HTML\n-->\n###### Deep detail\n- [ ] Deep\n"
+            "## Other\n- [ ] Outside again\n## Human checks\n- [ ] Repeated\n"
+            "# End\n- [ ] Outside last\n")
+    assert speckit.human_checks(plan) == [
+        "- [ ] Repeated", "- [ ]\tKeep  internal\tspacing", "- [ ] Fenced",
+        "- [ ] HTML", "- [ ] Deep", "- [ ] Repeated",
+    ]
+    assert speckit.human_checks("") == []
+
+
+@pytest.mark.scenario("speckit-format/plan-human-checks/collect-literal-pending-checks")
+@pytest.mark.parametrize("heading", [
+    "# Human checks", "### Human checks", "## Human checks extra", "## Human checks ##",
+    "## Human Checks", "##  Human checks", "##\tHuman checks",
+    "\u00a0## Human checks", "## Human checks\u00a0",
+    "### Verification and human rollout checklist",
+])
+def test_human_checks_select_only_exact_heading(heading):
+    assert speckit.human_checks(f"{heading}\n- [ ] Ignored") == []
+
+
+@pytest.mark.scenario("speckit-format/plan-human-checks/collect-literal-pending-checks")
+@pytest.mark.parametrize("checkbox", [
+    "- [x] Done", "- [X] Done", "- [?] Unknown", "- [] Empty state", "- [  ] Wide state",
+    "* [ ] Other bullet", "+ [ ] Other bullet", "-  [ ] Wide gap", "-\t[ ] Tab gap",
+    "- [ ]No gap", "- [ ]\u00a0Unicode gap", "\u00a0- [ ] Unicode indent",
+    "- [ ]", "- [ ] \t ", "- [ ] \u00a0",
+])
+def test_human_checks_require_literal_pending_checkbox_and_nonblank_text(checkbox):
+    assert speckit.human_checks(f"## Human checks\n{checkbox}") == []
+
+
+@pytest.mark.scenario("speckit-format/plan-human-checks/collect-literal-pending-checks")
+@pytest.mark.parametrize("heading, closes", [
+    ("# End", True), (" \t##\tEnd\t ", True), ("## Human checks extra", True),
+    ("### Detail", False), ("###### Detail", False), ("####### Detail", False),
+    ("#No gap", False), ("##\u00a0Unicode gap", False), ("\u00a0## End", False),
+    ("### Verification and human rollout checklist", False),
+])
+@pytest.mark.parametrize("wrapper", [("", ""), ("```md\n", "\n```"), ("<!--\n", "\n-->")])
+def test_human_checks_use_physical_heading_boundaries(heading, closes, wrapper):
+    plan = ("## Human checks\n" + wrapper[0] + heading + wrapper[1]
+            + "\n- [ ] After boundary\n## Human checks\n- [ ] Reopened")
+    expected = [] if closes else ["- [ ] After boundary"]
+    assert speckit.human_checks(plan) == expected + ["- [ ] Reopened"]
+
+
+@pytest.mark.scenario("speckit-format/status-completion/replace-and-insert-idempotently")
+@pytest.mark.parametrize("ending", ["\n", "\r\n", "\r"])
+@pytest.mark.parametrize("statuses", [
+    ["**Status**: Draft"], ["**Status**: Complete"],
+    ["**Status**: Draft", " \t**Status**:\tReview \t", "**Status**:"],
+])
+def test_mark_complete_is_idempotent(ending, statuses):
+    unrelated = ["Status: Draft", "**Status** : Draft", "Prose **Status**: Draft",
+                 "\u00a0**Status**: Draft", "## Other", "  untouched\t "]
+    text = ending.join(["# Feature", *statuses, *unrelated])
+    expected = ending.join(["# Feature", *["**Status**: Complete" for _ in statuses], *unrelated])
+    completed = speckit.mark_complete(text)
+    assert completed == expected
+    assert speckit.mark_complete(completed) == completed
+    assert speckit.parse_spec(completed).status == "Complete"
+
+
+@pytest.mark.scenario("speckit-format/status-completion/replace-and-insert-idempotently")
+@pytest.mark.parametrize("text, expected", [
+    ("# Feature\n\nBody\n", "# Feature\n**Status**: Complete\n\nBody\n"),
+    ("# Feature\r\nBody\nEnd\r", "# Feature\r\n**Status**: Complete\r\nBody\nEnd\r"),
+    ("# Feature\rBody\r", "# Feature\r**Status**: Complete\rBody\r"),
+    ("# Feature", "# Feature\n**Status**: Complete\n"),
+    ("Preamble\r\n \t#\tFirst\t \n# Second\r\nBody",
+     "Preamble\r\n \t#\tFirst\t \n**Status**: Complete\n# Second\r\nBody"),
+    ("# Feature\n**Status**: Draft", "# Feature\n**Status**: Complete"),
+    ("**Status**: Draft\r\n# Feature\n<!--\n\t**Status**: Review\r-->\n"
+     "```md\r\n**Status**: Pending\n```",
+     "**Status**: Complete\r\n# Feature\n<!--\n**Status**: Complete\r-->\n"
+     "```md\r\n**Status**: Complete\n```"),
+])
+def test_mark_complete_inserts_after_first_title_and_preserves_line_endings(text, expected):
+    assert speckit.mark_complete(text) == expected
+    assert speckit.mark_complete(expected) == expected
+
+
+@pytest.mark.scenario("speckit-format/status-completion/replace-and-insert-idempotently")
+@pytest.mark.parametrize("text", [
+    "", "Prose only", "## Feature\n", "#\n", "\u00a0# Feature\n",
+    "**Status**: Draft\n", "**Status**: Complete\r\n## Feature\r\n",
+])
+def test_mark_complete_refuses_missing_title_even_with_status(text):
+    with pytest.raises(SpecError, match="missing title"):
+        speckit.mark_complete(text)

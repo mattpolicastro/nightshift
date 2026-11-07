@@ -247,3 +247,49 @@ def validate(repo: Path, change: str) -> list[str]:
                 if checkbox and checkbox[1] not in ("x", "X"):
                     report(name, line, "unchecked checklist item")
     return [f"{path}:{line}: {message}" for path, line, message in sorted(errors)]
+
+
+def questions(spec: Spec) -> list[str]:
+    """Return complete clarification markers in source order, including repeats."""
+    return [marker.text for marker in spec.clarifications]
+
+
+def human_checks(plan_text: str) -> list[str]:
+    """Collect literal pending lines under exact Human checks sections."""
+    selected = False
+    checks = []
+    for raw in plan_text.splitlines():
+        line = raw.strip(" \t")
+        heading = re.match(r"^(#{1,6})[ \t]+", line)
+        if heading and len(heading[1]) <= 2:
+            selected = False
+        if line == "## Human checks":
+            selected = True
+        elif selected and re.match(r"- \[ \][ \t]", line) and line[6:].strip():
+            checks.append(line)
+    return checks
+
+
+def mark_complete(spec_text: str) -> str:
+    """Complete all physical statuses, or insert after the required first title."""
+    lines = spec_text.splitlines(keepends=True)
+    title_index: int | None = None
+    title_ending = ""
+    has_status = False
+    for index, raw in enumerate(lines):
+        content = raw.splitlines()[0]
+        ending = raw[len(content):]
+        line = content.strip(" \t")
+        if title_index is None and TITLE.match(line):
+            title_index, title_ending = index, ending
+        if STATUS.match(line):
+            lines[index] = "**Status**: Complete" + ending
+            has_status = True
+    if title_index is None:
+        raise SpecError("cannot mark complete: missing title")
+    if not has_status:
+        ending = title_ending or "\n"
+        if not title_ending:
+            lines[title_index] += ending
+        lines.insert(title_index + 1, "**Status**: Complete" + ending)
+    return "".join(lines)
