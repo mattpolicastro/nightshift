@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from specloop import seal, tasks
+from specloop import seal, spec_format, tasks
 from specloop.manifest import Manifest
 from specloop.revision_store import RevisionStore, fingerprint
 from specloop.state import Busy, Run
@@ -159,7 +159,7 @@ def revise_result(run: Run, m: Manifest, feedback: str, *, feedback_format: str 
         record = store.load() if store else None
         replayed = record is not None
         repo, ref = run.dir / "repo.git", f"refs/heads/{m.branch}"
-        path = f"openspec/changes/{m.change}/tasks.md"
+        path = spec_format.get(m).tasks_path(m.change)
         if record is None:
             _eligible(run, m)
         head = _git(repo, "rev-parse", ref).decode().strip()
