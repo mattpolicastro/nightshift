@@ -15,6 +15,8 @@ STORY = re.compile(r"^### User Story (\d+) - (.+)$")
 PRIORITY = re.compile(r"^(.+?) \(Priority: P(\d+)\)$")
 SCENARIO = re.compile(r"^\d+\.\s+\*\*AS(\d+)\*\*\s+(.*)$")
 CLARIFICATION = re.compile(r"\[NEEDS CLARIFICATION(?:\s*:[^\]]*)?\]")
+PHASE = re.compile(r"^##\s+Phase\s+(\d+):\s+(.+?)\s*$")
+TASK_LABEL = re.compile(r"^(T\d{3,}(?:\.\d+)*)\s+(?:\[P\]\s+)?(?:\[US(\d+)\]\s+)?(.*)$")
 
 
 @dataclass(frozen=True)
@@ -105,4 +107,25 @@ def scenario_ids(change: str, spec: Spec) -> dict[str, str]:
             if sid in found:
                 raise SpecError(f"duplicate scenario id: {sid}")
             found[sid] = f"US{story.number} — AS{scenario.number}\n{scenario.text}"
+    return found
+
+
+def parse_tasks(text: str) -> list[tasks.Task]:
+    """Read labelled checkboxes in literal phases, retaining flags in task text."""
+    found: list[tasks.Task] = []
+    section: int | None = None
+    title = ""
+    for number, line in enumerate(text.splitlines()):
+        if phase := PHASE.match(line):
+            section, title = int(phase[1]), phase[2]
+            continue
+        if (heading := HEADING.match(line)) and len(heading[1]) <= 2:
+            section = None
+        if section is None or (checkbox := tasks.TASK.match(line)) is None:
+            continue
+        body = checkbox[3]
+        if label := TASK_LABEL.match(body):
+            # The final capture omits flags; retain them for identity and ownership.
+            rest = body[label.end(1):].lstrip()
+            found.append(tasks.Task(section, title, label[1], rest, checkbox[2] != " ", number))
     return found

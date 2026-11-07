@@ -185,3 +185,110 @@ def test_scenario_identity_requires_whole_regex_match():
     spec.stories[0].scenarios.append(speckit.Scenario("9/trailing", "invalid", 32))
     with pytest.raises(SpecError, match="invalid scenario id"):
         speckit.scenario_ids(CHANGE, spec)
+
+
+@pytest.mark.scenario("speckit-format/shared-task-records/parse-phases-and-references")
+def test_fixture_parses_stories_scenarios_and_tasks():
+    spec = speckit.parse_spec(SPEC_FILE.read_text(encoding="utf-8"))
+    ids = speckit.scenario_ids(CHANGE, spec)
+    parsed = speckit.parse_tasks(SPEC_FILE.with_name("tasks.md").read_text(encoding="utf-8"))
+    assert [(s.number, s.priority, len(s.scenarios)) for s in spec.stories] == [
+        (1, 1, 2), (2, 2, 1), (3, 3, 1),
+    ]
+    assert all(type(task) is tasks.Task for task in parsed)
+    assert [(t.section, t.section_title, t.label, t.line, t.done) for t in parsed] == [
+        (1, "Setup", "T001", 4, False),
+        (2, "Foundational", "T002", 8, False),
+        (3, "User Story 1 - Check the gate", "T003", 12, False),
+        (3, "User Story 1 - Check the gate", "T004", 13, False),
+        (4, "User Story 2 - Explain a refusal", "T005", 17, False),
+        (5, "User Story 3 - Retry a check", "T006", 21, False),
+        (6, "Polish", "T007", 25, False),
+    ]
+    assert parsed[3].text == "[P] [US1] Refuse failing checks. Covers `042-add-a-gate/us1/as2`."
+    assert parsed[3].scenarios == ["042-add-a-gate/us1/as2"]
+    assert {sid for task in parsed for sid in task.scenarios} == set(ids)
+
+
+@pytest.mark.scenario("speckit-format/shared-task-records/parse-phases-and-references")
+@pytest.mark.parametrize("state, done", [(" ", False), ("x", True), ("X", True)])
+@pytest.mark.parametrize("label", ["T001", "T1234", "T003.2", "T003.2.10"])
+def test_task_labels_done_states_and_zero_based_lines(state, done, label):
+    text = f"# Tasks\r\n\r\n##\tPhase 007: User Story 2 - Gate  \r\n\r\n\t- [{state}] {label}\t[P] [US2] Check `a/b/c`.  \r\ncontinuation"
+    assert speckit.parse_tasks(text) == [
+        tasks.Task(7, "User Story 2 - Gate", label, "[P] [US2] Check `a/b/c`.", done, 4),
+    ]
+
+
+@pytest.mark.scenario("speckit-format/shared-task-records/bound-phases-literally")
+@pytest.mark.parametrize("body, owner", [
+    ("Check", None), ("[P] Check", None), ("[US2] Check", "2"),
+    ("[P] [US02] Check", "02"), ("Mention [US2] in prose", None),
+    ("[P] Mention [US2] in prose", None), ("[US2] [P] Check", "2"),
+    ("[US2]Check", None), ("[P][US2] Check", None),
+    ("[USk] Check", None),
+])
+def test_task_flags_are_preserved_and_ownership_is_positional(body, owner):
+    task, = speckit.parse_tasks(f"## Phase 1: User Story 2 - Gate\n- [ ] T001 {body}")
+    assert task.text == body
+    assert task.title() == f"T001 {body}"
+    # Ownership is the label grammar's capture, never a search through prose.
+    match = speckit.TASK_LABEL.fullmatch(task.title())
+    assert match is not None
+    assert match[2] == owner
+
+
+@pytest.mark.scenario("speckit-format/shared-task-records/bound-phases-literally")
+@pytest.mark.parametrize("level", range(1, 8))
+@pytest.mark.parametrize("wrapper", [("", ""), ("```md\n", "\n```"), ("<!--\n", "\n-->")])
+def test_task_phase_boundaries_and_literal_examples(level, wrapper):
+    text = (wrapper[0] + "- [ ] T001 Outside\n## Phase 1: Setup\n- [ ] T002 Inside\n"
+            + "#" * level + " Boundary\n- [x] T003 After heading\n"
+            "## Phase 2: Polish\n- [X] T004 Reopened" + wrapper[1])
+    offset = wrapper[0].count("\n")
+    expected = [tasks.Task(1, "Setup", "T002", "Inside", False, 2 + offset)]
+    if level > 2:
+        expected.append(tasks.Task(1, "Setup", "T003", "After heading", True, 4 + offset))
+    expected.append(tasks.Task(2, "Polish", "T004", "Reopened", True, 6 + offset))
+    assert speckit.parse_tasks(text) == expected
+
+
+@pytest.mark.scenario("speckit-format/shared-task-records/bound-phases-literally")
+@pytest.mark.parametrize("heading", [
+    " ## Phase 1: Setup", "\t## Phase 1: Setup", "### Phase 1: Setup",
+    "## Phase 1 Setup", "## Phase one: Setup", "## Phase 1:", "## 1. Setup",
+])
+def test_only_recognized_phases_admit_tasks(heading):
+    assert speckit.parse_tasks(f"{heading}\n- [ ] T001 Outside") == []
+
+
+@pytest.mark.scenario("speckit-format/shared-task-records/bound-phases-literally")
+@pytest.mark.parametrize("checkbox", [
+    "- [ ] T01 Short", "- [ ] t001 Lowercase", "- [ ] 001 Numeric",
+    "- [ ] T001. Broken", "- [ ] T001.a Broken", "- [ ] T001..2 Broken",
+    "- [ ] T001Suffix Broken", "- [ ] Unlabelled", "- [ ] T001",
+    "- [ ] [P] T001 Misplaced", "- [?] T001 Unknown state", "* [ ] T001 Bullet",
+])
+def test_invalid_task_labels_and_checkbox_forms_do_not_count(checkbox):
+    assert speckit.parse_tasks(f"## Phase 1: Setup\n{checkbox}") == []
+
+
+@pytest.mark.scenario("speckit-format/shared-task-records/parse-phases-and-references")
+def test_task_keys_and_references_use_shared_record_behavior():
+    body = ("[P] [US1] Check `042-add-a-gate/us1/as2` twice `042-add-a-gate/us1/as2`; "
+            "also `unknown/us9/as1`. Ignore bare 042-add-a-gate/us1/as1, "
+            "`Upper/us1/as1`, `a/b/c/d`, and `a/b`.")
+    task, = speckit.parse_tasks(f"## Phase 0: Setup\n- [ ] T001 {body}")
+    shared = tasks.Task(0, "Setup", "T001", body, False, 1)
+    assert task == shared
+    assert task.key == shared.key
+    assert task.scenarios == tasks.SCENARIO_REF.findall(body) == [
+        "042-add-a-gate/us1/as2", "042-add-a-gate/us1/as2", "unknown/us9/as1",
+    ]
+    assert task.known_scenarios({"042-add-a-gate/us1/as2"}) == [
+        "042-add-a-gate/us1/as2", "042-add-a-gate/us1/as2",
+    ]
+    renumbered, = speckit.parse_tasks(f"\n## Phase 9: Setup\n- [X] T999.2 {body}")
+    assert renumbered.key == task.key
+    changed, = speckit.parse_tasks("## Phase 0: Setup\n- [ ] T001 " + body.replace("[P] ", ""))
+    assert changed.key != task.key
