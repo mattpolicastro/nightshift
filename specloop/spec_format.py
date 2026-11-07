@@ -87,7 +87,7 @@ class _OpenSpec:
         return f"openspec/changes/{change}/"
 
     def finish(self, work: Path, change: str, all_tasks_done: bool) -> dict:
-        return openspec.archive(work, change, all_tasks_done)
+        return openspec.archive(work, change, all_tasks_done=all_tasks_done)
 
     def pr_title(self, change: str) -> str:
         return f"{change}: OpenSpec change via specloop"

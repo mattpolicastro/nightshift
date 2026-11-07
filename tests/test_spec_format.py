@@ -1,6 +1,9 @@
 """The format boundary preserves OpenSpec's paths, calls and physical-line rules."""
 
+import ast
+import hashlib
 import json
+import shlex
 import subprocess
 from dataclasses import fields, replace
 from pathlib import Path
@@ -9,10 +12,13 @@ from unittest.mock import Mock, call
 
 import pytest
 
-from specloop import cli, loop, openspec, revise, spec_format, tasks
+from specloop import agents, cli, loop, openspec, propose, revise, spec_format, tasks
 from specloop.manifest import Manifest
 from specloop.seal import SAFE_FLAGS, git
 from specloop.state import Run, TaskState
+from test_finish_expect_head import service
+from test_specloop_act import admitted
+from test_specloop_command_json import BRANCH, CHANGE, template
 
 
 @pytest.fixture
@@ -83,8 +89,10 @@ def test_delegation_is_late_bound(tmp_path, monkeypatch, method, backend, tail, 
     replacement = Mock(return_value=result)
     monkeypatch.setattr(openspec, backend, replacement)
     args = (tmp_path, "sample-change", *tail)
+    backend_args = args[:2] if method == "finish" else args
+    backend_kwargs = {"all_tasks_done": tail[0]} if method == "finish" else {}
     assert call(*args) is result
-    replacement.assert_called_once_with(*args)
+    replacement.assert_called_once_with(*backend_args, **backend_kwargs)
     for cls in (openspec.SpecError, openspec.ValidatorUnavailable, OSError):
         error = cls("same exception")
         replacement = Mock(side_effect=error)
@@ -92,7 +100,7 @@ def test_delegation_is_late_bound(tmp_path, monkeypatch, method, backend, tail, 
         with pytest.raises(cls) as raised:
             call(*args)
         assert raised.value is error
-        replacement.assert_called_once_with(*args)
+        replacement.assert_called_once_with(*backend_args, **backend_kwargs)
 
 
 @pytest.mark.scenario("spec-format/format-seam/delegation-stays-late-bound")
@@ -430,3 +438,264 @@ def test_task_path_routes_through_revision_and_replay(repo, tmp_path, monkeypatc
     assert {p: p.read_bytes() for p in saved} == saved
     assert selection.call_args_list == [call(ctx.m)] * 3
     assert adapter.tasks_path.call_args_list == [call(ctx.m.change)] * 3
+
+
+@pytest.mark.scenario("spec-format/engine-routing-compatibility/consumers-contain-no-direct-format-operations")
+def test_no_direct_openspec_path_literals_outside_adapter():
+    for module in (cli, loop, revise, propose):
+        source = Path(module.__file__).read_text()
+        assert "openspec/changes/" not in source, module.__name__
+        assert not any(isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                       and node.value.id == "openspec" for node in ast.walk(ast.parse(source))), module.__name__
+    assert cli.openspec is openspec
+
+
+@pytest.mark.scenario("spec-format/engine-routing-compatibility/consumers-contain-no-direct-format-operations")
+@pytest.mark.scenario("spec-format/engine-routing-compatibility/drafting-and-revision-retain-behavior")
+def test_drafting_prompt_retains_exact_bytes():
+    rendered = propose.PROMPT.format(
+        change="sample-change", drafter_root=spec_format.OPENSPEC.drafter_root("sample-change"),
+        idea="An idea\nwith details", sources="- README.md", in_flight="", feedback="")
+    # SHA-256 of the complete rendered pre-extraction prompt with these inputs.
+    assert hashlib.sha256(rendered.encode()).hexdigest() == (
+        "42095800fc5d9f88e7e8e971d48b90efe0c1269a291524178baffcdb7b463ec1")
+
+
+@pytest.mark.scenario("spec-format/format-seam/delegation-stays-late-bound")
+@pytest.mark.parametrize("error", [None, spec_format.SpecError, spec_format.ValidatorUnavailable])
+def test_admission_and_lint_retain_late_bound_scenario_errors(repo, monkeypatch, error):
+    path = "openspec/changes/sample-change/tasks.md"
+    head = commit(repo, {path: "## 1. Core\n- [ ] 1.1 Implement `cap/req/example`\n"})
+    m = Manifest(repo, "sample-change", "main", "main", "", {}, (), (), ())
+    validator = Mock(return_value=["validation problem"])
+    lookup = Mock(return_value={"cap/req/example": "text"})
+    if error:
+        lookup.side_effect = error("scenario failure")
+    monkeypatch.setattr(openspec, "validate", validator)
+    monkeypatch.setattr(openspec, "scenarios", lookup)
+    for operation in (lambda: cli.problems_with(repo, head, m), lambda: propose.lint(repo, m.change)):
+        if error is spec_format.ValidatorUnavailable:
+            with pytest.raises(error) as raised:
+                operation()
+            assert raised.value is lookup.side_effect
+        else:
+            assert operation() == ["validation problem"] + (["scenario failure"] if error else [])
+    assert validator.call_count == lookup.call_count == 2
+    assert validator.call_args_list == lookup.call_args_list
+    assert all(c.args[1] == m.change for c in validator.call_args_list)
+
+
+@pytest.mark.scenario("spec-format/engine-routing-compatibility/drafting-and-revision-retain-behavior")
+@pytest.mark.parametrize("root", ["openspec/changes/sample-change/", "format-fixture/sample-change/"])
+def test_drafting_routes_paths_validation_confinement_and_staging(repo, tmp_path, monkeypatch, root):
+    from test_specloop_propose import M
+
+    task_path = root + "work-items.md"
+    adapter = Mock(spec=spec_format.SpecFormat)
+    adapter.tasks_path.return_value = task_path
+    adapter.drafter_root.return_value = root
+    adapter.validate.side_effect = lambda *a: []
+    adapter.scenarios.return_value = {"cap/req/example": "text"}
+    selection = Mock(return_value=adapter)
+    monkeypatch.setattr(spec_format, "get", selection)
+    monkeypatch.setattr(propose, "in_flight", lambda *a: {"tests/shared.py": ["other"]})
+    monkeypatch.setattr(propose, "start_commit", lambda *a: "main")
+    monkeypatch.setattr(propose.critic, "open_pr_files", lambda *a: ({}, []))
+    events = []
+
+    def draft(call):
+        events.append("draft")
+        assert f"the change, under {root}. Do not edit any other file." in call.prompt
+        path = call.cwd / task_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("## 1. Core\n- [ ] 1.1 Implement `cap/req/example` in `tests/new.py`; "
+                        "do not edit `tests/shared.py`.\n")
+        return agents.Result("ok", {"status": "drafted", "questions": []})
+
+    def review(kind):
+        def check(*a, **kw):
+            events.append(kind)
+            return {"contradictions": [], "risks": []}
+        return check
+
+    monkeypatch.setattr(propose.feasibility, "check", review("feasibility"))
+    monkeypatch.setattr(propose.critic, "check", review("critic"))
+    spy = Mock(wraps=git)
+    monkeypatch.setattr(propose, "git", spy)
+    result = propose.draft(repo, "main", "sample-change", "idea", [], M, tmp_path / "draft", agent=draft)
+    assert result.commit and not result.problems and not result.risks
+    assert events == ["draft", "feasibility", "critic"]
+    selection.assert_called_once_with(M)
+    adapter.validate.assert_called_once_with(result.work, "sample-change")
+    adapter.scenarios.assert_called_once_with(result.work, "sample-change")
+    assert adapter.tasks_path.call_args_list == [call("sample-change")] * 3
+    assert [c for c in spy.call_args_list if c.args[1] == "add"] == [
+        call(result.work, "add", "-A", root.removesuffix("/"))]
+    assert git(result.work, "show", "-s", "--format=%s", "HEAD") == (
+        b"Draft OpenSpec change sample-change (specloop propose, round 1)\n")
+    (result.work / "outside.py").write_text("stray")
+    assert propose.lint(result.work, "sample-change", adapter) == [
+        f"outside.py: only files under {root} may change"]
+    path = result.work / task_path
+    path.write_text(path.read_text().replace("tests/new.py", "tests/shared.py"))
+    assert propose.overlaps(result.work, "sample-change", {"tests/shared.py": ["other"]}, adapter) == [
+        "task 1.1: `tests/shared.py` is also being changed by other; put these tests in a new file"]
+
+
+@pytest.mark.scenario("spec-format/engine-routing-compatibility/drafting-and-revision-retain-behavior")
+def test_in_flight_selects_each_runs_manifest_adapter(tmp_path, monkeypatch):
+    manifests, adapters, reads = {}, {}, {}
+    for change in ("first", "second"):
+        run = Run.for_change(change)
+        run.pause("requested")
+        m = Manifest(tmp_path, change, f"branch/{change}", "main", "", {}, (), (), ())
+        manifests[run.dir / "manifest.toml"] = m
+        adapter = Mock(spec=spec_format.SpecFormat)
+        adapter.tasks_path.return_value = f"format-fixture/{change}/work-items.md"
+        adapters[change] = adapter
+        reads[(run.dir / "repo.git", "show", f"{m.branch}:{adapter.tasks_path.return_value}")] = (
+            f"## 1. Core\n- [ ] 1.1 Update `tests/{change}.py`; do not edit `tests/shared.py`.\n".encode())
+    monkeypatch.setattr(propose.manifest, "load", manifests.__getitem__)
+    selection = Mock(side_effect=lambda m: adapters[m.change])
+    monkeypatch.setattr(spec_format, "get", selection)
+    reader = Mock(side_effect=lambda *args: reads[args])
+    monkeypatch.setattr(propose, "git", reader)
+    assert propose.in_flight(tmp_path, "new") == {
+        "tests/first.py": ["first"], "tests/second.py": ["second"]}
+    assert selection.call_args_list == [call(m) for m in manifests.values()]
+    assert reader.call_args_list == [call(*args) for args in reads]
+    for change, adapter in adapters.items():
+        adapter.tasks_path.assert_called_once_with(change)
+
+
+@pytest.mark.scenario("spec-format/engine-routing-compatibility/drafting-and-revision-retain-behavior")
+@pytest.mark.parametrize("root", ["openspec/changes/sample-change/", "format-fixture/sample-change/"])
+def test_draft_ready_notification_routes_root_and_preserves_text(tmp_path, monkeypatch, root):
+    m = Manifest(tmp_path, "sample-change", "draft/custom", "main", "", {}, (), (), ())
+    draft = propose.Draft(m.change, tmp_path / "work", commit="a" * 40, branch=m.branch)
+    adapter = Mock(wraps=spec_format.OPENSPEC)
+    adapter.drafter_root.return_value = root
+    selection = Mock(return_value=adapter)
+    monkeypatch.setattr(spec_format, "get", selection)
+    monkeypatch.setattr(cli.manifest, "template", lambda *a, **kw: (m, ""))
+    monkeypatch.setattr(propose, "draft", lambda *a, **kw: draft)
+    monkeypatch.setattr(propose, "publish_branch", lambda *a: m.branch)
+    monkeypatch.setattr(cli, "load_env", lambda *a: {})
+    sent = []
+    monkeypatch.setattr(cli, "notifier", lambda *a: sent.append)
+    path = str(tmp_path / "manifest with spaces.toml")
+    assert cli.main(["propose", path, "--idea", "A feature"]) == 0
+    assert sent == [cli.messages.Message(
+        cli.messages.ACTION, m.change, "Review the drafted change, then admit it",
+        f"draft ready on {m.branch} in {m.repo} ({draft.commit[:12]}); review {root} there",
+        shlex.join(["nightshift", "admit", path, "--change", m.change,
+                    "--branch", m.branch, "--head", draft.commit]))]
+    selection.assert_called_once_with(m)
+    adapter.drafter_root.assert_called_once_with(m.change)
+
+
+@pytest.mark.scenario("spec-format/engine-routing-compatibility/publication-and-interrupted-finish-retain-behavior")
+@pytest.mark.parametrize("custom_labels", [False, True])
+def test_publication_routes_labels_and_preserves_body(service, monkeypatch, custom_labels):
+    run = service.run
+    run.pause("ready_to_publish")
+    adapter = Mock(wraps=spec_format.OPENSPEC)
+    adapter.pr_kind = "Fixture change" if custom_labels else "OpenSpec change"
+    title = f"{CHANGE}: OpenSpec change via specloop"
+    if custom_labels:
+        title = "Fixture title"
+        adapter.pr_title.return_value = title
+    selection = Mock(return_value=adapter)
+    monkeypatch.setattr(spec_format, "get", selection)
+    monkeypatch.setattr(loop, "_fetch_publish_base", lambda *a, **kw: service.local_head())
+    monkeypatch.setattr(loop, "_publish_needs_prepare", lambda *a: False)
+    run.state.pr = ""
+    monkeypatch.setattr(cli, "_existing_pr", lambda *a: "")
+    gh = Mock(return_value=service.url)
+    monkeypatch.setattr(cli, "_gh", gh)
+    assert cli._publish(SimpleNamespace(change=CHANGE), run) == 0
+    body = (f"{adapter.pr_kind} `{CHANGE}`, driven by specloop: 1 tasks, each sealed, verified by the "
+            "harness and independently reviewed.\n\n## Checks a human must make\n\n"
+            "- [ ] `cap/req/manual` — Human checks this\n\n"
+            "## Non-blocking review findings\n\n(none)\n\n"
+            "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
+    gh.assert_called_once_with("pr", "create", "--draft", "-R", "example/repo", "--head", BRANCH,
+                               "--base", "main", "--title", title, "--body", body)
+    adapter.pr_title.assert_called_once_with(CHANGE)
+    assert all(c.args[0].change == CHANGE for c in selection.call_args_list)
+    assert run.state.pr == service.url and run.state.pause.reason == "human_checks"
+
+
+@pytest.mark.scenario("spec-format/engine-routing-compatibility/publication-and-interrupted-finish-retain-behavior")
+@pytest.mark.parametrize("failure", ["push", "ready"])
+def test_finish_routes_and_reuses_archive_after_interruption(service, monkeypatch, capfd, failure):
+    adapter = Mock(wraps=spec_format.OPENSPEC)
+    selection = Mock(return_value=adapter)
+    monkeypatch.setattr(spec_format, "get", selection)
+    original = service.local_head()
+    saved = (service.run.dir / "state.json").read_bytes()
+    args = SimpleNamespace(change=CHANGE, expect_head="0" * 40)
+    assert cli._finish(args, service.run) == 1
+    adapter.tasks_paths_at.assert_not_called()
+    adapter.finish.assert_not_called()
+    assert f"expected head {'0' * 40}; observed run branch head {original}; refusing to finish" in capfd.readouterr().err
+    args.expect_head = original
+    service.failure = failure
+    with pytest.raises(RuntimeError, match=f"{failure} unavailable"):
+        cli._finish(args, service.run)
+    archived = service.local_head()
+    assert archived != original
+    assert (service.run.dir / "state.json").read_bytes() == saved
+    adapter.finish.assert_called_once()
+    assert adapter.finish.call_args.args[1] == CHANGE
+    assert adapter.finish.call_args.kwargs == {"all_tasks_done": True}
+    assert git(service.bare, "show", "-s", "--format=%s", archived) == (
+        f"specloop: archive {CHANGE} into openspec/specs\n".encode())
+    assert service.archives == [CHANGE]
+    service.failure = None
+    args.expect_head = archived
+    assert cli._finish(args, service.run) == 0
+    assert service.local_head() == service.remote_head() == archived
+    assert service.run.state.status == "done" and service.run.state.pause is None
+    assert adapter.finish.call_count == 1
+    assert adapter.tasks_paths_at.call_args_list == [
+        call(service.bare, original, CHANGE), call(service.bare, archived, CHANGE)]
+    assert capfd.readouterr().out == f"{CHANGE}: archived and marked ready for review — {service.url}\n"
+
+
+@pytest.mark.scenario("spec-format/committed-task-discovery/missing-tasks-retain-read-failure")
+@pytest.mark.scenario("spec-format/engine-routing-compatibility/publication-and-interrupted-finish-retain-behavior")
+@pytest.mark.parametrize("json_output", [False, True])
+def test_status_routes_each_manifest_and_isolates_missing_tasks(repo, tmp_path, monkeypatch, capsys, json_output):
+    broken = run_context(repo, tmp_path / "broken")
+    head = commit(repo, {"openspec/changes/sample-change/tasks.md": "## 1. Core\n- [x] 1.1 Implement\n"})
+    healthy = run_context(repo, tmp_path / "healthy")
+    contexts = {"broken": broken, "healthy": healthy}
+    monkeypatch.setattr(cli.Run, "for_change", lambda name, **kw: contexts[name].run)
+    monkeypatch.setattr(cli, "iter_run_dirs", lambda: [Path(name) for name in contexts])
+    monkeypatch.setattr(cli, "_manifest", lambda run: next(c.m for c in contexts.values() if c.run is run))
+    from specloop import serve
+    monkeypatch.setattr(serve, "liveness", lambda: "not running")
+    adapter = Mock(wraps=spec_format.OPENSPEC)
+    selection = Mock(return_value=adapter)
+    monkeypatch.setattr(spec_format, "get", selection)
+    saved = {c.run.dir / "state.json": (c.run.dir / "state.json").read_bytes() for c in contexts.values()}
+    for method in ("save", "event", "pause", "lock"):
+        monkeypatch.setattr(Run, method, Mock(side_effect=AssertionError("status mutated state")))
+    monkeypatch.setattr(cli, "_finish", Mock(side_effect=AssertionError("status retried finish")))
+    assert cli.status(SimpleNamespace(json=json_output, change=None, events=0)) == 0
+    output = capsys.readouterr().out
+    if json_output:
+        entries = json.loads(output)["runs"]
+        assert entries[0]["pause"]["reason"] == "status_error"
+        assert "tasks.md" in entries[0]["error"]
+        assert entries[1]["tasks"] == {"done": 1, "total": 1}
+        assert entries[1]["head"] == head
+    else:
+        assert "(could not read tasks:" in output
+        assert f"  tasks: 1/1 done on main @ {head[:12]}\n" in output
+    assert selection.call_args_list == [call(broken.m), call(healthy.m)]
+    assert all(c.args[0] is ctx.m for c, ctx in zip(selection.call_args_list, contexts.values()))
+    assert adapter.tasks_paths_at.call_args_list == [
+        call(c.repo, c.head(), c.m.change) for c in contexts.values()]
+    assert {p: p.read_bytes() for p in saved} == saved
