@@ -17,6 +17,7 @@ The prerequisite, engine, deployment, platform and plugin guides SHALL consisten
 - **WHEN** an operator reads the validator and deployment guidance
 - **THEN** it explains missing WHEN/GIVEN or THEN and unknown requirements-header failures, accepted closing hashes and the retained harness scenario lint
 - **THEN** pre-merge validation of throwaway main and Scheming Vizier, pre-deploy validation of both enrolled checkouts and the Mac Studio admission/finish cut-over remain explicit pending human checks recorded on #191/#184
+- **THEN** the bundled supervisor PATH/comment remain unchanged; a separate operator-controlled supervisor check without `~/n/bin` establishes dependency removal, while exact bundled-wrapper cleanup and verification are explicitly deferred to separately authorized work
 - **THEN** archived failures are informational and offline tests do not claim live deployment success
 
 ## MODIFIED Requirements
@@ -38,10 +39,10 @@ The prerequisite, engine, deployment, platform and plugin guides SHALL consisten
 
 #### Scenario: Frozen service wrappers remain explicit
 - **WHEN** an operator reads setup examples and platform limitations for the new host settings
-- **THEN** guidance names `bin/nightshift-daemon` and `bin/specloop-serve` as wrappers with fixed bootstrap checkout, uv and remaining PATH locations, explicitly noting only the supervisor's removal of ~/n/bin and the associated OpenSpec comment change, and says environment settings do not relocate those wrapper commands
-- **THEN** guidance describes wrapper portability as deferred because `bin/**` remains frozen apart from that narrow supervisor PATH/comment exception, distinguishes direct CLI configuration from bundled service startup, and does not claim a new helper or relocated wrapper pathname solves the limitation
+- **THEN** guidance names `bin/nightshift-daemon` and `bin/specloop-serve` as unchanged wrappers with fixed bootstrap checkout, uv and PATH locations, explicitly noting the supervisor's retained ~/n/bin prefix and stale OpenSpec comment, and says environment settings do not relocate those wrapper commands
+- **THEN** guidance describes wrapper portability as deferred because `bin/**` remains frozen without exceptions, distinguishes direct CLI configuration from bundled service startup, and does not claim a new helper or relocated wrapper pathname solves the limitation
 - **THEN** full daemon rollout remains pending separate wrapper work or an independently provisioned operator service preserving credential and preflight guards
-- **THEN** the same freeze covers launchd plists and all other wrapper comments; current guidance explains the retained worker startup prerequisites and real pause/supervisor boundaries without promising those files were corrected
+- **THEN** the same freeze covers launchd plists and all wrapper comments; current guidance explains the retained worker startup prerequisites and real pause/supervisor boundaries without promising those files were corrected
 
 ### Requirement: Format selection guidance
 

@@ -75,3 +75,12 @@ Strict validation SHALL delegate parsing to OpenSpec 1.16.1 and preserve normal 
 - **THEN** the pinned validator accepts those headings
 - **WHEN** a live change spec has a physical line matching `^#{1,3}\s+Scenario:`, including a literal matching example
 - **THEN** the harness still reports the existing exactly-four-hashes problem without semantic fence or HTML parsing
+
+### Requirement: Plugin host path compatibility
+
+The plugin SHALL retain `NIGHTSHIFT_NODE_BIN`, its default and Factory PATH ordering for its own Node tools. Plugin comments and test diagnostics SHALL explain this retained purpose without attributing it to OpenSpec or npx. All `bin/**` files and launchd plists SHALL remain unchanged.
+
+#### Scenario: Node prefix remains for the plugin
+- **WHEN** Factory host paths are resolved with the default or overridden Node directory after the standalone cut-over
+- **THEN** the configured Node directory remains the first Factory PATH entry and existing executable, cwd and environment assertions still pass
+- **THEN** plugin comments and the Node-prefix assertion diagnostic describe the plugin's own Node needs; no wrapper or plist edit is required or permitted
