@@ -278,17 +278,3 @@ source directory, and separate pinned templates from authored feature documents.
 
 - **WHEN** the fixture's tasks template is compared with the pinned local source
 - **THEN** its bytes match, and the fixture also includes `.specify/memory/constitution.md` without altering upstream inputs
-
-### Requirement: Document the parser boundary
-
-If `docs/specloop/speckit.md` exists at implementation time, it SHALL receive a
-short paragraph documenting the parser API, conservative line rules and lack of
-engine integration with an issue #186 citation. If absent, the implementation
-SHALL defer that paragraph to #185 and note the omission in the PR description.
-Shared guides and all existing behavior SHALL remain unchanged.
-
-#### Scenario: Respect the guide dependency
-
-- **WHEN** implementation documentation is prepared
-- **THEN** the existing house-rules guide receives only the scoped paragraph, or an absent guide is explicitly deferred in the PR description
-- **THEN** no substitute guide or shared-documentation edit is introduced and no parser-only work is described as engine integration

@@ -237,10 +237,11 @@ documentation checks verify structure, links or runnable examples, not phrases.
   identities and checks; authors must remove ambiguous examples from feature files.
 - Synthetic fixtures prove the specified grammar, not all real generator output.
   The live feature check below remains pending even when CI is green.
-- Six tasks in one section keep two verbatim-copy batches (244 and 252 template
-  lines) within session budgets and separate spec parsing, task parsing,
-  validation and text helpers. Approximately 300 changed lines per session and
-  250 module lines are estimates; preserve correctness and named coverage first.
+- Five tasks in one section combine the local fixture copies and provenance
+  checks, then separate spec parsing, task parsing, validation and text helpers.
+  Verbatim copied lines are not agent-authored lines and do not count toward
+  the roughly 300-line session ceiling. Session and module line budgets are
+  estimates; preserve correctness and named coverage first.
 - Sharing `Task` preserves keys and scenario references; future integration must
   still adapt mutation and format selection without broadening this issue.
 - #185 may land during implementation. Its absence is an accepted documentation
