@@ -158,7 +158,13 @@ Never fall back to a sequential/timestamp directory or a second spec file.
 
 Add a single sentence under the unique `## How the engine works` heading linking
 `speckit.md`, describing the house rules/preset as authoring support in #184.
-Add the `presets/` row under root `README.md`'s unique `## Layout` heading. These
+Add the `presets/` row under root `README.md`'s unique `## Layout` heading in
+task 1.2, alongside creation of the preset directory and its Layout assertion.
+Task 1.1 adds only the house-rules document, engine-guide link and their test.
+The existing `tests/test_forge_gitea.py::test_gitea_layout_module_paths_resolve`
+requires every listed directory to exist, and verification gates each task;
+therefore neither the row nor its new assertion may precede preset creation.
+Preserve that existing test unchanged. These
 are the necessary overlaps with #187; preserve its format-seam wording if it
 lands first. Do not globally replace "OpenSpec", rename its examples, or change
 its archival guidance. No current claim in `KNOWN-LIMITATIONS.md` is invalidated
@@ -186,8 +192,9 @@ parameterization or helper changes. Decorate them with the relevant scenarios.
 
 - `test_speckit_house_rules_doc_lists_every_rule`: check all eight exact physical
   heading lines above, each occurring once, plus `042-add-a-gate/us1/as2`.
-  Check the requested README link and Layout row within their exact unique
-  heading boundaries. Recognize `^#{1,6} ` headings at column zero and end a
+  Check the engine guide's requested link within its exact unique heading
+  boundaries; this task-1.1 test must not require the preset directory or Layout
+  row introduced in task 1.2. Recognize `^#{1,6} ` headings at column zero and end a
   section at the next heading of the same or higher level. Missing, duplicate
   or indented target headings fail; no fence/HTML interpretation hides a line.
 - `test_speckit_preset_manifest_parses`: parse the entire flow-style YAML with
@@ -196,6 +203,14 @@ parameterization or helper changes. Decorate them with the relevant scenarios.
   Check the wrapper has exactly one literal `{CORE_TEMPLATE}` and the named
   directory/branch overrides; check the README's two install forms. Invalid
   parsing, missing entries/files or escaped paths fail; no network or install.
+  In this task-1.2 test, also assert the new root README Layout row and existing
+  `presets/` directory. Select the unique exact `## Layout` physical line through
+  the next column-zero `^#{1,6} ` heading of level one or two (or EOF); missing,
+  duplicate or indented target headings fail. Require exactly one column-zero
+  table row whose first cell, stripped of spaces, is exactly backticked
+  `presets/`; missing, duplicate or indented matching rows fail. Use literal
+  lines only, without semantic fence/HTML parsing. This adds the assertion here
+  rather than changing task 1.1's test or the existing Layout-path assertion.
 - `test_speckit_spec_template_labels_scenarios`: select every physical
   `### User Story <positive integer> - ...` block until the next column-zero
   level-one/two/three heading. Require unique story numbers, at least the three
@@ -211,7 +226,9 @@ parameterization or helper changes. Decorate them with the relevant scenarios.
   user features or runtime enforcement.
 
 Keep assertions structural and token-based rather than matching explanatory
-paragraphs. Run the named tests and full `uv run pytest` for implementation
+paragraphs. Run the unchanged Layout-path test at both task gates; task 1.1
+keeps the existing directory list valid and task 1.2 supplies the new directory
+and its row together. Run the named tests and full `uv run pytest` for implementation
 acceptance, preserving existing assertions. Static checks cannot prove prompt
 execution order, environment propagation, branch hooks or actual installation.
 
