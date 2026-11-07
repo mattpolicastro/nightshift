@@ -25,6 +25,51 @@ REPOSITORY = "https://github.com/mattpolicastro/nightshift"
 LINK = re.compile(r"\[([^\[\]\n]+)\]\(([^\s)]+)\)")
 
 
+@pytest.mark.scenario("specloop-documentation/spec-kit-feature-identity/author-chooses-a-stable-feature-identity")
+@pytest.mark.scenario("specloop-documentation/spec-kit-issue-first-authoring/author-opens-the-issue-before-specifying")
+@pytest.mark.scenario("specloop-documentation/spec-kit-labelled-scenarios/tests-retain-a-scenario-reference")
+@pytest.mark.scenario("specloop-documentation/spec-kit-task-traceability/author-links-tasks-and-scenarios")
+@pytest.mark.scenario("specloop-documentation/spec-kit-human-checks/author-records-a-live-check")
+@pytest.mark.scenario("specloop-documentation/spec-kit-flow-forward-records/author-changes-delivered-behavior")
+@pytest.mark.scenario("specloop-documentation/spec-kit-frozen-authoring-paths/implementer-leaves-acceptance-criteria-intact")
+@pytest.mark.scenario("specloop-documentation/spec-kit-clarification-boundary/draft-still-needs-an-answer")
+@pytest.mark.scenario("specloop-documentation/spec-kit-discovery/find-authoring-guidance")
+@pytest.mark.scenario("specloop-documentation/documentation-integrity/scope-and-regression-checks-remain-intact")
+@pytest.mark.scenario("specloop-documentation/documentation-integrity/references-and-reader-checks-are-reviewable")
+def test_speckit_house_rules_doc_lists_every_rule():
+    from test_factory_land_docs import links_resolve
+
+    def section(document, heading):
+        lines = document.split("\n")
+        candidates = [i for i, line in enumerate(lines) if line.strip() == heading]
+        assert len(candidates) == 1, (heading, "missing/duplicate heading")
+        start, = candidates
+        assert lines[start] == heading, (heading, "heading must be exact and column-zero")
+        level = len(heading.split(" ", 1)[0])
+        end = next((i for i in range(start + 1, len(lines))
+                    if (match := re.match(r"^(#{1,6}) ", lines[i]))
+                    and len(match[1]) <= level), len(lines))
+        return "\n".join(lines[start + 1:end])
+
+    path = "docs/specloop/speckit.md"
+    document = (ROOT / path).read_text()
+    for heading in (
+        "## Feature directory and branch", "## Open the issue first",
+        "## Labelled acceptance scenarios", "## Tasks cite scenarios",
+        "## Human-only checks", "## Flow-forward persistence", "## Frozen paths",
+        "## No [NEEDS CLARIFICATION] at approval",
+    ):
+        assert section(document, heading).strip()
+    assert "042-add-a-gate/us1/as2" in document
+    links_resolve(path, document)
+    for number in (184, 185):
+        assert (f"issue #{number}", f"{REPOSITORY}/issues/{number}") in LINK.findall(document)
+    guide_path = "docs/specloop/README.md"
+    passage = section((ROOT / guide_path).read_text(), "## How the engine works")
+    assert "speckit.md" in {target for _, target in LINK.findall(passage)}
+    links_resolve(guide_path, passage)
+
+
 @pytest.mark.parametrize("path,heading", [
     pytest.param(path, heading, marks=[pytest.mark.scenario(s) for s in scenarios])
     for paths, scenarios in [
