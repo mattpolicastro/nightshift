@@ -70,6 +70,85 @@ def test_speckit_house_rules_doc_lists_every_rule():
     links_resolve(guide_path, passage)
 
 
+@pytest.mark.scenario("speckit-preset/preset-manifest/manifest-resolves-all-provided-files")
+@pytest.mark.scenario("speckit-preset/issue-first-command-wrapper/select-the-issue-directory-before-core-execution")
+@pytest.mark.scenario("speckit-preset/issue-first-command-wrapper/refuse-an-ambiguous-or-conflicting-creation")
+@pytest.mark.scenario("speckit-preset/preset-installation/install-from-checkout-or-release")
+@pytest.mark.scenario("specloop-documentation/spec-kit-discovery/find-authoring-guidance")
+@pytest.mark.scenario("specloop-documentation/documentation-integrity/scope-and-regression-checks-remain-intact")
+def test_speckit_preset_manifest_parses():
+    from test_factory_land_docs import links_resolve
+
+    root = ROOT / "presets/nightshift-speckit"
+    manifest = json.loads((root / "preset.yml").read_text())
+    assert manifest["schema_version"] == "1.0" and manifest["preset"]["id"] == "nightshift-speckit"
+    assert manifest["requires"] == {"speckit_version": ">=1.3.2"}
+    expected = [("template", "spec-template", "templates/spec-template.md", "replace"),
+                ("template", "tasks-template", "templates/tasks-template.md", "replace"),
+                ("command", "speckit.specify", "commands/speckit.specify.md", "wrap")]
+    assert manifest["provides"] == {"templates": [dict(type=t, name=n, file=f, replaces=n, strategy=s)
+                                                for t, n, f, s in expected]}
+    for _, _, file, _ in expected:
+        path = (root / file).resolve()
+        assert path.is_relative_to(root.resolve()) and path.is_file()
+    wrapper = (root / "commands/speckit.specify.md").read_text()
+    assert wrapper.count("{CORE_TEMPLATE}") == 1 and wrapper.rstrip().endswith("{CORE_TEMPLATE}")
+    assert re.search(r"\A---\n(?:[^\n]*\n)*?strategy: wrap\n(?:[^\n]*\n)*?---\n", wrapper)
+    for token in ("SPECIFY_FEATURE_DIRECTORY", "GIT_BRANCH_NAME", "before_specify", ".specify/feature.json"):
+        assert token in wrapper.split("{CORE_TEMPLATE}")[0]
+    readme = (root / "README.md").read_text()
+    for command in ("specify preset add --dev ./presets/nightshift-speckit",
+                    "specify preset add --from <release-archive-url>"):
+        assert command in readme
+    links_resolve("presets/nightshift-speckit/README.md", readme)
+    lines = (ROOT / "README.md").read_text().split("\n")
+    start, = [i for i, line in enumerate(lines) if line.strip() == "## Layout"]
+    assert lines[start] == "## Layout"
+    end = next((i for i in range(start + 1, len(lines)) if re.match(r"^#{1,2} ", lines[i])), len(lines))
+    row, = [line for line in lines[start + 1:end] if re.match(r"^\s*\| *`presets/` *\|", line)]
+    assert row.startswith("|") and row.endswith("|") and (ROOT / "presets").is_dir()
+    links_resolve("README.md", "\n".join(lines[start + 1:end]))
+
+
+@pytest.mark.scenario("speckit-preset/labelled-spec-scaffold/each-story-starts-with-a-labelled-acceptance-list")
+@pytest.mark.scenario("speckit-preset/scenario-citing-task-scaffold/task-examples-preserve-scenario-traceability")
+def test_speckit_spec_template_labels_scenarios():
+    root = ROOT / "presets/nightshift-speckit/templates"
+    lines = (root / "spec-template.md").read_text().split("\n")
+    stories = [i for i, line in enumerate(lines) if line.lstrip().startswith("### User Story")]
+    numbers = set()
+    for start in stories:
+        story = re.fullmatch(r"### User Story ([1-9][0-9]*) - .+", lines[start])
+        assert story and int(story[1]) not in numbers
+        numbers.add(int(story[1]))
+        end = next((i for i in range(start + 1, len(lines)) if re.match(r"^#{1,3} ", lines[i])), len(lines))
+        block = lines[start + 1:end]
+        heading, = [i for i, line in enumerate(block) if line.strip().startswith("**Acceptance Scenarios**")]
+        assert block[heading] == "**Acceptance Scenarios**:"
+        first = next(i for i in range(heading + 1, len(block)) if block[i].strip())
+        assert block[first].startswith("1. **AS1** **Given**")
+        stop = next((i for i in range(first, len(block)) if not block[i].strip()), len(block))
+        assert [i for i, line in enumerate(block) if re.match(r"\s*[0-9]+\.", line)] == list(range(first, stop))
+        labels = set()
+        for line in block[first:stop]:
+            match = re.fullmatch(r"([1-9][0-9]*)\. \*\*AS([1-9][0-9]*)\*\* \*\*Given\*\* .+ \*\*When\*\* .+ \*\*Then\*\* .+", line)
+            assert match and match[1] == match[2] and match[1] not in labels
+            labels.add(match[1])
+    assert {1, 2, 3} <= numbers
+    lines = (root / "tasks-template.md").read_text().split("\n")
+    start, = [i for i, line in enumerate(lines) if line.strip() == "## Format"]
+    assert lines[start] == "## Format"
+    end = next((i for i in range(start + 1, len(lines)) if re.match(r"^#{1,2} ", lines[i])), len(lines))
+    citation = r"`[0-9]{3,}-[a-z0-9-]+/us[1-9][0-9]*/as[1-9][0-9]*`"
+    assert re.search(citation, "\n".join(lines[start + 1:end]))
+    examples = [line for line in lines if line.lstrip().startswith("-") and re.search(r"\[US[0-9]+\]", line)]
+    assert examples and len({re.search(r"\bT[0-9]+\b", line)[0] for line in examples}) == len(examples)
+    assert numbers <= {int(re.search(r"\[US([0-9]+)\]", line)[1]) for line in examples}
+    for line in examples:
+        assert re.fullmatch(r"- \[[ X]\] T[0-9]{3,} (?:\[P\] )?\[US[1-9][0-9]*\] .+", line)
+        assert re.search(citation, line) and re.search(r"\b[\w-]+/[\w./-]+", re.sub(citation, "", line))
+
+
 @pytest.mark.parametrize("path,heading", [
     pytest.param(path, heading, marks=[pytest.mark.scenario(s) for s in scenarios])
     for paths, scenarios in [
