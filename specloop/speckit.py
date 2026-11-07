@@ -122,12 +122,12 @@ class _Phase:
     number: int
     title: str
     line: int
-    tasks: list[tasks.Task] = field(default_factory=list)
+    entries: list[tasks.Task] = field(default_factory=list)
 
 
 def parse_tasks(text: str) -> list[tasks.Task]:
     """Read labelled checkboxes in literal phases, retaining flags in task text."""
-    return [task for phase in _parse_phases(text) for task in phase.tasks]
+    return [task for phase in _parse_phases(text) for task in phase.entries]
 
 
 def _parse_phases(text: str) -> list[_Phase]:
@@ -146,8 +146,8 @@ def _parse_phases(text: str) -> list[_Phase]:
         if label := TASK_LABEL.match(body):
             # The final capture omits flags; retain them for identity and ownership.
             rest = body[label.end(1):].lstrip()
-            current.tasks.append(tasks.Task(current.number, current.title, label[1], rest,
-                                            checkbox[2] != " ", number))
+            current.entries.append(tasks.Task(current.number, current.title, label[1], rest,
+                                              checkbox[2] != " ", number))
     return found
 
 
@@ -215,7 +215,7 @@ def validate(repo: Path, change: str) -> list[str]:
                 matching = any(
                     (label := TASK_LABEL.match(task.title())) is not None
                     and label[2] is not None and int(label[2]) == number
-                    for task in phase.tasks
+                    for task in phase.entries
                 )
                 has_owner |= matching
                 if not matching:
@@ -228,7 +228,7 @@ def validate(repo: Path, change: str) -> list[str]:
         if "spec.md" in inputs:
             covered: set[str] = set()
             for phase in phases:
-                for task in phase.tasks:
+                for task in phase.entries:
                     for sid in dict.fromkeys(task.scenarios):
                         covered.add(sid)
                         if sid not in known:
