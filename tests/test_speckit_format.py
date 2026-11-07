@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import shutil
 
 import pytest
 
@@ -292,3 +293,188 @@ def test_task_keys_and_references_use_shared_record_behavior():
     assert renumbered.key == task.key
     changed, = speckit.parse_tasks("## Phase 0: Setup\n- [ ] T001 " + body.replace("[P] ", ""))
     assert changed.key != task.key
+
+
+@pytest.fixture
+def feature_copy(tmp_path):
+    shutil.copytree(FIXTURE, tmp_path, dirs_exist_ok=True)
+    # Harness sources are read-only; copytree preserves those permissions.
+    # Make only the disposable copy writable, including directories for unlink/rmtree.
+    for path in [tmp_path, *tmp_path.rglob("*")]:
+        path.chmod(path.stat().st_mode | 0o200)
+    return tmp_path, speckit.feature_dir(tmp_path, CHANGE)
+
+
+CHECKLIST = "checklists/readiness.md"
+
+
+@pytest.mark.scenario("speckit-format/feature-validation/valid-feature-passes")
+@pytest.mark.parametrize("checklists", ["original", "absent", "empty"])
+@pytest.mark.parametrize("state", [" ", "x", "X"])
+def test_validate_passes_on_fixture(feature_copy, checklists, state):
+    repo, feature = feature_copy
+    path = feature / "tasks.md"
+    path.write_text(path.read_text().replace("[ ]", f"[{state}]"), encoding="utf-8")
+    if checklists == "absent":
+        shutil.rmtree(feature / "checklists")
+    elif checklists == "empty":
+        (feature / CHECKLIST).write_text("No checkboxes.\n", encoding="utf-8")
+    # Templates still contain placeholders, and plan human checks remain pending.
+    assert speckit.validate(repo, CHANGE) == []
+
+
+def validation_case(scenario, edits, diagnostic):
+    return pytest.param(edits, diagnostic, marks=pytest.mark.scenario(scenario))
+
+
+@pytest.mark.parametrize("edits, diagnostic", [
+    *[validation_case("speckit-format/required-spec-sections/missing-section-reports",
+        [("spec.md", f"## {heading} *(mandatory)*", "")],
+        f"spec.md:1: missing section: {heading}")
+      for heading in ("User Scenarios & Testing", "Requirements", "Success Criteria")],
+    *[validation_case("speckit-format/story-readiness/missing-priority-reports",
+        [("spec.md", " (Priority: P1)", suffix)], "spec.md:7: US1: missing priority")
+      for suffix in ("", " (Priority: nope)")],
+    validation_case("speckit-format/story-readiness/missing-scenario-label-reports",
+        [("spec.md", "1. **AS1** Given a refused", "1. Given a refused"),
+         ("tasks.md", f"`{CHANGE}/us2/as1`", "")],
+        "spec.md:13: US2: no labelled acceptance scenario"),
+    *[validation_case("speckit-format/unique-scenario-labels/duplicate-label-reports",
+        [("spec.md", "7. **AS2**", f"2. **{label}** duplicate\n7. **AS2**")],
+        f"spec.md:11: duplicate scenario id: {CHANGE}/us1/as1")
+      for label in ("AS1", "AS01")],
+    *[validation_case("speckit-format/story-phase-ownership/missing-phase-ownership-reports",
+        [("tasks.md", "[US1] ", replacement),
+         ("tasks.md", "T001 Create", "T001 [US1] Create")],
+        "tasks.md:11: user-story phase has no matching [US1] task")
+      for replacement in ("", "Mention [US1] ", "[US2] ")],
+    validation_case("speckit-format/scenario-task-coverage/uncovered-scenario-reports",
+        [("tasks.md", f"`{CHANGE}/us1/as2`", f"{CHANGE}/us1/as2")],
+        f"spec.md:11: uncovered scenario: {CHANGE}/us1/as2"),
+    validation_case("speckit-format/scenario-task-coverage/unknown-scenario-reports",
+        [("tasks.md", "T001 Create", "T001 See `unknown/us9/as1`. Create")],
+        "tasks.md:5: unknown scenario: unknown/us9/as1"),
+    *[validation_case("speckit-format/clarification-completion/clarification-reports",
+        [(name, "\n", f"\n{opening}{marker}{closing}\n")],
+        f"{name}:{2 + opening.count(chr(10))}: unresolved clarification: {marker}")
+      for name in ("spec.md", "tasks.md", "plan.md", CHECKLIST)
+      for marker in ("[NEEDS CLARIFICATION]", "[NEEDS CLARIFICATION: why?]")
+      for opening, closing in (("", ""), ("```md\n", "\n```"), ("<!--\n", "\n-->"), (" \t", "\t "))],
+    *[validation_case("speckit-format/checklist-completion/unchecked-checklist-reports",
+        [(CHECKLIST, "\n", f"\n{opening}{bullet} [{state}] Example{closing}\n")],
+        f"{CHECKLIST}:{2 + opening.count(chr(10))}: unchecked checklist item")
+      for bullet in "-*+" for state in ("", " ", "?", "done", " x ")
+      for opening, closing in (("", ""), ("```md\n", "\n```"), ("<!--\n", "\n-->"), (" \t", "\t "))],
+    validation_case("speckit-format/plan-availability/missing-plan-reports",
+        [("plan.md", None, None)], "plan.md:1: missing required file"),
+])
+def test_validate_reports_each_rule(feature_copy, edits, diagnostic):
+    repo, feature = feature_copy
+    for name, old, new in edits:
+        path = feature / name
+        if old is None:
+            path.unlink()
+        else:
+            text = path.read_text(encoding="utf-8")
+            assert old in text
+            # Inserting a literal example changes just the first newline.
+            path.write_text(text.replace(old, new, 1 if old == "\n" else -1), encoding="utf-8")
+    assert speckit.validate(repo, CHANGE) == [f"specs/{CHANGE}/{diagnostic}"]
+
+
+@pytest.mark.scenario("speckit-format/unique-scenario-labels/duplicate-label-reports")
+def test_validate_duplicate_across_stories_uses_later_source_line(feature_copy):
+    repo, feature = feature_copy
+    path = feature / "spec.md"
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text + "### User Story 01 - Again (Priority: P0)\n"
+                    "**Acceptance Scenarios**:\n1. **AS01** duplicate\n", encoding="utf-8")
+    assert speckit.validate(repo, CHANGE) == [
+        f"specs/{CHANGE}/spec.md:34: duplicate scenario id: {CHANGE}/us1/as1"]
+
+
+@pytest.mark.scenario("speckit-format/story-phase-ownership/missing-phase-ownership-reports")
+def test_validate_empty_repeated_phase_needs_its_own_task(feature_copy):
+    repo, feature = feature_copy
+    path = feature / "tasks.md"
+    path.write_text(path.read_text() + "## Phase 3: User Story 1 - Check the gate\n"
+                    "### Details\nProse [US1]\n## Other\n- [ ] T008 [US1] Outside\n", encoding="utf-8")
+    assert speckit.validate(repo, CHANGE) == [
+        f"specs/{CHANGE}/tasks.md:27: user-story phase has no matching [US1] task"]
+
+
+@pytest.mark.parametrize("empty", [
+    pytest.param("stories", marks=pytest.mark.scenario(
+        "speckit-format/minimum-feature-content/empty-story-content-refuses")),
+    pytest.param("tasks", marks=pytest.mark.scenario(
+        "speckit-format/minimum-feature-content/empty-user-story-work-refuses")),
+    pytest.param("both", marks=pytest.mark.scenario(
+        "speckit-format/minimum-feature-content/headings-alone-refuse")),
+])
+def test_validate_minimum_content(feature_copy, empty):
+    repo, feature = feature_copy
+    spec_path, task_path = feature / "spec.md", feature / "tasks.md"
+    spec_text, task_text = spec_path.read_text(), task_path.read_text()
+    expected = []
+    if empty == "stories":
+        spec_text = re.sub(r"^\d+\. .*\n", "", spec_text, flags=re.MULTILINE)
+        task_text = tasks.SCENARIO_REF.sub("", task_text)
+    elif empty == "tasks":
+        # Setup work still cites every scenario, but cannot satisfy story ownership.
+        task_text = "## Phase 1: Setup\n" + "\n".join(
+            line for line in task_text.splitlines() if tasks.TASK.match(line))
+    else:
+        spec_text = "## User Scenarios & Testing\n## Requirements\n## Success Criteria\n"
+        task_text = ""
+        (feature / "plan.md").write_text("", encoding="utf-8")
+        shutil.rmtree(feature / "checklists")
+    if empty in ("stories", "both"):
+        expected.append(f"specs/{CHANGE}/spec.md:1: no user story with a labelled acceptance scenario")
+    if empty in ("tasks", "both"):
+        expected.append(f"specs/{CHANGE}/tasks.md:1: no user-story task")
+    spec_path.write_text(spec_text, encoding="utf-8")
+    task_path.write_text(task_text, encoding="utf-8")
+    assert speckit.validate(repo, CHANGE) == expected
+
+
+@pytest.mark.scenario("speckit-format/minimum-feature-content/empty-user-story-work-refuses")
+def test_validate_aggregate_keeps_independent_errors(feature_copy):
+    repo, feature = feature_copy
+    spec_path, task_path = feature / "spec.md", feature / "tasks.md"
+    spec_path.write_text(spec_path.read_text().replace(" (Priority: P1)", ""), encoding="utf-8")
+    text = re.sub(r"\[US\d+\] ", "", task_path.read_text())
+    task_path.write_text(text.replace(f"`{CHANGE}/us1/as1`", "`unknown/us9/as1`"), encoding="utf-8")
+    expected = [
+        f"specs/{CHANGE}/spec.md:7: US1: missing priority",
+        f"specs/{CHANGE}/spec.md:10: uncovered scenario: {CHANGE}/us1/as1",
+        f"specs/{CHANGE}/tasks.md:1: no user-story task",
+        f"specs/{CHANGE}/tasks.md:13: unknown scenario: unknown/us9/as1",
+    ]
+    assert speckit.validate(repo, CHANGE) == expected
+    assert speckit.validate(repo, CHANGE) == expected
+
+
+@pytest.mark.scenario("speckit-format/feature-validation/unavailable-inputs-refuse")
+@pytest.mark.parametrize("name", ["spec.md", "tasks.md", "plan.md", CHECKLIST])
+@pytest.mark.parametrize("failure, message", [
+    ("missing", "missing required file"), ("unreadable", "cannot read file"),
+    ("decode", "cannot decode UTF-8 file"),
+])
+def test_validate_unavailable_inputs(feature_copy, monkeypatch, name, failure, message):
+    repo, feature = feature_copy
+    path = feature / name
+    if failure == "decode":
+        path.write_bytes(b"\xff")
+    elif failure == "missing" and name != CHECKLIST:
+        path.unlink()
+    else:
+        original = Path.read_text
+
+        def fail_read(self, *args, **kwargs):
+            if self == path:
+                # Also exercise a listed checklist disappearing before its read.
+                raise FileNotFoundError() if failure == "missing" else PermissionError()
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_read)
+    assert speckit.validate(repo, CHANGE) == [f"specs/{CHANGE}/{name}:1: {message}"]
