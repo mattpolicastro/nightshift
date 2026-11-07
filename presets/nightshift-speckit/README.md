@@ -3,6 +3,14 @@
 Authoring assets for [issue #185](https://github.com/mattpolicastro/nightshift/issues/185)
 in [issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
 Requires spec-kit >=1.3.2, a spec-kit project, Git and a supported host agent.
+
+Spec-kit's Bash template resolver uses the first `python3` on `PATH` and requires
+PyYAML in that interpreter. If the system Python lacks it, set
+`SPECKIT_PYTHON_EXECUTABLE` to the CLI's own interpreter (for a `uv tool` install,
+use `export SPECKIT_PYTHON_EXECUTABLE="$(uv tool dir)/specify-cli/bin/python"`).
+Otherwise, `/speckit.specify` stops with
+`Error: PyYAML is required to resolve preset template composition` before creating the feature.
+
 The inspected baseline is v1.3.2; future-version compatibility is untested. Installing
 assets does not enable Nightshift's pending format adapter, validator, freezing or finish support.
 
