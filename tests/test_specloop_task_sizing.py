@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def task_rules():
     prompt = propose.PROMPT.format(
         change="size-a-plan", idea="Update related guidance", sources="- README.md",
-        in_flight="", feedback="",
+        in_flight="", feedback="", drafter_root="openspec/changes/size-a-plan/",
     )
     section = prompt.split("- `tasks.md`", 1)[1].split("\n- Prefer behaviour", 1)[0]
     return [" ".join(rule.split()) for rule in section.split("\n  - ")[1:]]

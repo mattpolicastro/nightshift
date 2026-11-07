@@ -9,7 +9,7 @@ from nightshift import specloop_intake
 from nightshift import daemon
 from nightshift.config import Repo
 from gitea_dispatch_fixtures import install_gitea
-from specloop import cli, loop
+from specloop import cli, loop, spec_format
 from test_specloop_base_sync import base_env, commit, controlled_verify, publish_env, sh
 
 
@@ -195,7 +195,7 @@ def test_absent_or_empty_design_preserves_output(design_env, design, has_checks)
 def test_design_failure_cannot_establish_readiness(design_env, monkeypatch, failure):
     ctx = design_env.ctx
     save_design(design_env, "## Human checks\n- [ ] Pending\n")
-    original = loop.git
+    original = spec_format.git
 
     def fail(repo, *args, **kwargs):
         if args[0] == "ls-tree" and failure == "lookup":
@@ -207,7 +207,7 @@ def test_design_failure_cannot_establish_readiness(design_env, monkeypatch, fail
                 return b"\xff"
         return original(repo, *args, **kwargs)
 
-    monkeypatch.setattr(loop, "git", fail)
+    monkeypatch.setattr(spec_format, "git", fail)
     with pytest.raises(RuntimeError, match="could not collect human checks.*design.md"):
         loop.finals(ctx, ctx.head())
     assert ctx.run.state.pause is None

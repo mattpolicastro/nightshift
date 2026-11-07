@@ -137,6 +137,33 @@ results; PR and issue delivery waits until the pause file is removed.
 Runs already admitted continue under the separate specloop supervisor; the
 Nightshift pause file does not stop that supervisor.
 
+## Manifest format
+
+The optional `[run] format` field defaults to `"openspec"`. Explicit
+`format = "openspec"` selects the same adapter; existing manifests and saved
+runs need no migration, state change or manifest rewrite. The
+[self-hosting example](../../examples/specloop/self-hosting.toml) shows the
+explicit selection. Format selection is independent of provider and forge
+selection, and leaves OpenSpec's `npx` invocation and binary requirements intact.
+
+`format = "speckit"` is accepted by the manifest parser and retained through
+change/branch template overrides, but the adapter is not available.
+`nightshift admit repo.toml --json` exits 1 with one version-1 JSON document,
+`"outcome": "refused"`, and the exact diagnostic
+`spec-kit format is not available yet` in `reasons`. This is an ordinary
+admission refusal, before checkout/validator work or an agent invocation;
+partial admission is cleaned up and no admitted `state.json` is saved.
+
+Only OpenSpec is operational. The seam is tracked by
+[issue #187](https://github.com/mattpolicastro/nightshift/issues/187) toward
+the native spec-kit initiative in
+[issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
+Finish, human-check and recovery rules remain unchanged. Offline compatibility
+tests do not establish live legacy-run resume: the
+[pending deployed-resume check](README.md#how-the-engine-works) must be performed
+by a human after deployment and its result recorded on issue #184, linked from
+issue #187.
+
 ## Keyed build revisions
 
 Queue a review round for an admitted change with an optional run-local key

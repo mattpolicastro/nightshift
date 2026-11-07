@@ -90,6 +90,7 @@ class Manifest:
     auth_targets: tuple[str, ...] = ()  # all profiles, including unused and fallback logins
     mutation_invalid_steps: tuple[str, ...] = DEFAULT_MUTATION_INVALID_STEPS
     snapshots: tuple[Snapshot, ...] = ()
+    format: str = "openspec"
 
 
 def _path(s: str) -> Path:
@@ -254,6 +255,7 @@ def parse(data: dict, roles_override: dict[str, str] | None = None) -> Manifest:
         repo=_path(run["repo"]),
         change=run["change"],
         branch=run["branch"],
+        format=run.get("format", "openspec"),
         pr_base=run.get("pr_base", "main"),
         github=run.get("github", ""),
         roles=roles,
