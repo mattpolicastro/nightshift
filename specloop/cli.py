@@ -23,7 +23,7 @@ from urllib.parse import quote, unquote, urlsplit
 from nightshift import config
 from nightshift.forge import ForgeError
 from nightshift.forge.gitea import GiteaForge
-from specloop import feasibility, loop, manifest, messages, openspec, tasks, verify
+from specloop import feasibility, loop, manifest, messages, openspec, spec_format, tasks, verify
 from specloop.seal import git
 from specloop.state import SAFE_CHANGE, Busy, Run, TaskState, iter_run_dirs, proposals_dir, run_dir
 from specloop.state_locks import MigrationBusy, writer
@@ -83,16 +83,20 @@ def _checkout(repo: Path, rev: str, dest: Path) -> None:
 
 
 def problems_with(repo: Path, rev: str, m: manifest.Manifest) -> list[str]:
+    try:
+        fmt = spec_format.get(m)
+    except spec_format.SpecError as e:
+        return [str(e)]
     with tempfile.TemporaryDirectory() as tmp:
         _checkout(repo, rev, Path(tmp))
-        found = openspec.validate(Path(tmp), m.change)
+        found = fmt.validate(Path(tmp), m.change)
         try:
-            known = openspec.scenarios(Path(tmp), m.change)
-        except openspec.ValidatorUnavailable:
+            known = fmt.scenarios(Path(tmp), m.change)
+        except spec_format.ValidatorUnavailable:
             raise
-        except openspec.SpecError as e:
+        except spec_format.SpecError as e:
             return found + [str(e)]
-        task_file = openspec.change_dir(Path(tmp), m.change) / "tasks.md"
+        task_file = Path(tmp) / fmt.tasks_path(m.change)
         if not task_file.exists():
             return found + ["the change has no tasks.md"]
         parsed = tasks.parse(task_file.read_text())
@@ -202,7 +206,7 @@ def _admit_locked(args, run: Run, m: manifest.Manifest, text: str, roles: dict) 
             if review.get("contradictions"):
                 raise ValueError("tasks that are impossible as written:\n" + "\n".join(
                     f"  - {c['task']}: {c['problem']}\n      evidence: {c['evidence']}" for c in review["contradictions"]))
-    except openspec.ValidatorUnavailable:
+    except spec_format.ValidatorUnavailable:
         _clear_admission(run)
         raise
     except Exception as e:
@@ -554,7 +558,7 @@ def _pr_body(ctx: loop.Ctx) -> str:
         f"- [ ] `{sid}` — {why}" for sid, why in sorted(m.coverage_exempt.items())]))
     follow = (ctx.run.dir / "followups.md").read_text() if (ctx.run.dir / "followups.md").exists() else "(none)\n"
     done = [t for t in tasks.parse(ctx.tasks_text(head)) if t.done]
-    return (f"OpenSpec change `{m.change}`, driven by specloop: {len(done)} tasks, each sealed, verified by the "
+    return (f"{spec_format.get(m).pr_kind} `{m.change}`, driven by specloop: {len(done)} tasks, each sealed, verified by the "
             f"harness and independently reviewed.\n\n## Checks a human must make\n\n{checks or '(none)'}\n\n"
             f"## Non-blocking review findings\n\n{follow}\n"
             f"🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
@@ -691,7 +695,7 @@ def _publish(args, run: Run) -> int:
         # saved. Reconcile first; a failed lookup must not trigger creation.
         url = _existing_pr(ctx, target)
     if not url:
-        title = f"{ctx.m.change}: OpenSpec change via specloop"
+        title = spec_format.get(ctx.m).pr_title(ctx.m.change)
         if target is not None and target.forge is not None:
             url = target.forge.create_draft_pr(target.repository, ctx.m.branch, ctx.m.pr_base, title, _pr_body(ctx)).stdout
         else:
@@ -718,16 +722,10 @@ def _expected_head(value: str) -> str:
     return value.lower()
 
 
-def _tasks_path(repo: Path, head: str, change: str) -> str:
+def _tasks_path(repo: Path, head: str, change: str,
+                fmt: spec_format.SpecFormat = spec_format.OPENSPEC) -> str:
     """Locate tasks at this commit, including an interrupted finish's archive."""
-    live = f"openspec/changes/{change}/tasks.md"
-    paths = git(repo, "ls-tree", "-r", "--name-only", head,
-                live, "openspec/changes/archive/").decode().splitlines()
-    if live in paths:
-        return live
-    archived = sorted(p for p in paths if re.fullmatch(
-        rf"openspec/changes/archive/\d{{4}}-\d{{2}}-\d{{2}}-{re.escape(change)}/tasks\.md", p))
-    return archived[-1] if archived else live
+    return fmt.tasks_paths_at(repo, head, change)[0]
 
 
 def _gitea_ready(target: ForgeTarget, pr: str) -> None:
@@ -774,7 +772,7 @@ def _finish(args, run: Run) -> int:
         print(f"expected head {expected}; observed run branch head {head}; refusing to finish",
               file=sys.stderr)
         return 1
-    task_path = _tasks_path(ctx.repo, head, ctx.m.change)
+    task_path = _tasks_path(ctx.repo, head, ctx.m.change, spec_format.get(ctx.m))
     text = git(ctx.repo, "show", f"{head}:{task_path}").decode()
     if any(not t.done for t in tasks.parse(text)):
         print("tasks are unfinished; refusing to archive", file=sys.stderr)
@@ -787,7 +785,7 @@ def _finish(args, run: Run) -> int:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp) / "w"
             subprocess.run(["git", "clone", "-q", "--branch", ctx.m.branch, str(ctx.repo), str(work)], check=True)
-            openspec.archive(work, ctx.m.change, all_tasks_done=True)
+            spec_format.get(ctx.m).finish(work, ctx.m.change, all_tasks_done=True)
             git(work, "add", "-A")
             git(work, "commit", "-qm", f"specloop: archive {ctx.m.change} into openspec/specs", env=loop.seal.IDENTITY)
             git(work, "push", "-q", str(ctx.repo), f"HEAD:{ctx.ref}")
@@ -901,7 +899,7 @@ def propose(args) -> int:
     published_ref = drafting.publish_branch(d, m.repo)
     notify(messages.Message(messages.ACTION, m.change, "Review the drafted change, then admit it",
                             f"draft ready on {published_ref} in {m.repo} ({d.commit[:12]}); "
-                            f"review openspec/changes/{m.change}/ there",
+                            f"review {spec_format.get(m).drafter_root(m.change)} there",
                             shlex.join(["nightshift", "admit", args.manifest, "--change", m.change,
                                         "--branch", m.branch, "--head", d.commit])))
     _outcome(args, outcome="drafted", branch=published_ref)
@@ -1098,7 +1096,7 @@ def _status_entry(name: str) -> dict:
     m = _manifest(run)
     repo = run.dir / "repo.git"
     head = git(repo, "rev-parse", f"refs/heads/{m.branch}").decode().strip()
-    task_path = _tasks_path(repo, head, m.change)
+    task_path = _tasks_path(repo, head, m.change, spec_format.get(m))
     text = git(repo, "show", f"{head}:{task_path}").decode()
     all_tasks = tasks.parse(text)
     auto_resumes_remaining = 0
@@ -1224,7 +1222,7 @@ def status(args) -> int:
             m = _manifest(run)
             repo = run.dir / "repo.git"
             head = git(repo, "rev-parse", f"refs/heads/{m.branch}").decode().strip()
-            task_path = _tasks_path(repo, head, m.change)
+            task_path = _tasks_path(repo, head, m.change, spec_format.get(m))
             all_tasks = tasks.parse(git(repo, "show", f"{head}:{task_path}").decode())
             done = sum(t.done for t in all_tasks)
             print(f"  tasks: {done}/{len(all_tasks)} done on {m.branch} @ {head[:12]}")
@@ -1389,7 +1387,7 @@ def dispatch(args) -> int:
     with _diagnostics_to_stderr():
         try:
             code = execute()
-        except openspec.ValidatorUnavailable as e:
+        except spec_format.ValidatorUnavailable as e:
             if args.cmd in ("admit", "propose"):
                 args.document = {"version": 1, "error": str(e) or type(e).__name__}
             elif args.cmd == "publish":

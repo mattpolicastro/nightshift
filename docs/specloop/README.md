@@ -788,6 +788,28 @@ for usage, refresh behavior and installation.
 
 ## How the engine works
 
+**Formats.** Only OpenSpec operates today. Omit `[run] format` or set
+`format = "openspec"`; existing manifests and saved runs need no migration or
+rewrite. The format seam in [issue #187](https://github.com/mattpolicastro/nightshift/issues/187)
+prepares for [issue #184](https://github.com/mattpolicastro/nightshift/issues/184),
+but does not implement spec-kit. `format = "speckit"` parses as a reserved
+selection; `nightshift admit repo.toml --json` exits 1 with version-1 `outcome: refused`
+and `spec-kit format is not available yet` in its reasons. OpenSpec's `npx`
+invocation and binary requirements are unchanged, as are finish, human checks
+and recovery. See the [manifest contract](command-json.md#manifest-format)
+and [complete example](../../examples/specloop/self-hosting.toml).
+
+Offline saved-manifest/state tests do not establish deployed resume. This
+human check remains pending:
+
+- [ ] After deploy, resume one paused OpenSpec run admitted before this change
+  whose manifest omits `format`. Verify its saved head, task progress and
+  pause/revision state remain usable. Retain before/after manifests and state
+  for old/new reader inspection; do not run two writers concurrently. Record
+  the run identity, code revisions and result on
+  [issue #184](https://github.com/mattpolicastro/nightshift/issues/184), with a
+  link from [issue #187](https://github.com/mattpolicastro/nightshift/issues/187).
+
 `specloop/` (in this repo) drives an admitted OpenSpec change through its
 `tasks.md`, one task at a time.
 

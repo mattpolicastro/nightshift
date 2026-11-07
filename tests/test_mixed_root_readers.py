@@ -54,7 +54,7 @@ def test_reports_and_proposal_context_share_mixed_roots(tmp_path, monkeypatch):
     source.mkdir()
     (source / "shared.py").touch()
     monkeypatch.setattr(propose.manifest, "load", lambda path: SimpleNamespace(
-        repo=source if path.parent != other else tmp_path / "other", branch="main", change=path.parent.name))
+        repo=source if path.parent != other else tmp_path / "other", branch="main", change=path.parent.name, format="openspec"))
     reads = []
 
     def tasks(repo, *args):

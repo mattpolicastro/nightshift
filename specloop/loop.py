@@ -16,7 +16,7 @@ from pathlib import Path
 
 import time
 
-from specloop import agents, evidence, messages, openspec, prompts, quota, review, seal, tasks, verify
+from specloop import agents, evidence, messages, openspec, prompts, quota, review, seal, spec_format, tasks, verify
 from specloop.manifest import Manifest
 from specloop.seal import git
 from specloop.state import Run, TaskState
@@ -27,7 +27,7 @@ class Ctx:
         self.run, self.m, self.secrets, self.notify, self.agent = run, m, secrets, notify, agent
         self.repo = run.dir / "repo.git"
         self.ref = f"refs/heads/{m.branch}"
-        self.tasks_path = f"openspec/changes/{m.change}/tasks.md"
+        self.tasks_path = spec_format.get(m).tasks_path(m.change)
         self.credentials = seal.credential_values(secrets)
         self.infra_retries: _InfraRetries | None = None
         self.snapshots = verify.SnapshotContext(run.dir / "snapshots", lambda kind, **data: self.run.event(kind, **data))
@@ -378,27 +378,7 @@ def run(ctx: Ctx) -> str:
 
 def design_human_checks(ctx: Ctx, head: str) -> list[str]:
     """Collect literal pending checks from the committed design, including examples."""
-    path = f"openspec/changes/{ctx.m.change}/design.md"
-    try:
-        if not git(ctx.repo, "ls-tree", "-z", "--name-only", head, "--", path):
-            return []
-        text = git(ctx.repo, "show", f"{head}:{path}").decode("utf-8")
-    except (RuntimeError, OSError, subprocess.SubprocessError, UnicodeError) as exc:
-        raise RuntimeError(f"could not collect human checks from {head}:{path}: {exc}") from exc
-    selected = {"## Human checks": 2, "### Verification and human rollout checklist": 3}
-    depth = 0
-    checks = []
-    for physical_line in text.splitlines():
-        line = physical_line.strip(" \t")
-        heading = re.match(r"^(#{1,6})[ \t]+", line)
-        if heading and len(heading[1]) <= depth:
-            depth = 0
-        # A nested selected heading must not narrow its enclosing section.
-        if not depth and line in selected:
-            depth = selected[line]
-        elif depth and re.match(r"- \[ \][ \t]", line) and line[6:].strip():
-            checks.append(line)
-    return checks
+    return spec_format.get(ctx.m).human_checks(ctx.repo, head, ctx.m.change)
 
 
 def append_design_checks(ctx: Ctx, head: str, existing: list[str]) -> list[str]:
@@ -486,7 +466,7 @@ def _scenarios_at(ctx: Ctx, rev: str) -> dict[str, str]:
     with tempfile.TemporaryDirectory() as tmp:
         verify.extract(ctx.repo, rev, Path(tmp) / "src")
         try:
-            return openspec.scenarios(Path(tmp) / "src", ctx.m.change)
+            return spec_format.get(ctx.m).scenarios(Path(tmp) / "src", ctx.m.change)
         finally:
             subprocess.run(["chmod", "-R", "u+w", tmp], check=False)
 
@@ -697,8 +677,8 @@ def _gate_context(ctx: Ctx, n: int, head: str, section: list[tasks.Task], ts: Ta
     context.mkdir(parents=True, exist_ok=True)
     _copy_change(checkout, ctx, context)
     try:
-        known = openspec.scenarios(checkout, ctx.m.change)
-    except openspec.SpecError as e:
+        known = spec_format.get(ctx.m).scenarios(checkout, ctx.m.change)
+    except spec_format.SpecError as e:
         known = {}
         ctx.run.event("gate_scenarios_failed", section=n, error=str(e)[:300])
     cited = sorted({sid for t in section for sid in t.known_scenarios(known)})
@@ -1179,20 +1159,19 @@ def _seed(ctx: Ctx, ts: TaskState, work: Path) -> bool:
 
 def _scenario_text(work: Path, ctx: Ctx, task: tasks.Task) -> str:
     try:
-        known = openspec.scenarios(work, ctx.m.change)
-    except openspec.SpecError as e:
+        known = spec_format.get(ctx.m).scenarios(work, ctx.m.change)
+    except spec_format.SpecError as e:
         return f"(scenario lookup failed: {e})"
     return "\n\n".join(f"### `{sid}`\n{known[sid]}"
                        for sid in task.known_scenarios(known)) or "(this task names no scenario IDs)"
 
 
 def _copy_change(work: Path, ctx: Ctx, context: Path) -> None:
-    src = openspec.change_dir(work, ctx.m.change)
-    for name in ("proposal.md", "design.md"):
-        if (src / name).exists():
-            shutil.copy(src / name, context / name)
-    if (src / "specs").exists():
-        shutil.copytree(src / "specs", context / "specs", dirs_exist_ok=True)
+    for src, name in spec_format.get(ctx.m).context_files(work, ctx.m.change):
+        if name == "specs":
+            shutil.copytree(src, context / name, dirs_exist_ok=True)
+        else:
+            shutil.copy(src, context / name)
 
 
 def _context(ctx: Ctx, task: tasks.Task, ts: TaskState, work: Path, context: Path, seeded: bool) -> bool:

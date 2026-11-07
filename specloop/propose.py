@@ -1,7 +1,7 @@
 """`specloop propose`: draft an OpenSpec change from an idea, for a human to approve.
 
 Writing specific specs was the bottleneck the worker engine's September review
-identified. A drafting session writes openspec/changes/<name>/ in a clone of the
+identified. A drafting session writes the change's directory in a clone of the
 target repository; the harness validates it (OpenSpec strict validation, the
 scenario lint, every task's scenario IDs) and feeds problems back, then runs the
 feasibility review and an independent spec critic. A clean draft is committed
@@ -26,7 +26,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from specloop import agents, critic, feasibility, manifest, openspec, state, tasks
+from specloop import agents, critic, feasibility, manifest, spec_format, state, tasks
 from specloop.manifest import Manifest
 from specloop.seal import IDENTITY, git
 
@@ -43,7 +43,7 @@ PROMPT = """\
 # Draft an OpenSpec change: `{change}`
 
 Your working directory is a clone of the repository. Write the change, and only
-the change, under openspec/changes/{change}/. Do not edit any other file.
+the change, under {drafter_root}. Do not edit any other file.
 
 ## The idea
 
@@ -159,7 +159,7 @@ def in_flight(source: Path, change: str) -> dict[str, list[str]]:
             m = manifest.load(d / "manifest.toml")
             if Path(m.repo).expanduser().resolve() != root:
                 continue
-            text = git(d / "repo.git", "show", f"{m.branch}:openspec/changes/{m.change}/tasks.md").decode()
+            text = git(d / "repo.git", "show", f"{m.branch}:{spec_format.get(m).tasks_path(m.change)}").decode()
         except Exception:
             continue  # an unreadable run must not stop drafting
         # A "Do not edit X" list names X but plans no edit to it.
@@ -178,9 +178,10 @@ def _in_flight_section(planned: dict[str, list[str]]) -> str:
             "The implementer never sees this list: if the change must avoid a file, name it.\n")
 
 
-def overlaps(work: Path, change: str, planned: dict[str, list[str]]) -> list[str]:
+def overlaps(work: Path, change: str, planned: dict[str, list[str]],
+             fmt: spec_format.SpecFormat = spec_format.OPENSPEC) -> list[str]:
     """Tasks that edit a test file an unfinished run also plans to change."""
-    task_file = openspec.change_dir(work, change) / "tasks.md"
+    task_file = work / fmt.tasks_path(change)
     found = []
     for t in tasks.parse(task_file.read_text()) if task_file.exists() else []:
         for path in sorted(p for p in edited_paths(t.text) if is_test(p) and p in planned):
@@ -201,15 +202,15 @@ class Draft:
     branch: str = ""
 
 
-def lint(work: Path, change: str) -> list[str]:
-    problems = openspec.validate(work, change)
+def lint(work: Path, change: str, fmt: spec_format.SpecFormat = spec_format.OPENSPEC) -> list[str]:
+    problems = fmt.validate(work, change)
     try:
-        known = openspec.scenarios(work, change)
-    except openspec.ValidatorUnavailable:
+        known = fmt.scenarios(work, change)
+    except spec_format.ValidatorUnavailable:
         raise
-    except openspec.SpecError as e:
+    except spec_format.SpecError as e:
         return problems + [str(e)]
-    task_file = openspec.change_dir(work, change) / "tasks.md"
+    task_file = work / fmt.tasks_path(change)
     parsed = tasks.parse(task_file.read_text()) if task_file.exists() else []
     if not parsed:
         problems.append("tasks.md has no tasks under '## N. Title' sections")
@@ -218,8 +219,9 @@ def lint(work: Path, change: str) -> list[str]:
     problems += [f"scenario `{s}` is not covered by any task" for s in sorted(set(known) - cited)]
     problems += [f"task {t.label}: a person does this, but only an implementing agent works through "
                  "tasks.md; describe the check in design.md instead" for t in parsed if HUMAN_TASK.match(t.text)]
-    stray = [p for p in _changed(work) if not p.startswith(f"openspec/changes/{change}/")]
-    problems += [f"{p}: only files under openspec/changes/{change}/ may change" for p in stray]
+    root = fmt.drafter_root(change)
+    stray = [p for p in _changed(work) if not p.startswith(root)]
+    problems += [f"{p}: only files under {root} may change" for p in stray]
     return problems
 
 
@@ -283,6 +285,7 @@ def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m
           rounds: int = 4, agent=None, *, branch: str | None = None,
           from_branch: str | None = None) -> Draft:
     _check_draft_output(change, out)
+    fmt = spec_format.get(m)
     agent = agent or agents.run
     start = start_commit(source, base, from_branch)
     shutil.rmtree(out, ignore_errors=True)
@@ -298,7 +301,8 @@ def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m
     critic_correction = False
     feedback = ""
     for n in range(1, rounds + 1):
-        prompt = PROMPT.format(change=change, idea=idea, feedback=feedback, in_flight=_in_flight_section(planned),
+        prompt = PROMPT.format(change=change, drafter_root=fmt.drafter_root(change), idea=idea,
+                               feedback=feedback, in_flight=_in_flight_section(planned),
                                sources="\n".join(f"- {s}" for s in sources) or "- (no extra sources named)")
         call = agents.Call(profile, "write", prompt, work, SCHEMA, out / f"draft-{n}.jsonl", m.implement_minutes * 60,
                            m.idle_minutes * 60, agents.homes_dir() / profile.name)
@@ -310,14 +314,14 @@ def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m
             d.questions = res.output["questions"]
             return d
         # Overlap gets one round of feedback: a change may have to edit a shared test file.
-        d.problems = lint(work, change) + (overlaps(work, change, planned) if n == 1 else [])
+        d.problems = lint(work, change, fmt) + (overlaps(work, change, planned, fmt) if n == 1 else [])
         if d.problems:
             if critic_correction:
                 break
             feedback = ("\n## Your previous draft was rejected by the harness\n\nFix every problem:\n"
                         + "\n".join(f"- {p}" for p in d.problems) + "\n")
             continue
-        git(work, "add", "-A", f"openspec/changes/{change}")
+        git(work, "add", "-A", fmt.drafter_root(change).removesuffix("/"))
         unchanged = subprocess.run(["git", "-C", str(work), "diff", "--cached", "--quiet"]).returncode == 0
         if unchanged and d.commit:
             break  # the drafter made no change in answer to the review: the contradictions stand
@@ -359,7 +363,7 @@ def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m
                         f"- {c['task']}: {c['problem']} (evidence: {c['evidence']})" for c in d.contradictions) + "\n")
     if d.problems:
         return d
-    d.risks += [f"{o}, so the two may conflict on merge" for o in overlaps(work, change, planned)]
+    d.risks += [f"{o}, so the two may conflict on merge" for o in overlaps(work, change, planned, fmt)]
     (out / "draft.json").write_text(json.dumps({k: str(v) if isinstance(v, Path) else v
                                                 for k, v in d.__dict__.items()}, indent=2))
     return d

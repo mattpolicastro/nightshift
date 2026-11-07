@@ -110,7 +110,7 @@ def test_draft_notifications_keep_manifest_change_and_branch(tmp_path, monkeypat
     from specloop import propose
 
     path = str(tmp_path / "manifest with spaces.toml")
-    manifest = SimpleNamespace(repo=tmp_path, change="new-change", branch="draft/custom", env_file=None)
+    manifest = SimpleNamespace(repo=tmp_path, change="new-change", branch="draft/custom", env_file=None, format="openspec")
     draft = SimpleNamespace(commit="a" * 40, questions=questions, contradictions=[], risks=[], problems=[])
     sent = []
     monkeypatch.setattr(cli.manifest, "template", lambda *a, **kw: (manifest, ""))
