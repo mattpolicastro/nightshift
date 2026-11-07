@@ -90,6 +90,7 @@ class Manifest:
     auth_targets: tuple[str, ...] = ()  # all profiles, including unused and fallback logins
     mutation_invalid_steps: tuple[str, ...] = DEFAULT_MUTATION_INVALID_STEPS
     snapshots: tuple[Snapshot, ...] = ()
+    format: str = "openspec"
 
 
 def _path(s: str) -> Path:
