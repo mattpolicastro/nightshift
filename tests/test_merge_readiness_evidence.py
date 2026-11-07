@@ -9,6 +9,68 @@ from nightshift.specloop_intake import _readiness_evidence
 from specloop import state, state_locks
 
 
+@pytest.mark.scenario("merge-readiness/disabled-evidence-exemption/disabled-manifest-needs-no-evidence")
+@pytest.mark.parametrize("setting", ["false", "omitted"])
+@pytest.mark.parametrize("events", ["empty", "absent", "malformed"])
+def test_readiness_evidence_disabled_manifest_reports_no_evidence_reasons(
+        local_run, monkeypatch, setting, events):
+    env = local_run
+    manifest = env.run.manifest_path
+    manifest.write_text(manifest.read_text().replace(
+        "gates = {evidence = true}\n",
+        "gates = {evidence = false}\n" if setting == "false" else ""))
+    env.run.state.evidenced.clear()
+    env.run.state.section_base.clear()
+    env.run.save()
+    env.events = []
+    env.write_events()
+    events_path = env.run.dir / "events.jsonl"
+    if events == "absent":
+        events_path.unlink()
+    elif events == "malformed":
+        events_path.write_text("not-json\n")
+
+    def forbidden_git(*args, **kwargs):
+        pytest.fail("disabled evidence must not read committed tasks or diffs")
+
+    original_open = Path.open
+
+    def guarded_open(path, *args, **kwargs):
+        assert path != events_path, "disabled evidence must not read events"
+        return original_open(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", guarded_open)
+        assert _readiness_evidence(env.row, git_runner=forbidden_git) == []
+
+
+@pytest.mark.scenario("merge-readiness/local-evidence-assessment/enabled-manifest-still-requires-events")
+@pytest.mark.scenario("merge-readiness/local-evidence-assessment/unknown-evidence-blocks")
+@pytest.mark.parametrize("missing", [None, "state.json", "manifest.toml", "events.jsonl"])
+def test_readiness_evidence_enabled_manifest_still_requires_events(local_run, missing):
+    env = local_run  # The saved fixture manifest explicitly enables evidence.
+    env.events = []
+    env.write_events()
+    env.run.state.section_base.clear()
+    env.run.save()
+    if missing:
+        path = env.run.dir / missing
+        path.unlink()
+
+    reasons = _readiness_evidence(env.row)
+
+    if missing:
+        source = "run identity/state.json" if missing == "state.json" else missing
+        assert len(reasons) == 1
+        assert reasons[0].startswith(f"evidence: check {source} (FileNotFoundError:")
+        assert str(path) in reasons[0]
+        assert not path.exists()
+    else:
+        assert reasons == [
+            f"evidence section {n}: missing event; no bounded test-only diff proof"
+            for n in (1, 2)]
+
+
 @pytest.mark.scenario("merge-readiness/local-evidence-assessment/measured-sections-pass")
 @pytest.mark.parametrize("score", [0, 0.5, 1])
 def test_measured_sections_pass(local_run, score):

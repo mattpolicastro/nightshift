@@ -31,6 +31,7 @@ class LocalRun:
         self.write_events()
         self.run.manifest_path.write_text('''run = {repo = ".", change = "c", branch = "spec/c"}
 roles = {implement = "p", review = "p"}
+gates = {evidence = true}
 profiles = {p = {adapter = "codex", model = "m"}}
 paths = {allowed = ["tests/**"]}
 verify = [{id = "ok", run = ["true"]}]''')
