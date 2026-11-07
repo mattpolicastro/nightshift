@@ -1,12 +1,10 @@
 # Nightshift spec-kit house rules
 
-These authoring rules and the planned `nightshift-speckit` preset belong to
+These authoring rules and the `nightshift-speckit` preset belong to
 [issue #185](https://github.com/mattpolicastro/nightshift/issues/185) in
 [issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
 Native engine parsing, admission, freezing and finish support remain separate work;
-these rules do not enable them. Installation and host-agent execution still need
-Matt's scratch-project check; live references and readability need his pre-merge
-review. Existing [OpenSpec naming and lifecycle guidance](README.md) stays in effect.
+these rules do not enable them. Existing [OpenSpec naming and lifecycle guidance](README.md) stays in effect.
 
 ## Feature directory and branch
 
@@ -33,7 +31,7 @@ Open the issue, then specify with its number: `/speckit.specify 42 Add a gate`
 or `/speckit.specify #42 Add a gate`. The remaining text is the issue title used
 for both the slug and initial feature description; expand requirements during drafting.
 Both forms select `specs/042-add-a-gate` and branch `spec/042-add-a-gate`.
-The planned preset wrapper supplies `SPECIFY_FEATURE_DIRECTORY=specs/042-add-a-gate`
+The preset's `speckit.specify` wrapper supplies `SPECIFY_FEATURE_DIRECTORY=specs/042-add-a-gate`
 using the upstream [directory override](https://github.com/github/spec-kit/blob/v1.3.2/docs/overview/core.md).
 Sequential or timestamp configuration cannot derive a repository issue number;
 passing it explicitly keeps identity tied to the issue without a forge API lookup

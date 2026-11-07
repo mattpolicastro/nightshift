@@ -788,7 +788,7 @@ for usage, refresh behavior and installation.
 
 ## How the engine works
 
-The [spec-kit house rules](speckit.md) describe the rules and planned preset for authoring support in [issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
+The [spec-kit house rules](speckit.md) describe the authoring rules and the `nightshift-speckit` preset ([issue #184](https://github.com/mattpolicastro/nightshift/issues/184)).
 
 `specloop/` (in this repo) drives an admitted OpenSpec change through its
 `tasks.md`, one task at a time.
