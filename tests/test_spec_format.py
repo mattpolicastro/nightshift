@@ -3,6 +3,7 @@
 import ast
 import hashlib
 import json
+import re
 import shlex
 import subprocess
 import tomllib
@@ -23,6 +24,88 @@ from test_finish_expect_head import service
 from test_specloop_act import admitted
 from test_specloop_command_json import BRANCH, CHANGE, template
 import spec_format_legacy_fixtures as legacy
+
+
+def format_guide_section(text, heading):
+    """Select exact column-zero physical lines, without Markdown interpretation."""
+    match = re.fullmatch(r"(#{1,6})[ \t]+\S.*", heading)
+    assert match is not None, "invalid heading boundary"
+    lines = text.split("\n")
+    assert lines.count(heading) == 1, "missing/duplicate heading boundary"
+    start = lines.index(heading) + 1
+    for end in range(start, len(lines)):
+        boundary = re.match(r"^(#{1,6})[ \t]+", lines[end])
+        if boundary and len(boundary[1]) <= len(match[1]):
+            return "\n".join(lines[start:end])
+    return "\n".join(lines[start:])
+
+
+@pytest.mark.scenario("specloop-documentation/format-selection-guidance/compatibility-claims-retain-their-limits")
+@pytest.mark.parametrize("wrapper", ["", "```markdown\n", "<!--\n", "    <div>\n"])
+@pytest.mark.parametrize("ending", ["", "# Next", "##\tNext", "## Next"])
+def test_format_guide_boundaries_are_physical(wrapper, ending):
+    heading = "## Selected"
+    body = "content\n### Child\nchild\n    ## Indented\n\t# Indented\n####### Not a heading\n##No space"
+    text = wrapper + heading + "\n" + body
+    if ending:
+        text += "\n" + ending + "\nexcluded"
+    assert format_guide_section(text, heading) == body
+    for bad in (text.replace(heading, ""), text.replace(heading, " " + heading),
+                text.replace(heading, heading + " "), text + "\n" + heading,
+                text + "\n```\n" + heading, text + "\n<!--\n" + heading):
+        with pytest.raises(AssertionError, match="missing/duplicate"):
+            format_guide_section(bad, heading)
+
+
+@pytest.mark.scenario("specloop-documentation/format-selection-guidance/operator-selects-the-supported-format")
+def test_complete_self_hosting_example_selects_supported_format(monkeypatch):
+    example = Path(__file__).resolve().parents[1] / "examples/specloop/self-hosting.toml"
+    data = tomllib.loads(example.read_text())
+    assert data["run"]["format"] == "openspec"
+    explicit = manifest.load(example)  # Parse every table, including verification and routes.
+    assert spec_format.get(explicit) is spec_format.OPENSPEC
+    del data["run"]["format"]
+    assert manifest.parse(data) == explicit
+    data["run"]["format"] = "speckit"
+    reserved = manifest.parse(data)
+    assert reserved == replace(explicit, format="speckit")
+    with pytest.raises(spec_format.SpecError) as refusal:
+        spec_format.get(reserved)
+    for module, name in ((cli, "_checkout"), (openspec, "validate"), (agents, "run")):
+        monkeypatch.setattr(module, name, Mock(side_effect=AssertionError(f"unexpected {name}")))
+    assert cli.problems_with(reserved.repo, "unused", reserved) == [str(refusal.value)]
+
+
+@pytest.mark.scenario("specloop-documentation/format-selection-guidance/operator-selects-the-supported-format")
+@pytest.mark.scenario("specloop-documentation/format-selection-guidance/compatibility-claims-retain-their-limits")
+@pytest.mark.parametrize("path,heading", [
+    ("docs/specloop/README.md", "## How the engine works"),
+    ("docs/specloop/command-json.md", "## Manifest format"),
+])
+def test_format_guidance_links_and_pending_check(path, heading):
+    from doc_commands import argv_cases, parse_command, physical_commands
+    from test_factory_land_docs import links_resolve
+    from test_specloop_documentation_integrity import LINK, ROOT, REPOSITORY
+
+    section = format_guide_section((ROOT / path).read_text(), heading)
+    targets = {target for _, target in LINK.findall(section)}
+    assert {f"{REPOSITORY}/issues/187", f"{REPOSITORY}/issues/184",
+            "../../examples/specloop/self-hosting.toml"} <= targets
+    links_resolve(path, section)
+    admissions = []
+    for _, command in physical_commands(section):
+        if any(argv[1:2] == ["admit"] and "--json" in argv for argv in argv_cases(command)):
+            admissions.extend(parse_command(command))
+    assert admissions
+    for args in admissions:
+        assert args.handler is cli.dispatch and args.manifest and args.json
+    if path == "docs/specloop/README.md":
+        # Inspect checkbox state and its tracking links, not the human-check prose.
+        checks = re.findall(r"^- \[([ xX])\] (.*(?:\n[ \t]+[^\n]+)*)", section, re.M)
+        tracked = [(state, body) for state, body in checks
+                   if f"{REPOSITORY}/issues/184" in {url for _, url in LINK.findall(body)}]
+        assert len(tracked) == 1 and tracked[0][0] == " "
+        assert f"{REPOSITORY}/issues/187" in {url for _, url in LINK.findall(tracked[0][1])}
 
 
 @pytest.fixture
@@ -123,6 +206,7 @@ def test_manifest_format_defaults_to_openspec(template, monkeypatch, capfd, form
 
 
 @pytest.mark.scenario("spec-format/manifest-format-selection/spec-kit-is-refused-at-admission")
+@pytest.mark.scenario("specloop-documentation/format-selection-guidance/operator-selects-the-supported-format")
 @pytest.mark.parametrize("overrides", [False, True])
 def test_manifest_format_speckit_refused_at_admission(template, monkeypatch, capfd, overrides):
     path, repo = template
