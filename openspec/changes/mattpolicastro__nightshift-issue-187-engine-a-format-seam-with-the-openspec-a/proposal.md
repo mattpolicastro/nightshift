@@ -18,6 +18,10 @@ the behavior of existing OpenSpec manifests and admitted runs.
 - Document formats in the engine guide, manifest/JSON guide and self-hosting
   example. Add focused tests in `tests/test_spec_format.py`; preserve existing
   assertions, rendered prompts, messages, subprocess argv and commit messages.
+- Permit adding `format="openspec"` to the existing `SimpleNamespace` manifest
+  fixtures in `tests/test_mixed_root_readers.py` and
+  `tests/test_specloop_messages.py` when their callers adopt `get(m)`; keep
+  every assertion unchanged.
 
 Out of scope: a spec-kit adapter or `specloop/speckit.py`, OpenSpec CLI/binary
 changes, edits to `specloop/openspec.py` internals, `nightshift/`, prompt wording,

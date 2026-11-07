@@ -72,6 +72,7 @@ recovery behavior SHALL remain unchanged.
 - **WHEN** an OpenSpec draft is linted, checked for overlaps, staged or revised, or another run contributes to the in-flight file map
 - **THEN** the relevant manifest's adapter supplies paths and operations while existing confinement diagnostics, prompt text, git add argv, review ordering, run filtering and revision idempotency remain unchanged
 - **THEN** task/scenario parsing and the existing exclusion and hands-off rules do not change
+- **THEN** mixed canonical/legacy roots retain the same in-flight map and read order without state mutation, and successful drafting retains its notification and manifest/change/branch command arguments; the two named `SimpleNamespace` fixture inputs may gain `format="openspec"` as specified in task 1.3, with every existing assertion preserved
 
 #### Scenario: Publication and interrupted finish retain behavior
 - **WHEN** an OpenSpec run publishes or finishes, including an expected-head mismatch or retry after an archive commit survives a failed push or ready operation

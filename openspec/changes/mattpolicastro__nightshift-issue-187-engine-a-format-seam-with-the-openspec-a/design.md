@@ -171,9 +171,32 @@ migration is
 move its captured Git function and monkeypatch from `loop.git` to
 `spec_format.git`, preserving all three failure cases and assertions. Name
 this and any further necessary patch-target-only migrations in the PR
-description, along with the `task_rules` template-input fixture migration;
-direct patches of `specloop.openspec.validate`, `.scenarios`
-and `.archive` continue to work unchanged. Run `uv run pytest` and
+description, along with the `task_rules` template-input fixture migration
+and both manifest-fixture migrations below. Direct patches of
+`specloop.openspec.validate`, `.scenarios` and `.archive` continue to work
+unchanged.
+
+Task 1.3 also explicitly permits adding only `format="openspec"` to the
+`SimpleNamespace` manifest inputs in these existing tests:
+
+- `tests/test_mixed_root_readers.py::test_reports_and_proposal_context_share_mixed_roots`:
+  extend the manifest returned by the patched `propose.manifest.load`.
+  Retain every assertion, including both repositories' in-flight maps,
+  canonical/legacy run visibility, read order and unchanged state snapshot.
+- `tests/test_specloop_messages.py::test_draft_notifications_keep_manifest_change_and_branch`:
+  extend the manifest returned by the patched `cli.manifest.template`.
+  Retain both `questions` parameter cases and every assertion about exit
+  status, notification count/kind and parsed command arguments.
+
+These are fixture-input migrations, explicitly allowed in addition to patch
+target changes. `SimpleNamespace` does not inherit `Manifest.format`'s
+default: `get(m)` would otherwise raise `AttributeError`, silently hiding
+runs in `in_flight` or breaking the successful draft-ready notification.
+Keep selection through `m.format`; do not mask incomplete test doubles with
+a production fallback or weaken assertions. Run both named regressions with
+task 1.3 and list both migrations by name in the PR description.
+
+Run `uv run pytest` and
 `uv run python scripts/check_types.py`; do not grow `mypy-baseline.txt`.
 
 ### Documentation and concurrent work
