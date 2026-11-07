@@ -5,20 +5,24 @@ import hashlib
 import json
 import shlex
 import subprocess
-from dataclasses import fields, replace
+import tomllib
+from dataclasses import asdict, fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
 import pytest
 
-from specloop import agents, cli, loop, openspec, propose, revise, spec_format, tasks
+from nightshift.cli import main
+from specloop import agents, cli, loop, manifest, openspec, propose, revise, spec_format, state, tasks
 from specloop.manifest import Manifest
+from specloop.revision_store import RevisionStore
 from specloop.seal import SAFE_FLAGS, git
 from specloop.state import Run, TaskState
 from test_finish_expect_head import service
 from test_specloop_act import admitted
 from test_specloop_command_json import BRANCH, CHANGE, template
+import spec_format_legacy_fixtures as legacy
 
 
 @pytest.fixture
@@ -72,6 +76,179 @@ def test_manifest_construction_and_adapter_selection(tmp_path):
     assert spec_format.get(replace(m, format="openspec")) is spec_format.OPENSPEC
     with pytest.raises(openspec.SpecError, match="^spec-kit format is not available yet$"):
         spec_format.get(replace(m, format="speckit"))
+
+
+@pytest.mark.scenario("spec-format/manifest-format-selection/omitted-and-explicit-openspec-agree")
+@pytest.mark.parametrize("format_value", [None, "openspec"])
+@pytest.mark.parametrize("overrides", [False, True])
+def test_manifest_format_defaults_to_openspec(template, monkeypatch, capfd, format_value, overrides):
+    path, repo = template
+    text = path.read_text()
+    if format_value is not None:
+        text = text.replace("[run]", f'[run]\nformat = "{format_value}"')
+    if not overrides:
+        text = text.replace('change = "x"', f'change = "{CHANGE}"').replace(
+            'branch = "spec/x"', f'branch = "{BRANCH}"')
+    path.write_text(text)
+    assert manifest.load(path).format == "openspec"
+    kwargs = {"change": CHANGE, "branch": BRANCH} if overrides else {}
+    m, effective = manifest.template(path, **kwargs)
+    assert m.format == "openspec"
+    assert (m.change, m.branch) == (CHANGE, BRANCH)
+    assert spec_format.get(m) is spec_format.OPENSPEC
+    direct = Manifest(repo, CHANGE, BRANCH, "main", "", {}, (), (), ())
+    assert direct.format == "openspec" and spec_format.get(direct) is spec_format.get(m)
+    validator = Mock(return_value=[])
+    agent = Mock(side_effect=AssertionError("admission with --skip-feasibility must not run an agent"))
+    monkeypatch.setattr(openspec, "validate", validator)
+    monkeypatch.setattr(agents, "run", agent)
+    flags = ["--change", CHANGE, "--branch", BRANCH] if overrides else []
+    assert main(["admit", str(path), *flags, "--skip-feasibility", "--json"]) == 0
+    document = json.loads(capfd.readouterr().out)
+    assert document["version"] == 1 and document["outcome"] == "admitted"
+    validator.assert_called_once()
+    assert validator.call_args.args[1] == CHANGE
+    agent.assert_not_called()
+    run = Run.for_change(CHANGE, require_existing=True)
+    assert run.manifest_path.read_text() == effective
+    assert ("format" in tomllib.loads(effective)["run"]) is (format_value is not None)
+    assert path.read_text() == text
+    saved = cli._manifest(run)
+    assert saved == m and spec_format.get(saved) is spec_format.OPENSPEC
+    ctx = loop.Ctx(run, saved, {})
+    assert ctx.tasks_path == f"openspec/changes/{CHANGE}/tasks.md"
+    assert ctx.head() == document["head"]
+    assert cli._tasks_path(ctx.repo, ctx.head(), CHANGE, spec_format.get(saved)) == ctx.tasks_path
+    assert git(ctx.repo, "show", f"{ctx.head()}:{ctx.tasks_path}") == (repo / ctx.tasks_path).read_bytes()
+
+
+@pytest.mark.scenario("spec-format/manifest-format-selection/spec-kit-is-refused-at-admission")
+@pytest.mark.parametrize("overrides", [False, True])
+def test_manifest_format_speckit_refused_at_admission(template, monkeypatch, capfd, overrides):
+    path, repo = template
+    text = path.read_text().replace("[run]", '[run]\nformat = "speckit"')
+    if not overrides:
+        text = text.replace('change = "x"', f'change = "{CHANGE}"').replace(
+            'branch = "spec/x"', f'branch = "{BRANCH}"')
+    path.write_text(text)
+    assert manifest.load(path).format == "speckit"
+    kwargs = {"change": CHANGE, "branch": BRANCH} if overrides else {}
+    m, effective = manifest.template(path, **kwargs)
+    assert (m.format, m.change, m.branch) == ("speckit", CHANGE, BRANCH)
+    assert tomllib.loads(effective)["run"]["format"] == "speckit"
+    forbidden = {}
+    for module, name in ((cli, "_checkout"), (openspec, "validate"), (openspec, "scenarios"),
+                         (cli.feasibility, "check"), (agents, "run"), (Run, "save")):
+        forbidden[name] = Mock(side_effect=AssertionError(f"unexpected {name}"))
+        monkeypatch.setattr(module, name, forbidden[name])
+    diagnostic = "spec-kit format is not available yet"
+    assert cli.problems_with(repo / "missing", "missing-revision", m) == [diagnostic]
+
+    run = Run.for_change(CHANGE)
+    run.dir.mkdir(parents=True)
+    (run.dir / "lock").touch()
+    lock_inode = (run.dir / "lock").stat().st_ino
+    (run.dir / "admission").mkdir()
+    (run.dir / "admission/partial.json").write_text("{}")
+    run.manifest_path.write_text("partial admission")
+    refs = git(repo, "show-ref")
+    flags = ["--change", CHANGE, "--branch", BRANCH] if overrides else []
+    assert main(["admit", str(path), *flags, "--json"]) == 1
+    output = capfd.readouterr()
+    document = json.loads(output.out)  # Reject extra documents or stdout diagnostics.
+    assert document["version"] == 1 and document["outcome"] == "refused"
+    assert document["reasons"] == [f"the change is not admissible:\n  - {diagnostic}"]
+    assert "error" not in document
+    assert diagnostic in output.err
+    for boundary in forbidden.values():
+        boundary.assert_not_called()
+    assert not (run.dir / "state.json").exists()
+    assert list(run.dir.iterdir()) == [run.dir / "lock"]
+    assert (run.dir / "lock").stat().st_ino == lock_inode
+    assert git(repo, "show-ref") == refs
+    assert path.read_text() == text
+
+
+@pytest.fixture(params=["old", "new-omitted", "new-explicit"])
+def saved_openspec_run(request, template, capfd):
+    """An old writer's paused run, or a new admission, isolated from live state."""
+    path, repo = template
+    text = path.read_text().replace('change = "x"', f'change = "{CHANGE}"').replace(
+        'branch = "spec/x"', f'branch = "{BRANCH}"')
+    if request.param == "new-explicit":
+        text = text.replace("[run]", '[run]\nformat = "openspec"')
+    path.write_text(text)
+    run = Run.for_change(CHANGE)
+    if request.param == "old":
+        run.dir.mkdir(parents=True)
+        run.manifest_path.write_text(text)
+        git(repo, "clone", "-q", "--bare", str(repo), str(run.dir / "repo.git"))
+        schema = legacy
+    else:
+        assert main(["admit", str(path), "--skip-feasibility", "--json"]) == 0
+        assert json.loads(capfd.readouterr().out)["outcome"] == "admitted"
+        schema = state
+    head = git(repo, "rev-parse", BRANCH).decode().strip()
+    task = tasks.parse((repo / f"openspec/changes/{CHANGE}/tasks.md").read_text())[0]
+    saved = schema.RunState(
+        change=CHANGE, status="paused", pause=schema.Pause("human_checks", task.key, "Review PR"),
+        tasks={task.key: schema.TaskState(attempts=2, sessions=3, status="passed", candidate=head,
+                                        candidate_base=head, note="Keep task identity", arbitrated=1)},
+        gates_passed=[1], created=1700000000, pr="https://github.com/example/repo/pull/7",
+        section_base={"1": head}, evidenced=[1], evidence_summary={"1": "verified"},
+    )
+    if request.param == "old":
+        (run.dir / "state.json").write_text(json.dumps(asdict(saved), indent=2))
+    else:
+        run.state = saved
+        run.save()
+    return run, asdict(saved), task, head
+
+
+@pytest.mark.scenario("spec-format/manifest-format-selection/saved-openspec-runs-remain-compatible")
+def test_saved_openspec_runs_remain_compatible(saved_openspec_run):
+    run, expected, task, head = saved_openspec_run
+    before_manifest = run.manifest_path.read_bytes()
+    before_state = (run.dir / "state.json").read_bytes()
+    raw = tomllib.loads(before_manifest.decode())
+    old_manifest = legacy.parse(raw)
+    m = manifest.load(run.manifest_path)
+    assert m.format == "openspec" and spec_format.get(m) is spec_format.OPENSPEC
+    assert asdict(old_manifest) == {k: v for k, v in asdict(m).items() if k != "format"}
+    assert not hasattr(old_manifest, "format")
+    loaded = Run(run.dir, require_existing=True)
+    assert asdict(loaded.state) == asdict(legacy.load_state(run.dir)) == expected
+    ctx = loop.Ctx(loaded, m, {})
+    assert ctx.head() == head
+    committed_tasks = git(ctx.repo, "show", f"{head}:{ctx.tasks_path}").decode()
+    assert tasks.parse(committed_tasks)[0] == task
+    assert loaded.state.task(task.key).candidate == head
+    assert loaded.state.pause.reason == "human_checks"
+    assert run.manifest_path.read_bytes() == before_manifest
+    assert (run.dir / "state.json").read_bytes() == before_state
+
+    # A keyed review round remains usable after a save and reader restart.
+    # RevisionStore is unchanged by the seam; inspect its persisted wire shape too.
+    result = revise.revise_result(loaded, m, "Handle empty input", round_id="review-1")
+    store = RevisionStore(run.dir, CHANGE, BRANCH, "review-1", ["Handle empty input"])
+    record = store.load()
+    assert set(record) == {"version", "change", "branch", "round_id", "payload_digest", "tasks",
+                           "parent", "commit", "round", "status", "state_digest", "events_digest"}
+    assert record["version"] == 1 and record["status"] == "completed"
+    assert record["parent"] == head and record["commit"] == result.commit
+    assert asdict(legacy.load_state(run.dir)) == {**expected, "status": "running", "pause": None}
+    restarted = Run(run.dir, require_existing=True)
+    assert asdict(restarted.state) == asdict(legacy.load_state(run.dir))
+    snapshot = {p: p.read_bytes() for p in [run.manifest_path, run.dir / "state.json",
+                                           run.dir / "events.jsonl", store.path]}
+    replay = revise.revise_result(restarted, manifest.load(run.manifest_path),
+                                  "Handle empty input", round_id="review-1")
+    assert replay.replayed and replay.commit == result.commit
+    assert {p: p.read_bytes() for p in snapshot} == snapshot
+    assert run.manifest_path.read_bytes() == before_manifest
+    assert git(ctx.repo, "rev-parse", ctx.ref).decode().strip() == result.commit
+    revised = tasks.parse(git(ctx.repo, "show", f"{result.commit}:{ctx.tasks_path}").decode())
+    assert revised[0] == task and len(revised) == 2
 
 
 @pytest.mark.scenario("spec-format/format-seam/delegation-stays-late-bound")

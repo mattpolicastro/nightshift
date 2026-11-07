@@ -255,6 +255,7 @@ def parse(data: dict, roles_override: dict[str, str] | None = None) -> Manifest:
         repo=_path(run["repo"]),
         change=run["change"],
         branch=run["branch"],
+        format=run.get("format", "openspec"),
         pr_base=run.get("pr_base", "main"),
         github=run.get("github", ""),
         roles=roles,
