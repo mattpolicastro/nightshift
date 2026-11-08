@@ -18,6 +18,7 @@ SHALL remain unchanged.
 - **WHEN** an author reads the native drafting guide and house rules
 - **THEN** the guide explains templates, ASn labels, prioritized story phases, story tags, backticked citations, plan human checks, up to three genuine questions and revision in the existing undelivered feature directory
 - **THEN** it shows explicit propose and normal admission without a feasibility bypass, states the per-story sizing rule and leaves daemon intake unsupported
+- **THEN** the new drafting paragraph identifies `specs/` and `openspec/` as reserved specification roots excluded from shared planned-file extraction for every format, with or without a root, and explains the deliberate OpenSpec change: `specs/helper.py` is no longer a planned edit while `src/helper.py` remains eligible
 
 #### Scenario: Quality evidence remains human
 - **WHEN** documentation describes verification of native drafting

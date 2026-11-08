@@ -93,7 +93,14 @@ Apply it with or without `root`, after existing suffix normalization. The helper
 is used by `nightshift.arm.scope_paths` through a rootless `edited_paths` call,
 so adding only a manifest argument or checking for `.specify` would miss that
 caller. Treat both format-owned spec roots as specification references for this
-advisory map; this intentionally also excludes a `specs/` token in a mixed repo.
+advisory map, for every format; this intentionally also excludes a `specs/` token
+in an OpenSpec or mixed repo. This is a deliberate, documented change to OpenSpec
+planned-file behavior, covered by the MODIFIED `spec-format` requirement
+“Engine routing compatibility” and the existing ADDED `in-flight-file-map`
+requirement. An OpenSpec task naming `specs/helper.py` and `src/helper.py` now
+contributes only `src/helper.py`, through both `paths` and `edited_paths`, with
+or without a root. The drafting guidance must identify `specs/` alongside
+`openspec/` as a reserved specification root for this shared extraction.
 All other prefixes, function suffixes, negation clauses, bare-file existence
 checks and run selection remain unchanged. No `nightshift/` edit is needed.
 
@@ -212,8 +219,13 @@ Add “What the drafter produces” to `docs/specloop/speckit.md` and a separate
 native drafting section in `docs/specloop/README.md`. Leave its existing
 “OpenSpec drafting” prose unchanged. Include explicit `propose` and ordinary
 `admit` examples, feature revision identity, local templates, question return,
-per-story sizing and the bounded native review context. Correct pending-support
-claims in root `README.md`, `docs/specloop/command-json.md`,
+per-story sizing and the bounded native review context. In the new drafting
+guidance paragraph, explicitly say that
+`specs/` and `openspec/` are reserved specification roots excluded from planned
+edits for every format, even OpenSpec and rootless extraction; for example,
+`specs/helper.py` is excluded while `src/helper.py` remains eligible. Add this
+explanation without rewriting the preserved OpenSpec drafting prose.
+Correct pending-support claims in root `README.md`, `docs/specloop/command-json.md`,
 `presets/nightshift-speckit/README.md` and comments in
 `examples/specloop/speckit.toml`. Keep daemon intake pending.
 
