@@ -746,7 +746,7 @@ def _publish(args, run: Run) -> int:
 
 
 def finish(args) -> int:
-    """Archive the change into openspec/specs, push, and mark the PR ready."""
+    """Complete the selected format, push, and mark the PR ready."""
     return _locked_command(args, _finish)
 
 
@@ -809,14 +809,22 @@ def _finish(args, run: Run) -> int:
     fmt = spec_format.get(ctx.m)
     task_path = _tasks_path(ctx.repo, head, ctx.m.change, fmt)
     text = git(ctx.repo, "show", f"{head}:{task_path}").decode()
-    if any(not t.done for t in fmt.parse_tasks(text)):
-        print("tasks are unfinished; refusing to archive", file=sys.stderr)
+    parsed = fmt.parse_tasks(text)
+    native = ctx.m.format == "speckit"
+    if any(not t.done for t in parsed) or (native and not parsed):
+        print("tasks are unfinished or empty; refusing to complete" if native else
+              "tasks are unfinished; refusing to archive", file=sys.stderr)
         return 1
-    # Validate before the archive's internal push as well as the external push.
+    # Validate before format completion as well as the external push.
     # Preserve direct finish's exception contract; act renders the same reason.
     target = _forge_target(ctx.m.github) if ctx.m.github else None
     remote = _remote(ctx, target)
-    if task_path == ctx.tasks_path:
+    if native:
+        completed = fmt.finish(ctx.repo, ctx.m.change, all_tasks_done=True, head=head)["commit"]
+        if not loop._advance(ctx, head, completed):
+            print("run branch changed during completion; refusing to finish", file=sys.stderr)
+            return 1
+    elif task_path == ctx.tasks_path:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp) / "w"
             subprocess.run(["git", "clone", "-q", "--branch", ctx.m.branch, str(ctx.repo), str(work)], check=True)
@@ -824,7 +832,7 @@ def _finish(args, run: Run) -> int:
             git(work, "add", "-A")
             git(work, "commit", "-qm", f"specloop: archive {ctx.m.change} into openspec/specs", env=loop.seal.IDENTITY)
             git(work, "push", "-q", str(ctx.repo), f"HEAD:{ctx.ref}")
-    # The branch itself records the archive durably. Retry external operations
+    # The branch itself records completion durably. Retry external operations
     # from that commit without requiring a separate state write to have survived.
     _push(ctx.repo, remote, ctx.ref, source=ctx.m.repo)
     if target is not None and target.forge is not None:
@@ -845,7 +853,8 @@ def _finish(args, run: Run) -> int:
     st.status, st.pause = "done", None
     run.save()
     run.event("finished", head=ctx.head(), pr=st.pr)
-    print(f"{args.change}: archived and marked ready for review — {st.pr}")
+    operation = "completed" if native else "archived"
+    print(f"{args.change}: {operation} and marked ready for review — {st.pr}")
     return 0
 
 

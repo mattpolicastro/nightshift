@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tomllib
 from unittest.mock import Mock, call
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,7 +19,12 @@ from specloop.seal import IDENTITY, git
 from specloop.state import Run, TaskState
 from test_spec_format import saved_openspec_run
 from test_specloop_command_json import template
+from test_specloop_forge_selection import configured
+from fake_gitea import FakeGitea, Reply
+from nightshift.forge import http
 import spec_format_legacy_fixtures as legacy
+
+GITEA_REQUEST = cli.GiteaForge._request
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "speckit"
@@ -813,15 +819,435 @@ def test_fake_agent_build_through_native_phase_gates(native_ctx, monkeypatch):
     assert sum(e["event"] == "landed" for e in events) == 7
     assert all(e["passed"] for e in events if e["event"] == "verified")
     assert "- (T003.1)" in cli._pr_body(ctx)  # PR retains the full follow-up file.
-    # Exercise the trusted Status write primitive; lifecycle orchestration is a separate task.
+    # Native completion uses the same trusted writer after the candidate seal.
     spec_path = f"specs/{CHANGE}/spec.md"
     complete = speckit.mark_complete(frozen[spec_path].decode())
-    completed = seal.commit_files(ctx.repo, final, {spec_path: complete}, "trusted Status completion")
+    completed = spec_format.SPECKIT.finish(ctx.repo, CHANGE, True, head=final)["commit"]
     assert loop._advance(ctx, final, completed)
     assert git(ctx.repo, "diff", "--name-only", final, completed).decode().splitlines() == [spec_path]
     assert git(ctx.repo, "show", f"{completed}:{spec_path}") == complete.encode()
     assert ctx.tasks_text(completed) == ctx.tasks_text(final)
     assert git(ctx.repo, "show", "-s", "--format=%an <%ae>", completed).decode().strip() == "specloop <specloop@localhost>"
+    assert git(ctx.repo, "show", "-s", "--format=%B", completed).decode().strip() == f"specloop: complete spec-kit feature {CHANGE}"
+    for path, data in frozen.items():
+        if path != spec_path:
+            assert git(ctx.repo, "show", f"{completed}:{path}") == data
     for path, data in frozen.items():
         assert (ctx.m.repo / path).read_bytes() == data
     assert (ctx.m.repo / ctx.tasks_path).read_text() == original
+
+
+def record_native_commands(monkeypatch):
+    """Record actual process argv, including Git object operations."""
+    commands = []
+    real = subprocess.run
+
+    def run(argv, *args, **kwargs):
+        commands.append(list(argv))
+        assert Path(argv[0]).name not in {"npx", "openspec"}
+        if Path(argv[0]).name == "git":
+            assert not {"clone", "worktree", "archive"}.intersection(argv)
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    return commands
+
+
+def completed_tasks(ctx):
+    text = ctx.tasks_text(ctx.head())
+    for task in speckit.parse_tasks(text):
+        text = speckit.tick(text, task)
+    return text
+
+
+@pytest.mark.scenario("speckit-format/native-completion-commit/complete-with-no-external-validator")
+@pytest.mark.scenario("speckit-format/native-completion-commit/complete-status-is-idempotent")
+@pytest.mark.parametrize("original,expected", [
+    ("# Feature\r\n\r\n**Status**: Draft\r\nCriteria\n\t**Status**: Review\t\nTail",
+     "# Feature\r\n\r\n**Status**: Complete\r\nCriteria\n**Status**: Complete\nTail"),
+    ("Preamble\r\n# First\r\n# Second\nCriteria", "Preamble\r\n# First\r\n**Status**: Complete\r\n# Second\nCriteria"),
+    ("# Feature", "# Feature\n**Status**: Complete\n"),
+    ("# Feature\n**Status**: Complete\n", "# Feature\n**Status**: Complete\n"),
+])
+def test_finish_marks_complete_without_npx(native_ctx, monkeypatch, original, expected):
+    ctx = native_ctx
+    path = f"specs/{CHANGE}/spec.md"
+    head = native_commit(ctx, {ctx.tasks_path: completed_tasks(ctx), path: original})
+    source = {p: p.read_bytes() for p in ctx.m.repo.rglob("*") if p.is_file() and ".git" not in p.parts}
+    refs = git(ctx.repo, "show-ref")
+    argv = record_native_commands(monkeypatch)
+    commit_files = Mock(wraps=seal.commit_files)
+    monkeypatch.setattr(seal, "commit_files", commit_files)
+    result = spec_format.SPECKIT.finish(ctx.repo, CHANGE, True, head=head)
+    commit = result["commit"]
+    assert git(ctx.repo, "show", f"{commit}:{path}") == expected.encode()
+    assert git(ctx.repo, "show-ref") == refs
+    assert {p: p.read_bytes() for p in source} == source
+    assert git(ctx.repo, "diff", "--name-only", head, commit).decode().splitlines() == ([] if original == expected else [path])
+    if original != expected:
+        commit_files.assert_called_once_with(ctx.repo, head, {path: expected}, f"specloop: complete spec-kit feature {CHANGE}")
+        assert git(ctx.repo, "show", "-s", "--format=%P%n%B%n%an <%ae>%n%cn <%ce>", commit).decode().splitlines() == [
+            head, f"specloop: complete spec-kit feature {CHANGE}", "", "specloop <specloop@localhost>",
+            "specloop <specloop@localhost>"]
+    else:
+        assert commit == head
+        commit_files.assert_not_called()
+    count = commit_files.call_count
+    assert spec_format.SPECKIT.finish(ctx.repo, CHANGE, True, head=commit) == result
+    assert commit_files.call_count == count
+    assert spec_format.SPECKIT.tasks_paths_at(ctx.repo, commit, CHANGE) == [ctx.tasks_path]
+    assert all(t.done for t in speckit.parse_tasks(ctx.tasks_text(commit)))
+    assert argv and any("show" in a for a in argv)
+
+
+@pytest.mark.scenario("speckit-format/native-completion-commit/incomplete-or-unreadable-feature-refuses")
+@pytest.mark.scenario("speckit-format/native-completion-commit/complete-status-is-idempotent")
+@pytest.mark.parametrize("failure", ["false", "head", "missing-head", "unfinished", "empty", "duplicate-phase",
+                                          "duplicate-label", "missing-spec", "missing-tasks", "decode-spec",
+                                          "decode-tasks", "no-title"])
+def test_native_completion_refuses(native_ctx, monkeypatch, failure):
+    ctx = native_ctx
+    path = f"specs/{CHANGE}/spec.md"
+    text = completed_tasks(ctx)
+    if failure == "unfinished":
+        text = text.replace("[X]", "[ ]", 1)
+    elif failure == "empty":
+        text = "## Phase 1: Empty\n"
+    elif failure == "duplicate-phase":
+        text += "\n## Phase 1: Duplicate\n"
+    elif failure == "duplicate-label":
+        text += "- [X] T001 Duplicate\n"
+    spec = "**Status**: Complete\n" if failure == "no-title" else "# Feature\n**Status**: Complete\n"
+    head = native_commit(ctx, {ctx.tasks_path: text, path: spec})
+    if failure.startswith(("missing-", "decode-")) and failure != "missing-head":
+        (ctx.m.repo / ctx.tasks_path).write_text(text)
+        (ctx.m.repo / path).write_text(spec)
+        source = ctx.m.repo / (path if failure.endswith("spec") else ctx.tasks_path)
+        if failure.startswith("missing-"):
+            source.unlink()
+        else:
+            source.write_bytes(b"\xff")
+        commit_feature(ctx.m.repo)
+        git(ctx.repo, "fetch", "-q", str(ctx.m.repo), f"+main:{ctx.ref}")
+        head = ctx.head()
+    refs = git(ctx.repo, "show-ref")
+    argv = record_native_commands(monkeypatch)
+    commit_files = Mock(wraps=seal.commit_files)
+    monkeypatch.setattr(seal, "commit_files", commit_files)
+    with pytest.raises(spec_format.SpecError):
+        spec_format.SPECKIT.finish(ctx.repo, CHANGE, failure != "false",
+                                  head=None if failure == "head" else "absent" if failure == "missing-head" else head)
+    assert git(ctx.repo, "show-ref") == refs
+    commit_files.assert_not_called()
+    assert not any("push" in a or "update-ref" in a for a in argv)
+
+
+@pytest.fixture(params=["github", "gitea"])
+def native_service(native_admission, configured, tmp_path, monkeypatch, capfd, request):
+    root, _, path, _ = native_admission
+    gitea = request.param == "gitea"
+    repository = "forge.example/example/repo" if gitea else "example/repo"
+    origin = ("https://forge.example:8443/git/example/repo.git" if gitea
+              else "https://github.com/example/repo.git")
+    url = ("https://forge.example:8443/git/example/repo/pulls/42" if gitea
+           else "https://github.com/example/repo/pull/42")
+    path.write_text(path.read_text().replace('[run]\n', f'[run]\ngithub = "{repository}"\n'))
+    git(root, "remote", "add", "origin", origin)
+    assert main(["admit", str(path), "--json", "--skip-feasibility"]) == 0
+    capfd.readouterr()
+    run = Run.for_change(CHANGE, require_existing=True)
+    ctx = cli._ctx(run)
+    remote = tmp_path / "remote.git"
+    git(tmp_path, "clone", "-q", "--bare", str(root), str(remote))
+    native_commit(ctx, {ctx.tasks_path: completed_tasks(ctx)})
+    run.state.pr = url
+    run.pause("human_checks")
+    s = SimpleNamespace(ctx=ctx, run=run, remote=remote, origin=origin, url=url, gitea=gitea,
+                        effects=[], gh=[], failure=None, fake=FakeGitea("https://forge.example:8443/git"))
+    monkeypatch.setattr(cli.GiteaForge, "_request", GITEA_REQUEST)
+    monkeypatch.setattr(http, "build_opener", lambda: s.fake)
+    real_push, real_fetch = cli._push, loop._fetch_publish_base
+
+    def push(repo, url, ref, *, source=None):
+        assert (repo, url, ref, source) == (ctx.repo, origin, ctx.ref, root)
+        assert Run(run.dir).state.status == "paused"
+        s.effects.append("push")
+        if s.failure == "push":
+            raise RuntimeError("push failed")
+        real_push(repo, str(remote), ref, source=source)
+
+    def fetch(ctx, url, **kw):
+        assert url == origin
+        s.effects.append("fetch")
+        return real_fetch(ctx, str(remote), **kw)
+
+    def gh(*args):
+        assert not gitea
+        s.gh.append(args)
+        assert git(remote, "rev-parse", ctx.ref).decode().strip() == ctx.head()
+        assert Run(run.dir).state.status == "paused"
+        if args[:2] == ("pr", "ready"):
+            s.effects.append("ready")
+            if s.failure in {"lost-ready", "ready"}:
+                raise RuntimeError("lost response")
+            return ""
+        if args[:2] == ("pr", "view"):
+            return "true" if s.failure == "ready" else "false"
+        if args[:2] == ("pr", "create"):
+            return url
+        assert args[0] == "api"
+        return "[]"
+
+    monkeypatch.setattr(cli, "_push", push)
+    monkeypatch.setattr(loop, "_fetch_publish_base", fetch)
+    monkeypatch.setattr(cli, "_gh", gh)
+    s.argv = record_native_commands(monkeypatch)
+    return s
+
+
+@pytest.mark.scenario("specloop-interface/native-publication-lifecycle/finish-guards-and-ordering")
+@pytest.mark.scenario("specloop-forge/verified-gitea-finish/prefix-removal-is-verified")
+@pytest.mark.scenario("specloop-forge/verified-gitea-finish/existing-finish-gates-remain")
+@pytest.mark.parametrize("mode", ["matching", "omitted", "act"])
+def test_native_finish_ordering(native_service, monkeypatch, capfd, mode):
+    s = native_service
+    ctx = s.ctx
+    head = ctx.head()
+    path = f"specs/{CHANGE}/spec.md"
+    original = git(ctx.repo, "show", f"{head}:{path}").decode()
+    complete = Mock(wraps=speckit.finish)
+    monkeypatch.setattr(speckit, "finish", complete)
+    remote = cli._remote
+
+    def validate(*args):
+        assert complete.call_count == 0
+        s.effects.append("origin")
+        return remote(*args)
+
+    monkeypatch.setattr(cli, "_remote", validate)
+    if s.gitea:
+        def read(call):
+            assert s.effects[:2] == ["origin", "push"]
+            assert Run(s.run.dir).state.pause.reason == "human_checks"
+            assert git(s.remote, "rev-parse", ctx.ref).decode().strip() == ctx.head() != head
+            return Reply({"title": "Draft: Keep Draft: inside" if len(s.fake.calls) == 1 else "Keep Draft: inside"})
+        endpoint = "/git/api/v1/repos/example/repo/pulls/42"
+        s.fake.route("GET", endpoint, read, read)
+        s.fake.route("PATCH", endpoint, Reply({}))
+    else:
+        s.failure = "lost-ready"
+    argv = ["act", CHANGE, "finish", "--json"] if mode == "act" else ["finish", CHANGE]
+    if mode == "matching":
+        argv += ["--expect-head", head.upper()]
+    assert main(argv) == 0
+    output = capfd.readouterr()
+    assert f"{CHANGE}: completed and marked ready for review — {s.url}" in (output.err if mode == "act" else output.out)
+    if mode == "act":
+        assert json.loads(output.out)["outcome"] == "done"
+    final = ctx.head()
+    complete.assert_called_once_with(ctx.repo, CHANGE, True, head=head)
+    assert git(ctx.repo, "diff", "--name-only", head, final).decode().splitlines() == [path]
+    assert git(ctx.repo, "show", f"{final}:{path}").decode() == speckit.mark_complete(original)
+    assert any(a[-4:] == ["update-ref", ctx.ref, final, head] for a in s.argv)
+    s.run.reload()
+    assert s.run.state.status == "done" and s.run.state.pause is None
+    assert list(agents.read_jsonl(s.run.dir / "events.jsonl"))[-1]["event"] == "finished"
+    if s.gitea:
+        assert [(c.method, c.body) for c in s.fake.calls] == [
+            ("GET", None), ("PATCH", {"title": "Keep Draft: inside"}), ("GET", None)]
+    else:
+        assert s.gh == [("pr", "ready", s.url, "-R", ctx.m.github),
+                        ("pr", "view", s.url, "-R", ctx.m.github, "--json", "isDraft", "--jq", ".isDraft")]
+
+
+@pytest.mark.scenario("specloop-interface/native-publication-lifecycle/finish-guards-and-ordering")
+@pytest.mark.scenario("specloop-forge/verified-gitea-finish/existing-finish-gates-remain")
+@pytest.mark.parametrize("gate", ["head", "unfinished", "empty", "ambiguous", "origin", "completion", "push", "race", "state"])
+def test_native_finish_guards(native_service, monkeypatch, capfd, gate):
+    s = native_service
+    ctx = s.ctx
+    if gate in {"unfinished", "empty", "ambiguous"}:
+        text = ctx.tasks_text(ctx.head())
+        text = (text.replace("[X]", "[ ]", 1) if gate == "unfinished" else
+                "" if gate == "empty" else text + "\n## Phase 1: Duplicate\n")
+        native_commit(ctx, {ctx.tasks_path: text})
+    elif gate == "origin":
+        git(ctx.m.repo, "remote", "set-url", "origin", "https://other.example/foreign/repo.git")
+    elif gate == "state":
+        s.run.pause("ready_to_publish")
+    elif gate == "push":
+        s.failure = "push"
+    head = ctx.head()
+    competing = seal.commit_files(ctx.repo, head, {"src/competing": "winner"}, "competing writer")
+    finish = speckit.finish
+
+    def complete(*args, **kwargs):
+        if gate == "completion":
+            raise spec_format.SpecError("completion failed")
+        result = finish(*args, **kwargs)
+        if gate == "race":
+            git(ctx.repo, "update-ref", ctx.ref, competing, head)
+        return result
+
+    spy = Mock(side_effect=complete)
+    monkeypatch.setattr(speckit, "finish", spy)
+    state = (s.run.dir / "state.json").read_bytes()
+    remote = git(s.remote, "rev-parse", ctx.ref)
+    args = ["finish", CHANGE, "--expect-head", "0" * 40 if gate == "head" else head]
+    if gate in {"ambiguous", "origin", "completion", "push"}:
+        with pytest.raises((RuntimeError, ValueError)):
+            main(args)
+    else:
+        assert main(args) == 1
+    assert (s.run.dir / "state.json").read_bytes() == state
+    assert s.fake.calls == s.gh == []
+    assert s.effects == (["push"] if gate == "push" else [])
+    assert git(s.remote, "rev-parse", ctx.ref) == remote
+    if gate == "race":
+        assert ctx.head() == competing
+        assert "branch changed" in capfd.readouterr().err
+    elif gate == "push":
+        assert ctx.head() != head
+    else:
+        assert ctx.head() == head
+    assert spy.call_count == int(gate in {"completion", "push", "race"})
+
+
+@pytest.mark.scenario("specloop-interface/native-publication-lifecycle/publish-native-feature")
+@pytest.mark.parametrize("mode", ["new", "adopted", "existing", ".github/workflows/test.yml",
+                                 ".gitea/workflows/test.yml", ".forgejo/test.yml"])
+def test_native_publication(native_service, monkeypatch, mode):
+    s = native_service
+    ctx = s.ctx
+    protected = mode.startswith(".")
+    if protected:
+        native_commit(ctx, {mode: "workflow"})
+    s.run.state.pr = s.url if mode == "existing" else ""
+    s.run.pause("ready_to_publish")
+    # Only committed plan checks belong in the draft.
+    (ctx.m.repo / f"specs/{CHANGE}/plan.md").write_text("## Human checks\n- [ ] dirty source\n")
+    checks = spec_format.SPECKIT.human_checks(ctx.repo, ctx.head(), CHANGE)
+    assert checks
+    endpoint = "/git/api/v1/repos/example/repo/pulls"
+    if s.gitea:
+        row = {"id": 42, "number": 42, "html_url": s.url, "state": "open",
+               "head": {"ref": ctx.m.branch, "repo": {"full_name": "example/repo"}},
+               "base": {"ref": ctx.m.pr_base}}
+        s.fake.route("GET", endpoint, Reply([row] if mode == "adopted" else []), page=1)
+        s.fake.route("GET", endpoint, Reply([]), page=2)
+        s.fake.route("POST", endpoint, Reply({"html_url": s.url, "number": 42}))
+    elif mode == "adopted":
+        # Exercise the existing GitHub identity lookup with a matching response.
+        original_gh = cli._gh
+
+        def gh(*args):
+            if args[0] == "api":
+                s.gh.append(args)
+                return json.dumps([{"html_url": s.url, "head": {"ref": ctx.m.branch,
+                                    "repo": {"full_name": "example/repo"}}, "base": {"ref": ctx.m.pr_base}}])
+            return original_gh(*args)
+
+        monkeypatch.setattr(cli, "_gh", gh)
+    state = (s.run.dir / "state.json").read_bytes()
+    if protected:
+        with pytest.raises(RuntimeError, match="Refusing to publish protected paths"):
+            main(["publish", CHANGE])
+        assert s.effects == ["fetch"]
+        assert s.fake.calls == s.gh == []
+        assert (s.run.dir / "state.json").read_bytes() == state
+        return
+    assert main(["publish", CHANGE]) == 0
+    assert s.effects == ["fetch", "push"]
+    s.run.reload()
+    assert s.run.state.pause.reason == "human_checks" and s.run.state.pr == s.url
+    if mode == "new":
+        if s.gitea:
+            request = next(c for c in s.fake.calls if c.method == "POST")
+            title, body = request.body["title"], request.body["body"]
+            assert request.body["head"] == ctx.m.branch and request.body["base"] == ctx.m.pr_base
+        else:
+            request = next(a for a in s.gh if a[:2] == ("pr", "create"))
+            assert "--draft" in request
+            title, body = request[request.index("--title") + 1], request[request.index("--body") + 1]
+        assert title == ("Draft: " if s.gitea else "") + f"{CHANGE}: spec-kit feature via specloop"
+        assert body.startswith(f"spec-kit feature `{CHANGE}`, driven by specloop: 7 tasks,")
+        assert all(check in body for check in checks)
+        assert "dirty source" not in body
+    elif s.gitea:
+        assert [c.method for c in s.fake.calls] == ([] if mode == "existing" else ["GET", "GET"])
+    else:
+        assert len(s.gh) == (0 if mode == "existing" else 1)
+        assert not any(a[:2] == ("pr", "create") for a in s.gh)
+
+
+@pytest.mark.scenario("specloop-forge/verified-gitea-finish/prefix-removal-is-verified")
+@pytest.mark.parametrize("native_service", ["gitea"], indirect=True)
+@pytest.mark.parametrize("title,intended", [
+    ("[WIP.*]  Résumé [WIP.*]  ", " Résumé [WIP.*]  "),
+    ("[wip.*] Ready", "[wip.*] Ready"),
+    ("Ready [WIP.*] inside", "Ready [WIP.*] inside"),
+])
+def test_native_literal_prefix(native_service, configured, title, intended):
+    s = native_service
+    path, _ = configured
+    path.write_text(path.read_text().replace('wip_prefix = "Draft: "', 'wip_prefix = "[WIP.*] "'))
+    endpoint = "/git/api/v1/repos/example/repo/pulls/42"
+    s.fake.route("GET", endpoint, Reply({"title": title}), Reply({"title": intended}))
+    s.fake.route("PATCH", endpoint, Reply({}))
+    assert main(["finish", CHANGE]) == 0
+    s.run.reload()
+    assert s.run.state.status == "done"
+    assert [c.method for c in s.fake.calls] == (["GET"] if title == intended else ["GET", "PATCH", "GET"])
+    if title != intended:
+        assert s.fake.calls[1].body == {"title": intended}
+
+
+@pytest.mark.scenario("specloop-forge/verified-gitea-finish/existing-finish-gates-remain")
+@pytest.mark.parametrize("native_service", ["gitea"], indirect=True)
+@pytest.mark.parametrize("gate", ["foreign-pr", "forge"])
+def test_native_forge_guards(native_service, configured, monkeypatch, gate):
+    s = native_service
+    if gate == "foreign-pr":
+        s.run.state.pr = s.url.replace("example/repo", "other/repo")
+        s.run.save()
+    else:
+        path, _ = configured
+        path.write_text("")
+    head = s.ctx.head()
+    state = (s.run.dir / "state.json").read_bytes()
+    complete = Mock(wraps=speckit.finish)
+    monkeypatch.setattr(speckit, "finish", complete)
+    with pytest.raises((ValueError, RuntimeError)):
+        main(["finish", CHANGE])
+    assert s.ctx.head() == head
+    assert (s.run.dir / "state.json").read_bytes() == state
+    assert s.effects == s.fake.calls == s.gh == []
+    complete.assert_not_called()
+
+
+
+@pytest.mark.scenario("specloop-interface/native-publication-lifecycle/finish-guards-and-ordering")
+@pytest.mark.scenario("specloop-forge/verified-gitea-finish/prefix-removal-is-verified")
+def test_native_readiness_must_succeed_before_done(native_service):
+    s = native_service
+    head = s.ctx.head()
+    state = (s.run.dir / "state.json").read_bytes()
+    s.failure = "ready"
+    if s.gitea:
+        endpoint = "/git/api/v1/repos/example/repo/pulls/42"
+        s.fake.route("GET", endpoint, Reply({"title": "Draft: Title"}), Reply({"title": "Other title"}))
+        s.fake.route("PATCH", endpoint, Reply({"title": "Title"}))
+    with pytest.raises(RuntimeError):
+        main(["finish", CHANGE])
+    assert s.ctx.head() != head
+    assert git(s.remote, "rev-parse", s.ctx.ref).decode().strip() == s.ctx.head()
+    assert (s.run.dir / "state.json").read_bytes() == state
+    assert not any(e["event"] == "finished" for e in agents.read_jsonl(s.run.dir / "events.jsonl"))
+    if s.gitea:
+        assert s.effects == ["push"]
+        assert [(c.method, c.body) for c in s.fake.calls] == [
+            ("GET", None), ("PATCH", {"title": "Title"}), ("GET", None)]
+    else:
+        assert s.effects == ["push", "ready"]
+        assert s.gh == [("pr", "ready", s.url, "-R", s.ctx.m.github),
+                        ("pr", "view", s.url, "-R", s.ctx.m.github, "--json", "isDraft", "--jq", ".isDraft")]

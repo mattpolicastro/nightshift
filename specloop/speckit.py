@@ -2,10 +2,11 @@
 
 import json
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import tasks
+from . import seal, tasks
 from .openspec import SpecError, slug
 
 TITLE = re.compile(r"^#\s+(.+?)\s*$")
@@ -381,6 +382,27 @@ def human_checks(plan_text: str) -> list[str]:
         elif selected and re.match(r"- \[ \][ \t]", line) and line[6:].strip():
             checks.append(line)
     return checks
+
+
+def finish(repo: Path, change: str, all_tasks_done: bool, *, head: str | None) -> dict:
+    """Complete committed native records without a checkout or ref advancement."""
+    if not head:
+        raise SpecError("native completion requires a committed head")
+    if not all_tasks_done:
+        raise SpecError("tasks are unfinished; refusing to complete")
+    path = f"specs/{change}/tasks.md"
+    try:
+        records = parse_tasks(seal.git(repo, "show", f"{head}:{path}").decode("utf-8"))
+        if not records or any(not task.done for task in records):
+            raise SpecError("tasks are empty or unfinished; refusing to complete")
+        path = f"specs/{change}/spec.md"
+        original = seal.git(repo, "show", f"{head}:{path}").decode("utf-8")
+    except (RuntimeError, OSError, subprocess.SubprocessError, UnicodeError) as exc:
+        raise SpecError(f"cannot complete {head}:{path}: {exc}") from exc
+    completed = mark_complete(original)
+    commit = (head if completed == original else seal.commit_files(
+        repo, head, {path: completed}, f"specloop: complete spec-kit feature {change}"))
+    return {"commit": commit}
 
 
 def mark_complete(spec_text: str) -> str:

@@ -27,7 +27,7 @@ class SpecFormat(Protocol):
     def human_checks(self, repo: Path, head: str, change: str) -> list[str]: ...
     def context_files(self, repo: Path, change: str) -> list[tuple[Path, str]]: ...
     def drafter_root(self, change: str) -> str: ...
-    def finish(self, work: Path, change: str, all_tasks_done: bool) -> dict: ...
+    def finish(self, work: Path, change: str, all_tasks_done: bool, *, head: str | None = None) -> dict: ...
     def pr_title(self, change: str) -> str: ...
 
     @property
@@ -118,7 +118,7 @@ class _OpenSpec:
     def drafter_root(self, change: str) -> str:
         return f"openspec/changes/{change}/"
 
-    def finish(self, work: Path, change: str, all_tasks_done: bool) -> dict:
+    def finish(self, work: Path, change: str, all_tasks_done: bool, *, head: str | None = None) -> dict:
         return openspec.archive(work, change, all_tasks_done=all_tasks_done)
 
     def pr_title(self, change: str) -> str:
@@ -165,8 +165,8 @@ class _SpecKit:
                    (repo / ".specify/memory/constitution.md", "specs/constitution.md")]
         return [(path, name) for path, name in entries if path.exists()]
 
-    def finish(self, work: Path, change: str, all_tasks_done: bool) -> dict:
-        raise SpecError("native completion is not implemented yet")
+    def finish(self, work: Path, change: str, all_tasks_done: bool, *, head: str | None = None) -> dict:
+        return speckit.finish(work, change, all_tasks_done, head=head)
 
     def parse_tasks(self, text: str) -> list[tasks.Task]:
         return speckit.parse_tasks(text)
