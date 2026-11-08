@@ -794,8 +794,8 @@ for usage, refresh behavior and installation.
 
 **Formats.** Omit `[run] format` or set `format = "openspec"` for OpenSpec;
 existing manifests and saved runs need no migration or rewrite. Select
-`format = "speckit"` for explicit native builds of approved features, through the
-adapter in [issue #188](https://github.com/mattpolicastro/nightshift/issues/188),
+`format = "speckit"` for explicit native drafting and builds of approved features,
+through the adapter in [issue #188](https://github.com/mattpolicastro/nightshift/issues/188),
 following [issue #187](https://github.com/mattpolicastro/nightshift/issues/187)
 in [issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
 OpenSpec uses the pinned
@@ -937,8 +937,10 @@ Copy the [native manifest example](../../examples/specloop/speckit.toml) outside
 the target repository and edit its source, branch, profiles and trusted check
 paths. Commit the approved `specs/<NNN>-<slug>/spec.md`, `plan.md`, `tasks.md`
 and `.specify/memory/constitution.md` on that source branch before admission.
-This is an explicit build path; native drafting and daemon intake are not supported.
-Native feasibility support is pending, so request `--skip-feasibility` explicitly:
+Use the [native drafting workflow](#native-spec-kit-drafting) for ordinary
+admission with feasibility. Native daemon intake remains unsupported.
+The following is an optional operator-requested feasibility bypass example;
+`--skip-feasibility` is not a native prerequisite:
 
 ```sh
 uv run nightshift admit /path/to/manifests/speckit.toml --change 042-add-a-gate --branch spec/042-add-a-gate --skip-feasibility --json
@@ -962,10 +964,12 @@ Only harness writes tick or append tasks and complete Status. The example's
 Finish sets `**Status**: Complete` in the selected feature's `spec.md`, retains all
 feature files and archives nothing. It pushes and marks ready after human checks;
 it never merges. OpenSpec Finish continues to archive into `openspec/specs/`.
-Native context contains only the selected feature and
-`.specify/memory/constitution.md`: there is no consolidated current spec,
-automatic supersession traversal or cross-feature conflict detection. Delivered
-feature records stay in place. Later features name superseded features under
+Native build context contains only the selected feature's `spec.md`, `plan.md`
+and `.specify/memory/constitution.md`, using their native names. Feasibility and
+critic reviews also read explicitly named Complete features, as described in
+[native drafting](#native-spec-kit-drafting). There is no consolidated current
+spec, automatic supersession traversal or exhaustive cross-feature conflict
+detection. Delivered feature records stay in place. Later features name superseded features under
 `## Assumptions`, for example `Supersedes 042-add-a-gate`; see the
 [flow-forward house rule](speckit.md#flow-forward-persistence).
 
@@ -975,6 +979,109 @@ confirm retained files, unchanged acceptance criteria, Complete Status and no
 archive. Record run/PR identity and touchpoint count on
 [issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
 Offline tests do not establish this live observation.
+
+### Native spec-kit drafting
+
+Use a trusted native manifest outside the target repository, based
+on the [native example](../../examples/specloop/speckit.toml). Install authoring
+assets separately; the drafter reads local `.specify/templates/spec-template.md`,
+`plan-template.md` and `tasks-template.md`, the constitution and relevant code
+and tests. Missing templates are a prerequisite to fix locally, not a request
+to download them or invoke `specify`. Follow the
+[house rules and draft artifacts](speckit.md#what-the-drafter-produces).
+Native daemon intake remains unsupported; select the feature and branch explicitly.
+
+#### Draft and admit
+
+For issue 42, draft locally, review the resulting feature and resolve any questions,
+then admit the approved branch with ordinary feasibility review:
+
+```sh
+uv run nightshift propose /path/to/manifests/speckit.toml --change 042-add-a-gate --branch spec/042-add-a-gate --idea-file /path/to/idea.md --json
+uv run nightshift admit /path/to/manifests/speckit.toml --change 042-add-a-gate --branch spec/042-add-a-gate --json
+```
+
+The drafter produces `specs/042-add-a-gate/spec.md`, `plan.md` and `tasks.md`.
+It labels scenarios `ASn` within numbered, prioritized stories, creates Setup/
+Foundational work followed by one positive `## Phase N: User Story K - ...`
+per story in numeric priority order (source order breaks ties), and uses native
+`T001` task labels, optional `[P]`, positional `[USk]` tags and backticked
+citations such as `042-add-a-gate/us1/as2`. Every scenario needs covering work;
+setup needs no invented story citation. Human-only work belongs in `plan.md`
+under `## Human checks`, with one scenario citation per checklist item.
+
+Target six tasks or fewer per user story, with one concern and about 300 changed
+lines at most per task. Combine related work, order dependencies and put tests
+with their code. Every task costs a review cycle and every phase an evidence
+gate. Documentation-only work normally needs one or two tasks per story, retaining
+the required story phases. More than eight entries in a story phase warrants
+advisory critic merge advice; exactly eight does not. Whole-feature totals never
+trigger a count-only risk or rejection: three five-task stories are fine. See the
+[sizing examples](speckit.md#story-sizing-examples).
+
+Shared planned-file extraction reserves both `specs/` and `openspec/` as
+specification roots and excludes them for every format, with or without a root
+argument. This deliberately changes OpenSpec planned-file behavior too:
+`specs/helper.py` is excluded while `src/helper.py` remains eligible, including
+rootless extraction. Specification references are not planned implementation edits.
+
+Up to three genuine missing-intent questions may appear as
+`[NEEDS CLARIFICATION: ...]` in `spec.md`; routine implementation choices are
+the drafter's responsibility. Questions return `needs_input` before lint
+correction, commit or review. Resolve them before approval; direct lint and
+admission still reject unresolved markers. Successful drafting runs adapter lint,
+feasibility and the read-only critic before leaving the local branch for approval.
+Admission retains structural validation and feasibility; the existing
+`--skip-feasibility` option is an optional operator-requested bypass.
+Continue with [build, publication and Finish](#native-spec-kit-builds).
+
+#### Revise an undelivered feature
+
+Name the existing feature in the idea and pass its same change and branch.
+The drafter revises that directory in place, preserving committed task/scenario
+IDs and unrelated content; conflicting target names must be resolved, not renamed.
+For example, after adding answers to the idea file:
+
+```sh
+uv run nightshift propose /path/to/manifests/speckit.toml --change 042-add-a-gate --branch spec/042-add-a-gate --from-branch spec/042-add-a-gate --idea-file /path/to/idea-and-answers.md --json
+```
+
+Complete features are immutable records. Make later behavior changes in a new
+feature and identify supersession under `## Assumptions`.
+
+#### Bounded review context
+
+Feasibility and critic reviews read the selected feature, the constitution and
+each Complete feature explicitly named in the plan's `## Depends on` or
+`## Assumptions`, or the spec's `## Assumptions`. Plan field lines `Depends on:`
+and `**Depends on**:` also work. Use canonical names such as `042-add-a-gate`
+or `specs/042-add-a-gate/spec.md`. Sections start at exact column-zero headings
+and end at the next level-one/two heading; matching physical lines in examples
+receive no exemption. Review checks the referenced file's `**Status**: Complete`;
+it does not infer identities from titles, follow dependencies recursively or
+scan unrelated history. Missing, unreadable or ambiguous required context must
+produce a concrete inability-to-complete finding, not a clean review.
+
+Breaking the constitution or changing a named Complete feature's guarantee
+without explicitly identifying and justifying that change in `## Assumptions`
+is a contradiction. A generic dependency mention is insufficient; disclosure
+does not waive frozen paths or trusted verification. Build context remains the
+selected feature and constitution only. There is no consolidated current spec,
+automatic supersession traversal or exhaustive cross-feature conflict detection.
+
+#### Draft quality observation
+
+| Human check | Status | Tracking |
+| --- | --- | --- |
+| Real-profile feature draft and spec-PR inspection | Pending | [issue #184](https://github.com/mattpolicastro/nightshift/issues/184) |
+
+A human still needs to draft a real feature-sized issue in a scratch repository
+with the real profiles, inspect the spec PR's house-rule shape, task boundaries
+and review findings, and confirm ordinary feasibility without a bypass. Record
+the issue/PR identity, drafting rounds, questions and critic findings on the
+tracking issue. Offline prompt, routing and documentation tests establish
+contracts, not draft quality or completion of this live check. Keep this
+observation in human checks, never in an implementing agent's task list.
 
 ### OpenSpec drafting
 

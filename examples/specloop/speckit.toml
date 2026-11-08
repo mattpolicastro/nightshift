@@ -1,7 +1,10 @@
 # Trusted template for an approved native feature. Copy OUTSIDE the target repo.
 # Edit source, branch, provider profiles and trusted check paths before admission:
+# nightshift admit /path/to/manifests/speckit.toml --json
+# Optional operator-requested feasibility bypass:
 # nightshift admit /path/to/manifests/speckit.toml --skip-feasibility --json
-# Structural validation still runs; native drafting/feasibility are not supported.
+# Structural validation still runs. Native propose and feasibility are supported;
+# daemon intake remains unsupported. See docs/specloop/README.md native drafting.
 
 [run]
 format = "speckit"

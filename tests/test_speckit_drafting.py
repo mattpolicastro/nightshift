@@ -2,7 +2,9 @@ from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
+import tomllib
 from unittest.mock import Mock
 
 import pytest
@@ -14,6 +16,7 @@ from specloop.state import Run
 from test_spec_format import commit, repo
 from test_speckit_build import native_admission, native_commit, native_ctx, three_phase_feature
 from test_specloop_propose import M
+import test_speckit_build_docs as doc
 
 CHANGE = "042-add-a-gate"
 FMT = spec_format.SPECKIT
@@ -82,6 +85,7 @@ def test_speckit_prompt_names_house_rules(feature, tmp_path):
 @pytest.mark.scenario("spec-drafting/risk-based-task-sizing/native-feature-size-is-per-story")
 @pytest.mark.scenario("spec-drafting/compact-documentation-plans/documentation-only-sizing")
 @pytest.mark.scenario("spec-drafting/compact-documentation-plans/native-documentation-retains-story-phases")
+@pytest.mark.scenario("specloop-documentation/native-drafting-guidance/author-finds-the-native-workflow")
 @pytest.mark.parametrize("format", ["openspec", "speckit"])
 def test_speckit_sizing_guidance(format):
     template = propose.SPECKIT_PROMPT if format == "speckit" else propose.PROMPT
@@ -108,6 +112,19 @@ def test_speckit_sizing_guidance(format):
             "Cover every scenario with a task", "human-only work in plan.md under `## Human checks`",
         ):
             assert clause in prompt
+        # Read the published examples as data, without pinning explanatory prose.
+        body = doc.passage(doc.read(doc.HOUSE), "### Story sizing examples")
+        rows = documentation_table(body)
+        examples = []
+        for counts, total, target_met, risk in rows:
+            counts = [int(value.strip()) for value in counts.split(",")]
+            assert int(total) == sum(counts)
+            assert target_met == ("Yes" if max(counts) <= 6 else "No")
+            assert risk == ("Yes" if max(counts) > 8 else "No")
+            examples.append(counts)
+        assert examples == [[5, 5, 5], [8], [9]]
+        guide = doc.passage(doc.read(doc.GUIDE), "### Native spec-kit drafting")
+        assert "speckit.md#story-sizing-examples" in doc.local_links(doc.GUIDE, guide)
     else:
         for clause in (
             "Combine work touching the same file for one concern into one task within that ceiling",
@@ -618,3 +635,130 @@ def test_native_context_does_not_replace_committed_plan_checks(native_ctx, tmp_p
     with pytest.raises(RuntimeError, match="could not collect human checks.*plan.md"):
         loop.finals(ctx, head)
     assert ctx.run.state.pause is None
+
+
+def documentation_table(body):
+    """Read a physical pipe table; prose and Markdown containers are irrelevant."""
+    lines = [line for line in body.split("\n") if line.startswith("|")]
+    assert len(lines) >= 3
+    rows = [[cell.strip() for cell in line.split("|")[1:-1]] for line in lines]
+    assert all(line.endswith("|") for line in lines)
+    assert all(len(row) == len(rows[0]) for row in rows)
+    assert all(re.fullmatch(r":?-{3,}:?", cell) for cell in rows[1])
+    return rows[2:]
+
+
+@pytest.mark.scenario("specloop-documentation/native-drafting-guidance/author-finds-the-native-workflow")
+@pytest.mark.scenario("specloop-documentation/native-build-operator-guidance/operator-finishes-the-selected-format")
+def test_native_drafting_workflow_examples(monkeypatch):
+    guide = doc.read(doc.GUIDE)
+    body = doc.passage(guide, "#### Draft and admit")
+    proposal, admission = doc.parse_commands(doc.fenced(body, "sh"), monkeypatch)
+    example = doc.read("examples/specloop/speckit.toml")
+    raw = tomllib.loads(example)
+    m = manifest.parse(raw)
+    assert spec_format.get(m) is FMT
+    assert {"specs/**", ".specify/**"} <= set(m.frozen)
+    assert [proposal.cmd, admission.cmd] == ["propose", "admit"]
+    assert not admission.skip_feasibility
+    assert proposal.idea_file and proposal.from_branch is None
+    for args in (proposal, admission):
+        assert args.change == m.change and args.branch == m.branch and args.json
+        assert Path(args.manifest).name == "speckit.toml"
+    revision = doc.passage(guide, "#### Revise an undelivered feature")
+    revised, = doc.parse_commands(doc.fenced(revision, "sh"), monkeypatch)
+    assert revised.cmd == "propose" and revised.change == proposal.change
+    assert revised.branch == revised.from_branch == proposal.branch
+    assert revised.idea_file != proposal.idea_file
+    # The older bypass examples remain separate, valid CLI contracts.
+    build = doc.passage(guide, "### Native spec-kit builds")
+    commands = doc.parse_commands(doc.fenced(build, "sh"), monkeypatch)
+    assert [args.cmd for args in commands] == ["admit", "run", "publish", "finish"]
+    assert commands[0].skip_feasibility
+    assert all(args.change == proposal.change for args in commands)
+    commented = "\n".join(line.removeprefix("# ") for line in example.split("\n")
+                          if line.startswith("# nightshift "))
+    normal, bypass = doc.parse_commands(commented, monkeypatch)
+    assert normal.cmd == bypass.cmd == "admit"
+    assert normal.manifest == bypass.manifest == admission.manifest
+    assert normal.json and bypass.json
+    assert not normal.skip_feasibility and bypass.skip_feasibility
+    assert "#native-spec-kit-builds" in doc.local_links(doc.GUIDE, body)
+    assert "#native-spec-kit-drafting" in doc.local_links(doc.GUIDE, build)
+
+
+@pytest.mark.scenario("specloop-documentation/native-drafting-guidance/author-finds-the-native-workflow")
+@pytest.mark.parametrize("rooted", [False, True])
+def test_documented_reserved_root_example(tmp_path, rooted):
+    body = doc.passage(doc.read(doc.GUIDE), "#### Draft and admit")
+    tokens = doc.inline(body)
+    assert {"specs/", "openspec/", "specs/helper.py", "src/helper.py"} <= tokens
+    example = "Edit " + " and ".join(f"`{p}`" for p in sorted(tokens) if p.endswith("/helper.py"))
+    root = tmp_path if rooted else None
+    assert propose.paths(example, root) == {"src/helper.py"}
+    assert propose.edited_paths(example, root) == {"src/helper.py"}
+
+
+@pytest.mark.scenario("specloop-documentation/native-drafting-guidance/quality-evidence-remains-human")
+def test_native_draft_quality_observation_remains_pending():
+    body = doc.passage(doc.read(doc.GUIDE), "#### Draft quality observation")
+    check, = documentation_table(body)
+    assert len(check) == 3 and check[0].strip()
+    assert check[1] == "Pending"
+    assert doc.local_links(doc.GUIDE, check[2]) == {
+        "https://github.com/mattpolicastro/nightshift/issues/184",
+    }
+    assert FMT.parse_tasks(body) == []
+    assert not re.search(r"^- \[[xX]\]", body, re.M)
+    house = doc.passage(doc.read(doc.HOUSE), "## What the drafter produces")
+    assert "README.md#draft-quality-observation" in doc.local_links(doc.HOUSE, house)
+
+
+@pytest.mark.scenario("specloop-documentation/spec-kit-discovery/find-authoring-guidance")
+@pytest.mark.scenario("speckit-preset/native-build-support-guidance/preset-reader-finds-the-native-build-path")
+@pytest.mark.scenario("specloop-documentation/native-build-operator-guidance/operator-finishes-the-selected-format")
+@pytest.mark.parametrize("path,heading,target", [
+    ("README.md", "### Enroll a repository", "docs/specloop/README.md#native-spec-kit-drafting"),
+    (doc.GUIDE, "### Native spec-kit drafting", "speckit.md#what-the-drafter-produces"),
+    (doc.HOUSE, "## What the drafter produces", "README.md#native-spec-kit-drafting"),
+    (doc.PRESET, "# Nightshift spec-kit preset", "../../docs/specloop/README.md#native-spec-kit-drafting"),
+    ("docs/specloop/command-json.md", "## Manifest format", "README.md#native-spec-kit-drafting"),
+    ("KNOWN-LIMITATIONS.md", "## Open gaps", "docs/specloop/README.md#native-spec-kit-drafting"),
+])
+def test_native_drafting_discovery_links(path, heading, target):
+    body = doc.passage(doc.read(path), heading)
+    assert target in doc.local_links(path, body)
+
+
+@pytest.mark.scenario("specloop-documentation/native-build-operator-guidance/flow-forward-context-limits-are-explicit")
+def test_native_documented_context_matches_adapter():
+    fixture = doc.ROOT / "tests/fixtures/speckit"
+    destinations = {destination for _, destination in FMT.context_files(fixture, CHANGE)}
+    assert destinations == {"spec.md", "plan.md", ".specify/memory/constitution.md"}
+    for path, heading in ((doc.GUIDE, "### Native spec-kit builds"),
+                          ("KNOWN-LIMITATIONS.md", "## Open gaps")):
+        body = doc.passage(doc.read(path), heading)
+        assert destinations | {"## Assumptions", "Supersedes 042-add-a-gate"} <= doc.inline(body)
+        assert "https://github.com/mattpolicastro/nightshift/issues/184" in doc.local_links(path, body)
+    review = doc.passage(doc.read(doc.GUIDE), "#### Bounded review context")
+    assert {"## Depends on", "## Assumptions", "Depends on:", "**Depends on**:",
+            "**Status**: Complete", f"specs/{CHANGE}/spec.md"} <= doc.inline(review)
+    assert (fixture / f"specs/{CHANGE}/spec.md").is_file()
+
+
+@pytest.mark.scenario("specloop-documentation/native-documentation-verification/documentation-remains-structurally-reviewable")
+@pytest.mark.parametrize("heading", ["### Native spec-kit drafting", "#### Draft and admit",
+                                   "## What the drafter produces", "### Story sizing examples"])
+def test_native_drafting_passages_use_physical_boundaries(heading):
+    level = len(heading.split(" ", 1)[0])
+    child = "#" * (level + 1) + " Child"
+    body = f"body\n{child}\ninside\n  ## Indented\ntext\u2028# Not-a-line"
+    for wrapper in ("{}", "```md\n{}\n```", "<!--\n{}\n-->"):
+        for end in ("# End", "#" * level + " End", "#\tEnd"):
+            document = wrapper.format(f"{heading}\n{body}\n{end}\noutside")
+            assert doc.passage(document, heading) == body
+        for bad in ("", " " + heading, heading + " ", heading + "\n" + heading,
+                    heading + "\n " + heading, "prefix\u2028" + heading,
+                    heading + "\nbody\n# End\nother\n# End"):
+            with pytest.raises(AssertionError):
+                doc.passage(wrapper.format(bad), heading)
