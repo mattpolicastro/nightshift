@@ -25,6 +25,7 @@ from urllib.parse import quote
 
 from specloop import manifest as manifests
 from specloop import speckit
+from specloop import propose as drafting
 from specloop import state as run_state, tasks as run_tasks
 
 from . import queue, specloop_client, specloop_job
@@ -150,6 +151,45 @@ def _require_supported_name(repo: Repo, change: str) -> None:
             "Use a repository spelling that passes branch validation and update enrollment; "
             "restart after configuration changes. Recorded safe branches remain usable."
         )
+
+
+def _proposal_pr(repo: Repo, number: int, raw: dict, recorded: str | None,
+                 readiness: manifests.Manifest | ConfigurationError | None,
+                 forge: Forge) -> tuple[str, int | None, dict]:
+    """Bounded exact recovery; a failed lookup never establishes absence."""
+    native = False
+    if recorded:
+        candidates = [recorded]
+    else:
+        manifest = readiness if readiness is not None else manifest_readiness(repo, new_work=False)
+        native = not isinstance(manifest, ConfigurationError) and manifest.format == "speckit"
+        qualified = _change_name(repo.name, number, raw["title"])
+        candidates = [qualified, qualified.removeprefix(repo.name.split("/", 1)[0] + "__")]
+        if native:
+            candidates = [_change_name(repo.name, number, raw["title"], format="speckit"),
+                          *_native_targets(raw.get("body") or "", number), *candidates]
+    found = []
+    for change in dict.fromkeys(candidates):
+        pr = forge.latest_pr_number(repo.name, f"spec/{change}", strict=True)
+        if pr is not None:
+            previous = forge.pr_for_recovery(repo.name, pr)
+            found.append((change, pr, previous))
+            if not native:
+                break  # Preserve qualified-then-legacy OpenSpec lookup order.
+    if sum(previous["state"] == "OPEN" for _, _, previous in found) > 1:
+        raise DeliveryError("ambiguous open proposal identities: " + ", ".join(c for c, _, _ in found))
+    # Merged work suppresses drafting even if another candidate was closed.
+    for state in ("MERGED", "OPEN"):
+        for match in found:
+            if match[2]["state"] == state:
+                return match
+    if native:
+        # Lease the destination's closed PR, not an earlier candidate's head.
+        # Discovery later validates this same literal selection at the base.
+        targets = _native_targets(raw.get("body") or "", number)
+        destination = targets[0] if len(targets) == 1 else candidates[0]
+        found.sort(key=lambda match: match[0] != destination)
+    return found[0] if found else (candidates[0], None, {})
 
 
 def manifest_readiness(repo: Repo, *, new_work: bool = True) -> manifests.Manifest | ConfigurationError:
@@ -391,23 +431,23 @@ look like an absent label or an empty set of comments.
                     or drafting_events != receipt.get("drafting_events", drafting_events)):
                 receipt = None
         if receipt:
-            change = receipt["change"]
             receipt.setdefault("title", raw["title"])
-        else:
-            change = recorded_change or _change_name(repo.name, number, raw["title"])
-        branch = f"spec/{change}"
-        pr = forge.latest_pr_number(repo.name, branch, strict=True)
-        if not receipt and not recorded_change and pr is None:
-            # Bounded recovery after receipt loss: exact branches in this
-            # repository, using the current title. Errors must not look like
-            # absence, and recorded identities never depend on today's title.
-            legacy = change.removeprefix(repo.name.split("/", 1)[0] + "__")
-            pr = forge.latest_pr_number(repo.name, f"spec/{legacy}", strict=True)
-            if pr is not None:
-                change = legacy
+        change, pr, previous = _proposal_pr(
+            repo, number, raw, receipt["change"] if receipt else recorded_change, readiness, forge,
+        )
+        if (previous.get("state") == "CLOSED" and (receipt or recorded_change)
+                and (not receipt or receipt.get("replaces_pr", {}).get("number") != pr)):
+            # Retiring a recorded round releases its identity. Native recovery
+            # must now inspect the new candidates, including the destination's
+            # own closed PR, before binding a replacement lease or drafting.
+            receipt = None
+            manifest = readiness if readiness is not None else manifest_readiness(repo, new_work=False)
+            if not isinstance(manifest, ConfigurationError) and manifest.format == "speckit":
+                candidate = _proposal_pr(repo, number, raw, None, manifest, forge)
+                if candidate[1] is not None:
+                    change, pr, previous = candidate
         replaces_pr = None
         if pr is not None:
-            previous = forge.pr_for_recovery(repo.name, pr)
             if previous["state"] == "CLOSED":
                 # A re-armed issue starts a new draft after a human closes its
                 # PR. Keep replacement receipts on delivery retries, even
@@ -453,10 +493,10 @@ look like an absent label or an empty set of comments.
         # same applications used for rearming before replacing any receipt.
         if not authorize():
             return None
-        _require_manifest(repo, readiness)
+        manifest = _require_manifest(repo, readiness)
         # Closing a legacy PR ends that identity's round. Only genuinely new
-        # work gets today's qualified name; delivery retries keep the receipt.
-        change = _change_name(repo.name, number, raw["title"])
+        # work gets today's manifest-selected name; retries keep the receipt.
+        change = _change_name(repo.name, number, raw["title"], format=manifest.format)
         _require_supported_name(repo, change)
         if not _recover_item_cleanup(path):
             return _PENDING
@@ -478,9 +518,21 @@ look like an absent label or an empty set of comments.
                      git_runner=git_runner, readiness=readiness)
             _finish_delivery(path, receipt)
             return receipt
+        pinned = []
+        if manifest.format == "speckit":
+            def draft_git(args, *, timeout, **kwargs):
+                return _bounded_run(args, runner=git_runner, **kwargs)
+
+            base_commit = drafting.start_commit(manifest.repo, repo.base,
+                                               runner=draft_git)
+            change = _native_change(manifest.repo, base_commit, repo.name, number,
+                                    raw["title"], raw.get("body") or "", git_runner=git_runner)
+            receipt["change"] = change
+            branch = f"spec/{change}"
+            pinned = ["--base-commit", base_commit]
         if not _start(path, receipt, [
             "propose", str(repo.manifest), "--change", change,
-            "--branch", branch, "--base", repo.base,
+            "--branch", branch, "--base", repo.base, *pinned,
         ], idea=idea, runner=specloop_runner, launcher=launcher):
             return _PENDING
         _save(path, receipt)

@@ -315,3 +315,220 @@ def test_native_discovery_requires_existing_exact_commit(target_repo, pin):
         pin = git(source, "rev-parse", head + "^{tree}").decode().strip()
     with pytest.raises((ValueError, subprocess.CalledProcessError)):
         select_target((source, pin), "")
+
+
+@pytest.fixture(params=["github", "gitea"])
+def front_door(repo, tmp_path, monkeypatch, request):
+    from types import SimpleNamespace
+    from manifest_fixtures import manifest_text
+    from nightshift import queue
+    from nightshift.config import Repo
+    from nightshift.forge.github import GitHubForge
+    from gitea_dispatch_fixtures import install_gitea
+    from test_forge_gitea import make_forge, pull
+    from test_specloop_isolation import Pipeline
+
+    path = tmp_path / "intake.toml"
+    path.write_text(manifest_text(repo))
+    pipeline = Pipeline(Repo("owner/sample", engine="specloop", manifest=path))
+    pipeline.issue(7)
+    issue = pipeline.issues[7]
+    issue.update(title="Add a gate", authorAssociation="OWNER")
+    forge = GitHubForge(lambda args: json.dumps({"author_association": "OWNER"})
+        if args == ["api", "repos/owner/sample/issues/7"] else pipeline.gh(args))
+    remote = None
+    if request.param == "gitea":
+        installed = install_gitea(monkeypatch, pipeline.repo, issues=[issue])
+        remote = installed.remote
+        issue = remote["issues"][0]
+        forge = make_forge(installed.fake)
+    e = SimpleNamespace(source=repo, manifest=path, issue=issue, forge=forge,
+                        path=tmp_path / "proposals/owner__sample/7.json",
+                        commands=[], heads=[], errors=[], fail=None, push_failure=False, prs=[])
+    lookup = forge.latest_pr_number
+    def exact(repository, branch, *, strict):
+        assert repository == "owner/sample" and strict
+        e.heads.append(branch.removeprefix("spec/"))
+        if e.fail == branch.removeprefix("spec/"):
+            raise RuntimeError("exact lookup unavailable")
+        return lookup(repository, branch, strict=strict)
+    monkeypatch.setattr(forge, "latest_pr_number", exact)
+    def command(args, **kwargs):
+        e.commands.append(args)
+        if "push" in args and e.push_failure:
+            raise RuntimeError("push interrupted")
+        if args[0] == "git" and not any(op in args for op in ("push", "ls-remote")):
+            return subprocess.run(args, **kwargs)
+        return pipeline.command(args, **kwargs)
+    def add(change, state="OPEN", head="a" * 40):
+        number = 8 + len(e.prs)
+        if remote is None:
+            pipeline.approved(number)
+            pr = pipeline.prs[number]
+            pr.update(headRefName=f"spec/{change}", state=state, headRefOid=head)
+        else:
+            pr = pull(number, f"spec/{change}", labels=[], state="open" if state == "OPEN" else "closed",
+                      merged=state == "MERGED", html_url=f"https://forge.example/gitea/owner/sample/pulls/{number}")
+            remote["pulls"].append(pr)
+            pr["head"]["sha"] = head
+        e.prs.append(pr)
+    e.add = add
+    e.format = lambda value: path.write_text(manifest_text(repo).replace(
+        "[run]", "[run]" + (f'\nformat = "{value}"' if value else "")))
+    e.poll = lambda: intake.propose_pending(pipeline.repo, queue.Labels(), tmp_path, forge=forge,
+        specloop_runner=command, git_runner=command, on_error=lambda n, exc: e.errors.append(exc))
+    return e
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("issue-intake/owner-qualified-new-identities/manifest-selects-native-naming")
+@pytest.mark.parametrize("format", [None, "openspec", "speckit"])
+@pytest.mark.parametrize("files", ["openspec", "specs"])
+def test_manifest_selects_intake_naming(front_door, format, files):
+    e = front_door
+    commit(e.source, {f"{files}/unrelated/README.md": "Unrelated format files"})
+    e.format(format)
+    rows = e.poll()
+    assert not e.errors
+    receipt, = rows
+    change = "007-add-a-gate" if format == "speckit" else "owner__sample-issue-7-add-a-gate"
+    assert receipt["change"] == change and receipt["result"]["branch"] == f"spec/{change}"
+    assert e.heads == ([change] if format == "speckit" else []) + [
+        "owner__sample-issue-7-add-a-gate", "sample-issue-7-add-a-gate"]
+    command, = [c for c in e.commands if c[:2] == ["specloop", "propose"]]
+    assert command[command.index("--change") + 1] == change
+    assert ("--base-commit" in command) == (format == "speckit")
+    assert not e.errors and receipt["delivered"]
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("issue-intake/recorded-identities-remain-authoritative/legacy-receipt-survives-title-edits")
+@pytest.mark.scenario("issue-intake/recorded-identities-remain-authoritative/native-and-legacy-recovery-keep-identity")
+@pytest.mark.parametrize("format,change", [(None, "sample-issue-7-old"),
+    ("speckit", "sample-issue-7-old"), ("speckit", "007-old")])
+@pytest.mark.parametrize("pending", [False, True])
+def test_saved_proposal_keeps_identity(front_door, monkeypatch, format, change, pending):
+    e = front_door
+    e.format(format)
+    e.issue.update(title="Edited title", body="blocked-by: #99\nspecs/007-missing/")
+    result = dict(outcome="drafted", branch=f"refs/specloop/proposals/{change}", commit="a" * 40)
+    saved = dict(change=change, job="saved-job", title="Old title", idea="Old idea", result=result)
+    if pending:
+        saved.pop("result")
+        results = iter([None, result])
+        monkeypatch.setattr(intake.specloop_job, "_collect_locked", lambda *a: next(results))
+    (e.path.parent / "7.jobs/saved-job").mkdir(parents=True)
+    intake._save(e.path, saved)
+    monkeypatch.setattr(e.forge, "open_blockers", lambda *a: pytest.fail("delivery consulted blockers"))
+    if pending:
+        assert e.poll() == [] and json.loads(e.path.read_text()) == saved
+    rows = e.poll()
+    assert not e.errors
+    receipt, = rows
+    assert receipt == {**saved, "result": result, "delivered": True}
+    assert e.heads == [change] and not e.errors
+    push, = e.commands
+    assert push[-1] == f"{'a' * 40}:refs/heads/spec/{change}"
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("issue-intake/recorded-identities-remain-authoritative/legacy-pr-is-recovered")
+@pytest.mark.scenario("issue-intake/recorded-identities-remain-authoritative/native-and-legacy-recovery-keep-identity")
+@pytest.mark.parametrize("format,change", [(None, "sample-issue-7-add-a-gate"),
+    ("speckit", "007-add-a-gate"), ("speckit", "007-old"),
+    ("speckit", "owner__sample-issue-7-add-a-gate"), ("speckit", "sample-issue-7-add-a-gate")])
+@pytest.mark.parametrize("authorized", [False, True])
+def test_exact_pr_recovery_precedes_blockers(front_door, monkeypatch, format, change, authorized):
+    e = front_door
+    e.format(format)
+    e.issue["body"] = "blocked-by: #99\nspecs/007-old/ specs/007-old/"
+    e.add(change)
+    monkeypatch.setattr(e.forge, "open_blockers", lambda *a: pytest.fail("recovery consulted blockers"))
+    if not authorized:
+        events = e.forge.label_event_pages("owner/sample", 7)
+        for page in events:
+            for event in page:
+                event["actor"] = {}
+        monkeypatch.setattr(e.forge, "label_event_pages", lambda *a: events)
+    assert e.poll() == [] and not e.errors
+    assert not e.path.exists() and not e.commands
+    assert bool(e.issue["labels"]) != authorized
+    if authorized:
+        assert "/8" in e.issue["comments"][-1]["body"]
+    assert e.heads == (["007-add-a-gate", "007-old"] if format == "speckit" else []) + [
+        "owner__sample-issue-7-add-a-gate", "sample-issue-7-add-a-gate"]
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("issue-intake/recorded-identities-remain-authoritative/lookup-failure-does-not-create-duplicate-work")
+@pytest.mark.scenario("issue-intake/recorded-identities-remain-authoritative/recovery-ambiguity-blocks-new-work")
+@pytest.mark.parametrize("format,failed", [(None, "owner__sample-issue-7-add-a-gate"),
+    (None, "sample-issue-7-add-a-gate"), ("speckit", "007-add-a-gate"),
+    ("speckit", "007-old"), ("speckit", "owner__sample-issue-7-add-a-gate"),
+    ("speckit", "sample-issue-7-add-a-gate"), ("speckit", "ambiguous")])
+def test_uncertain_recovery_preserves_history(front_door, format, failed):
+    e = front_door
+    e.format(format)
+    e.issue["body"] = "specs/007-old/"
+    intake._save(e.path, dict(change="old", idea="old", delivered=True, result={"outcome": "needs_input"}))
+    before = e.path.read_bytes()
+    if format == "speckit":
+        e.add("007-old")
+    if failed == "ambiguous":
+        e.add("sample-issue-7-add-a-gate")
+    else:
+        e.fail = failed
+    assert e.poll() == [] and len(e.errors) == 1
+    assert ("ambiguous" if failed == "ambiguous" else "lookup unavailable") in str(e.errors[0])
+    assert e.path.read_bytes() == before and e.issue["labels"] and not e.issue["comments"]
+    assert not e.commands
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("issue-intake/recorded-identities-remain-authoritative/closed-legacy-pr-starts-a-qualified-round")
+@pytest.mark.scenario("issue-intake/recorded-identities-remain-authoritative/native-and-legacy-recovery-keep-identity")
+@pytest.mark.parametrize("format,target", [(None, None), ("speckit", None), ("speckit", "007-old")])
+@pytest.mark.parametrize("state", ["CLOSED", "MERGED"])
+@pytest.mark.parametrize("native_pr", [False, True])
+@pytest.mark.parametrize("target_closed", [False, True])
+@pytest.mark.parametrize("recorded", [False, True])
+def test_closed_round_retains_replacement_lease(front_door, format, target, state, native_pr, target_closed, recorded):
+    e = front_door
+    e.format(format)
+    old_change = "007-add-a-gate" if native_pr and format == "speckit" else "sample-issue-7-add-a-gate"
+    e.add(old_change, state)
+    if recorded:
+        intake._save(e.path, dict(change=old_change, title="Add a gate", idea="Old idea", delivered=True,
+            result=dict(outcome="drafted", branch=f"spec/{old_change}", commit="a" * 40)))
+    before = e.path.read_bytes() if recorded else None
+    if target:
+        commit(e.source, {f"specs/{target}/spec.md": "# Old\n**Status**: Draft\n"})
+        e.issue["body"] = f"specs/{target}/"
+        if target_closed:
+            e.add(target, "CLOSED", head="b" * 40)
+    replacement = {"number": 9, "head": "b" * 40} if target and target_closed else {"number": 8, "head": "a" * 40}
+    labels, e.issue["labels"] = e.issue["labels"], []
+    assert e.poll() == [] and not e.commands
+    e.issue["labels"] = labels
+    if state == "CLOSED":
+        e.push_failure = True
+        assert e.poll() == [] and str(e.errors.pop()) == "push interrupted"
+        saved = json.loads(e.path.read_text())
+        assert saved["replaces_pr"] == replacement
+        e.issue["title"] = "Edited before retry"
+        e.push_failure = False
+    rows = e.poll()
+    assert not e.errors
+    if state == "MERGED":
+        assert rows == [] and not e.commands
+        assert (e.path.read_bytes() if e.path.exists() else None) == before
+    else:
+        receipt, = rows
+        expected = target or ("007-add-a-gate" if format == "speckit" else "owner__sample-issue-7-add-a-gate")
+        assert receipt["change"] == expected
+        assert receipt["replaces_pr"] == replacement
+        assert receipt == {**saved, "delivered": True}
+        assert sum(c[:2] == ["specloop", "propose"] for c in e.commands) == 1
+        push = [c for c in e.commands if "push" in c][-1]
+        assert f"--force-with-lease=refs/heads/spec/{expected}:{replacement['head']}" in push
+        assert receipt["delivered"]
