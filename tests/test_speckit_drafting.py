@@ -68,6 +68,8 @@ def test_speckit_prompt_names_house_rules(feature, tmp_path):
                   "new feature", "## Assumptions", "Do not invoke `specify`", "missing templates"):
         assert token in prompt
     assert "openspec/" not in prompt
+    # The recommendation includes smaller plans, not six tasks AND fewer.
+    assert "Target six tasks or fewer per user story" in " ".join(prompt.split())
     assert d.commit and not d.problems and len(calls) == 1
     assert (d.work / ROOT / "tasks.md").read_bytes() == original
     assert git(d.work, "diff", "--name-only", "HEAD^", "HEAD").decode().splitlines() == [ROOT + "plan.md"]
@@ -214,6 +216,17 @@ Revisit specs/012-old-result/.
 
 def assert_native_review_prompt(prompt):
     text = " ".join(prompt.split())
+    # These are agent instructions: preserve the logical relationships, not
+    # just the individual context names or finding categories.
+    for instruction in (
+        "code and tests, and repository instructions (including AGENTS.md when present)",
+        "for every feature named by these sections or fields",
+        "Missing or ambiguous referenced identity, unreadable required context, or conflicting Status lines "
+        "must produce a concrete inability-to-complete finding in contradictions",
+        "removes only that missing-disclosure basis; it does not waive allowed/frozen paths, "
+        "trusted verify commands, or other impossibilities",
+    ):
+        assert instruction in text
     for instruction in (
         *(ROOT + name for name in ("spec.md", "plan.md", "tasks.md")),
         ".specify/memory/constitution.md", "specs/<named-feature>/spec.md",
