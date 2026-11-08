@@ -91,6 +91,15 @@ test('host-paths/trusted-host-path-settings/unconfigured-host-retains-defaults',
   await commands(host(t), '/opt/homebrew/bin/uv', `${home}/Projects/nightshift`, '/opt/homebrew/bin', `${home}/n/bin`);
 });
 
+test('openspec-binary/plugin-host-path-compatibility/node-prefix-remains-for-the-plugin', async t => {
+  for (const node of [undefined, '/tools/plugin-node']) {
+    await t.test(node ?? 'default Node directory', async t => {
+      await commands(host(t, { NIGHTSHIFT_NODE_BIN: node }),
+        '/opt/homebrew/bin/uv', `${home}/Projects/nightshift`, '/opt/homebrew/bin', node ?? `${home}/n/bin`);
+    });
+  }
+});
+
 test('worker-retirement/client-command-boundaries-remain-stable/existing-clients-use-surviving-commands', async t => {
   const h = host(t);
   await commands(h, '/opt/homebrew/bin/uv', `${home}/Projects/nightshift`, '/opt/homebrew/bin', `${home}/n/bin`);

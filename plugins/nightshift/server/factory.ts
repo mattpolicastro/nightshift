@@ -176,7 +176,7 @@ const execute: FactoryExecute = args => new Promise((resolve, reject) => {
     cwd, shell: false,
     // act may push (publish, finish): nightshift allows 300 s for a push.
     timeout: args[0] === 'act' ? 330_000 : 60_000, maxBuffer: 2 * 1024 * 1024,
-    // ~/n/bin: finish archives the change through OpenSpec's npx, which lives there.
+    // Keep the configured Node directory first for the plugin's own Node tools.
     env: { ...process.env, PATH: path },
   }, (error, stdout) => {
     children.delete(child);
