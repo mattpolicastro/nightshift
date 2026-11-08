@@ -99,9 +99,45 @@ Context limitations:
 """
 
 
+_SPECKIT_TASK_SIZING = """\
+   Count task entries separately in each user-story phase using the existing
+   native physical-line rules (speckit.PHASE, speckit.STORY_PHASE, tasks.TASK
+   and speckit.TASK_LABEL). A phase is a column-zero `## Phase N: Title` heading;
+   its title must start with `User Story K` (numeric K ending at a word boundary)
+   to qualify as a story phase. A same-or-higher heading (column-zero level one
+   or two) closes the phase; deeper headings retain it.
+   Only native T-task checkboxes within that phase count: `- [ ]`, `- [x]` or
+   `- [X]`, with optional leading whitespace, a T label with at least three
+   digits and optional dotted numeric children, then optional positional [P]
+   and [USk] flags. Count checked and unchecked entries and each dotted child
+   as entries, not headings or scenarios. Use literal physical lines: no
+   semantic interpretation of fences, HTML or indentation; matching lines in
+   examples receive no exemption. Ambiguous phase/task identity remains a
+   validator/parser refusal, never a size pass.
+   More than eight tasks (nine or more) in one story phase warrants a
+   non-blocking risk naming that story phase, concrete task labels that could
+   merge and their shared concern; if necessary boundaries prevent a safe
+   merge, explain why rather than inventing a merge. Exactly eight tasks in a
+   story phase do not trigger a count finding. Fifteen tasks across three
+   five-task story phases do not trigger a count finding.
+   Ignore whole-feature totals, including documentation-only totals. Setup,
+   Foundational and Polish phases are outside this story-count test but remain
+   subject to ordinary feasibility and over-engineering review. Documentation-only
+   means changing documentation without changing executable behavior; it uses
+   the same per-story threshold, not a two-task critic threshold.
+   The drafter's six-task recommendation per story is not a critic rejection
+   threshold. The ceiling remains about 300 changed lines per task, not per
+   story or feature. Task count alone never belongs in contradictions,
+   requires correction or rejects a proposal. Independently evidenced unsafe
+   designs still qualify as contradictions under the existing blocking criteria.
+"""
+
+
 SPECKIT_PROMPT = (
     "# Spec critic of a spec-kit feature\n\n" + feasibility.SPECKIT_CONTEXT + "\n"
-    + PROMPT[PROMPT.index("Implementers may change only:"):]
+    + PROMPT[PROMPT.index("Implementers may change only:"):PROMPT.index("   Count task entries")]
+    + _SPECKIT_TASK_SIZING
+    + PROMPT[PROMPT.index("2. File collisions"):]
 )
 
 

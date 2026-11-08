@@ -77,6 +77,49 @@ def test_speckit_prompt_names_house_rules(feature, tmp_path):
     assert (feature / ROOT / "plan.md").read_bytes() != b"Revised plan\n"
 
 
+@pytest.mark.scenario("spec-drafting/risk-based-task-sizing/related-work-shares-a-task")
+@pytest.mark.scenario("spec-drafting/risk-based-task-sizing/necessary-boundaries-remain")
+@pytest.mark.scenario("spec-drafting/risk-based-task-sizing/native-feature-size-is-per-story")
+@pytest.mark.scenario("spec-drafting/compact-documentation-plans/documentation-only-sizing")
+@pytest.mark.scenario("spec-drafting/compact-documentation-plans/native-documentation-retains-story-phases")
+@pytest.mark.parametrize("format", ["openspec", "speckit"])
+def test_speckit_sizing_guidance(format):
+    template = propose.SPECKIT_PROMPT if format == "speckit" else propose.PROMPT
+    prompt = " ".join(template.format(
+        change=CHANGE, drafter_root=spec_format.get(replace(M, format=format)).drafter_root(CHANGE),
+        idea="Document three stories", sources="", in_flight="", feedback="",
+    ).split())
+    for clause in ("300 changed lines at most", "one concern", "single session",
+                   "Split when distinct concerns, dependencies or", "review cycle",
+                   "evidence gate", "document heading"):
+        assert clause in prompt
+    if format == "speckit":
+        for clause in (
+            "Combine related same-file work within that ceiling, order dependencies, and put tests with code.",
+            "the ceiling applies per task, not per story or feature",
+            "Target six tasks or fewer per user story. Six is a recommendation, not a hard rejection limit",
+            "three stories with five tasks each satisfy it",
+            "documentation-only work (documentation updates without changing executable behavior)",
+            "one or two tasks per story within the required story phases",
+            "Retain one phase per story",
+            "whole-feature task count, including documentation-only totals, is not a size risk or rejection condition",
+            "exactly one positive `## Phase N: User Story K - ...` per user story",
+            f"Cite stable IDs in backticks as `{CHANGE}/us<k>/as<n>`",
+            "Cover every scenario with a task", "human-only work in plan.md under `## Human checks`",
+        ):
+            assert clause in prompt
+    else:
+        for clause in (
+            "Combine work touching the same file for one concern into one task within that ceiling",
+            "six tasks or fewer and as few sections as dependencies allow",
+            "Six is a normal target, not a hard rejection limit",
+            "one or two tasks in one section", "Every scenario must be covered by at least one task",
+            "Order tasks so each builds on landed work. Put tests with the code they test",
+            "describe it in the design",
+        ):
+            assert clause in prompt
+
+
 @pytest.mark.scenario("spec-drafting/native-draft-lint/fixture-passes-and-stray-files-refuse")
 def test_lint_accepts_fixture_and_rejects_stray_file(feature):
     assert propose.lint(feature, CHANGE, FMT) == []
@@ -431,8 +474,11 @@ def test_native_admission_uses_feasibility_normally(native_admission, monkeypatc
 def test_original_review_prompts_and_native_checklist_are_preserved():
     assert hashlib.sha256(feasibility.PROMPT.encode()).hexdigest() == "58c2d98ae31ff9af8239ebbaeee9018ce37aa324494d261bd4bb9682dc0a74d3"
     assert hashlib.sha256(critic.PROMPT.encode()).hexdigest() == "b221906f7a9e0d3fc5669ae58d3c22f093ebeb56aeada6abdb6187f074e52781"
-    checklist = critic.PROMPT.split("Work through all eight checklist items:\n", 1)[1].split("\nReturn contradictions", 1)[0]
-    assert checklist in critic.SPECKIT_PROMPT
+    # Native sizing intentionally replaces only the count guidance in item 1.
+    opening = critic.PROMPT.split("Work through all eight checklist items:\n", 1)[1].split("   Count task entries", 1)[0]
+    assert opening in critic.SPECKIT_PROMPT
+    checklist = critic.PROMPT[critic.PROMPT.index("2. File collisions"):]
+    assert critic.SPECKIT_PROMPT.endswith(checklist)
 
 
 BUILD_PROMPTS = [

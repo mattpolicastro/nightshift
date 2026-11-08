@@ -138,10 +138,17 @@ or the constitution. Report missing templates as an actionable prerequisite.
   setup tasks need no invented story citations.
 - Each task has one concern and about 300 changed lines at most. Combine related
   same-file work within that ceiling, order dependencies, and put tests with code.
-  Target six tasks or fewer per user story; for documentation-only work target
-  one or two per story within the required story phases. Minimize unnecessary
-  splits: each task incurs a review cycle and each phase an evidence gate.
-  The whole-feature task count is not a size risk or rejection condition.
+  Each task is a single session; the ceiling applies per task, not per story or
+  feature. Split when distinct concerns, dependencies or that ceiling require
+  it, never merely by document heading.
+  Target six tasks or fewer per user story. Six is a recommendation, not a hard
+  rejection limit: three stories with five tasks each satisfy it.
+  For documentation-only work (documentation updates without changing executable
+  behavior), target one or two tasks per story within the required story phases.
+  Minimize unnecessary splits: each task incurs a full implement, verify and
+  review cycle and each phase an evidence gate. Retain one phase per story.
+  The whole-feature task count, including documentation-only totals, is not a
+  size risk or rejection condition.
 - For rich text use deterministic physical-line rules, refusing ambiguous
   identities; never require semantic Markdown/fence/HTML/indentation parsing.
 - Put human-only work in plan.md under `## Human checks`, with one scenario
