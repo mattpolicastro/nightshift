@@ -5,6 +5,8 @@ concrete: an open-ended rubric lets each review find "the next missing
 assertion", which is how one task can become eight runs.
 """
 
+from specloop.manifest import Manifest
+
 IMPLEMENT_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": ["status", "summary", "subtasks"],
@@ -222,3 +224,18 @@ the last candidate passed the harness's verification, and every remaining
   merges. Never accept over a real defect within the task."""
 
 ARBITER_NO_ACCEPT = "not available: the last candidate failed the harness's own verification."
+
+# Only format-owned context and feature terminology differ; keep the task,
+# scenario, review and arbitration contracts shared with the original prompts.
+_SPECKIT = {
+    template: template.replace("OpenSpec change", "spec-kit feature")
+    .replace("OpenSpec\nchange", "spec-kit\nfeature")
+    .replace("{ctx}/proposal.md, {ctx}/design.md, {ctx}/specs/",
+             "{ctx}/spec.md, {ctx}/plan.md, {ctx}/.specify/memory/constitution.md")
+    for template in (IMPLEMENT, REVIEW, GATE_REVIEW, ARBITER)
+}
+
+
+def for_format(template: str, m: Manifest | None = None) -> str:
+    """Select by manifest here so build consumers remain format-neutral."""
+    return _SPECKIT[template] if m is not None and m.format == "speckit" else template

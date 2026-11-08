@@ -620,7 +620,7 @@ def gate_review(ctx: Ctx, n: int, head: str, all_tasks: list[tasks.Task]) -> boo
     subprocess.run(["chmod", "-R", "u+w", str(checkout)], check=False)
     section = [t for t in all_tasks if t.section == n]
     _gate_context(ctx, n, head, section, ts, checkout, context)
-    prompt = prompts.GATE_REVIEW.format(
+    prompt = prompts.for_format(prompts.GATE_REVIEW, ctx.m).format(
         n=n, title=section[0].section_title, ctx=str(context),
         prior_line=f"- {context}/prior-review.md — the first review's blocking findings\n" if ts.feedback else "",
         prior_rule=prompts.GATE_PRIOR_RULE.format(ctx=str(context)) if ts.feedback else "")
@@ -794,7 +794,7 @@ def _review(ctx: Ctx, task: tasks.Task, ts: TaskState, head: str, sha: str) -> N
     subprocess.run(["chmod", "-R", "u+w", str(checkout)], check=False)
     _review_context(ctx, task, ts, head, sha, checkout, context)
     attempt = ts.attempts + 1
-    prompt = prompts.REVIEW.format(
+    prompt = prompts.for_format(prompts.REVIEW, ctx.m).format(
         label=task.label, text=task.text,
         prior_line=f"- {context}/prior-review.md — the previous attempt's blocking findings\n" if ts.feedback else "",
         ctx=str(context),
@@ -1093,8 +1093,9 @@ def arbitrate(ctx: Ctx, task: tasks.Task, ts: TaskState, why: str, verified: boo
     diff = git(ctx.repo, "diff", ts.candidate_base, ts.candidate).decode(errors="replace") if ts.candidate else ""
     (context / "diff.patch").write_text(diff or "(no candidate was sealed)\n")
     (context / "history.md").write_text(_history(ctx, task) + "\n\n## Why the last attempt failed\n\n" + why + "\n")
-    prompt = prompts.ARBITER.format(label=task.label, text=task.text, attempts=ts.attempts, ctx=str(context),
-                                    accept_rule=prompts.ARBITER_ACCEPT if verified else prompts.ARBITER_NO_ACCEPT)
+    prompt = prompts.for_format(prompts.ARBITER, ctx.m).format(
+        label=task.label, text=task.text, attempts=ts.attempts, ctx=str(context),
+        accept_rule=prompts.ARBITER_ACCEPT if verified else prompts.ARBITER_NO_ACCEPT)
     ctx.run.event("arbitrate", task=task.key, session=ts.sessions, verified=verified)
     call = _call(ctx, "arbiter", "read", prompt, checkout, prompts.ARBITER_SCHEMA, adir / "arbiter.jsonl",
                  ctx.m.review_minutes)
@@ -1228,7 +1229,7 @@ def _implement_prompt(ctx: Ctx, task: tasks.Task, has_feedback: bool, context: P
             for s in steps) or "    (none)")
         for label, steps in (("Prepare", ctx.m.prepare), ("Verify", ctx.m.verify))
     )
-    return prompts.IMPLEMENT.format(
+    return prompts.for_format(prompts.IMPLEMENT, ctx.m).format(
         label=task.label, text=task.text, recipe=recipe,
         allowed=", ".join(ctx.m.allowed), frozen=", ".join(ctx.m.frozen),
         feedback_line=f"- {context}/feedback.md — why the previous attempt was not accepted\n" if has_feedback else "",

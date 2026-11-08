@@ -159,10 +159,9 @@ class _SpecKit:
 
     def context_files(self, repo: Path, change: str) -> list[tuple[Path, str]]:
         src = self.change_dir(repo, change)
-        entries = [(src / "spec.md", "proposal.md"),
-                   (src / "spec.md", "specs/spec.md"),
-                   (src / "plan.md", "design.md"),
-                   (repo / ".specify/memory/constitution.md", "specs/constitution.md")]
+        entries = [(src / "spec.md", "spec.md"),
+                   (src / "plan.md", "plan.md"),
+                   (repo / ".specify/memory/constitution.md", ".specify/memory/constitution.md")]
         return [(path, name) for path, name in entries if path.exists()]
 
     def finish(self, work: Path, change: str, all_tasks_done: bool, *, head: str | None = None) -> dict:

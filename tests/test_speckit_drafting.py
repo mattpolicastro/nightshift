@@ -8,11 +8,11 @@ from unittest.mock import Mock
 import pytest
 
 from nightshift.cli import main
-from specloop import agents, cli, critic, feasibility, manifest, openspec, propose, spec_format
+from specloop import agents, cli, critic, feasibility, loop, manifest, openspec, prompts, propose, spec_format
 from specloop.seal import git
 from specloop.state import Run
 from test_spec_format import commit, repo
-from test_speckit_build import native_admission, three_phase_feature
+from test_speckit_build import native_admission, native_commit, native_ctx, three_phase_feature
 from test_specloop_propose import M
 
 CHANGE = "042-add-a-gate"
@@ -433,3 +433,142 @@ def test_original_review_prompts_and_native_checklist_are_preserved():
     assert hashlib.sha256(critic.PROMPT.encode()).hexdigest() == "b221906f7a9e0d3fc5669ae58d3c22f093ebeb56aeada6abdb6187f074e52781"
     checklist = critic.PROMPT.split("Work through all eight checklist items:\n", 1)[1].split("\nReturn contradictions", 1)[0]
     assert checklist in critic.SPECKIT_PROMPT
+
+
+BUILD_PROMPTS = [
+    ("IMPLEMENT", "f5e289b07258879155ba6cd41d55e38a6bfa8c100498151e0151b01060b4b71d"),
+    ("REVIEW", "b300d138d8f5d47ab0c9dd4ddad1d4b383d4298d94c17bfd04a2b5fc826b7248"),
+    ("GATE_REVIEW", "cd395e93e0a8dfa185ab003b2db54e419ecb296e6bf97dee33daaa26aca1948a"),
+    ("ARBITER", "ddc06a37788bfc99cfa3dbb9b820ce897e239f425aaa065adeff626caa0be88a"),
+]
+
+
+@pytest.mark.scenario("spec-format/format-aware-build-prompts/native-consumers-read-real-files")
+@pytest.mark.scenario("spec-format/format-aware-build-prompts/openspec-consumers-retain-exact-prompts")
+@pytest.mark.scenario("spec-format/native-context-and-human-checks/selected-feature-context")
+@pytest.mark.parametrize("consumer,digest", BUILD_PROMPTS)
+@pytest.mark.parametrize("format", [None, "openspec", "speckit"])
+@pytest.mark.parametrize("retry", [False, True])
+def test_build_consumer_prompt_and_context(native_ctx, monkeypatch, consumer, digest, format, retry):
+    ctx = native_ctx
+    data = {
+        "run": {"repo": str(ctx.m.repo), "change": CHANGE, "branch": "main"},
+        "roles": dict.fromkeys(("implement", "review", "gate", "arbiter"), "fake"),
+        "profiles": {"fake": {"adapter": "codex", "model": "test"}},
+        "paths": {"allowed": ["src/**"], "frozen": ["specs/**", ".specify/**"]},
+        "verify": [{"id": "tests", "run": ["/usr/bin/true"]}],
+    }
+    if format is not None:
+        data["run"]["format"] = format
+    ctx = loop.Ctx(ctx.run, manifest.parse(data), {})
+    fmt = spec_format.get(ctx.m)
+    if format == "speckit":
+        sources = {"spec.md": ROOT + "spec.md", "plan.md": ROOT + "plan.md",
+                   ".specify/memory/constitution.md": ".specify/memory/constitution.md"}
+        files = {path: (ctx.m.repo / path).read_text().replace("\n", "\r\n") + "\r\nNative café\r\n"
+                 for path in sources.values()}
+    else:
+        root = f"openspec/changes/{CHANGE}/"
+        sources = {name: root + name for name in ("proposal.md", "design.md", "specs/cap/spec.md")}
+        files = {sources["proposal.md"]: "Proposal café\r\n", sources["design.md"]: "Design café\r\n",
+                 sources["specs/cap/spec.md"]: "## ADDED Requirements\r\n### Requirement: Gate\r\n"
+                 "#### Scenario: Pass\r\n- **WHEN** checks pass\r\n- **THEN** permit café\r\n",
+                 root + "tasks.md": "## 1. Gate\n- [ ] 1.1 Implement `cap/gate/pass`\n"}
+        monkeypatch.setattr(openspec, "_run", Mock(return_value=(0, {"deltas": [{
+            "spec": "cap", "operation": "ADDED", "requirements": [{"name": "Gate", "scenarios": [{
+                "name": "Pass", "rawText": "- **WHEN** checks pass\n- **THEN** permit café"}]}]}]})))
+    files["specs/001-unrelated/spec.md"] = "Unrelated historical feature\n"
+    head = native_commit(ctx, files)
+    before = {p: p.read_bytes() for p in ctx.m.repo.rglob("*") if p.is_file() and ".git" not in p.parts}
+    task = next(t for t in fmt.parse_tasks(ctx.tasks_text(head)) if t.scenarios)
+    ts = ctx.run.state.task(f"section:{task.section}" if consumer == "GATE_REVIEW" else task.key)
+    ts.feedback = "Prior finding" if retry else ""
+    ts.attempts = int(retry)
+    ts.candidate = ts.candidate_base = head
+    calls = []
+
+    class Captured(Exception):
+        pass
+
+    def agent(call):
+        calls.append(call)
+        raise Captured
+
+    ctx.agent = agent
+    with pytest.raises(Captured):
+        if consumer == "IMPLEMENT":
+            loop.step(ctx, task, head)
+        elif consumer == "REVIEW":
+            loop._review(ctx, task, ts, head, head)
+        elif consumer == "GATE_REVIEW":
+            loop.gate_review(ctx, task.section, head, [task])
+        else:
+            loop.arbitrate(ctx, task, ts, "Last attempt failed", verified=retry)
+    assert len(calls) == 1
+    call = calls[0]
+    context = call.cwd.parent / "context"
+    for dest, source in sources.items():
+        assert str(context / dest) in call.prompt or dest == "specs/cap/spec.md"
+        assert (context / dest).read_bytes() == files[source].encode()
+    assert not (context / "tasks.md").exists()
+    assert not (context / "specs/001-unrelated").exists()
+    assert {p: p.read_bytes() for p in before} == before
+    scenario_file = context / ("section.md" if consumer == "GATE_REVIEW" else "task.md")
+    known = fmt.scenarios(call.cwd, CHANGE)
+    assert task.known_scenarios(known)
+    for sid in task.known_scenarios(known):
+        assert f"### `{sid}`\n{known[sid]}" in scenario_file.read_text()
+
+    template = getattr(prompts, consumer)
+    assert hashlib.sha256(template.encode()).hexdigest() == digest
+    assert prompts.for_format(template) is template
+    assert prompts.for_format(template, replace(ctx.m, format="openspec")) is template
+    expected = template.format(
+        label=task.label, text=task.text, ctx=str(context), n=task.section, title=task.section_title,
+        attempts=ts.attempts, accept_rule=prompts.ARBITER_ACCEPT if retry else prompts.ARBITER_NO_ACCEPT,
+        allowed="src/**", frozen="specs/**, .specify/**",
+        feedback_line=f"- {context}/feedback.md — why the previous attempt was not accepted\n" if retry else "",
+        prior_line=(f"- {context}/prior-review.md — " + (
+            "the first review's blocking findings\n" if consumer == "GATE_REVIEW" else
+            "the previous attempt's blocking findings\n")) if retry else "",
+        prior_rule=(prompts.GATE_PRIOR_RULE.format(ctx=str(context)) if consumer == "GATE_REVIEW" else
+                    prompts.PRIOR_RULE.format(attempt=ts.attempts + 1)) if retry else "",
+        recipe="  Trusted preparation runs under the harness with network access before offline verification.\n"
+        "  Steps run from the build directory with read-only extracted source.\n"
+        "  Source, build, and revision values below illustrate the recipe, not actual sandbox paths.\n"
+        "  Prepare:\n    (none)\n  Verify:\n    tests: /usr/bin/true  (expect exit 0)")
+    if format == "speckit":
+        for alias in ("proposal.md", "design.md", "specs"):
+            assert not (context / alias).exists()
+            assert str(context / alias) not in call.prompt
+        expected = expected.replace("OpenSpec change", "spec-kit feature").replace(
+            "OpenSpec\nchange", "spec-kit\nfeature").replace(
+            f"{context}/proposal.md, {context}/design.md, {context}/specs/",
+            f"{context}/spec.md, {context}/plan.md, {context}/.specify/memory/constitution.md")
+    assert call.prompt == expected
+    assert call.access == ("write" if consumer == "IMPLEMENT" else "read")
+    assert call.schema is (prompts.IMPLEMENT_SCHEMA if consumer == "IMPLEMENT" else
+                           prompts.ARBITER_SCHEMA if consumer == "ARBITER" else prompts.REVIEW_SCHEMA)
+
+
+@pytest.mark.scenario("spec-format/native-context-and-human-checks/plan-checks-use-the-committed-revision")
+@pytest.mark.scenario("spec-format/native-context-and-human-checks/plan-failure-blocks-readiness")
+def test_native_context_does_not_replace_committed_plan_checks(native_ctx, tmp_path, monkeypatch):
+    ctx = native_ctx
+    path = ROOT + "plan.md"
+    head = native_commit(ctx, {path: "## Human checks\n- [ ] Committed check\n- [ ] Committed check\n"})
+    (ctx.m.repo / path).write_text("## Human checks\n- [ ] Dirty check\n")
+    context = tmp_path / "context"
+    loop._copy_change(ctx.m.repo, ctx, context)
+    assert (context / "plan.md").read_text() == "## Human checks\n- [ ] Dirty check\n"
+    assert loop.design_human_checks(ctx, head) == ["- [ ] Committed check"] * 2
+    monkeypatch.setattr(loop, "prepare_publish", lambda ctx: True)
+    assert loop.finals(ctx, head) is False
+    assert cli._pr_body(ctx).count("- [ ] Committed check") == 1
+    assert "Dirty check" not in cli._pr_body(ctx)
+    # Neither the source plan nor an assembled context rescues a missing revision.
+    ctx.run.state.pause = None
+    monkeypatch.setattr(ctx, "head", lambda: "missing-revision")
+    with pytest.raises(RuntimeError, match="could not collect human checks.*plan.md"):
+        loop.finals(ctx, head)
+    assert ctx.run.state.pause is None
