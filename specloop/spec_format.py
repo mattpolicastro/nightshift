@@ -1,5 +1,6 @@
 """Change-format paths and operations, with OpenSpec as the default backend."""
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -17,6 +18,7 @@ class SpecFormat(Protocol):
     def split(self, text: str, task: tasks.Task, subtasks: list[str]) -> str: ...
     def extend_section(self, text: str, section: int, items: list[str]) -> str: ...
     def append_section(self, text: str, title: str, items: list[str]) -> str: ...
+    def append_round(self, text: str, blocks: list[str]) -> tuple[int, str]: ...
     def change_dir(self, repo: Path, change: str) -> Path: ...
     def tasks_path(self, change: str) -> str: ...
     def tasks_paths_at(self, repo: Path, head: str, change: str) -> list[str]: ...
@@ -49,6 +51,16 @@ class _OpenSpec:
 
     def append_section(self, text: str, title: str, items: list[str]) -> str:
         return tasks.append_section(text, title, items)
+
+    def append_round(self, text: str, blocks: list[str]) -> tuple[int, str]:
+        rounds = [int(r.group(1)) for line in text.splitlines()
+                  if (section := tasks.SECTION.match(line))
+                  and (r := re.fullmatch(r"Review round (\d+)", section.group(2)))]
+        number = max(rounds, default=0) + 1
+        # Quoting keeps embedded checklists on one line; ordinals distinguish duplicates.
+        items = [f"Address review feedback {i}: {json.dumps(block)}"
+                 for i, block in enumerate(blocks, 1)]
+        return number, tasks.append_section(text, f"Review round {number}", items)
 
     def change_dir(self, repo: Path, change: str) -> Path:
         return openspec.change_dir(repo, change)
@@ -161,6 +173,9 @@ class _SpecKit:
 
     def append_section(self, text: str, title: str, items: list[str]) -> str:
         return speckit.append_section(text, title, items)
+
+    def append_round(self, text: str, blocks: list[str]) -> tuple[int, str]:
+        return speckit.append_round(text, blocks)
 
 
 OPENSPEC: SpecFormat = _OpenSpec()

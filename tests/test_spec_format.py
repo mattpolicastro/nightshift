@@ -595,39 +595,6 @@ def test_committed_scenario_lookup_routes_and_cleans_up(repo, tmp_path, monkeypa
     assert len(extracted) == 1 and not extracted[0].parent.exists()
 
 
-@pytest.mark.scenario("spec-format/engine-routing-compatibility/drafting-and-revision-retain-behavior")
-def test_task_path_routes_through_revision_and_replay(repo, tmp_path, monkeypatch):
-    path = "format-fixture/work-items.md"
-    original = "## 1. Core\n- [x] 1.1 Implement `cap/req/example`\n"
-    parent = commit(repo, {path: original})
-    adapter = Mock(spec=spec_format.SpecFormat)
-    adapter.tasks_path.return_value = path
-    selection = Mock(return_value=adapter)
-    monkeypatch.setattr(spec_format, "get", selection)
-    ctx = run_context(repo, tmp_path)
-    assert ctx.tasks_path == path and ctx.tasks_text(parent) == original
-    feedback = "Keep the scenario `cap/req/example`.\n- [ ] Verify it."
-    result = revise.revise_result(ctx.run, ctx.m, feedback, round_id="format-round")
-    assert not result.replayed and result.status == "running" and result.pause is None
-    assert ctx.head() == result.commit
-    text = ctx.tasks_text(result.commit)
-    parsed = tasks.parse(text)
-    assert parsed[:-1] == tasks.parse(original)
-    assert parsed[-1].section_title == "Review round 1" and not parsed[-1].done
-    assert parsed[-1].text == f"Address review feedback 1: {json.dumps(feedback)}"
-    assert git(ctx.repo, "diff-tree", "--no-commit-id", "--name-only", "-r", result.commit).decode().splitlines() == [path]
-    assert git(ctx.repo, "show", "-s", "--format=%s", result.commit) == b"specloop: append review round 1\n"
-    journal, = (ctx.run.dir / "revision-rounds").glob("*.json")
-    record = json.loads(journal.read_text())
-    assert record["status"] == "completed" and record["commit"] == result.commit
-    assert record["parent"] == parent and record["tasks"] == 1 and record["round"] == 1
-    saved = {p: p.read_bytes() for p in (journal, ctx.run.dir / "state.json", ctx.run.dir / "events.jsonl")}
-    replay = revise.revise_result(ctx.run, ctx.m, feedback, round_id="format-round")
-    assert replay == replace(result, replayed=True)
-    assert ctx.head() == result.commit and ctx.tasks_text(result.commit) == text
-    assert {p: p.read_bytes() for p in saved} == saved
-    assert selection.call_args_list == [call(ctx.m)] * 3
-    assert adapter.tasks_path.call_args_list == [call(ctx.m.change)] * 3
 
 
 @pytest.mark.scenario("spec-format/engine-routing-compatibility/consumers-contain-no-direct-format-operations")

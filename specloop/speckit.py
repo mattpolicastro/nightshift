@@ -1,5 +1,6 @@
 """Standalone spec-kit records, recognized literally from physical lines."""
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -250,6 +251,17 @@ def append_section(text: str, title: str, items: list[str]) -> str:
     body = _new_tasks(phases, items)
     sep = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
     return _checked_result(f"{text}{sep}## Phase {number}: {title}\n\n{body}")
+
+
+def append_round(text: str, blocks: list[str]) -> tuple[int, str]:
+    """Append feedback after the highest literal native review-round title."""
+    rounds = [int(r[1]) for line in text.splitlines()
+              if (phase := PHASE.match(line))
+              and (r := re.fullmatch(r"Review round (\d+)", phase[2]))]
+    number = max(rounds, default=0) + 1
+    items = [f"Address review feedback {i}: {json.dumps(block)}"
+             for i, block in enumerate(blocks, 1)]
+    return number, append_section(text, f"Review round {number}", items)
 
 
 def validate(repo: Path, change: str) -> list[str]:
