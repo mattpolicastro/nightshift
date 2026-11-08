@@ -37,6 +37,18 @@ None of these follow-ups establishes live validation or a completed host rollout
 
 ## Open gaps
 
+- **Native spec-kit context:** explicit native builds supply only the selected
+  feature and `.specify/memory/constitution.md`. There is no consolidated current
+  spec, automatic supersession traversal or cross-feature conflict detection.
+  Delivered feature records remain in place; later features name superseded
+  features under `## Assumptions` (for example `Supersedes 042-add-a-gate`).
+  Native drafting, feasibility and daemon intake remain future work. Follow the
+  [explicit build guide](docs/specloop/README.md#native-spec-kit-builds), including
+  `--skip-feasibility` and structural admission validation. The real story build,
+  publication/Finish observation and touchpoint count remain an unchecked design
+  item on [issue #184](https://github.com/mattpolicastro/nightshift/issues/184);
+  offline tests do not establish them.
+
 - **Readiness test-only fallback:** with evidence enabled, the missing-event
   fallback recognizes only repository-root `tests/` paths after excluding the
   harness-owned tasks file. Layouts such as `packages/*/test/` still block
@@ -284,7 +296,8 @@ None of these follow-ups establishes live validation or a completed host rollout
 ## Factory landing
 
 Factory's separate Land confirmation freezes change, PR, pause ID, published
-head and pause timestamp; Finish still only archives, pushes and marks ready.
+head and pause timestamp; Finish archives OpenSpec into `openspec/specs/` or sets
+native `**Status**: Complete` without archival, then pushes and marks ready without merging.
 Private plugin transport starts a detached worker and preserves canonical
 CLI/daemon/supervisor isolation. Status and Stop are independent of ordinary
 Factory actions and remain available during daemon pause. Progress and retained

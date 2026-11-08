@@ -588,7 +588,8 @@ it, run `nightshift run <change>`. Retry publication after the driver restores
 `ready_to_publish`; the daemon retries on a later poll. A successful publish
 updates the recorded branch and PR and pauses at `human_checks`. Complete the
 human checks and hosted CI review before `nightshift finish <change>` archives
-the change and marks the PR ready. A human merges it.
+OpenSpec into `openspec/specs/` or sets native `**Status**: Complete` without archival,
+then pushes and marks the PR ready. A human merges it.
 
 Inspect `nightshift status <change>` for the pause detail. Base preparation can
 stop at three distinct pauses:
@@ -664,8 +665,9 @@ uv run nightshift finish <change>
 Complete the PR's human checks before finish. Publication refuses changes under
 `.gitea/workflows/`, `.github/workflows/` or `.forgejo/` on either forge before
 push or PR writes. Gitea publish reuses an exact existing PR or creates a
-WIP-prefixed title, not native draft state. Finish archives and pushes, then marks
-the PR ready by removing one configured WIP prefix with a title-only PATCH and
+WIP-prefixed title, not native draft state. Finish archives OpenSpec into
+`openspec/specs/` or sets native `**Status**: Complete` without archival, then pushes
+and marks the PR ready by removing one configured WIP prefix with a title-only PATCH and
 reading back the result; it does not merge. Inspect remote effects before retrying
 an ambiguous create failure: lookup-before-create cannot prevent concurrent or late-visible duplicates.
 Title edits between GET and PATCH can be overwritten without conflict detection;
@@ -702,9 +704,11 @@ Abort at every pause. Worker task rows remain read-only.
 **Publish and Finish push to the forge selected by the run manifest, so Paseo
 asks for confirmation before either action**, even before a PR exists. Cancel
 sends nothing. GitHub retains draft/ready behavior; configured Gitea creates a
-WIP-title PR and finish removes that prefix after archive/push and verifies the
-title. Finish does not merge. Provision config/bot environment and separate git
-credentials in the Paseo host process using [engine setup](#explicit-forge-publication).
+WIP-title PR and finish removes that prefix after completion/push and verifies the
+title. Finish archives OpenSpec into `openspec/specs/` or sets native
+`**Status**: Complete` without archival, then pushes and marks ready without merging.
+Provision config/bot environment and separate git credentials in the Paseo host
+process using [engine setup](#explicit-forge-publication).
 Factory's display-origin allowlist does not route or authorize writes: only
 HTTPS root `/owner/repo/pulls/N` Gitea PRs display. Engine-supported HTTP loopback
 or URL-prefix installations may require direct CLI use. Land remains GitHub-only;
@@ -788,17 +792,23 @@ for usage, refresh behavior and installation.
 
 ## How the engine works
 
-**Formats.** Only OpenSpec operates today. Omit `[run] format` or set
-`format = "openspec"`; existing manifests and saved runs need no migration or
-rewrite. The format seam in [issue #187](https://github.com/mattpolicastro/nightshift/issues/187)
-prepares for [issue #184](https://github.com/mattpolicastro/nightshift/issues/184),
-but does not implement spec-kit. `format = "speckit"` parses as a reserved
-selection; `nightshift admit repo.toml --json` exits 1 with version-1 `outcome: refused`
-and `spec-kit format is not available yet` in its reasons. Separately,
-[issue #191](https://github.com/mattpolicastro/nightshift/issues/191) replaces the
-validator with [verified standalone OpenSpec 1.16.1](../deploy.md#install-openspec).
-Finish, human checks and recovery retain their gates. See the [manifest contract](command-json.md#manifest-format)
-and [complete example](../../examples/specloop/self-hosting.toml).
+**Formats.** Omit `[run] format` or set `format = "openspec"` for OpenSpec;
+existing manifests and saved runs need no migration or rewrite. Select
+`format = "speckit"` for explicit native builds of approved features, through the
+adapter in [issue #188](https://github.com/mattpolicastro/nightshift/issues/188),
+following [issue #187](https://github.com/mattpolicastro/nightshift/issues/187)
+in [issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
+OpenSpec uses the pinned
+[verified standalone OpenSpec 1.16.1](../deploy.md#install-openspec) binary introduced
+by [issue #191](https://github.com/mattpolicastro/nightshift/issues/191), with no
+runtime download or npx fallback. Native selection leaves that executable
+contract unchanged.
+Finish, human checks and recovery retain their gates. See the
+[manifest contract](command-json.md#manifest-format),
+[OpenSpec example](../../examples/specloop/self-hosting.toml) and
+[native example](../../examples/specloop/speckit.toml). OpenSpec Finish archives into
+`openspec/specs/`; native Finish sets `**Status**: Complete` and archives nothing.
+Both push and mark the PR ready without merging.
 
 Offline saved-manifest/state tests do not establish deployed resume. This
 human check remains pending:
@@ -838,7 +848,7 @@ removal without a separate supervisor-without-`~/n/bin` experiment.
 
 The [spec-kit house rules](speckit.md) describe the authoring rules and the `nightshift-speckit` preset ([issue #184](https://github.com/mattpolicastro/nightshift/issues/184)).
 
-`specloop/` (in this repo) drives an admitted OpenSpec change through its
+`specloop/` (in this repo) drives an admitted OpenSpec change or native feature through its
 `tasks.md`, one task at a time.
 
 1. A fresh agent session from a named provider profile implements the task.
@@ -916,10 +926,57 @@ uv run nightshift accept <change> [task]
 uv run nightshift waive <change> <task> <text>
 uv run nightshift publish <change>      # push to the recorded PR, or open a draft PR
 uv run nightshift revise <change> --feedback <file> --round-id <key>  # retain key and input on retry
-uv run nightshift finish <change>       # archive the change, mark the PR ready
+uv run nightshift finish <change>       # archive OpenSpec or complete native Status; push and mark ready
 uv run nightshift propose <manifest> <change> --idea "Add a gate" [--source doc]   # draft a change
 uv run nightshift drill <change>        # seeded defects through the review gate
 ```
+
+### Native spec-kit builds
+
+Copy the [native manifest example](../../examples/specloop/speckit.toml) outside
+the target repository and edit its source, branch, profiles and trusted check
+paths. Commit the approved `specs/<NNN>-<slug>/spec.md`, `plan.md`, `tasks.md`
+and `.specify/memory/constitution.md` on that source branch before admission.
+This is an explicit build path; native drafting and daemon intake are not supported.
+Native feasibility support is pending, so request `--skip-feasibility` explicitly:
+
+```sh
+uv run nightshift admit /path/to/manifests/speckit.toml --change 042-add-a-gate --branch spec/042-add-a-gate --skip-feasibility --json
+uv run nightshift run 042-add-a-gate
+uv run nightshift publish 042-add-a-gate --json
+uv run nightshift finish 042-add-a-gate
+```
+
+Complete the PR's human checks before running the Finish command above.
+
+Structural admission still validates the committed feature, task identities,
+scenario references and gates. Use positive `## Phase N: Title` numbers;
+phase zero is refused, and each configured `[gates] phases` entry must name a
+phase containing tasks. `[paths] frozen` must include `specs/**`, `.specify/**`,
+workflow paths and steering files: implementers cannot alter acceptance criteria.
+Only harness writes tick or append tasks and complete Status. The example's
+`[coverage] step = "unit-tests"` names its actual verifier, which loads the trusted
+[scenario plugin](../../examples/specloop/scenario_plugin.py) to emit
+`SCENARIO <feature>/us<k>/as<n>` lines for passing marked tests.
+
+Finish sets `**Status**: Complete` in the selected feature's `spec.md`, retains all
+feature files and archives nothing. It pushes and marks ready after human checks;
+it never merges. OpenSpec Finish continues to archive into `openspec/specs/`.
+Native context contains only the selected feature and
+`.specify/memory/constitution.md`: there is no consolidated current spec,
+automatic supersession traversal or cross-feature conflict detection. Delivered
+feature records stay in place. Later features name superseded features under
+`## Assumptions`, for example `Supersedes 042-add-a-gate`; see the
+[flow-forward house rule](speckit.md#flow-forward-persistence).
+
+The approved design's live check remains unchecked: run a real story build with
+implementer/reviewer profiles, publish, perform the human checks and Finish;
+confirm retained files, unchanged acceptance criteria, Complete Status and no
+archive. Record run/PR identity and touchpoint count on
+[issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
+Offline tests do not establish this live observation.
+
+### OpenSpec drafting
 
 **`propose`** has an agent draft the OpenSpec change. The harness then:
 1. validates and lints it;

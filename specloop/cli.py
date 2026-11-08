@@ -23,7 +23,7 @@ from urllib.parse import quote, unquote, urlsplit
 from nightshift import config
 from nightshift.forge import ForgeError
 from nightshift.forge.gitea import GiteaForge
-from specloop import feasibility, loop, manifest, messages, openspec, spec_format, tasks, verify
+from specloop import feasibility, loop, manifest, messages, openspec, speckit, spec_format, tasks, verify
 from specloop.seal import git
 from specloop.state import SAFE_CHANGE, Busy, Run, TaskState, iter_run_dirs, proposals_dir, run_dir
 from specloop.state_locks import MigrationBusy, writer
@@ -99,17 +99,42 @@ def problems_with(repo: Path, rev: str, m: manifest.Manifest) -> list[str]:
         task_file = Path(tmp) / fmt.tasks_path(m.change)
         if not task_file.exists():
             return found + ["the change has no tasks.md"]
-        parsed = tasks.parse(task_file.read_text())
+        try:
+            text = task_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as e:
+            if m.format != "speckit":
+                raise
+            return found + [f"{fmt.tasks_path(m.change)}: cannot read tasks: {e}"]
+        native = m.format == "speckit"
+        if native:
+            # Scan physical headings too: an empty phase has no Task record.
+            for line, raw in enumerate(text.splitlines(), 1):
+                if (phase := speckit.PHASE.match(raw)) and int(phase[1]) == 0:
+                    found.append(f"{fmt.tasks_path(m.change)}:{line}: phase zero is not admissible")
+            if 0 in m.phase_gates:
+                found.append("phase gate zero is not admissible")
+        try:
+            parsed = fmt.parse_tasks(text)
+        except spec_format.ValidatorUnavailable:
+            raise
+        except spec_format.SpecError as e:
+            if not native:
+                raise
+            return found + [str(e)]
         if not parsed:
-            found.append("tasks.md has no tasks under '## N. Title' sections")
+            heading = "'## Phase N: Title' phases" if native else "'## N. Title' sections"
+            found.append(f"tasks.md has no tasks under {heading}")
         keys = [t.key for t in parsed]
         if len(keys) != len(set(keys)):
             found.append("two tasks in one section have identical text")
         for t in parsed:
             found += [f"task {t.label}: unknown scenario `{s}`" for s in t.scenarios if s not in known]
         for n in m.phase_gates:
+            if native and n == 0:
+                continue
             if not any(t.section == n for t in parsed):
-                found.append(f"phase gate {n} names no section in tasks.md")
+                section = "populated phase" if native else "section"
+                found.append(f"phase gate {n} names no {section} in tasks.md")
     return found
 
 
@@ -195,6 +220,14 @@ def _admit_locked(args, run: Run, m: manifest.Manifest, text: str, roles: dict) 
         found = problems_with(run.dir / "repo.git", head, m)
         if found:
             raise ValueError("the change is not admissible:\n" + "\n".join(f"  - {p}" for p in found))
+        counts = {}
+        if m.format == "speckit":
+            fmt = spec_format.get(m)
+            with tempfile.TemporaryDirectory() as tmp:
+                _checkout(run.dir / "repo.git", head, Path(tmp))
+                parsed = fmt.parse_tasks((Path(tmp) / fmt.tasks_path(m.change)).read_text(encoding="utf-8"))
+                counts = {"sections": len({t.section for t in parsed}),
+                          "scenarios": len(fmt.scenarios(Path(tmp), m.change))}
         if not args.skip_feasibility:
             review = feasibility.check(run.dir / "repo.git", head, m, run.dir / "admission")
             _outcome(args, risks=review.get("risks", []))
@@ -217,7 +250,7 @@ def _admit_locked(args, run: Run, m: manifest.Manifest, text: str, roles: dict) 
     run.state.pr = args.pr
     run.save()
     run.event("admitted", head=head, implement=m.roles["implement"].name, review=m.roles["review"].name)
-    _outcome(args, outcome="admitted")
+    _outcome(args, outcome="admitted", **counts)
     print(f"admitted {m.change} at {head[:12]} ({m.roles['implement'].name} implements, "
           f"{m.roles['review'].name} reviews). Next: nightshift run {m.change}")
     return 0
@@ -345,7 +378,7 @@ def _candidate_landed(ctx: loop.Ctx, task: tasks.Task, ts: TaskState, head: str)
         return False
     if git(ctx.repo, "diff", "--name-only", ts.candidate, head).decode().splitlines() != [ctx.tasks_path]:
         return False
-    return ctx.tasks_text(head) == tasks.tick(ctx.tasks_text(ts.candidate_base), task)
+    return ctx.tasks_text(head) == spec_format.get(ctx.m).tick(ctx.tasks_text(ts.candidate_base), task)
 
 
 def _accept(args, run: Run) -> int:
@@ -359,7 +392,7 @@ def _accept(args, run: Run) -> int:
         print("no candidate to accept for that task", file=sys.stderr)
         return 1
     head = ctx.head()
-    task = next((t for t in tasks.parse(ctx.tasks_text(head)) if t.key == key), None)
+    task = next((t for t in spec_format.get(ctx.m).parse_tasks(ctx.tasks_text(head)) if t.key == key), None)
     if not task:
         print("that task is no longer in tasks.md", file=sys.stderr)
         return 1
@@ -557,8 +590,9 @@ def _pr_body(ctx: loop.Ctx) -> str:
     checks = "\n".join(loop.append_design_checks(ctx, head, [
         f"- [ ] `{sid}` — {why}" for sid, why in sorted(m.coverage_exempt.items())]))
     follow = (ctx.run.dir / "followups.md").read_text() if (ctx.run.dir / "followups.md").exists() else "(none)\n"
-    done = [t for t in tasks.parse(ctx.tasks_text(head)) if t.done]
-    return (f"{spec_format.get(m).pr_kind} `{m.change}`, driven by specloop: {len(done)} tasks, each sealed, verified by the "
+    fmt = spec_format.get(m)
+    done = [t for t in fmt.parse_tasks(ctx.tasks_text(head)) if t.done]
+    return (f"{fmt.pr_kind} `{m.change}`, driven by specloop: {len(done)} tasks, each sealed, verified by the "
             f"harness and independently reviewed.\n\n## Checks a human must make\n\n{checks or '(none)'}\n\n"
             f"## Non-blocking review findings\n\n{follow}\n"
             f"🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
@@ -712,7 +746,7 @@ def _publish(args, run: Run) -> int:
 
 
 def finish(args) -> int:
-    """Archive the change into openspec/specs, push, and mark the PR ready."""
+    """Complete the selected format, push, and mark the PR ready."""
     return _locked_command(args, _finish)
 
 
@@ -772,16 +806,25 @@ def _finish(args, run: Run) -> int:
         print(f"expected head {expected}; observed run branch head {head}; refusing to finish",
               file=sys.stderr)
         return 1
-    task_path = _tasks_path(ctx.repo, head, ctx.m.change, spec_format.get(ctx.m))
+    fmt = spec_format.get(ctx.m)
+    task_path = _tasks_path(ctx.repo, head, ctx.m.change, fmt)
     text = git(ctx.repo, "show", f"{head}:{task_path}").decode()
-    if any(not t.done for t in tasks.parse(text)):
-        print("tasks are unfinished; refusing to archive", file=sys.stderr)
+    parsed = fmt.parse_tasks(text)
+    native = ctx.m.format == "speckit"
+    if any(not t.done for t in parsed) or (native and not parsed):
+        print("tasks are unfinished or empty; refusing to complete" if native else
+              "tasks are unfinished; refusing to archive", file=sys.stderr)
         return 1
-    # Validate before the archive's internal push as well as the external push.
+    # Validate before format completion as well as the external push.
     # Preserve direct finish's exception contract; act renders the same reason.
     target = _forge_target(ctx.m.github) if ctx.m.github else None
     remote = _remote(ctx, target)
-    if task_path == ctx.tasks_path:
+    if native:
+        completed = fmt.finish(ctx.repo, ctx.m.change, all_tasks_done=True, head=head)["commit"]
+        if not loop._advance(ctx, head, completed):
+            print("run branch changed during completion; refusing to finish", file=sys.stderr)
+            return 1
+    elif task_path == ctx.tasks_path:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp) / "w"
             subprocess.run(["git", "clone", "-q", "--branch", ctx.m.branch, str(ctx.repo), str(work)], check=True)
@@ -789,7 +832,7 @@ def _finish(args, run: Run) -> int:
             git(work, "add", "-A")
             git(work, "commit", "-qm", f"specloop: archive {ctx.m.change} into openspec/specs", env=loop.seal.IDENTITY)
             git(work, "push", "-q", str(ctx.repo), f"HEAD:{ctx.ref}")
-    # The branch itself records the archive durably. Retry external operations
+    # The branch itself records completion durably. Retry external operations
     # from that commit without requiring a separate state write to have survived.
     _push(ctx.repo, remote, ctx.ref, source=ctx.m.repo)
     if target is not None and target.forge is not None:
@@ -810,7 +853,8 @@ def _finish(args, run: Run) -> int:
     st.status, st.pause = "done", None
     run.save()
     run.event("finished", head=ctx.head(), pr=st.pr)
-    print(f"{args.change}: archived and marked ready for review — {st.pr}")
+    operation = "completed" if native else "archived"
+    print(f"{args.change}: {operation} and marked ready for review — {st.pr}")
     return 0
 
 
@@ -1096,9 +1140,10 @@ def _status_entry(name: str) -> dict:
     m = _manifest(run)
     repo = run.dir / "repo.git"
     head = git(repo, "rev-parse", f"refs/heads/{m.branch}").decode().strip()
-    task_path = _tasks_path(repo, head, m.change, spec_format.get(m))
+    fmt = spec_format.get(m)
+    task_path = _tasks_path(repo, head, m.change, fmt)
     text = git(repo, "show", f"{head}:{task_path}").decode()
-    all_tasks = tasks.parse(text)
+    all_tasks = fmt.parse_tasks(text)
     auto_resumes_remaining = 0
     if st.pause and st.pause.resume_at and st.pause.reason in serve.AUTO_RESUME:
         cap = serve.AUTO_RESUME[st.pause.reason]
@@ -1222,8 +1267,9 @@ def status(args) -> int:
             m = _manifest(run)
             repo = run.dir / "repo.git"
             head = git(repo, "rev-parse", f"refs/heads/{m.branch}").decode().strip()
-            task_path = _tasks_path(repo, head, m.change, spec_format.get(m))
-            all_tasks = tasks.parse(git(repo, "show", f"{head}:{task_path}").decode())
+            fmt = spec_format.get(m)
+            task_path = _tasks_path(repo, head, m.change, fmt)
+            all_tasks = fmt.parse_tasks(git(repo, "show", f"{head}:{task_path}").decode())
             done = sum(t.done for t in all_tasks)
             print(f"  tasks: {done}/{len(all_tasks)} done on {m.branch} @ {head[:12]}")
             nxt = next((t for t in all_tasks if not t.done), None)

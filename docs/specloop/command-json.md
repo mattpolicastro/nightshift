@@ -150,27 +150,38 @@ The optional `[run] format` field defaults to `"openspec"`. Explicit
 runs need no migration, state change or manifest rewrite. The
 [self-hosting example](../../examples/specloop/self-hosting.toml) shows the
 explicit selection. Format selection is independent of provider and forge
-selection. The separate [issue #191](https://github.com/mattpolicastro/nightshift/issues/191)
-change installs [standalone OpenSpec 1.16.1](../deploy.md#install-openspec);
-the format seam itself neither replaces the validator nor implements spec-kit.
+selection. OpenSpec uses the pinned
+[standalone OpenSpec 1.16.1](../deploy.md#install-openspec) binary introduced by
+[issue #191](https://github.com/mattpolicastro/nightshift/issues/191), with no
+runtime download or npx fallback. Native format selection does not change this
+OpenSpec executable contract.
 
-`format = "speckit"` is accepted by the manifest parser and retained through
-change/branch template overrides, but the adapter is not available.
-`nightshift admit repo.toml --json` exits 1 with one version-1 JSON document,
-`"outcome": "refused"`, and the exact diagnostic
-`spec-kit format is not available yet` in `reasons`. This is an ordinary
-admission refusal, before checkout/validator work or an agent invocation;
-partial admission is cleaned up and no admitted `state.json` is saved.
+`format = "speckit"` selects native build support and is retained through
+change/branch template overrides. Use the
+[native manifest example](../../examples/specloop/speckit.toml) outside the target
+repository and follow [explicit native admission](README.md#native-spec-kit-builds)
+with `--skip-feasibility`; native feasibility, drafting and daemon intake remain
+future work. Structural admission validates the committed feature, scenario
+references, unique task identities and positive phase gates. Successful native
+`admit --json` includes integer `sections` and `scenarios` counts. Invalid or
+missing features return version-1 `"outcome": "refused"` with diagnostics in
+`reasons`; partial admission is cleaned up and no admitted `state.json` is saved.
 
-Only OpenSpec is operational. The seam is tracked by
-[issue #187](https://github.com/mattpolicastro/nightshift/issues/187) toward
-the native spec-kit initiative in
+```sh
+nightshift admit /path/to/manifests/speckit.toml --skip-feasibility --json
+```
+
+The adapter is tracked by
+[issue #188](https://github.com/mattpolicastro/nightshift/issues/188), following
+[issue #187](https://github.com/mattpolicastro/nightshift/issues/187) in
 [issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
-Finish, human-check and recovery rules remain unchanged. Offline compatibility
-tests do not establish live legacy-run resume: the
-[pending deployed-resume check](README.md#how-the-engine-works) must be performed
-by a human after deployment and its result recorded on issue #184, linked from
-issue #187.
+OpenSpec Finish archives into `openspec/specs/`; its human-check and recovery
+rules remain unchanged. Native Finish sets `**Status**: Complete` without archival;
+both formats push and mark ready without merging. Offline compatibility tests
+do not establish live legacy-run
+resume: the [pending deployed-resume check](README.md#how-the-engine-works) must be
+performed by a human after deployment and its result recorded on issue #184,
+linked from issue #187.
 
 ## Keyed build revisions
 

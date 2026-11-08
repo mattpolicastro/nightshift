@@ -234,6 +234,16 @@ model/endpoint tables, concurrency, task caps and phase budgets are inert, with
 sorted key-only ignored-setting notes. They do not configure manifests or
 providers. See [manifest templates and CLI outcomes](docs/specloop/command-json.md).
 
+The trusted manifest's `[run] format` defaults to `"openspec"`; explicit
+`format = "openspec"` selects the same path. For approved native features, use
+`format = "speckit"` and the [native manifest example](examples/specloop/speckit.toml)
+with the [explicit build commands](docs/specloop/README.md#native-spec-kit-builds),
+including `--skip-feasibility`. Keep the effective trusted manifest outside the
+target repository. Preset asset installation does not enroll or configure a build;
+native drafting and daemon intake remain future work. OpenSpec Finish archives into
+`openspec/specs/`; native Finish sets `**Status**: Complete` without archival.
+Both push and mark ready after human checks, without merging.
+
 Omitting `repos.forge` always selects legacy GitHub. An explicit selection must
 exactly match a named forge table; repository names must be unique across all
 forges, ignoring case. See [config.example.toml](config.example.toml) for the
@@ -253,7 +263,8 @@ checkout's `config.toml`) and selected bot `token_env`; the credentials file
 landing tokens nor manifest step/env values are authentication fallbacks.
 Git push needs separate git credentials. Gitea requires one HTTP(S) origin
 matching scheme, host, effective port, URL prefix and case-sensitive repository;
-SSH and local origins refuse. Publish creates a WIP-title PR; finish archives,
+SSH and local origins refuse. Publish creates a WIP-title PR; finish archives
+OpenSpec into `openspec/specs/` or sets native `**Status**: Complete` without archival,
 pushes, removes the prefix by title PATCH and verifies it by read-back, without
 merging or native draft state. Follow [explicit forge publication](docs/specloop/README.md#explicit-forge-publication)
 for commands, retries and limits ([issue #129](https://github.com/mattpolicastro/nightshift/issues/129)).
@@ -856,7 +867,8 @@ The page's **Factory** section lists specloop runs, those waiting on you first, 
 one button per action that fits each pause (resume with a note, accept, publish,
 finish, abort), plus separate **Land** at a verifiable `human_checks` pause.
 Publish and Finish require confirmation and use the manifest-selected forge,
-including configured Gitea. Finish archives, pushes and marks ready without merging.
+including configured Gitea. Finish archives OpenSpec into `openspec/specs/` or sets
+native `**Status**: Complete` without archival, then pushes and marks ready without merging.
 Provision config, bot and git credentials in the Paseo host process as described
 in [Factory setup](plugins/nightshift/README.md#factory). Land remains GitHub-only and invokes existing
 landing through an explicit confirmation that human checks were performed.

@@ -1,0 +1,48 @@
+# Trusted template for an approved native feature. Copy OUTSIDE the target repo.
+# Edit source, branch, provider profiles and trusted check paths before admission:
+# nightshift admit /path/to/manifests/speckit.toml --skip-feasibility --json
+# Structural validation still runs; native drafting/feasibility are not supported.
+
+[run]
+format = "speckit"
+repo = "/path/to/project"
+change = "042-add-a-gate"
+branch = "spec/042-add-a-gate"
+pr_base = "main"
+github = "owner/project"
+
+[roles]
+implement = "codex-astra"
+review = "codex-astra"
+
+[profiles.codex-astra]
+adapter = "codex"
+model = "gpt-6-astra"
+effort = "high"
+
+[paths]
+allowed = ["src/**", "tests/**", "docs/**", "README.md"]
+frozen = ["specs/**", ".specify/**", ".github/**", ".gitea/workflows/**",
+          ".forgejo/**", "AGENTS.md", "CLAUDE.md", "pyproject.toml", "uv.lock"]
+
+[gates]
+# Positive phase numbers containing tasks; adjust for the approved tasks.md.
+phases = [3, 4, 5]
+review = "agent"
+stuck = "agent"
+
+[vars]
+venv = "/path/to/project/.venv"
+# Copy examples/specloop/scenario_plugin.py into this trusted external directory.
+checks = "/path/to/manifests/project"
+
+[[verify]]
+id = "unit-tests"
+run = ["/usr/bin/env", "PYTHONPATH={src}:{checks}", "PYTHONDONTWRITEBYTECODE=1",
+       "{venv}/bin/python", "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider",
+       "-p", "scenario_plugin", "--rootdir={src}", "{src}/tests"]
+timeout = 900
+
+# The plugin emits SCENARIO <feature>/us<k>/as<n> for passing marked tests.
+[coverage]
+step = "unit-tests"

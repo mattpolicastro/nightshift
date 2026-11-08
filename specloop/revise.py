@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from specloop import seal, spec_format, tasks
+from specloop import seal, spec_format
 from specloop.manifest import Manifest
 from specloop.revision_store import RevisionStore, fingerprint
 from specloop.state import Busy, Run
@@ -34,15 +34,8 @@ def _eligible(run: Run, m: Manifest) -> None:
                            "or for its human checks")
 
 
-def _append(text: str, blocks: list[str]) -> tuple[int, str]:
-    rounds = [int(r.group(1)) for line in text.splitlines()
-              if (section := tasks.SECTION.match(line))
-              and (r := re.fullmatch(r"Review round (\d+)", section.group(2)))]
-    number = max(rounds, default=0) + 1
-    # Quoting keeps embedded checklists on one line; ordinals distinguish duplicates.
-    items = [f"Address review feedback {i}: {json.dumps(block)}"
-             for i, block in enumerate(blocks, 1)]
-    return number, tasks.append_section(text, f"Review round {number}", items)
+def _append(fmt: spec_format.SpecFormat, text: str, blocks: list[str]) -> tuple[int, str]:
+    return fmt.append_round(text, blocks)
 
 
 def _git(repo: Path, *args: str, **kwargs) -> bytes:
@@ -67,7 +60,8 @@ def _ancestor(repo: Path, commit: str, head: str) -> None:
                            + result.stderr.decode(errors="replace").strip()[:400])
 
 
-def _validate_candidate(repo: Path, record: dict, path: str, blocks: list[str]) -> None:
+def _validate_candidate(repo: Path, record: dict, path: str, blocks: list[str],
+                        fmt: spec_format.SpecFormat) -> None:
     parent, commit = record["parent"], record["commit"]
     # batch-check reports absent objects without conflating them with a Git error.
     kinds = _git(repo, "cat-file", "--batch-check=%(objecttype)",
@@ -86,7 +80,7 @@ def _validate_candidate(repo: Path, record: dict, path: str, blocks: list[str]) 
     if path.encode() not in trees[0]:
         raise ValueError("revision evidence conflict: original tasks are missing")
     original = _git(repo, "show", f"{parent}:{path}").decode()
-    number, text = _append(original, blocks)
+    number, text = _append(fmt, original, blocks)
     blob = _git(repo, "hash-object", "--stdin", input=text.encode()).strip()
     trees[0][path.encode()] = b"100644 blob " + blob
     if number != record["round"] or trees[0] != trees[1]:
@@ -159,12 +153,13 @@ def revise_result(run: Run, m: Manifest, feedback: str, *, feedback_format: str 
         record = store.load() if store else None
         replayed = record is not None
         repo, ref = run.dir / "repo.git", f"refs/heads/{m.branch}"
-        path = spec_format.get(m).tasks_path(m.change)
+        fmt = spec_format.get(m)
+        path = fmt.tasks_path(m.change)
         if record is None:
             _eligible(run, m)
         head = _git(repo, "rev-parse", ref).decode().strip()
         if store and record is not None:
-            _validate_candidate(repo, record, path, blocks)
+            _validate_candidate(repo, record, path, blocks, fmt)
             has_event = _has_event(run, record) if record["status"] == "prepared" else False
             if head == record["parent"] and record["status"] == "prepared":
                 _eligible(run, m)
@@ -176,7 +171,7 @@ def revise_result(run: Run, m: Manifest, feedback: str, *, feedback_format: str 
             commit = record["commit"]
         else:
             text = _git(repo, "show", f"{head}:{path}").decode()
-            number, text = _append(text, blocks)
+            number, text = _append(fmt, text, blocks)
             commit = seal.commit_files(repo, head, {path: text}, f"specloop: append review round {number}")
             if store:
                 record = store.prepare(parent=head, commit=commit, number=number)

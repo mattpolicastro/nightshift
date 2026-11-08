@@ -143,9 +143,7 @@ def test_documented_format_assignments_match_manifest_adapter(path, heading):
         if value == explicit.format:
             assert spec_format.get(selected) is spec_format.OPENSPEC
         else:
-            with pytest.raises(openspec.SpecError) as error:
-                spec_format.get(selected)
-            assert str(error.value) in re.findall(r"`([^`\n]+)`", text)
+            assert value == "speckit" and spec_format.get(selected) is spec_format.SPECKIT
 
 
 @pytest.mark.scenario("specloop-documentation/standalone-openspec-operator-guidance/operator-understands-stricter-drafts-and-rollout")

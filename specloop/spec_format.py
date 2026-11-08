@@ -1,17 +1,24 @@
 """Change-format paths and operations, with OpenSpec as the default backend."""
 
+import json
 import re
 import subprocess
 from pathlib import Path
 from typing import Protocol
 
-from specloop import openspec
+from specloop import openspec, speckit, tasks
 from specloop.manifest import Manifest
 from specloop.openspec import SpecError as SpecError, ValidatorUnavailable as ValidatorUnavailable
 from specloop.seal import git
 
 
 class SpecFormat(Protocol):
+    def parse_tasks(self, text: str) -> list[tasks.Task]: ...
+    def tick(self, text: str, task: tasks.Task) -> str: ...
+    def split(self, text: str, task: tasks.Task, subtasks: list[str]) -> str: ...
+    def extend_section(self, text: str, section: int, items: list[str]) -> str: ...
+    def append_section(self, text: str, title: str, items: list[str]) -> str: ...
+    def append_round(self, text: str, blocks: list[str]) -> tuple[int, str]: ...
     def change_dir(self, repo: Path, change: str) -> Path: ...
     def tasks_path(self, change: str) -> str: ...
     def tasks_paths_at(self, repo: Path, head: str, change: str) -> list[str]: ...
@@ -20,7 +27,7 @@ class SpecFormat(Protocol):
     def human_checks(self, repo: Path, head: str, change: str) -> list[str]: ...
     def context_files(self, repo: Path, change: str) -> list[tuple[Path, str]]: ...
     def drafter_root(self, change: str) -> str: ...
-    def finish(self, work: Path, change: str, all_tasks_done: bool) -> dict: ...
+    def finish(self, work: Path, change: str, all_tasks_done: bool, *, head: str | None = None) -> dict: ...
     def pr_title(self, change: str) -> str: ...
 
     @property
@@ -29,6 +36,31 @@ class SpecFormat(Protocol):
 
 class _OpenSpec:
     pr_kind = "OpenSpec change"
+
+    def parse_tasks(self, text: str) -> list[tasks.Task]:
+        return tasks.parse(text)
+
+    def tick(self, text: str, task: tasks.Task) -> str:
+        return tasks.tick(text, task)
+
+    def split(self, text: str, task: tasks.Task, subtasks: list[str]) -> str:
+        return tasks.split(text, task, subtasks)
+
+    def extend_section(self, text: str, section: int, items: list[str]) -> str:
+        return tasks.extend_section(text, section, items)
+
+    def append_section(self, text: str, title: str, items: list[str]) -> str:
+        return tasks.append_section(text, title, items)
+
+    def append_round(self, text: str, blocks: list[str]) -> tuple[int, str]:
+        rounds = [int(r.group(1)) for line in text.splitlines()
+                  if (section := tasks.SECTION.match(line))
+                  and (r := re.fullmatch(r"Review round (\d+)", section.group(2)))]
+        number = max(rounds, default=0) + 1
+        # Quoting keeps embedded checklists on one line; ordinals distinguish duplicates.
+        items = [f"Address review feedback {i}: {json.dumps(block)}"
+                 for i, block in enumerate(blocks, 1)]
+        return number, tasks.append_section(text, f"Review round {number}", items)
 
     def change_dir(self, repo: Path, change: str) -> Path:
         return openspec.change_dir(repo, change)
@@ -86,17 +118,80 @@ class _OpenSpec:
     def drafter_root(self, change: str) -> str:
         return f"openspec/changes/{change}/"
 
-    def finish(self, work: Path, change: str, all_tasks_done: bool) -> dict:
+    def finish(self, work: Path, change: str, all_tasks_done: bool, *, head: str | None = None) -> dict:
         return openspec.archive(work, change, all_tasks_done=all_tasks_done)
 
     def pr_title(self, change: str) -> str:
         return f"{change}: OpenSpec change via specloop"
 
 
+class _SpecKit:
+    pr_kind = "spec-kit feature"
+
+    def change_dir(self, repo: Path, change: str) -> Path:
+        return speckit.feature_dir(repo, change)
+
+    def tasks_path(self, change: str) -> str:
+        return f"specs/{change}/tasks.md"
+
+    def tasks_paths_at(self, repo: Path, head: str, change: str) -> list[str]:
+        return [self.tasks_path(change)]
+
+    def validate(self, repo: Path, change: str) -> list[str]:
+        return speckit.validate(repo, change)
+
+    def scenarios(self, repo: Path, change: str) -> dict[str, str]:
+        return speckit.scenarios(repo, change)
+
+    def drafter_root(self, change: str) -> str:
+        return f"specs/{change}/"
+
+    def pr_title(self, change: str) -> str:
+        return f"{change}: spec-kit feature via specloop"
+
+    def human_checks(self, repo: Path, head: str, change: str) -> list[str]:
+        path = f"specs/{change}/plan.md"
+        try:
+            text = git(repo, "show", f"{head}:{path}").decode("utf-8")
+        except (RuntimeError, OSError, subprocess.SubprocessError, UnicodeError) as exc:
+            raise RuntimeError(f"could not collect human checks from {head}:{path}: {exc}") from exc
+        return speckit.human_checks(text)
+
+    def context_files(self, repo: Path, change: str) -> list[tuple[Path, str]]:
+        src = self.change_dir(repo, change)
+        entries = [(src / "spec.md", "proposal.md"),
+                   (src / "spec.md", "specs/spec.md"),
+                   (src / "plan.md", "design.md"),
+                   (repo / ".specify/memory/constitution.md", "specs/constitution.md")]
+        return [(path, name) for path, name in entries if path.exists()]
+
+    def finish(self, work: Path, change: str, all_tasks_done: bool, *, head: str | None = None) -> dict:
+        return speckit.finish(work, change, all_tasks_done, head=head)
+
+    def parse_tasks(self, text: str) -> list[tasks.Task]:
+        return speckit.parse_tasks(text)
+
+    def tick(self, text: str, task: tasks.Task) -> str:
+        return speckit.tick(text, task)
+
+    def split(self, text: str, task: tasks.Task, subtasks: list[str]) -> str:
+        return speckit.split(text, task, subtasks)
+
+    def extend_section(self, text: str, section: int, items: list[str]) -> str:
+        return speckit.extend_section(text, section, items)
+
+    def append_section(self, text: str, title: str, items: list[str]) -> str:
+        return speckit.append_section(text, title, items)
+
+    def append_round(self, text: str, blocks: list[str]) -> tuple[int, str]:
+        return speckit.append_round(text, blocks)
+
+
 OPENSPEC: SpecFormat = _OpenSpec()
+SPECKIT: SpecFormat = _SpecKit()
 
 
 def get(m: Manifest) -> SpecFormat:
     if m.format == "speckit":
-        raise SpecError("spec-kit format is not available yet")
+        return SPECKIT
     return OPENSPEC

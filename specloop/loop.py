@@ -48,7 +48,7 @@ class Ctx:
         ts = self.run.state.tasks.get(task.key) if task else None
         done = 0
         if reason == "ready_to_publish":
-            done = sum(t.done for t in tasks.parse(self.tasks_text(self.head())))
+            done = sum(t.done for t in spec_format.get(self.m).parse_tasks(self.tasks_text(self.head())))
         self.notify(messages.for_pause(self.m.change, reason, label=task.label if task else "", key=key,
                                        detail=detail, attempts=ts.attempts if ts else 0, done=done,
                                        pr=self.run.state.pr, resume_at=resume_at))
@@ -354,7 +354,7 @@ def run(ctx: Ctx) -> str:
             else:
                 verify.warm_snapshots(ctx.repo, base, ctx.m, ctx.snapshots)
         head = ctx.head()
-        all_tasks = tasks.parse(ctx.tasks_text(head))
+        all_tasks = spec_format.get(ctx.m).parse_tasks(ctx.tasks_text(head))
         if ctx.m.evidence and (n := _evidence_due(all_tasks, st)) is not None:
             if not section_evidence(ctx, n, head, all_tasks):
                 break
@@ -454,7 +454,7 @@ def _coverage_tasks(missing: list[str]) -> list[str]:
 
 
 def _append(ctx: Ctx, head: str, title: str, items: list[str]) -> bool:
-    text = tasks.append_section(ctx.tasks_text(head), title, items)
+    text = spec_format.get(ctx.m).append_section(ctx.tasks_text(head), title, items)
     _rewrite_tasks(ctx, head, text, f"specloop: append {title.lower()} tasks", None)
     ctx.notify(messages.fyi(ctx.m.change, f"added {len(items)} {title.lower()} task(s) and carried on."))
     return True
@@ -576,7 +576,7 @@ def section_evidence(ctx: Ctx, n: int, head: str, all_tasks: list[tasks.Task]) -
         items.append(f"Strengthen the tests so each of these single-line mutations of code added in section {n} "
                      f"makes a test fail; where a mutation genuinely cannot change behaviour, say why in a comment on the "
                      f"line above it starting `mutation-equivalent:` (the reviewer judges it): {listed}")
-    text = tasks.extend_section(ctx.tasks_text(head), n, items)
+    text = spec_format.get(ctx.m).extend_section(ctx.tasks_text(head), n, items)
     _rewrite_tasks(ctx, head, text, f"specloop: strengthen section {n} after its evidence check", None)
     gap = (f"{len(ev.uncovered)} scenario(s) untested" if ev.uncovered else "") + \
           (", " if ev.uncovered and survived else "") + (f"{len(survived)} mutant(s) survived" if survived else "")
@@ -665,7 +665,7 @@ def gate_review(ctx: Ctx, n: int, head: str, all_tasks: list[tasks.Task]) -> boo
     ts.attempts += 1
     ts.feedback = review.feedback(d)
     items = [f"Fix this finding from section {n}'s review: {f['text']} ({f['basis']})" for f in d.blocking]
-    text = tasks.extend_section(ctx.tasks_text(head), n, items)
+    text = spec_format.get(ctx.m).extend_section(ctx.tasks_text(head), n, items)
     _rewrite_tasks(ctx, head, text, f"specloop: add fixes from section {n}'s gate review", None)
     ctx.notify(messages.fyi(ctx.m.change, f"section {n}'s gate review found {len(items)} problem(s); "
                                           f"added fix task(s) and carried on."))
@@ -692,7 +692,14 @@ def _gate_context(ctx: Ctx, n: int, head: str, section: list[tasks.Task], ts: Ta
     (context / "diff.patch").write_text(diff)
     (context / "evidence.md").write_text(ctx.run.state.evidence_summary.get(str(n), "(no evidence gate ran for this section)") + "\n")
     notes = ctx.run.dir / "followups.md"
-    mine = [l for l in notes.read_text().splitlines() if l.startswith(f"- ({n}.")] if notes.exists() else []
+    labels = {t.label for t in section if t.label}
+    mine = []
+    if notes.exists():
+        for line in notes.read_text().splitlines():
+            if line.startswith("- ("):
+                label, delimiter, _ = line[3:].partition(") ")
+                if delimiter and label in labels:
+                    mine.append(line)
     (context / "followups.md").write_text("\n".join(mine or ["(none)"]) + "\n")
     if ts.feedback:
         (context / "prior-review.md").write_text(ts.feedback + "\n")
@@ -738,7 +745,7 @@ def step(ctx: Ctx, task: tasks.Task, head: str) -> None:
         subs = [s for s in out["subtasks"] if s.strip()]
         if not 2 <= len(subs) <= 6:
             return _failed(ctx, task, ts, "too_big needs 2 to 6 non-empty subtasks.")
-        return _rewrite_tasks(ctx, head, tasks.split(ctx.tasks_text(head), task, subs),
+        return _rewrite_tasks(ctx, head, spec_format.get(ctx.m).split(ctx.tasks_text(head), task, subs),
                               f"specloop: split task {task.label} into {len(subs)} subtasks", task)
 
     try:
@@ -822,7 +829,7 @@ def _review(ctx: Ctx, task: tasks.Task, ts: TaskState, head: str, sha: str) -> N
 
 def _land(ctx: Ctx, task: tasks.Task, ts: TaskState, head: str, sha: str) -> None:
     """Candidate plus the tasks.md tick, onto the branch in one ref update."""
-    ticked = tasks.tick(ctx.tasks_text(head), task)
+    ticked = spec_format.get(ctx.m).tick(ctx.tasks_text(head), task)
     tick = _commit_with(ctx, sha, {ctx.tasks_path: ticked}, f"specloop: complete task {task.label}")
     if not _advance(ctx, head, tick):
         ts.pending_review = ""
@@ -1168,10 +1175,12 @@ def _scenario_text(work: Path, ctx: Ctx, task: tasks.Task) -> str:
 
 def _copy_change(work: Path, ctx: Ctx, context: Path) -> None:
     for src, name in spec_format.get(ctx.m).context_files(work, ctx.m.change):
-        if name == "specs":
-            shutil.copytree(src, context / name, dirs_exist_ok=True)
+        dest = context / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_dir():
+            shutil.copytree(src, dest, dirs_exist_ok=True)
         else:
-            shutil.copy(src, context / name)
+            shutil.copy(src, dest)
 
 
 def _context(ctx: Ctx, task: tasks.Task, ts: TaskState, work: Path, context: Path, seeded: bool) -> bool:

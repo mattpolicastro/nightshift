@@ -11,8 +11,17 @@ use `export SPECKIT_PYTHON_EXECUTABLE="$(uv tool dir)/specify-cli/bin/python"`).
 Otherwise, `/speckit.specify` stops with
 `Error: PyYAML is required to resolve preset template composition` before creating the feature.
 
-The inspected baseline is v1.3.2; future-version compatibility is untested. Installing
-assets does not enable Nightshift's pending format adapter, validator, freezing or finish support.
+The inspected baseline is v1.3.2; future-version compatibility is untested.
+Installing this preset installs authoring assets only: it does not enroll a
+repository or configure a build. For approved features, follow the
+[explicit native build guide](../../docs/specloop/README.md#native-spec-kit-builds)
+with a trusted [`format = "speckit"` manifest](../../examples/specloop/speckit.toml)
+kept outside the target repository. Set `[paths] frozen` to include `specs/**`
+and `.specify/**` plus workflow and steering protections. Explicit `nightshift admit`
+uses `--skip-feasibility` while retaining structural validation; `nightshift run`
+builds and `nightshift publish` publishes. After human checks, `nightshift finish`
+sets `**Status**: Complete`, archives nothing, pushes and marks ready without merging.
+Native drafting, feasibility and daemon intake support remain future work.
 
 ## Installation
 

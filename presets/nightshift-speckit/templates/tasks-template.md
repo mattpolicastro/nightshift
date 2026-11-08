@@ -44,10 +44,19 @@ each story's scenarios. Mark dependencies; parallelize only without file/prerequ
 
 ## Harness-owned Review and Completion
 
-Keep committed task IDs stable, as with `/speckit.converge`; never renumber or reuse
-removed IDs. The harness appends review and coverage work under
-`## Phase N: Review round K`, with N after the existing phases and task IDs after
-the largest existing T number M using `T{M+1:03d}` (never truncate).
-Only the harness ticks completion `[X]`. Implementers cannot edit `specs/**` or
-`.specify/**`. Human/live checks belong in plan.md under `## Human checks`, each
+- Review feedback alone appends `## Phase N: Review round K`; K is the largest
+  existing review-round number plus one.
+- Section evidence and reviewer fixes extend the existing `## Phase N: Title`;
+  they keep its phase number and title.
+- Final fixes append `## Phase N: Coverage` or `## Phase N: Acceptance fixes`,
+  using the supplied title.
+
+Every appended phase uses the largest existing phase number plus one.
+All new base task IDs follow the largest existing numeric T root M (including
+dotted children), using
+`T{M+1:03d}` without truncation. Keep committed task IDs and scenario citations
+stable; never renumber or reuse removed IDs. Only the harness ticks `[X]` or
+updates frozen authoring files. As with `/speckit.converge`, preserve identities.
+Implementers cannot edit `specs/**` or `.specify/**`.
+Human/live checks belong in plan.md under `## Human checks`, each
 with exactly one scenario ID, and are not implementing-agent tasks or CI claims.

@@ -1,10 +1,12 @@
 """Standalone spec-kit records, recognized literally from physical lines."""
 
+import json
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import tasks
+from . import seal, tasks
 from .openspec import SpecError, slug
 
 TITLE = re.compile(r"^#\s+(.+?)\s*$")
@@ -58,6 +60,15 @@ class Spec:
 
 def feature_dir(repo: Path, change: str) -> Path:
     return repo / "specs" / change
+
+
+def scenarios(repo: Path, change: str) -> dict[str, str]:
+    path = feature_dir(repo, change) / "spec.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise SpecError(f"{path}: cannot read native scenarios: {exc}") from exc
+    return scenario_ids(change, parse_spec(text))
 
 
 def parse_spec(text: str) -> Spec:
@@ -127,7 +138,27 @@ class _Phase:
 
 def parse_tasks(text: str) -> list[tasks.Task]:
     """Read labelled checkboxes in literal phases, retaining flags in task text."""
-    return [task for phase in _parse_phases(text) for task in phase.entries]
+    return [task for phase in _checked_phases(text) for task in phase.entries]
+
+
+def _checked_phases(text: str) -> list[_Phase]:
+    phases = _parse_phases(text)
+    numbers: set[int] = set()
+    labels: set[tuple[int, ...]] = set()
+    keys: set[str] = set()
+    for phase in phases:
+        if phase.number in numbers:
+            raise SpecError(f"duplicate native phase number: {phase.number}")
+        numbers.add(phase.number)
+        for task in phase.entries:
+            identity = tuple(int(part) for part in task.label[1:].split("."))
+            if identity in labels:
+                raise SpecError(f"duplicate native task label: {task.label}")
+            labels.add(identity)
+            if task.key in keys:
+                raise SpecError(f"ambiguous native task key: {task.key} ({task.title()!r})")
+            keys.add(task.key)
+    return phases
 
 
 def _parse_phases(text: str) -> list[_Phase]:
@@ -149,6 +180,89 @@ def _parse_phases(text: str) -> list[_Phase]:
             current.entries.append(tasks.Task(current.number, current.title, label[1], rest,
                                               checkbox[2] != " ", number))
     return found
+
+
+def _locate(text: str, task: tasks.Task) -> tasks.Task:
+    for current in parse_tasks(text):
+        if current.key == task.key:
+            return current
+    raise SpecError(f"task {task.key} ({task.title()!r}) is no longer in tasks.md")
+
+
+def _checked_result(text: str) -> str:
+    parse_tasks(text)
+    return text
+
+
+def tick(text: str, task: tasks.Task) -> str:
+    current = _locate(text, task)
+    lines = text.splitlines(keepends=True)
+    if not current.done:
+        lines[current.line] = re.sub(r"\[ \]", "[X]", lines[current.line], count=1)
+    return _checked_result("".join(lines))
+
+
+def _inherit_flags(parent: tasks.Task, item: str) -> str:
+    """Only the label grammar's positional flags convey ownership."""
+    original = TASK_LABEL.fullmatch(parent.title())
+    supplied = TASK_LABEL.fullmatch(f"T000 {item.strip()}")
+    if original is None or supplied is None:
+        raise SpecError("split requires a nonempty native task body")
+    owner, new_owner = original[2], supplied[2]
+    if owner is not None and new_owner is not None and int(owner) != int(new_owner):
+        raise SpecError(f"conflicting story ownership: US{owner} and US{new_owner}")
+    parallel = any(re.match(r"^\[P\]\s+", body) for body in (parent.text, item.strip()))
+    story = owner if owner is not None else new_owner
+    return ("[P] " if parallel else "") + (f"[US{story}] " if story is not None else "") + supplied[3]
+
+
+def split(text: str, task: tasks.Task, subtasks: list[str]) -> str:
+    current = _locate(text, task)
+    lines = text.splitlines(keepends=True)
+    match = tasks.TASK.match(lines[current.line])
+    assert match is not None
+    new = [f"{match[1]}- [ ] {current.label}.{n} {_inherit_flags(current, item)}\n"
+           for n, item in enumerate(subtasks, 1)]
+    return _checked_result("".join(lines[:current.line] + new + lines[current.line + 1:]))
+
+
+def _new_tasks(phases: list[_Phase], items: list[str]) -> str:
+    root = max((int(task.label[1:].split(".")[0])
+                for phase in phases for task in phase.entries), default=0)
+    return "".join(f"- [ ] T{root + n:03d} {item.strip()}\n" for n, item in enumerate(items, 1))
+
+
+def extend_section(text: str, section: int, items: list[str]) -> str:
+    phases = _checked_phases(text)
+    phase = next((phase for phase in phases if phase.number == section), None)
+    if phase is None:
+        raise SpecError(f"no native phase {section}")
+    lines = text.splitlines(keepends=True)
+    # Empty phases are valid targets; insert just after their heading.
+    at = phase.entries[-1].line + 1 if phase.entries else phase.line
+    new = _new_tasks(phases, items)
+    if new and not lines[at - 1].endswith(("\n", "\r")):
+        new = "\n" + new
+    return _checked_result("".join(lines[:at]) + new + "".join(lines[at:]))
+
+
+def append_section(text: str, title: str, items: list[str]) -> str:
+    phases = _checked_phases(text)
+    number = max((phase.number for phase in phases), default=0) + 1
+    body = _new_tasks(phases, items)
+    sep = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+    return _checked_result(f"{text}{sep}## Phase {number}: {title}\n\n{body}")
+
+
+def append_round(text: str, blocks: list[str]) -> tuple[int, str]:
+    """Append feedback after the highest literal native review-round title."""
+    rounds = [int(r[1]) for line in text.splitlines()
+              if (phase := PHASE.match(line))
+              and (r := re.fullmatch(r"Review round (\d+)", phase[2]))]
+    number = max(rounds, default=0) + 1
+    items = [f"Address review feedback {i}: {json.dumps(block)}"
+             for i, block in enumerate(blocks, 1)]
+    return number, append_section(text, f"Review round {number}", items)
 
 
 def validate(repo: Path, change: str) -> list[str]:
@@ -268,6 +382,27 @@ def human_checks(plan_text: str) -> list[str]:
         elif selected and re.match(r"- \[ \][ \t]", line) and line[6:].strip():
             checks.append(line)
     return checks
+
+
+def finish(repo: Path, change: str, all_tasks_done: bool, *, head: str | None) -> dict:
+    """Complete committed native records without a checkout or ref advancement."""
+    if not head:
+        raise SpecError("native completion requires a committed head")
+    if not all_tasks_done:
+        raise SpecError("tasks are unfinished; refusing to complete")
+    path = f"specs/{change}/tasks.md"
+    try:
+        records = parse_tasks(seal.git(repo, "show", f"{head}:{path}").decode("utf-8"))
+        if not records or any(not task.done for task in records):
+            raise SpecError("tasks are empty or unfinished; refusing to complete")
+        path = f"specs/{change}/spec.md"
+        original = seal.git(repo, "show", f"{head}:{path}").decode("utf-8")
+    except (RuntimeError, OSError, subprocess.SubprocessError, UnicodeError) as exc:
+        raise SpecError(f"cannot complete {head}:{path}: {exc}") from exc
+    completed = mark_complete(original)
+    commit = (head if completed == original else seal.commit_files(
+        repo, head, {path: completed}, f"specloop: complete spec-kit feature {change}"))
+    return {"commit": commit}
 
 
 def mark_complete(spec_text: str) -> str:
