@@ -810,6 +810,8 @@ human check remains pending:
   [issue #184](https://github.com/mattpolicastro/nightshift/issues/184), with a
   link from [issue #187](https://github.com/mattpolicastro/nightshift/issues/187).
 
+The [spec-kit house rules](speckit.md) describe the authoring rules and the `nightshift-speckit` preset ([issue #184](https://github.com/mattpolicastro/nightshift/issues/184)).
+
 `specloop/` (in this repo) drives an admitted OpenSpec change through its
 `tasks.md`, one task at a time.
 

@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "preset": {
+    "id": "nightshift-speckit",
+    "name": "Nightshift spec-kit",
+    "version": "1.0.0",
+    "description": "Issue-first features and stable scenario citations for Nightshift authors.",
+    "author": "Matt Policastro",
+    "repository": "https://github.com/mattpolicastro/nightshift",
+    "license": "MIT"
+  },
+  "requires": {"speckit_version": ">=1.3.2"},
+  "provides": {
+    "templates": [
+      {"type": "template", "name": "spec-template", "file": "templates/spec-template.md", "replaces": "spec-template", "strategy": "replace"},
+      {"type": "template", "name": "tasks-template", "file": "templates/tasks-template.md", "replaces": "tasks-template", "strategy": "replace"},
+      {"type": "command", "name": "speckit.specify", "file": "commands/speckit.specify.md", "replaces": "speckit.specify", "strategy": "wrap"}
+    ]
+  }
+}
