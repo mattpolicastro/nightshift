@@ -1,0 +1,95 @@
+## Context
+
+The baseline is main `5a8eaf69`, including #189. `specloop/spec_format.py` already selects native paths and task operations, `revise._append` already delegates to `append_round`, and `propose.paths` already excludes `specs/`. Retain those implementations. `nightshift/specloop_intake.py` still hard-codes naming, readiness spec walks and task paths. `arm.front_door_issue` and `touchpoints.collect_history` recognize only the old producer names.
+
+The trusted enrollment manifest selects new work; the copied run manifest selects admitted work. `[[repos]]` gets no format field. Receipts, job requests and run directories keep their existing schemas and locations, so older daemons can still load newer receipts. Existing authorization, dependency, pause, stop, head-binding, foreign-journal, delivery and migration guarantees remain applicable.
+
+No AGENTS.md is present in this checkout or its inspected ancestor directories. House rules are `docs/specloop/speckit.md`; this change does not depend on access to the external research vault.
+
+## Goals / Non-Goals
+
+Deliver the native issue → spec PR → approval → build → revision → readiness flow on GitHub and configured Gitea, with stable issue-derived identity and unchanged OpenSpec behavior. Prevent concurrent proposals from replacing each other's active draft checkout. Make discovery and drafting inspect exactly the same committed tree.
+
+Do not redesign run storage, introduce receipts or state kinds, change forge policy, merge automatically, modify the Paseo plugin, or expand the build engine beyond the explicitly authorized proposal integration and revision numbering. Preserve #189's prompts, parser semantics, frozen paths and Complete-feature immutability. Keep the two OpenSpec slug functions as a #184 ledger item.
+
+## Decisions
+
+### One physical draft workspace, one lock
+
+Implement `draft_lock(out, owned=None)` in `specloop/propose.py`. Lock the physical managed output, not repository or issue identity: two repositories can both produce `007-add-a-gate` and currently share `<state_root>/drafts/<change>`. Use a stable sibling lock file `.<change>.lock` beside the replaceable directory. The lock is coordination, not a receipt or recoverable state machine; never unlink it, place it inside the removed directory, or truncate another owner's data. Reject symlinks/nonregular lock files and unsafe draft parents before replacement. Retain `_check_draft_output`, legacy-workspace refusal and completed compatibility-link handling.
+
+Use nonblocking exclusive `flock`; contention raises the existing `state.Busy` family and performs no removal, clone, agent call, public-ref update or delivery. A typed ownership token binds descriptor, device/inode and output path; nested calls borrow verified ownership instead of reacquiring a separate descriptor. Acquire after existing migration coordination and receipt/control locks; never acquire those outer locks while holding the draft lock. Release by closing owned descriptors, not explicit `LOCK_UN`, so an inherited owner is not unlocked by its parent's exit.
+
+`specloop/cli.py::propose` holds this helper across draft replacement, agent/review work and `publish_branch`. `draft` also protects direct Python callers, borrowing the CLI token when supplied. Daemon initial and spec-stage proposals use the same helper immediately before dispatch, before creating a replacement receipt/input or job. Background handoff in `nightshift/specloop_job.py` passes the descriptor through wrapper and CLI with `pass_fds`; use a private process argument/environment handoff, never persist a numeric FD in request JSON. Verify an inherited descriptor against the expected lock inode/path before using it. Direct CLI calls with no inherited descriptor acquire the same lock. Keep ordinary specloop argv, request fields and non-proposal launches unchanged.
+
+The daemon closes its copy after successful launch; the wrapper/CLI retain ownership until drafting and local proposal publication finish. Wrapper death must not release a still-running CLI's ownership. Failed launch closes every newly owned descriptor and preserves existing receipt recovery behavior. A busy daemon request remains retryable with its trigger/feedback intact. Old saved requests lacking handoff metadata acquire normally at CLI entry. Do not wrap agents or change their adapter protocol. Tests use bounded subprocesses and explicit synchronization, not live providers.
+
+This protects upgraded concurrent callers; drain pre-upgrade drafting writers before rollout because they do not acquire the new lock. The existing stop/inspect/release rules still govern interrupted jobs and surviving external processes; the lock is not a new job-cancellation mechanism.
+
+### Naming and trusted format selection
+
+Extend `_change_name(repository, number, title, *, format="openspec")` without changing the default call contract. For native format, produce `f"{number:03d}-{slug}"`; numbers are positive and repository-local on both forges. Keep the house-rule slug: lowercase, replace runs outside ASCII `a-z0-9` with `-`, strip boundary hyphens, take 40 characters, strip trailing hyphens, fallback `issue`. Branches remain `spec/<change>` with the existing safety predicate. Repository enrollment/spelling validation remains conservative and OpenSpec naming assertions remain unchanged.
+
+Read format from `manifest_readiness`/`_require_manifest`, never from files found in the target repository or a new `Repo` field. Omitted format selects OpenSpec. Already-recorded receipts, PR branches and runs override current titles and naming conventions. Never rewrite historical identities or infer a format from a numeric name.
+
+### Existing-feature discovery and pinned base
+
+For new eligible native work, inspect only the issue body for literal directory references. On each physical line, recognize a complete repository-relative token `specs/<digits>-<slug>/`, with at least three digits, a lowercase ASCII hyphen-separated slug of at most 40 characters, and token boundaries excluding surrounding path/name characters. Use `(?<![A-Za-z0-9_./-])specs/([0-9]{3,}-[a-z0-9]+(?:-[a-z0-9]+)*)/(?![A-Za-z0-9_./-])` per physical line, then validate slug length and the positive integer. Backticks are optional delimiters. A reference to a file beneath the directory is not a directory token. Apply the same rule inside fences, HTML and indentation: there is no Markdown interpretation. Deduplicate identical tokens; only references whose positive numeric prefix equals the issue number are target candidates. Other-number references remain context, allowing supersession references.
+
+One matching candidate selects that exact name if it exists as a Git tree at the drafting base and contains a readable, non-Complete `spec.md`. Preserve its committed scenario/task IDs even after a title edit. Several distinct matching candidates, a missing explicitly selected directory, a non-tree/symlink target, unreadable spec or Complete feature refuse through existing problems/questions handling; do not silently create another feature. With no matching explicit reference, use the generated name, and do not overwrite a Complete feature already at that path. No sequential directory-number scan or inference from uncommitted files.
+
+Resolve the base once with `propose.start_commit`: bounded best-effort origin fetch, prefer the fetched upstream base, otherwise local base; source checkout HEAD is irrelevant. Add an optional exact `base_commit` keyword to `draft` and `--base-commit` plumbing to the proposal CLI. It accepts a full existing commit object and is mutually exclusive with `--from-branch`; it is not a branch-name override. The front door SHALL supply only the commit obtained by ordinary resolution at discovery time. Discovery reads `<commit>:specs/<candidate>/`; drafting uses that commit without another base fetch/resolution, even if origin moves. A later fetch of that exact object into the draft clone is allowed. Retain unpinned `start_commit` behavior and reviewed `from_branch` semantics. Keep this internal pinning out of normal explicit CLI documentation examples.
+
+Daemon resolution must use its existing injected, pause-guarded git runner and 30-second process-group timeout. Permit `start_commit` to accept a runner while preserving its current default direct-call behavior and bounded fallback. A pause or timeout cannot become proof of directory absence: propagate pause; retain ordinary fetch-failure local fallback, but fail uncertain tree/blob reads through the existing retryable error path before dispatch.
+
+### Recovery and PR delivery
+
+Do exact PR recovery before dependency-gated new drafting or base discovery. For native enrollment, candidates are the current native name, literal same-number body candidates, and current-title qualified/legacy OpenSpec names, deduplicated. Lookups are repository-scoped; multiple incompatible open identities block rather than choosing one. Do not scan arbitrary PR titles or infer renamed historical features. For OpenSpec preserve the current qualified-then-legacy lookup transcript. Saved identities and jobs bypass discovery; lookup failures never imply absence. Authorization still precedes recovery writes, and open PR/completed-result recovery still bypasses blocker checks. Merged PR suppression and closed-PR replacement leases remain intact; a genuinely new native round uses native naming unless selecting an explicitly named existing feature.
+
+For native success, keep title `Spec: <issue title>`, `Closes #n`, feasibility-risk rendering, review label and issue-link delivery. Add exactly one line `spec-kit feature \`specs/<change>/\``. Determine this from the trusted effective manifest, including for a legacy-named native feature. Preserve successful-result source refs and exact saved-commit delivery; do not rewrite a recovered PR merely to add the line. No new receipt fields are required.
+
+### Native identity consumers
+
+In `arm.front_door_issue`, retain old qualified/basename patterns and additionally recognize a native basename starting `^(\d{3,})-`, converting the prefix with `int` and rejecting zero. Strip only the exact current-repository qualification where applicable, never an arbitrary owner's prefix or path. Native qualification accepted for compatibility is `<owner>__<repository>-<NNN>-<slug>`; bare `<NNN>-<slug>` is the producer form. Preserve safe-component and bounded slug checks. PR callers still require a same-repository `spec/` branch before attribution. Apply this matcher to PR file evidence and in-flight runs so self-exclusion and proven `blocked-by` chains work unchanged. `scope_paths` already inherits `specs/` exclusion; add regression coverage without rewriting it.
+
+In `touchpoints.collect_history`, extend only the existing no-proposal producer fallback to the same native identity, including retained admission/revision jobs. Recorded proposal identity takes precedence. Keep exact repository joins, offline reads, unknown-date warnings and filtering, conflicting-issue diagnostics and ambiguity handling. Two repositories with the same native name get separate issue rows; ambiguous globally named run events remain unread. No history rewrite or new schema.
+
+### Committed readiness through the format adapter
+
+Use the copied run manifest after existing run/PR/head/manifest identity checks. Preserve the PR-body checklist's precedence over publication `checks`, exact heading rules and accepted physical checkbox/citation grammar. In particular, the unique exact `## Checks a human must make` heading ends at the next line beginning `#`; zero headings permits the existing receipt fallback, multiple headings block, and malformed lines/citations block. Existing checked pre-merge rows do not become an exemption.
+
+For native checks, read only `<run-head>:specs/<change>/spec.md`, call `speckit.parse_spec` and `speckit.scenario_ids`, and require each cited ID to map uniquely to a scenario whose parsed text contains `<!-- nightshift:post-deploy -->`. The current parser's scenario text is the AS-labelled physical line: put the marker on that line; a marker on a neighboring line, another scenario or in plan.md does not qualify. Duplicate identities, read/decode failures, malformed IDs and unknown/unmarked IDs block. Matching literal examples use the parser's existing physical-line rules. The OpenSpec Markdown walk and its slug function remain unchanged.
+
+For enabled evidence, use `fmt.tasks_path(change)` and `fmt.parse_tasks(document)` to obtain task section numbers. Preserve the existing empty/duplicate-section guard by comparing parsed section order against physical headings using the selected backend's existing `tasks.SECTION` or `speckit.PHASE` regex, without introducing a new task parser or adapter API. A recognized empty phase, duplicate phase or malformed native task parse blocks. Other-format headings do not select a format; existing same-or-higher heading boundaries still apply. Exclude the adapter-selected tasks path from test-only diffs. Keep latest-event ordering, scoring, timeout checks and exact failure reasons.
+
+#182 shares `nightshift/specloop_intake.py`: edits there are unavoidable but confined to naming/discovery/PR delivery and the two readiness substitutions. Preserve its early `evidence = false` return after identity validation and before any task/event/diff read. Never modify `tests/merge_readiness_fixtures.py`, `tests/test_merge_readiness_evidence.py` or `tests/test_specloop_base_publication.py`. Add native fixture twins in new files; keep all existing OpenSpec fixtures/assertions, including every `tests/test_merge_readiness_*.py` assertion.
+
+### Revision and test boundaries
+
+Keep `revise._append` and `_validate_candidate` using the same selected adapter. Existing native append behavior already uses maximum phase N plus one, maximum exact `Review round K` plus one, and numeric T root M plus one (including dotted children), with minimum three digits and no truncation. No parser or numbering rewrite is planned. Test the requested Phase 4 round on a new local three-phase fixture, with highest root T009 producing T010; the committed shared fixture now has six phases and must remain unchanged. Also cover T999→T1000, dotted roots, duplicate refusal and same-key replay after later state changes. Keep `tests/test_revise_idempotency.py` and `tests/test_revision_crash_subprocess.py` unchanged.
+
+Add all six tests named in the issue, including revision replay, in `tests/test_speckit_front_door.py`; use separate new files for lock/subprocess tests, identity-consumer tests and documentation tests. Offline tests use temporary Git repositories and fake forges/providers. Run focused tests with each task and `uv run pytest` for final integration. Test code counts toward the approximately 300-line session ceiling; split a task before implementation if its single concern plus tests exceeds that ceiling.
+
+### Documentation and migration
+
+Update root README flow/enrollment, the existing engine-guide front-door heading, and a new `## The front door` house-rule section. Add native examples alongside the literal OpenSpec examples. Preserve exact headings, fenced command examples, existing normal/optional-bypass admission examples, links and pending human checks tested today. Update the native-spec-kit bullet only in `KNOWN-LIMITATIONS.md`; #182's readiness text is out of scope. Correct pending-front-door claims in `docs/specloop/command-json.md`, `presets/nightshift-speckit/README.md`, native manifest comments and any directly affected scoped introduction. No plugin edit.
+
+New documentation checks use unique exact physical headings through the next same-or-higher heading, and exact fence delimiter lines for examples. Missing/duplicate boundaries fail. Do not interpret Markdown containers or change existing test boundaries to accommodate edits. Parse examples with real CLI/TOML parsers without executing them, and check local links. Keep numeric native naming and existing owner-qualified naming literals visible.
+
+Document that native issue numbers are repository-local but run storage remains globally change-keyed within one state root. Existing collision refusal prevents adoption of another repository's run; operators needing identical native names concurrently use separate state roots. The draft lock serializes a shared disposable workspace; it does not namespace admitted runs. Do not claim recovery after both receipt loss and an unreferenced title/directory rename.
+
+## Risks / Trade-offs
+
+The lock and process handoff are separate tasks so subprocess synchronization, descriptor closure and migration/receipt lock ordering fit reviewable sessions. Discovery/recovery may also exceed a session: split implementation and its matching tests by helper versus intake integration if needed, preserving dependencies and scenario coverage rather than omitting tests.
+
+Readiness overlaps #182. Rebase narrowly and keep disabled evidence and protected fixtures unchanged; passing native checks must never weaken OpenSpec or enabled-evidence safeguards. Documentation tests select literal boundaries, so add sections where their existing selection remains valid, especially the single legacy-resume checklist under How the engine works.
+
+Physical-line discovery and post-deploy recognition intentionally have no semantic fence/HTML exemption. Ambiguous targets block; native post-deploy markers must be part of the parsed AS line. This is deterministic and testable but needs a clear author example.
+
+Offline tests prove parsing, dispatch, recovery and local Git behavior. They cannot prove live enrollment, credentials, labels, agent quality or operator readability. No real-enrollment success is claimed by this draft.
+
+## Human checks
+
+- [ ] On the first spec-kit-only enrollment on GitHub or configured Gitea, install the preset, create the labels, use a trusted manifest with `format = "speckit"`, and take one issue through draft → review → approval → build → publish → merge. Record issue/PR identity and the touchpoint report against the baseline on #184, including whether revision/readiness paths were exercised; `specloop-documentation/native-front-door-guidance/live-enrollment-remains-pending`.
+- [ ] Before upgrading, drain pre-upgrade proposal writers and inspect stopped jobs under the existing recovery procedure; confirm upgraded direct CLI and daemon proposals use the shared lock, without a continuing manual-exclusion requirement between upgraded callers; `spec-drafting/exclusive-draft-workspace/background-owner-survives-wrapper-exit`.
+- [ ] Verify live documentation references and read the enrollment/front-door guidance for clarity, preserving the separate pending draft-quality, build/Finish and deployed legacy-resume observations on #184; `specloop-documentation/native-front-door-guidance/operator-finds-native-enrollment`.
