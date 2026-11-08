@@ -10,14 +10,14 @@ The prerequisite, engine, deployment, platform and plugin guides SHALL consisten
 
 #### Scenario: Operator installs and verifies the release
 - **WHEN** an operator follows `docs/deploy.md#install-openspec` from the prerequisite or host guidance
-- **THEN** instructions identify the official 1.16.1 archive for the host, verify its SHA-256 against SHA256SUMS before extraction, place the executable at the configured path and run its version and preflight checks
+- **THEN** instructions identify the official 1.16.1 `openspec-darwin-arm64.tar.gz` archive for the sole mapped host and explain that all other hosts fail preflight as unknown, verify its SHA-256 against SHA256SUMS before extraction, place the executable at the configured path and run its version and preflight checks
 - **THEN** archive and executable digests are distinguished, runtime acquisition/fallback is absent, and affected consumers must be restarted after replacement
 
 #### Scenario: Operator understands stricter drafts and rollout
 - **WHEN** an operator reads the validator and deployment guidance
 - **THEN** it explains missing WHEN/GIVEN or THEN and unknown requirements-header failures, accepted closing hashes and the retained harness scenario lint
-- **THEN** pre-merge validation of throwaway main and Scheming Vizier, pre-deploy validation of both enrolled checkouts and the Mac Studio admission/finish cut-over remain explicit pending human checks recorded on #191/#184
-- **THEN** the bundled supervisor PATH/comment remain unchanged; a separate operator-controlled supervisor check without `~/n/bin` establishes dependency removal, while exact bundled-wrapper cleanup and verification are explicitly deferred to separately authorized work
+- **THEN** exactly three human checks remain pending and recorded on #191/#184: pre-merge validation of throwaway main and Scheming Vizier including disposable strict examples, pre-deploy validation of both enrolled deployment checkouts, and the Mac Studio admission/finish cut-over
+- **THEN** the bundled supervisor PATH/comment remain unchanged; absolute executable selection plus the cut-over establish dependency removal, with no separate supervisor-without-`~/n/bin` experiment, while exact bundled-wrapper cleanup remains deferred on #184's ledger
 - **THEN** archived failures are informational and offline tests do not claim live deployment success
 
 ## MODIFIED Requirements

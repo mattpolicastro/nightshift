@@ -42,10 +42,10 @@ The backend SHALL define `VERSION = "1.16.1"` as the single executable version c
 
 ### Requirement: Installed binary preflight
 
-Preflight SHALL independently verify a readable executable file, its SHA-256 against committed `specloop/openspec-SHA256SUMS` for the host target, and its exact pinned version. It SHALL verify bytes before execution, check afresh on every invocation, preserve other checks and fail with installation instructions on unavailable or invalid evidence. Release archive hashes and installed-executable hashes SHALL be distinguished and have recorded official-release provenance.
+Preflight SHALL independently verify a readable executable file, its SHA-256 against committed `specloop/openspec-SHA256SUMS` for the host target, and its exact pinned version. It SHALL verify bytes before execution, check afresh on every invocation, preserve other checks and fail with installation instructions on unavailable or invalid evidence.
 
 #### Scenario: Verified executable passes
-- **WHEN** the selected file is executable, its bytes match the host binary digest and its version is exactly `VERSION`
+- **WHEN** the host is Darwin arm64, the selected file is executable, its bytes match the `binary/darwin-arm64/openspec` digest and its version is exactly `VERSION`
 - **THEN** preflight reports a successful OpenSpec check without modifying files, downloading anything or relying on the runtime version cache
 - **THEN** existing forge, credential, alert and deep-probe checks retain their outcomes
 
@@ -55,8 +55,19 @@ Preflight SHALL independently verify a readable executable file, its SHA-256 aga
 - **THEN** other checks remain reportable and CLI preflight cannot report readiness
 
 #### Scenario: Unavailable prerequisite fails closed
-- **WHEN** the file is missing, unreadable or non-executable, checksum data is missing, malformed or duplicated, the host target is unknown, or the version probe fails, times out or mismatches
+- **WHEN** the file is missing, unreadable or non-executable, checksum data is missing, malformed or duplicated, the host pair is anything other than Darwin arm64 (including Intel macOS, Linux or Windows), or the version probe fails, times out or mismatches
 - **THEN** preflight reports a failed check with installation guidance and never substitutes another target, a cached pass or an automatic repair
+- **THEN** the host-target map contains only `("Darwin", "arm64")` to `darwin-arm64`; archive entries for other targets do not authorize execution
+
+### Requirement: Release checksum provenance
+
+The committed checksum manifest SHALL distinguish archive hashes from installed-executable hashes and record their official-release provenance. Implementation SHALL copy only the supplied release evidence without network retrieval or deriving additional binary hashes.
+
+#### Scenario: Supplied release evidence is copied offline
+- **WHEN** the manifest is created from the operator-verified 1.16.1 evidence in design
+- **THEN** it contains all eight supplied archive digests with `archive/` keys and exactly one installed-binary digest, `bf0fbb541e79c3990906254be7d1b075c95efceb41e9e28899e72357ba4268a0`, under `binary/darwin-arm64/openspec`
+- **THEN** comments record operator verification on 2026-11-08, the official release URL and publication timestamp, successful archive checksum verification, extraction to `LICENSE` and `openspec`, the binary hash derivation and observed version outputs
+- **THEN** entries follow the design's deterministic checksum-line grammar; malformed or duplicate keys are rejected without fetching replacement evidence
 
 ### Requirement: Strict validator compatibility
 
