@@ -99,6 +99,12 @@ Context limitations:
 """
 
 
+SPECKIT_PROMPT = (
+    "# Spec critic of a spec-kit feature\n\n" + feasibility.SPECKIT_CONTEXT + "\n"
+    + PROMPT[PROMPT.index("Implementers may change only:"):]
+)
+
+
 def _sorted_map(files: dict[str, list[str]]) -> dict[str, list[str]]:
     return {path: sorted(set(labels)) for path, labels in sorted(files.items())}
 
@@ -395,7 +401,8 @@ def check(repo: Path, rev: str, m: Manifest, out: Path, *, change: str,
             "Successfully collected PR context." if pr_files else
             "Successful lookup: no open PR changed files."
         )
-        prompt = PROMPT.format(
+        template = SPECKIT_PROMPT if m.format == "speckit" else PROMPT
+        prompt = template.format(
             change=change, allowed=", ".join(m.allowed) or "(none)",
             frozen=", ".join(m.frozen) or "(none)",
             planned=json.dumps(_sorted_map(planned), indent=2),

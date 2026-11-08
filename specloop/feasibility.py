@@ -56,6 +56,59 @@ merely risky, vague or likely to need a retry in `risks`.
 """
 
 
+# Shared agent reading guidance, not a harness parser or history resolver.
+SPECKIT_CONTEXT = """\
+Your working directory is a fresh extraction of the exact candidate commit.
+Do not modify anything. Read specs/{change}/spec.md, specs/{change}/plan.md,
+specs/{change}/tasks.md, .specify/memory/constitution.md, relevant repository
+code and tests, and repository instructions (including AGENTS.md when present).
+
+Read named feature context using these bounded physical-line rules:
+- In plan.md, sections start at exact column-zero `## Depends on` or
+  `## Assumptions` and end at the next column-zero level-one/two heading.
+  Also accept feature names on an ASCII-trimmed `Depends on:` or
+  `**Depends on**:` field line.
+- Read spec.md's `## Assumptions` too, with the same exact column-zero section
+  start and next column-zero level-one/two heading boundary.
+- References are explicit canonical `NNN-slug` names or `specs/NNN-slug/`
+  paths, optionally ending in `spec.md`. Read specs/<named-feature>/spec.md
+  for every feature named by these sections or fields.
+- Check each named spec's physical `**Status**: Complete` before treating it
+  as a delivered guarantee. Do not treat Draft features as Complete guarantees.
+  Do not infer identities from titles, recurse through named features'
+  references, or scan unrelated historical features.
+- Literal matching physical lines inside examples receive no semantic Markdown
+  exemption (including fences, HTML or indentation). Missing or ambiguous
+  referenced identity, unreadable required context, or conflicting Status lines
+  must produce a concrete inability-to-complete finding in contradictions,
+  naming the affected task and file/line evidence (or the required missing path).
+  Never silently omit required context and return a clean review.
+
+Breaking a constitution principle or changing behavior specified by a named
+Complete feature without explicitly identifying and justifying that change in
+`## Assumptions` in the selected feature's spec.md or plan.md is a contradiction.
+Name the task and cite concrete file/line evidence for the principle or guarantee
+and the changed behavior. A generic dependency mention is not acknowledgement.
+An explicit, justified Assumptions statement removes only that missing-disclosure
+basis; it does not waive allowed/frozen paths, trusted verify commands, or other
+impossibilities. Human-only checks belong in plan.md, not tasks.md.
+"""
+
+SPECKIT_PROMPT = (
+    "# Feasibility check of a spec-kit feature before it is admitted\n\n"
+    + SPECKIT_CONTEXT + "\n"
+    + PROMPT[PROMPT.index("Implementers may change only:"):].replace(
+        "- the change removes, hides or breaks behaviour that a requirement in\n"
+        "  openspec/specs/ guarantees, without a MODIFIED or REMOVED delta for that\n"
+        "  requirement (cite the requirement);\n", ""
+    ).replace("check belongs in design.md", "check belongs in plan.md").replace(
+        "Report a contradiction ONLY when a task is impossible as written,",
+        "Besides the required-context and missing-disclosure findings above,\n"
+        "report a contradiction ONLY when a task is impossible as written,"
+    )
+)
+
+
 def check(repo: Path, rev: str, m: Manifest, out: Path, agent=None) -> dict:
     agent = agent or agents.run
     checkout = out / "checkout"
@@ -73,7 +126,8 @@ def check(repo: Path, rev: str, m: Manifest, out: Path, agent=None) -> dict:
             for s in group) or "(none)")
         for label, group in (("Prepare", m.prepare), ("Verify", m.verify))
     )
-    prompt = PROMPT.format(change=m.change, allowed=", ".join(m.allowed), frozen=", ".join(m.frozen), steps=steps)
+    template = SPECKIT_PROMPT if m.format == "speckit" else PROMPT
+    prompt = template.format(change=m.change, allowed=", ".join(m.allowed), frozen=", ".join(m.frozen), steps=steps)
     profile = (m.chains.get("feasibility") or m.chains.get("review") or (m.roles["review"],))[0]
     call = agents.Call(profile, "read", prompt, checkout, SCHEMA, out / "feasibility.jsonl", 20 * 60,
                        m.idle_minutes * 60, agents.homes_dir() / profile.name)

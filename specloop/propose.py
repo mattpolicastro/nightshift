@@ -24,7 +24,7 @@ import re
 import shutil
 import stat
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from specloop import agents, critic, feasibility, manifest, speckit, spec_format, state
@@ -416,7 +416,8 @@ def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m
             return d
         git(work, "commit", "-qm", f"Draft OpenSpec change {change} (specloop propose, round {n})", env=IDENTITY)
         head = git(work, "rev-parse", "HEAD").decode().strip()
-        review = feasibility.check(work, head, m, out / f"feasibility-{n}", agent=agent)
+        review_manifest = replace(m, change=change) if m.format == "speckit" else m
+        review = feasibility.check(work, head, review_manifest, out / f"feasibility-{n}", agent=agent)
         if review.get("error"):
             d.problems = [f"feasibility review failed: {review['error']}"]
             return d
