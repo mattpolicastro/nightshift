@@ -6,17 +6,19 @@ Preserve ordinary draft-base resolution while allowing a discovery-time commit p
 
 ### Requirement: Repository qualified native draft workspaces
 
-Managed native proposals SHALL use `<state_root>/drafts/@speckit/<owner>__<repo>/<change>`, selecting the repository from the trusted manifest through the shared proposal CLI path. The unchanged `SAFE_CHANGE` predicate SHALL reject the namespace. OpenSpec proposals SHALL retain `<state_root>/drafts/<change>` exactly. Replacement SHALL affect only the selected leaf and retain path-safety checks for all managed parents.
+Managed native proposals SHALL use `<state_root>/drafts/@speckit/<owner>/<repo>/<change>` via the shared proposal CLI, with separate validated owner/repository components from the trusted manifest. The unchanged `SAFE_CHANGE` SHALL reject `@speckit`. OpenSpec output SHALL remain `<state_root>/drafts/<change>`. Replacement SHALL affect only the selected leaf after path-safety checks on every managed parent.
 
 #### Scenario: Native workspaces are isolated
 - **WHEN** native manifests for a/x and b/x propose 007-add-a-gate through daemon or direct CLI entry points
-- **THEN** their managed outputs are drafts/@speckit/a__x/007-add-a-gate and drafts/@speckit/b__x/007-add-a-gate, and replacing either leaves the other's files intact
+- **THEN** their managed outputs are drafts/@speckit/a/x/007-add-a-gate and drafts/@speckit/b/x/007-add-a-gate, and replacing either leaves the other's files intact
+- **THEN** owner/repository components retain exact spelling without delimiter concatenation, so distinct accepted repository tuples have distinct managed outputs
+- **THEN** native a__b/c and a/b__c also resolve distinctly to drafts/@speckit/a__b/c/007-add-a-gate and drafts/@speckit/a/b__c/007-add-a-gate; sequential direct CLI proposals and re-drafts in either order leave the other workspace's sentinel files intact after each replacement
 - **THEN** namespace selection uses the trusted repository; missing/unsafe repository components or linked/non-directory managed parents refuse before replacement, and explicit isolated Python output paths retain their supported behavior
 - **THEN** the change requires no workspace migration, lock, wrapper handoff or new receipt/state kind; existing daemon one-job-per-item receipts and stopped-job holds remain authoritative
 
 #### Scenario: OpenSpec workspaces remain flat and intact
 - **WHEN** native a/x issue 7 and OpenSpec 1-a/1-x__007 issue 7, both titled Add a gate, are drafted or redrafted in either order
-- **THEN** their directories are drafts/@speckit/a__x/007-add-a-gate and drafts/1-a__1-x__007-issue-7-add-a-gate, and drafting either leaves sentinel files in the other's workspace intact
+- **THEN** their directories are drafts/@speckit/a/x/007-add-a-gate and drafts/1-a__1-x__007-issue-7-add-a-gate, and drafting either leaves sentinel files in the other's workspace intact
 - **THEN** SAFE_CHANGE.fullmatch("@speckit") is None, no valid OpenSpec or explicit CLI change can occupy the namespace root, and existing flat OpenSpec paths, legacy migration refusals and compatibility links remain unchanged
 
 ## MODIFIED Requirements
