@@ -6,12 +6,14 @@ Document native front-door support and its rollout without weakening existing ex
 
 ### Requirement: Native front door guidance
 
-The scoped guides SHALL explain manifest-selected native naming, reuse, PR text, AS post-deploy markers, revisions, proposal locking and bounded recovery. Updates SHALL preserve existing examples, headings, installation prerequisites, assertions and pending checks. New tests SHALL apply deterministic physical heading/fence boundaries, fail ambiguity and preserve #182's protected files.
+The scoped guides SHALL explain native enrollment, naming, reuse, PR text, AS markers, revisions, isolated draft workspaces and bounded recovery. The arming guide SHALL document native issue attribution and both reserved spec roots. Updates SHALL preserve examples, headings, prerequisites, assertions and pending checks. New tests SHALL use deterministic physical heading/fence boundaries, fail ambiguity and preserve #182's protected files.
 
 #### Scenario: Operator finds native enrollment
 - **WHEN** an operator reads the native front-door and enrollment guidance
 - **THEN** it shows issue 7 becoming 007-add-a-gate and issue 1234 growing without truncation, the spec/ branch and specs/ directory, and format = speckit in the trusted manifest without a new repos field
-- **THEN** it explains existing-feature reuse, unchanged recorded identities, same-line AS markers, adapter revision numbering, shared upgraded CLI/daemon locking, pre-upgrade writer draining and the unchanged globally change-keyed run collision boundary
+- **THEN** it explains existing-feature reuse, unchanged recorded identities, same-line AS markers, adapter revision numbering, native drafts/@speckit/<owner>__<repo>/<change> isolation, unchanged flat OpenSpec workspaces, existing daemon one-job-per-item receipts/stopped-job holds, direct CLI same-repository/change coordination and pre-upgrade writer draining
+- **THEN** the ledger retains globally change-keyed run storage with existing collision refusal and separate state roots for concurrent identical native names; no draft lock or run namespace is claimed
+- **THEN** docs/arming.md recognizes native <NNN>-<slug> and compatibility <owner>__<repo>-<NNN>-<slug> identities using the numeric prefix as the source issue, excludes openspec/ and specs/ from scope paths, and retains existing OpenSpec examples
 - **THEN** existing OpenSpec naming literals, CLI examples, heading/fence boundaries, links, plugin content and the separate legacy-resume checklist remain intact; new offline checks parse real CLI/TOML examples without dispatch
 
 #### Scenario: Live enrollment remains pending
@@ -21,6 +23,21 @@ The scoped guides SHALL explain manifest-selected native naming, reuse, PR text,
 - **THEN** KNOWN-LIMITATIONS changes only its native-spec-kit bullet, retains #182 readiness material and does not present offline tests as live success
 
 ## MODIFIED Requirements
+
+### Requirement: Spec-kit discovery
+
+The engine guide SHALL retain its one-sentence house-rules link under How the
+engine works, and root README SHALL retain its presets/ Layout entry.
+Guidance SHALL distinguish authoring asset installation from explicit native
+drafting/builds and manifest-enrolled native front-door support. It SHALL
+preserve existing assertions and other in-flight changes, correcting only
+passages made false. This replaces the future-front-door wording because this
+change supplies that integration; installation alone still does not enroll it.
+
+#### Scenario: Find authoring guidance
+- **WHEN** a reader follows the engine guide link or root Layout entry
+- **THEN** house rules/preset remain discoverable, relative links resolve and no unperformed installation or live validation is described as complete
+- **THEN** the eight authoring rules retain distinct headings or bold leads and the guide retains 042-add-a-gate/us1/as2, with original authoring-asset assertions unchanged
 
 ### Requirement: Native build operator guidance
 

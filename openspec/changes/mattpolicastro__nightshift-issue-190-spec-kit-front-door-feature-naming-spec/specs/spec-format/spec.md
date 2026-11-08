@@ -1,6 +1,6 @@
 ## Purpose
 
-Retain format-seam compatibility while explicitly qualifying proposal locking and optional base pinning.
+Retain format-seam compatibility while explicitly qualifying optional discovery-base pinning.
 
 ## MODIFIED Requirements
 
@@ -9,7 +9,7 @@ Retain format-seam compatibility while explicitly qualifying proposal locking an
 The four consumer modules `cli.py`, `loop.py`, `revise.py` and `propose.py`
 SHALL route the extracted operations through the selected adapter, containing
 no `openspec/changes/` literal and no direct `openspec.` attribute call.
-Except for the pinned OpenSpec backend invocation, version gate, strict-validator upgrade and error classification explicitly specified by this change, and the shared planned-file exclusion below, OpenSpec rendered prompts, messages, argv, commits, state transitions and recovery behavior SHALL remain unchanged for uncontended, unpinned calls. The shared draft-workspace lock and explicitly supplied discovery-base pin under spec-drafting are narrow exceptions: lock contention SHALL be retryable, and a pinned call SHALL use its already resolved commit. These exceptions SHALL NOT change OpenSpec prompts, ordinary resolution, task operations or successful result shapes.
+Except for the pinned OpenSpec backend invocation, version gate, strict-validator upgrade and error classification explicitly specified by this change, and the shared planned-file exclusion below, OpenSpec rendered prompts, messages, argv, commits, state transitions and recovery behavior SHALL remain unchanged for unpinned calls. An explicitly supplied discovery-base pin under spec-drafting is a narrow exception: a pinned call SHALL use its already resolved commit. This exception SHALL NOT change OpenSpec prompts, ordinary resolution, flat draft-workspace paths, task operations or successful result shapes.
 
 Shared planned-file extraction (`propose.paths` and `edited_paths`) SHALL
 exclude tokens beginning `specs/` as well as `openspec/`, for every format

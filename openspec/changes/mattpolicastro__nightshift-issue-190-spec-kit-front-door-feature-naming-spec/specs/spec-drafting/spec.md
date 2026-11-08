@@ -1,32 +1,23 @@
 ## Purpose
 
-Preserve ordinary draft-base resolution while allowing a discovery-time commit pin and serializing replacement of shared proposal workspaces.
+Preserve ordinary draft-base resolution while allowing a discovery-time commit pin and isolating native proposal workspaces by repository and format.
 
 ## ADDED Requirements
 
-### Requirement: Exclusive draft workspace
+### Requirement: Repository qualified native draft workspaces
 
-Every upgraded daemon and direct CLI proposal SHALL share the nonblocking workspace lock in specloop/propose.py from replacement through local publication, including spec revisions. Stable lock inodes, safe paths, lock ordering and validated borrowed/inherited ownership SHALL follow the design. Busy or unsafe ownership SHALL prevent replacement; closing a parent descriptor SHALL NOT unlock a live inherited owner. No receipt or state kind SHALL be added.
+Managed native proposals SHALL use `<state_root>/drafts/@speckit/<owner>__<repo>/<change>`, selecting the repository from the trusted manifest through the shared proposal CLI path. The unchanged `SAFE_CHANGE` predicate SHALL reject the namespace. OpenSpec proposals SHALL retain `<state_root>/drafts/<change>` exactly. Replacement SHALL affect only the selected leaf and retain path-safety checks for all managed parents.
 
-#### Scenario: Concurrent proposals preserve active work
-- **WHEN** another proposal holds the lock for the same output, including a direct CLI caller competing with a daemon or two repositories producing the same native name
-- **THEN** the contender reports retryable busy before deleting files, cloning, invoking agents or updating proposal refs, and the active workspace remains intact
-- **THEN** an unrelated output can proceed and after the owner exits an eligible retry can acquire the same stable lock inode
+#### Scenario: Native workspaces are isolated
+- **WHEN** native manifests for a/x and b/x propose 007-add-a-gate through daemon or direct CLI entry points
+- **THEN** their managed outputs are drafts/@speckit/a__x/007-add-a-gate and drafts/@speckit/b__x/007-add-a-gate, and replacing either leaves the other's files intact
+- **THEN** namespace selection uses the trusted repository; missing/unsafe repository components or linked/non-directory managed parents refuse before replacement, and explicit isolated Python output paths retain their supported behavior
+- **THEN** the change requires no workspace migration, lock, wrapper handoff or new receipt/state kind; existing daemon one-job-per-item receipts and stopped-job holds remain authoritative
 
-#### Scenario: Unsafe locks refuse before replacement
-- **WHEN** the lock or managed output parent is a symlink/nonregular object, ownership names another output, or legacy workspace evidence requires migration
-- **THEN** the proposal refuses without following unsafe links, deleting evidence or acquiring a replacement lock inode
-- **THEN** ordinary migrated compatibility links and existing daemon receipt/job evidence remain intact
-
-#### Scenario: Background owner survives wrapper exit
-- **WHEN** an upgraded daemon hands ownership through a background wrapper to the proposal CLI, then the wrapper exits while the CLI remains active
-- **THEN** a competing CLI or daemon proposal stays busy until the surviving CLI closes ownership, with no premature explicit unlock by the parent
-- **THEN** direct CLI proposals without inherited ownership acquire the same helper, and legacy saved requests remain executable without new request fields
-
-#### Scenario: Failed dispatch releases ownership
-- **WHEN** launch fails or pause prevents the next dispatch operation after lock acquisition
-- **THEN** newly owned descriptors close, no replacement job is left falsely live, triggers and feedback remain eligible under existing recovery rules, and a later authorized unpaused attempt can retry
-- **THEN** retained completed work is delivered without rerunning a proposal solely to acquire this lock
+#### Scenario: OpenSpec workspaces remain flat and intact
+- **WHEN** native a/x issue 7 and OpenSpec 1-a/1-x__007 issue 7, both titled Add a gate, are drafted or redrafted in either order
+- **THEN** their directories are drafts/@speckit/a__x/007-add-a-gate and drafts/1-a__1-x__007-issue-7-add-a-gate, and drafting either leaves sentinel files in the other's workspace intact
+- **THEN** SAFE_CHANGE.fullmatch("@speckit") is None, no valid OpenSpec or explicit CLI change can occupy the namespace root, and existing flat OpenSpec paths, legacy migration refusals and compatibility links remain unchanged
 
 ## MODIFIED Requirements
 
