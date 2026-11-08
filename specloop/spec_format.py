@@ -114,6 +114,39 @@ class _OpenSpec:
 
 
 class _SpecKit:
+    pr_kind = "spec-kit feature"
+
+    def change_dir(self, repo: Path, change: str) -> Path:
+        return speckit.feature_dir(repo, change)
+
+    def tasks_path(self, change: str) -> str:
+        return f"specs/{change}/tasks.md"
+
+    def tasks_paths_at(self, repo: Path, head: str, change: str) -> list[str]:
+        return [self.tasks_path(change)]
+
+    def validate(self, repo: Path, change: str) -> list[str]:
+        return speckit.validate(repo, change)
+
+    def scenarios(self, repo: Path, change: str) -> dict[str, str]:
+        return speckit.scenarios(repo, change)
+
+    def drafter_root(self, change: str) -> str:
+        return f"specs/{change}/"
+
+    def pr_title(self, change: str) -> str:
+        return f"{change}: spec-kit feature via specloop"
+
+    def human_checks(self, repo: Path, head: str, change: str) -> list[str]:
+        # Context, committed checks and completion are wired in subsequent build tasks.
+        raise SpecError("native committed human checks are not implemented yet")
+
+    def context_files(self, repo: Path, change: str) -> list[tuple[Path, str]]:
+        raise SpecError("native build context is not implemented yet")
+
+    def finish(self, work: Path, change: str, all_tasks_done: bool) -> dict:
+        raise SpecError("native completion is not implemented yet")
+
     def parse_tasks(self, text: str) -> list[tasks.Task]:
         return speckit.parse_tasks(text)
 
@@ -131,10 +164,10 @@ class _SpecKit:
 
 
 OPENSPEC: SpecFormat = _OpenSpec()
-SPECKIT = _SpecKit()
+SPECKIT: SpecFormat = _SpecKit()
 
 
 def get(m: Manifest) -> SpecFormat:
     if m.format == "speckit":
-        raise SpecError("spec-kit format is not available yet")
+        return SPECKIT
     return OPENSPEC

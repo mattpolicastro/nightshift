@@ -23,7 +23,7 @@ from urllib.parse import quote, unquote, urlsplit
 from nightshift import config
 from nightshift.forge import ForgeError
 from nightshift.forge.gitea import GiteaForge
-from specloop import feasibility, loop, manifest, messages, openspec, spec_format, tasks, verify
+from specloop import feasibility, loop, manifest, messages, openspec, speckit, spec_format, tasks, verify
 from specloop.seal import git
 from specloop.state import SAFE_CHANGE, Busy, Run, TaskState, iter_run_dirs, proposals_dir, run_dir
 from specloop.state_locks import MigrationBusy, writer
@@ -99,17 +99,42 @@ def problems_with(repo: Path, rev: str, m: manifest.Manifest) -> list[str]:
         task_file = Path(tmp) / fmt.tasks_path(m.change)
         if not task_file.exists():
             return found + ["the change has no tasks.md"]
-        parsed = fmt.parse_tasks(task_file.read_text())
+        try:
+            text = task_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as e:
+            if m.format != "speckit":
+                raise
+            return found + [f"{fmt.tasks_path(m.change)}: cannot read tasks: {e}"]
+        native = m.format == "speckit"
+        if native:
+            # Scan physical headings too: an empty phase has no Task record.
+            for line, raw in enumerate(text.splitlines(), 1):
+                if (phase := speckit.PHASE.match(raw)) and int(phase[1]) == 0:
+                    found.append(f"{fmt.tasks_path(m.change)}:{line}: phase zero is not admissible")
+            if 0 in m.phase_gates:
+                found.append("phase gate zero is not admissible")
+        try:
+            parsed = fmt.parse_tasks(text)
+        except spec_format.ValidatorUnavailable:
+            raise
+        except spec_format.SpecError as e:
+            if not native:
+                raise
+            return found + [str(e)]
         if not parsed:
-            found.append("tasks.md has no tasks under '## N. Title' sections")
+            heading = "'## Phase N: Title' phases" if native else "'## N. Title' sections"
+            found.append(f"tasks.md has no tasks under {heading}")
         keys = [t.key for t in parsed]
         if len(keys) != len(set(keys)):
             found.append("two tasks in one section have identical text")
         for t in parsed:
             found += [f"task {t.label}: unknown scenario `{s}`" for s in t.scenarios if s not in known]
         for n in m.phase_gates:
+            if native and n == 0:
+                continue
             if not any(t.section == n for t in parsed):
-                found.append(f"phase gate {n} names no section in tasks.md")
+                section = "populated phase" if native else "section"
+                found.append(f"phase gate {n} names no {section} in tasks.md")
     return found
 
 
@@ -195,6 +220,14 @@ def _admit_locked(args, run: Run, m: manifest.Manifest, text: str, roles: dict) 
         found = problems_with(run.dir / "repo.git", head, m)
         if found:
             raise ValueError("the change is not admissible:\n" + "\n".join(f"  - {p}" for p in found))
+        counts = {}
+        if m.format == "speckit":
+            fmt = spec_format.get(m)
+            with tempfile.TemporaryDirectory() as tmp:
+                _checkout(run.dir / "repo.git", head, Path(tmp))
+                parsed = fmt.parse_tasks((Path(tmp) / fmt.tasks_path(m.change)).read_text(encoding="utf-8"))
+                counts = {"sections": len({t.section for t in parsed}),
+                          "scenarios": len(fmt.scenarios(Path(tmp), m.change))}
         if not args.skip_feasibility:
             review = feasibility.check(run.dir / "repo.git", head, m, run.dir / "admission")
             _outcome(args, risks=review.get("risks", []))
@@ -217,7 +250,7 @@ def _admit_locked(args, run: Run, m: manifest.Manifest, text: str, roles: dict) 
     run.state.pr = args.pr
     run.save()
     run.event("admitted", head=head, implement=m.roles["implement"].name, review=m.roles["review"].name)
-    _outcome(args, outcome="admitted")
+    _outcome(args, outcome="admitted", **counts)
     print(f"admitted {m.change} at {head[:12]} ({m.roles['implement'].name} implements, "
           f"{m.roles['review'].name} reviews). Next: nightshift run {m.change}")
     return 0

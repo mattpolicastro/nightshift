@@ -1,17 +1,24 @@
 """Task formats are selected by the caller, never inferred from headings."""
 
 import ast
-from dataclasses import replace
+import json
+import tomllib
+from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
 import pytest
 
-from specloop import agents, cli, evidence, loop, speckit, spec_format, tasks
+from nightshift.cli import main
+from specloop import agents, cli, evidence, loop, manifest, openspec, speckit, spec_format, tasks
+from specloop.manifest import Manifest
 from specloop.openspec import SpecError
 from specloop.seal import git
+from specloop.state import Run
 from test_spec_format import commit, repo, run_context
+from test_specloop_command_json import BRANCH, CHANGE, template
+from test_speckit_build import commit_feature, native_admission, three_phase_feature
 
 
 OPERATIONS = ("parse_tasks", "tick", "split", "extend_section", "append_section")
@@ -287,3 +294,150 @@ def test_section_fixes_use_adapter_extension(native_context, monkeypatch, source
     result = speckit.parse_tasks(ctx.tasks_text(ctx.head()))
     assert [(t.section, t.label, t.done) for t in result] == [(1, "T003", True), (1, "T004", False)]
     assert result[-1].text == adapter.extend_section.call_args.args[2][0]
+
+
+@pytest.mark.scenario("specloop-documentation/format-selection-guidance/operator-selects-the-supported-format")
+def test_complete_self_hosting_example_selects_supported_format(monkeypatch, tmp_path):
+    example = Path(__file__).resolve().parents[1] / "examples/specloop/self-hosting.toml"
+    data = tomllib.loads(example.read_text())
+    assert data["run"]["format"] == "openspec"
+    explicit = manifest.load(example)  # Parse every table, including verification and routes.
+    assert spec_format.get(explicit) is spec_format.OPENSPEC
+    del data["run"]["format"]
+    assert manifest.parse(data) == explicit
+    data["run"]["format"] = "speckit"
+    reserved = manifest.parse(data)
+    assert reserved == replace(explicit, format="speckit")
+    assert spec_format.get(reserved) is spec_format.SPECKIT
+    for module, name in ((openspec, "validate"), (agents, "run")):
+        monkeypatch.setattr(module, name, Mock(side_effect=AssertionError(f"unexpected {name}")))
+    # The example's source path is operator-owned; validate a disposable checkout.
+    source = tmp_path / "source"
+    source.mkdir()
+    git(source, "init", "-q", "-b", "main")
+    head = commit(source, {"README.md": "missing native feature\n"})
+    diagnostic = f"specs/{reserved.change}/spec.md:1: missing required file"
+    assert diagnostic in cli.problems_with(source, head, reserved)
+
+
+
+@pytest.mark.scenario("spec-format/manifest-format-selection/omitted-and-explicit-openspec-agree")
+@pytest.mark.scenario("spec-format/manifest-format-selection/spec-kit-selects-the-native-adapter")
+def test_manifest_construction_and_adapter_selection(tmp_path):
+    m = Manifest(tmp_path, "sample-change", "spec/sample-change", "main", "", {}, (), (), ())
+    assert fields(Manifest)[-1].name == "format"
+    assert m.format == "openspec"
+    assert spec_format.get(m) is spec_format.OPENSPEC
+    assert spec_format.get(replace(m, format="openspec")) is spec_format.OPENSPEC
+    assert spec_format.get(replace(m, format="speckit")) is spec_format.SPECKIT
+
+
+
+@pytest.mark.scenario("spec-format/manifest-format-selection/spec-kit-is-refused-at-admission")
+@pytest.mark.scenario("spec-format/manifest-format-selection/spec-kit-selects-the-native-adapter")
+@pytest.mark.scenario("specloop-documentation/format-selection-guidance/operator-selects-the-supported-format")
+@pytest.mark.parametrize("overrides", [False, True])
+def test_manifest_format_speckit_refused_at_admission(template, monkeypatch, capfd, overrides):
+    path, repo = template
+    text = path.read_text().replace("[run]", '[run]\nformat = "speckit"')
+    if not overrides:
+        text = text.replace('change = "x"', f'change = "{CHANGE}"').replace(
+            'branch = "spec/x"', f'branch = "{BRANCH}"')
+    path.write_text(text)
+    assert manifest.load(path).format == "speckit"
+    kwargs = {"change": CHANGE, "branch": BRANCH} if overrides else {}
+    m, effective = manifest.template(path, **kwargs)
+    assert (m.format, m.change, m.branch) == ("speckit", CHANGE, BRANCH)
+    assert tomllib.loads(effective)["run"]["format"] == "speckit"
+    forbidden = {}
+    for module, name in ((openspec, "validate"), (openspec, "scenarios"),
+                         (cli.feasibility, "check"), (agents, "run"), (Run, "save")):
+        forbidden[name] = Mock(side_effect=AssertionError(f"unexpected {name}"))
+        monkeypatch.setattr(module, name, forbidden[name])
+    assert spec_format.get(m) is spec_format.SPECKIT
+    validator = Mock(wraps=speckit.validate)
+    monkeypatch.setattr(speckit, "validate", validator)
+    diagnostic = f"specs/{CHANGE}/spec.md:1: missing required file"
+    problems = cli.problems_with(repo, BRANCH, m)
+    assert diagnostic in problems
+    validator.assert_called_once()
+
+    run = Run.for_change(CHANGE)
+    run.dir.mkdir(parents=True)
+    (run.dir / "lock").touch()
+    lock_inode = (run.dir / "lock").stat().st_ino
+    (run.dir / "admission").mkdir()
+    (run.dir / "admission/partial.json").write_text("{}")
+    run.manifest_path.write_text("partial admission")
+    refs = git(repo, "show-ref")
+    flags = ["--change", CHANGE, "--branch", BRANCH] if overrides else []
+    assert main(["admit", str(path), *flags, "--json"]) == 1
+    output = capfd.readouterr()
+    document = json.loads(output.out)  # Reject extra documents or stdout diagnostics.
+    assert document["version"] == 1 and document["outcome"] == "refused"
+    assert len(document["reasons"]) == 1
+    assert document["reasons"][0].startswith("the change is not admissible:\n")
+    assert diagnostic in document["reasons"][0]
+    for problem in problems:
+        if ":1: missing required file" in problem:
+            assert problem in document["reasons"][0]
+    assert "spec-kit format is not available yet" not in document["reasons"][0]
+    assert validator.call_count == 2
+    assert "error" not in document
+    assert diagnostic in output.err
+    for boundary in forbidden.values():
+        boundary.assert_not_called()
+    assert not (run.dir / "state.json").exists()
+    assert list(run.dir.iterdir()) == [run.dir / "lock"]
+    assert (run.dir / "lock").stat().st_ino == lock_inode
+    assert git(repo, "show-ref") == refs
+    assert path.read_text() == text
+
+
+@pytest.mark.scenario("spec-format/manifest-format-selection/omitted-and-explicit-openspec-agree")
+@pytest.mark.scenario("specloop-interface/native-admission/phase-zero-refuses")
+@pytest.mark.parametrize("format_value", [None, "openspec"])
+@pytest.mark.parametrize("gates", [[], [0]])
+def test_legacy_admission_retains_zero_gate_and_json(template, capfd, format_value, gates):
+    path, source = template
+    text = path.read_text()
+    if format_value:
+        text = text.replace("[run]", '[run]\nformat = "openspec"')
+    path.write_text(text + f"\n[gates]\nphases = {gates}\n")
+    task_path = f"openspec/changes/{CHANGE}/tasks.md"
+    original = (source / task_path).read_text()
+    git(source, "checkout", "-q", BRANCH)
+    commit(source, {task_path: "## 0. Setup\n- [ ] 0.1 Prepare\n" + original + "\n## Phase 0: Example\n"})
+    assert main(["admit", str(path), "--change", CHANGE, "--branch", BRANCH,
+                 "--skip-feasibility", "--json"]) == (1 if gates else 0)
+    document = json.loads(capfd.readouterr().out)
+    assert document["outcome"] == ("refused" if gates else "admitted")
+    if gates:
+        assert document["reasons"] == ["the change is not admissible:\n  - phase gate 0 names no section in tasks.md"]
+    assert set(document) == {"version", "outcome", "head", "reasons", "risks"}
+
+
+@pytest.mark.scenario("spec-format/manifest-format-selection/spec-kit-selects-the-native-adapter")
+def test_native_admission_does_not_skip_requested_feasibility(native_admission, monkeypatch, capfd):
+    _, _, path, _ = native_admission
+    check = Mock(return_value={"error": "controlled feasibility stop"})
+    monkeypatch.setattr(cli.feasibility, "check", check)
+    assert main(["admit", str(path), "--json"]) == 1
+    document = json.loads(capfd.readouterr().out)
+    assert document["outcome"] == "refused"
+    assert "controlled feasibility stop" in document["reasons"][0]
+    check.assert_called_once()
+    assert check.call_args.args[2].format == "speckit"
+    assert not (Run.for_change(check.call_args.args[2].change).dir / "state.json").exists()
+
+
+@pytest.mark.scenario("specloop-interface/native-admission/invalid-task-structure-refuses")
+def test_native_admission_uses_only_native_phase_boundaries(native_admission, capfd):
+    root, task_file, path, _ = native_admission
+    task_file.write_text(task_file.read_text() + "\n## 99. Numeric heading\n"
+                         "- [ ] T001 Outside native phases\n ## Phase 0: Indented example\n")
+    commit_feature(root)
+    assert main(["admit", str(path), "--skip-feasibility", "--json"]) == 0
+    document = json.loads(capfd.readouterr().out)
+    assert document["outcome"] == "admitted"
+    assert document["sections"] == 3 and document["scenarios"] == 4

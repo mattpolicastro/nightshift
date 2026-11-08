@@ -60,6 +60,15 @@ def feature_dir(repo: Path, change: str) -> Path:
     return repo / "specs" / change
 
 
+def scenarios(repo: Path, change: str) -> dict[str, str]:
+    path = feature_dir(repo, change) / "spec.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise SpecError(f"{path}: cannot read native scenarios: {exc}") from exc
+    return scenario_ids(change, parse_spec(text))
+
+
 def parse_spec(text: str) -> Spec:
     spec = Spec()
     story: Story | None = None

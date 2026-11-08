@@ -57,23 +57,6 @@ def test_format_guide_boundaries_are_physical(wrapper, ending):
             format_guide_section(bad, heading)
 
 
-@pytest.mark.scenario("specloop-documentation/format-selection-guidance/operator-selects-the-supported-format")
-def test_complete_self_hosting_example_selects_supported_format(monkeypatch):
-    example = Path(__file__).resolve().parents[1] / "examples/specloop/self-hosting.toml"
-    data = tomllib.loads(example.read_text())
-    assert data["run"]["format"] == "openspec"
-    explicit = manifest.load(example)  # Parse every table, including verification and routes.
-    assert spec_format.get(explicit) is spec_format.OPENSPEC
-    del data["run"]["format"]
-    assert manifest.parse(data) == explicit
-    data["run"]["format"] = "speckit"
-    reserved = manifest.parse(data)
-    assert reserved == replace(explicit, format="speckit")
-    with pytest.raises(spec_format.SpecError) as refusal:
-        spec_format.get(reserved)
-    for module, name in ((cli, "_checkout"), (openspec, "validate"), (agents, "run")):
-        monkeypatch.setattr(module, name, Mock(side_effect=AssertionError(f"unexpected {name}")))
-    assert cli.problems_with(reserved.repo, "unused", reserved) == [str(refusal.value)]
 
 
 @pytest.mark.scenario("specloop-documentation/format-selection-guidance/operator-selects-the-supported-format")
@@ -151,14 +134,6 @@ def test_openspec_adapter_matches_legacy_paths(tmp_path):
     assert adapter.pr_title("sample-change") == "sample-change: OpenSpec change via specloop"
 
 
-def test_manifest_construction_and_adapter_selection(tmp_path):
-    m = Manifest(tmp_path, "sample-change", "spec/sample-change", "main", "", {}, (), (), ())
-    assert fields(Manifest)[-1].name == "format"
-    assert m.format == "openspec"
-    assert spec_format.get(m) is spec_format.OPENSPEC
-    assert spec_format.get(replace(m, format="openspec")) is spec_format.OPENSPEC
-    with pytest.raises(openspec.SpecError, match="^spec-kit format is not available yet$"):
-        spec_format.get(replace(m, format="speckit"))
 
 
 @pytest.mark.scenario("spec-format/manifest-format-selection/omitted-and-explicit-openspec-agree")
@@ -205,52 +180,6 @@ def test_manifest_format_defaults_to_openspec(template, monkeypatch, capfd, form
     assert git(ctx.repo, "show", f"{ctx.head()}:{ctx.tasks_path}") == (repo / ctx.tasks_path).read_bytes()
 
 
-@pytest.mark.scenario("spec-format/manifest-format-selection/spec-kit-is-refused-at-admission")
-@pytest.mark.scenario("specloop-documentation/format-selection-guidance/operator-selects-the-supported-format")
-@pytest.mark.parametrize("overrides", [False, True])
-def test_manifest_format_speckit_refused_at_admission(template, monkeypatch, capfd, overrides):
-    path, repo = template
-    text = path.read_text().replace("[run]", '[run]\nformat = "speckit"')
-    if not overrides:
-        text = text.replace('change = "x"', f'change = "{CHANGE}"').replace(
-            'branch = "spec/x"', f'branch = "{BRANCH}"')
-    path.write_text(text)
-    assert manifest.load(path).format == "speckit"
-    kwargs = {"change": CHANGE, "branch": BRANCH} if overrides else {}
-    m, effective = manifest.template(path, **kwargs)
-    assert (m.format, m.change, m.branch) == ("speckit", CHANGE, BRANCH)
-    assert tomllib.loads(effective)["run"]["format"] == "speckit"
-    forbidden = {}
-    for module, name in ((cli, "_checkout"), (openspec, "validate"), (openspec, "scenarios"),
-                         (cli.feasibility, "check"), (agents, "run"), (Run, "save")):
-        forbidden[name] = Mock(side_effect=AssertionError(f"unexpected {name}"))
-        monkeypatch.setattr(module, name, forbidden[name])
-    diagnostic = "spec-kit format is not available yet"
-    assert cli.problems_with(repo / "missing", "missing-revision", m) == [diagnostic]
-
-    run = Run.for_change(CHANGE)
-    run.dir.mkdir(parents=True)
-    (run.dir / "lock").touch()
-    lock_inode = (run.dir / "lock").stat().st_ino
-    (run.dir / "admission").mkdir()
-    (run.dir / "admission/partial.json").write_text("{}")
-    run.manifest_path.write_text("partial admission")
-    refs = git(repo, "show-ref")
-    flags = ["--change", CHANGE, "--branch", BRANCH] if overrides else []
-    assert main(["admit", str(path), *flags, "--json"]) == 1
-    output = capfd.readouterr()
-    document = json.loads(output.out)  # Reject extra documents or stdout diagnostics.
-    assert document["version"] == 1 and document["outcome"] == "refused"
-    assert document["reasons"] == [f"the change is not admissible:\n  - {diagnostic}"]
-    assert "error" not in document
-    assert diagnostic in output.err
-    for boundary in forbidden.values():
-        boundary.assert_not_called()
-    assert not (run.dir / "state.json").exists()
-    assert list(run.dir.iterdir()) == [run.dir / "lock"]
-    assert (run.dir / "lock").stat().st_ino == lock_inode
-    assert git(repo, "show-ref") == refs
-    assert path.read_text() == text
 
 
 @pytest.fixture(params=["old", "new-omitted", "new-explicit"])
