@@ -13,9 +13,10 @@ another change was editing at the same time (it conflicts on merge). The
 drafter is told which files unfinished runs on the same repository plan to
 change; a task that edits one of those test files gets one round of feedback.
 
-The drafter cannot run the OpenSpec CLI itself (its sandbox has no network,
-and npx needs it), which is why validation is the harness's job. The manifest,
-with its trusted verify commands, is never drafted here.
+The harness runs the pinned, host-installed OpenSpec executable for validation;
+the drafter's sandbox does not provision that trusted host tool. No runtime
+package acquisition is needed. The manifest, with its trusted verify commands,
+is never drafted here.
 """
 
 import json

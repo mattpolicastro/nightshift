@@ -569,8 +569,11 @@ to `/opt/homebrew/bin`; Python uses it for prepare/verify, agent and Codex quota
 tool lookup. The plugin also uses `NIGHTSHIFT_NODE_BIN` (default `~/n/bin`),
 `NIGHTSHIFT_UV` (default `<resolved NIGHTSHIFT_BIN_DIR>/uv`) and
 `NIGHTSHIFT_CHECKOUT` (default `~/Projects/nightshift`). An unset uv setting
-follows the selected bin directory. Install the tools first; these settings
-do not discover or install them.
+follows the selected bin directory. The standalone validator uses
+`NIGHTSHIFT_OPENSPEC_BIN`, defaulting to `<NIGHTSHIFT_BIN_DIR>/openspec`
+(`/opt/homebrew/bin/openspec`); an explicit override takes precedence.
+[Install and verify OpenSpec 1.16.1](docs/deploy.md#install-openspec) first;
+these settings do not discover or install tools.
 
 For a **direct CLI** supervisor invocation, substitute your actual paths:
 
@@ -614,7 +617,11 @@ prepends `/opt/homebrew/bin:$HOME/n/bin` to incoming PATH;
 `$HOME/n/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin`.
 Environment settings do not relocate these bootstrap commands, nor does moving
 the wrapper pathname in a plist. Wrapper portability is deferred because
-`bin/**` is frozen; no new helper fixes it. Full daemon rollout on another
+`bin/**` is frozen without exceptions, including comments, as are launchd plists.
+The supervisor retains its `~/n/bin` prefix and stale OpenSpec/Node comment;
+PATH/comment cleanup is deferred on [issue #184](https://github.com/mattpolicastro/nightshift/issues/184)'s ledger.
+Absolute validator selection removes that backend dependency without wrapper edits.
+Full daemon rollout on another
 layout remains pending separate wrapper work or an independently provisioned
 operator service preserving equivalent credential and preflight guards,
 including required tokens, credential isolation, tool checks and startup
@@ -885,9 +892,12 @@ run state. Timing and inventory details are in [job control](#pause-and-job-cont
 
 ## Prerequisites
 
-macOS with Python 3.12 or later, `uv`, `gh` and git. Specloop drafting also uses
-Node/`npx` for OpenSpec; install the CLI and credentials required by the trusted
-manifest's provider profiles and verification commands.
+macOS with Python 3.12 or later, `uv`, `gh` and git, plus the
+[verified standalone OpenSpec 1.16.1 executable](docs/deploy.md#install-openspec).
+Only `darwin-arm64` is mapped; every other host fails OpenSpec preflight as
+unknown. Install the CLI and credentials required by the trusted manifest's
+provider profiles and verification commands. The plugin still needs Node for
+its own tools; OpenSpec performs no runtime acquisition or `npx` fallback.
 
 Direct Python front-door operation requires scoped GitHub access and preflight
 checks, not worker OAuth, Claude, pnpm or Swift. The CLI retains env-file

@@ -22,6 +22,7 @@ export function resolveHostPaths(
     return literalPath(name, env[name] ?? fallback, home, directory);
   }
   const bin = path('NIGHTSHIFT_BIN_DIR', '/opt/homebrew/bin', true);
+  // Factory retains the Node prefix (default ~/n/bin) for the plugin's own Node tools.
   const prefix = consumer === 'factory' ? [path('NIGHTSHIFT_NODE_BIN', '~/n/bin', true), bin] : [bin];
   return {
     cwd: path('NIGHTSHIFT_CHECKOUT', '~/Projects/nightshift'),

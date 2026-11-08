@@ -13,10 +13,17 @@ token. A credential test without a thing that must FAIL is not a test.
 
 from __future__ import annotations
 
+import hashlib
+import os
+import platform
 import re
 import subprocess
 from dataclasses import dataclass, fields
+from importlib.resources import files
+from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
+
+from specloop.openspec import ENV, VERSION, SpecError, resolve_binary
 
 from .config import Config, ForgeConfig, Repo
 from .forge.http import GiteaHTTPError, GiteaTransport
@@ -31,6 +38,61 @@ class Check:
     @property
     def line(self) -> str:
         return f"{'ok  ' if self.ok else 'FAIL'}  {self.name}: {self.detail}"
+
+
+_OPENSPEC_SUMS = files("specloop").joinpath("openspec-SHA256SUMS")
+_OPENSPEC_HOSTS = {("Darwin", "arm64"): "darwin-arm64"}
+_OPENSPEC_KEYS = {"binary/darwin-arm64/openspec"} | {
+    f"archive/openspec-{target}.{extension}"
+    for target, extension in (
+        ("darwin-arm64", "tar.gz"), ("darwin-x64", "tar.gz"),
+        ("linux-arm64-musl", "tar.gz"), ("linux-arm64", "tar.gz"),
+        ("linux-x64-musl", "tar.gz"), ("linux-x64", "tar.gz"),
+        ("windows-arm64", "zip"), ("windows-x64", "zip"),
+    )
+}
+
+
+def _openspec_checksums(data: str) -> dict[str, str]:
+    sums: dict[str, str] = {}
+    for line in data.split("\n"):
+        if not line or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"([0-9a-f]{64})  (\S+)", line)
+        if not match or match[2] not in _OPENSPEC_KEYS or match[2] in sums:
+            raise ValueError("malformed, unknown or duplicate checksum entry")
+        sums[match[2]] = match[1]
+    if sums.keys() != _OPENSPEC_KEYS:
+        raise ValueError("missing checksum entries")
+    return sums
+
+
+def _openspec_check(env: dict[str, str], *, runner=None) -> Check:
+    """Fresh integrity evidence, before execution; never consult the runtime cache."""
+    try:
+        binary = Path(resolve_binary(env))
+        target = _OPENSPEC_HOSTS.get((platform.system(), platform.machine()))
+        if target is None:
+            raise ValueError("unknown OpenSpec host target")
+        if not binary.is_file() or not os.access(binary, os.R_OK | os.X_OK):
+            raise ValueError("OpenSpec must be a readable executable file")
+        sums = _openspec_checksums(_OPENSPEC_SUMS.read_bytes().decode("ascii"))
+        with binary.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        if digest != sums[f"binary/{target}/openspec"]:
+            raise ValueError("OpenSpec binary checksum mismatch")
+        probe = (runner or subprocess.run)(
+            [str(binary), "--version"], env={**env, **ENV},
+            capture_output=True, text=True, timeout=120,
+        )
+        if probe.returncode or probe.stdout.strip() != VERSION:
+            raise ValueError("OpenSpec version probe failed")
+        return Check("openspec", True, f"OpenSpec {VERSION}; {target} binary SHA-256 verified")
+    except (OSError, ValueError, SpecError, subprocess.TimeoutExpired) as error:
+        # OS/probe errors can contain untrusted output; configuration errors are sanitized.
+        reason = str(error) if type(error) in (ValueError, SpecError) else "OpenSpec evidence or probe unavailable"
+        return Check("openspec", False, f"{reason}; install OpenSpec {VERSION} at the configured path; "
+                     "see docs/deploy.md#install-openspec")
 
 
 def _gh_can_read(repo: str, *, runner=None) -> bool:
@@ -202,14 +264,15 @@ def _gitea_checks(cfg: Config, env: dict[str, str], transport_factory, credentia
 
 
 def run(cfg: Config, env: dict[str, str], *, runner=None, transport_factory=None,
-        credential_runner=None, deep: bool = False) -> list[Check]:
+        credential_runner=None, openspec_runner=None, deep: bool = False) -> list[Check]:
     """Everything that should be true before the daemon is left alone.
 
     transport_factory(url, token) supplies a GiteaTransport-compatible client.
     credential_runner supplies subprocess.run-compatible, bounded git calls.
+    openspec_runner supplies the independent, bounded OpenSpec version probe.
     Gitea credentials come only from env; GitHub retains its ambient gh runner.
     """
-    checks: list[Check] = []
+    checks: list[Check] = [_openspec_check(env, runner=openspec_runner)]
 
     token = env.get("GH_TOKEN", "")
     checks.append(

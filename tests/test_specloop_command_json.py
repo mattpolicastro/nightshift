@@ -88,9 +88,13 @@ def review(monkeypatch, contradictions=()):
 @pytest.fixture
 def validator_process(monkeypatch):
     process = Mock()
+    process.probe = Mock(return_value=subprocess.CompletedProcess([], 0, openspec.VERSION + "\n", ""))
+    monkeypatch.setenv("NIGHTSHIFT_OPENSPEC_BIN", "/fixture tools/openspec")
+    monkeypatch.setattr(openspec, "_checked_paths", set())
     run = subprocess.run
     monkeypatch.setattr(subprocess, "run", lambda argv, **kw: (
-        process(argv, **kw) if argv[0] == "npx" else run(argv, **kw)))
+        (process.probe if argv[1:] == ["--version"] else process)(argv, **kw)
+        if argv[0] == openspec.resolve_binary() else run(argv, **kw)))
     return process
 
 
@@ -114,7 +118,7 @@ def drafting_calls(monkeypatch):
 
 @pytest.mark.scenario("specloop-interface/validator-availability-classification/validator-timeout-is-transient")
 def test_validator_timeout_is_transient_not_refusal(tmp_path, validator_process):
-    timeout = subprocess.TimeoutExpired("npx", 120)
+    timeout = subprocess.TimeoutExpired(openspec.resolve_binary(), 120)
     validator_process.side_effect = timeout
     with pytest.raises(openspec.ValidatorUnavailable) as raised:
         openspec._run(tmp_path, "validate", CHANGE, "--strict")
@@ -122,9 +126,75 @@ def test_validator_timeout_is_transient_not_refusal(tmp_path, validator_process)
     assert f"validate {CHANGE} --strict" in str(raised.value) and "120" in str(raised.value)
     validator_process.assert_called_once()
     argv, = validator_process.call_args.args
-    assert argv == ["npx", "-y", "--prefer-offline", openspec.PACKAGE, "validate", CHANGE, "--strict", "--json"]
+    assert argv == [openspec.resolve_binary(), "validate", CHANGE, "--strict", "--json"]
     assert validator_process.call_args.kwargs["timeout"] == 120
     assert all(validator_process.call_args.kwargs["env"][key] == value for key, value in openspec.ENV.items())
+
+
+@pytest.mark.scenario("openspec-binary/pinned-direct-invocation/validation-uses-the-pinned-binary")
+def test_validate_argv_uses_pinned_binary(tmp_path, validator_process, monkeypatch):
+    monkeypatch.setenv("VALIDATOR_TEST_ENV", "inherited")
+    validator_process.return_value = subprocess.CompletedProcess([], 0, '{"items": []}', "")
+    assert REAL_VALIDATE(tmp_path, CHANGE) == []
+    validator_process.assert_called_once()
+    assert validator_process.call_args.args == ([openspec.resolve_binary(), "validate", CHANGE, "--strict", "--json"],)
+    kw = validator_process.call_args.kwargs
+    validator_process.probe.assert_called_once_with([openspec.resolve_binary(), "--version"], **kw)
+    assert kw["cwd"] == tmp_path and kw["timeout"] == 120
+    assert kw["capture_output"] is True and kw["text"] is True
+    assert kw["env"]["VALIDATOR_TEST_ENV"] == "inherited"
+    assert all(kw["env"][key] == value for key, value in openspec.ENV.items())
+
+
+def assert_validator_admission_failure(template, monkeypatch, capfd, transient=False):
+    path, repo = template
+    before = git(repo, "show-ref")
+    monkeypatch.setattr(openspec, "validate", REAL_VALIDATE)
+    agent = Mock(side_effect=AssertionError("agent after validator failure"))
+    monkeypatch.setattr(agents, "run", agent)
+    assert main(admission(path, "--json")) == 1
+    document = json.loads(capfd.readouterr().out)
+    assert document["version"] == 1
+    if transient:
+        assert set(document) == {"version", "error"}
+        assert "120" in document["error"] and "timed out" in document["error"]
+    else:
+        assert document["outcome"] == "refused" and "error" not in document
+        assert openspec.VERSION in "\n".join(document["reasons"])
+        assert "docs/deploy.md#install-openspec" in "\n".join(document["reasons"])
+    agent.assert_not_called()
+    run = Run.for_change(CHANGE)
+    assert list(run.dir.iterdir()) == [run.dir / "lock"]
+    assert git(repo, "show-ref") == before
+
+
+@pytest.mark.scenario("openspec-binary/pinned-direct-invocation/missing-binary-is-not-transient")
+def test_missing_binary_is_not_transient(template, validator_process, monkeypatch, capfd):
+    validator_process.probe.side_effect = FileNotFoundError("missing binary")
+    assert_validator_admission_failure(template, monkeypatch, capfd)
+    validator_process.probe.assert_called_once()
+    validator_process.assert_not_called()
+
+
+@pytest.mark.scenario("openspec-binary/pinned-direct-invocation/version-mismatch-refuses")
+@pytest.mark.parametrize("undecodable", [False, True])
+def test_version_mismatch_refuses(template, validator_process, monkeypatch, capfd, undecodable):
+    validator_process.probe.return_value.stdout = "1.14.3"
+    if undecodable:
+        validator_process.probe.side_effect = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+    assert_validator_admission_failure(template, monkeypatch, capfd)
+    validator_process.probe.assert_called_once()
+    validator_process.assert_not_called()
+
+
+@pytest.mark.scenario("specloop-interface/validator-availability-classification/validator-timeout-is-transient")
+@pytest.mark.parametrize("probe", [True, False])
+def test_timeout_is_transient(template, validator_process, monkeypatch, capfd, probe):
+    process = validator_process.probe if probe else validator_process
+    process.side_effect = subprocess.TimeoutExpired(openspec.resolve_binary(), 120)
+    assert_validator_admission_failure(template, monkeypatch, capfd, transient=True)
+    process.assert_called_once()
+    assert validator_process.call_count == (0 if probe else 1)
 
 
 @pytest.mark.scenario("specloop-interface/validator-availability-classification/registry-failure-is-transient")
@@ -133,8 +203,9 @@ def test_validator_timeout_is_transient_not_refusal(tmp_path, validator_process)
 def test_validator_registry_failure_is_transient(tmp_path, validator_process, code, prefix):
     stderr = prefix + f"({code}): registry unavailable"
     validator_process.return_value = subprocess.CompletedProcess([], 1, "not JSON", stderr)
-    with pytest.raises(openspec.ValidatorUnavailable) as raised:
+    with pytest.raises(openspec.SpecError) as raised:
         openspec._run(tmp_path, "show", CHANGE)
+    assert type(raised.value) is openspec.SpecError
     assert str(raised.value) == f"openspec show {CHANGE}: exit 1, no JSON: {stderr[:400]}"
     validator_process.assert_called_once()
     assert validator_process.call_args.kwargs["timeout"] == 120

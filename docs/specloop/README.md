@@ -798,8 +798,9 @@ existing manifests and saved runs need no migration or rewrite. Select
 adapter in [issue #188](https://github.com/mattpolicastro/nightshift/issues/188),
 following [issue #187](https://github.com/mattpolicastro/nightshift/issues/187)
 in [issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
-OpenSpec's `npx` invocation and binary requirements are unchanged, as are its
-finish, human-check and recovery rules. See the
+[issue #191](https://github.com/mattpolicastro/nightshift/issues/191) replaces the
+validator with [verified standalone OpenSpec 1.16.1](../deploy.md#install-openspec).
+Finish, human checks and recovery retain their gates. See the
 [manifest contract](command-json.md#manifest-format),
 [OpenSpec example](../../examples/specloop/self-hosting.toml) and
 [native example](../../examples/specloop/speckit.toml). OpenSpec Finish archives into
@@ -816,6 +817,31 @@ human check remains pending:
   the run identity, code revisions and result on
   [issue #184](https://github.com/mattpolicastro/nightshift/issues/184), with a
   link from [issue #187](https://github.com/mattpolicastro/nightshift/issues/187).
+
+**Validator and host setup.** Set `NIGHTSHIFT_OPENSPEC_BIN` in the actual Python
+and Paseo service environments, or use `<NIGHTSHIFT_BIN_DIR>/openspec` (default
+`/opt/homebrew/bin/openspec`); follow [host path rules](../../KNOWN-LIMITATIONS.md#platform-assumptions)
+and restart affected consumers. Only `darwin-arm64` is mapped; all other hosts
+are unknown. Preflight checks the installed-file checksum before running the
+version probe. Runtime caches a successful exact `--version` result per path
+per process, so replacing that file requires restarts. Missing/unusable binaries
+or wrong versions are ordinary refusals; only subprocess timeouts are transient.
+No runtime download or `npx` fallback occurs.
+
+OpenSpec 1.16.1 strict validation rejects scenarios missing both WHEN and GIVEN,
+or missing THEN, and requirements under unrecognized `## … Requirements`
+headers. Valid closing heading hashes are accepted. Keep four opening hashes
+for scenarios: the harness still scans physical lines with `^#{1,3}\s+Scenario:`,
+even inside literal fences or HTML, without Markdown parsing. Duplicate scenario
+IDs and unfinished archive tasks still block; archived changes are excluded
+from harness validation. Upstream parser confirmation remains part of the
+[three pending rollout checks](../deploy.md#openspec-rollout-checks).
+
+All `bin/**` and launchd plists remain frozen, including comments. The unchanged
+`bin/specloop-serve` retains `~/n/bin` and its stale OpenSpec/Node comment;
+cleanup is deferred on [issue #184](https://github.com/mattpolicastro/nightshift/issues/184)'s ledger.
+Absolute executable selection and the Mac Studio cut-over establish dependency
+removal without a separate supervisor-without-`~/n/bin` experiment.
 
 The [spec-kit house rules](speckit.md) describe the authoring rules and the `nightshift-speckit` preset ([issue #184](https://github.com/mattpolicastro/nightshift/issues/184)).
 

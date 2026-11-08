@@ -228,7 +228,7 @@ for module, names in {
 @pytest.mark.real_trust
 @pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("run_command", [["run"], ["daemon", "run"]])
-def test_python_preflight_then_one_shot_dispatch(tmp_path, monkeypatch, capsys, caplog, legacy, run_command):
+def test_python_preflight_then_one_shot_dispatch(tmp_path, monkeypatch, capsys, caplog, legacy, run_command, openspec_host):
     # Failure permutations live in test_preflight (task 1.8); here a successful
     # preflight is followed by real CLI/daemon dispatch using the same enrollment.
     manifest = tmp_path / "repository.toml"
