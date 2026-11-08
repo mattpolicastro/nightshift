@@ -199,6 +199,17 @@ rules' formerly broad review/coverage sentence to distinguish these existing
 engine mechanisms; next-phase/global-T numbering applies to every appended
 phase. No edits to `evidence.py` are necessary.
 
+Apply the same distinction to the shipped
+`presets/nightshift-speckit/templates/tasks-template.md` under
+`## Harness-owned Review and Completion`: only feedback revisions append
+`## Phase N: Review round K`; section evidence/reviewer fixes extend the
+existing phase, and final fixes append `## Phase N: Coverage` or
+`## Phase N: Acceptance fixes`. Keep the scaffold's Format section, seven
+example tasks, stable-ID rule, uppercase harness ticks and human-check boundary.
+The `speckit-preset` Scenario-citing task scaffold MODIFIED delta replaces its
+prior conflation of review and coverage rounds; it does not change authoring
+grammar, the preset manifest or the command wrapper.
+
 Select follow-up notes by exact parsed task labels in the section. A physical
 line must start `- (` followed by a label and `) `; parse that first closing
 delimiter and compare the entire label to the section's parsed labels, not a
@@ -326,6 +337,32 @@ Update stale support disclaimers and clarify harness addition headings in
 `docs/specloop/speckit.md`, retaining its authoring rules, and the obsolete reserved-format comments in
 `examples/specloop/self-hosting.toml`. Correct the same refusal description in
 `docs/specloop/command-json.md` without changing unrelated JSON contracts.
+
+Include both shipped preset surfaces in this same documentation migration.
+In `presets/nightshift-speckit/README.md`, replace the introductory claim that
+adapter, validator, freezing and finish support are pending with explicit native
+build support through a trusted `format = "speckit"` manifest. Installing the
+preset still only installs authoring assets; it does not enroll a repository or
+configure the build. Link the engine guide and native manifest example, explain
+manifest-frozen `specs/**`/`.specify/**` and Status Complete without archival, and
+retain the native drafting/front-door boundary. Preserve the v1.3.2 baseline,
+PyYAML/interpreter advice, both installation commands, issue-first invocation,
+upstream links and pending scratch-install/live-reference checks on #184.
+Update the task template's harness paragraph as specified in decision 4 and the
+`speckit-preset` delta. These are scoped authoring-document corrections, not
+new preset behavior or a new installation claim.
+
+Extend new `tests/test_speckit_build_docs.py` to check these two preset surfaces:
+local README links/support configuration and the task template's distinct
+addition forms, stable T IDs, uppercase ticks and human-only checks. Select the
+template's unique exact `## Harness-owned Review and Completion` physical
+heading through the next same-or-higher heading; select the README introduction
+between its unique exact title and first level-two heading, refusing missing or
+duplicate boundaries. Use the existing physical-line rules below, without
+interpreting fences, HTML or indentation. Retain every assertion in
+`tests/test_specloop_documentation_integrity.py`; no relocation or weakening is
+needed for its preset grammar, citations, installation or link checks. New
+checks assert necessary tokens/structure rather than complete prose sentences.
 
 Necessary shared-file exceptions: README.md, KNOWN-LIMITATIONS.md,
 docs/specloop/README.md, docs/specloop/command-json.md and

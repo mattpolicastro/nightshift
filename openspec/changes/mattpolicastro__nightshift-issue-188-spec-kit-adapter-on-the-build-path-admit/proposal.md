@@ -23,7 +23,9 @@ house rules in `docs/specloop/speckit.md` and current main at `5284294d`.
   harness commit, push, then mark the PR ready. Native finish uses neither a
   clone nor `npx`, archives nothing, and retains retry and expected-head guards.
 - Add a trusted-manifest example, offline build/recovery tests and scoped operator
-  documentation, including the plugin's Finish table and confirmation guidance.
+  documentation, including the plugin's Finish table and confirmation guidance,
+  the shipped preset README's support status and its task template's distinct
+  review-round, existing-phase and final coverage/acceptance additions.
 
 Out of scope: native drafting or feasibility/critic/prompt redesign; edits to
 `specloop/propose.py`, `specloop/feasibility.py`, `specloop/critic.py`,
@@ -57,6 +59,9 @@ Modified capabilities:
   semantics for the native completion commit as well as OpenSpec archives.
 - `specloop-documentation`: replace temporary unavailability guidance and explain
   native completion, frozen paths and flow-forward context limits.
+- `speckit-preset`: update the shipped README's native build guidance and correct
+  the task scaffold's review/coverage guidance while preserving authoring grammar,
+  installation instructions and pending live-validation checks.
 
 No requirements are removed. MODIFIED deltas identify the protocol extension,
 temporary restrictions and archive-only wording that must change. Engine routing

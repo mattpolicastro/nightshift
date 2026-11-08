@@ -8,17 +8,17 @@ or real deployment validation.
 
 ### Requirement: Native build operator guidance
 
-The engine guide SHALL describe explicit native admission/build/publication,
-no archive, Complete Status and manifest-frozen authoring paths. Root enrollment
-guidance SHALL explain `[run] format` while distinguishing explicit native
-builds from future native front-door support. Plugin Finish guidance SHALL
-qualify both its action table and confirmation paragraph by format. Other
-passages made false SHALL receive only scoped corrections.
+The engine guide SHALL describe explicit native builds, Complete Status,
+no archive and frozen authoring paths. Enrollment guidance SHALL explain
+`[run] format` separately from future native front-door support. Both plugin
+Finish passages SHALL qualify completion by format. Other false passages,
+including the preset README and task scaffold, SHALL receive scoped corrections.
 
 #### Scenario: Operator finishes the selected format
 - **WHEN** an operator reads How the engine works, Publication, root enrollment and the plugin Finish action/confirmation guidance
 - **THEN** the docs agree that OpenSpec Finish archives into `openspec/specs/`, native Finish sets `**Status**: Complete` and archives nothing, and both push and mark ready without merging
 - **THEN** native examples use the explicit existing `--skip-feasibility` option until native feasibility support lands, retain structural admission validation, and do not promise native drafting or daemon intake support
+- **THEN** the shipped preset README describes the same explicit build path without claiming installation configures it, and its task template distinguishes review-round appends, existing-phase fixes and final Coverage/Acceptance fixes
 
 #### Scenario: Flow forward context limits are explicit
 - **WHEN** an operator reads KNOWN-LIMITATIONS.md and the native engine path
