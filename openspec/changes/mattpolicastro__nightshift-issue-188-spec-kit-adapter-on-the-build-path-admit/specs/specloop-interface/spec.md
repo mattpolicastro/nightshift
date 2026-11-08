@@ -8,7 +8,7 @@ revision, evidence, publication and completion without extending run state.
 ### Requirement: Native admission
 
 Admission SHALL validate the committed native feature with its adapter, use
-parsed task records for task/key/gate checks, preserve native `path:line`
+adapter-parsed task records for task/key/gate checks, preserve native `path:line`
 diagnostics and refuse phase zero. Successful native JSON SHALL retain version 1
 and outcome `admitted`, adding integer `sections` and `scenarios` counts.
 OpenSpec JSON and existing admission cleanup/locking SHALL remain unchanged.
@@ -23,9 +23,10 @@ OpenSpec JSON and existing admission cleanup/locking SHALL remain unchanged.
 - **THEN** admission refuses with the validator's repository-relative `spec.md:line: uncovered scenario` message in its reasons, one version-1 JSON document and no admitted state
 
 #### Scenario: Invalid task structure refuses
-- **WHEN** the native feature has no parsed tasks, duplicate task keys/labels or phase numbers, mixed-format headings, or a positive phase gate naming no populated phase
+- **WHEN** the native feature has no parsed tasks, duplicate task keys/labels or phase numbers, or a positive phase gate naming no populated phase
 - **THEN** admission reports the task/phase problem using native terminology and preserves source refs and existing partial-admission cleanup
 - **THEN** no agent is invoked and no admitted state is saved
+- **THEN** refusal follows the selected format's recognized task structure, never detection of another heading style; a numeric OpenSpec heading inside a native file is not a phase
 
 #### Scenario: Phase zero refuses
 - **WHEN** native tasks declare any physical `## Phase 0:` heading, including an empty phase, or the manifest names gate zero

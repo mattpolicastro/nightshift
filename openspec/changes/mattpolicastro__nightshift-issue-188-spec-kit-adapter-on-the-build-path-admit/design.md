@@ -31,24 +31,51 @@ uses real implementer/reviewer profiles after this structural admission.
 
 ## Decisions
 
-### 1. Shared physical-line task operations
+### 1. Manifest-selected task operations
 
-Keep existing call signatures for `tasks.parse`, `tick`, `split`,
-`extend_section` and `append_section`; format recognition lives there, not in
-`loop.py`. Scan `text.splitlines()` using the existing column-zero
-`tasks.SECTION` and `speckit.PHASE` regexes. A native heading selects
-`speckit.parse_tasks`; a numeric heading selects existing OpenSpec behavior.
-No recognized headings keeps the existing empty/default OpenSpec behavior.
-Both heading styles in one document refuse as ambiguous, even inside examples.
-Use a local import to avoid the existing `speckit -> tasks` import cycle.
+Keep `specloop/tasks.py` unchanged. Its `parse`, `tick`, `split`,
+`extend_section` and `append_section` retain byte-for-byte OpenSpec behavior,
+including ignoring native headings as section declarations. Never auto-detect
+heading styles or reject a file for containing both styles, even in examples.
+The already-selected manifest format alone determines task recognition.
+Engine routing compatibility remains in force without a MODIFIED delta.
+
+Extend `SpecFormat` in `specloop/spec_format.py` with these typed operations:
+
+| Member | OpenSpec delegation | Native delegation |
+| --- | --- | --- |
+| `parse_tasks(text: str) -> list[tasks.Task]` | `tasks.parse(text)` | `speckit.parse_tasks(text)` |
+| `tick(text: str, task: tasks.Task) -> str` | `tasks.tick(text, task)` | `speckit.tick(text, task)` |
+| `split(text: str, task: tasks.Task, subtasks: list[str]) -> str` | `tasks.split(text, task, subtasks)` | `speckit.split(text, task, subtasks)` |
+| `extend_section(text: str, section: int, items: list[str]) -> str` | `tasks.extend_section(text, section, items)` | `speckit.extend_section(text, section, items)` |
+| `append_section(text: str, title: str, items: list[str]) -> str` | `tasks.append_section(text, title, items)` | `speckit.append_section(text, title, items)` |
+| `append_round(text: str, blocks: list[str]) -> tuple[int, str]` | Existing revision numbering/quoting moved into the OpenSpec adapter | `speckit.append_round(text, blocks)`; decision 3 |
+
+Resolve delegated functions at call time. `cli.py` and `loop.py` route every
+task read/mutation through `spec_format.get(m)` or its already-selected adapter;
+`revise.py` delegates fresh append and replay reconstruction through it. Shared
+Task records and scenario regexes remain importable from `tasks`; no new state
+fields or serialized adapter are needed. Preserve existing adapter selection
+call counts, including selecting once per revision invocation.
+
+Native recognition scans `text.splitlines()` with the existing column-zero
+`speckit.PHASE` rule only. An OpenSpec-style `## N. Title` is not a native
+phase; like any other non-phase level-one/two heading it closes the current
+phase through the existing `HEADING` rule, and subsequent checkboxes remain
+outside a phase until the next native heading. This is ordinary native parsing,
+not mixed-style detection. OpenSpec examples containing `## Phase 1: Example`
+retain exactly the task records and mutation bytes produced today by `tasks`.
 
 Reuse native `PHASE`, `TASK_LABEL`, `HEADING` and `tasks.TASK`, including their
 existing whitespace, dotted-ID, flags and phase-boundary rules. Do not parse
 Markdown fences, HTML or indentation semantically. Repeated native phase numbers,
 reused native labels (compare tuples of integer root/dotted components, so
 numerically equivalent spellings collide), or multiple
-matches for a task key must block admission/mutation rather than choosing the
-first. Missing mutation targets raise rather than editing a nearby line. Native
+matches for a task key must raise `SpecError` from native parsing/mutation
+rather than choosing the first. Apply these guards in `speckit.parse_tasks`
+and native mutators; retain `_parse_phases` for validator source diagnostics
+and ensure native admission converts structural failures to ordinary refusal.
+Missing mutation targets raise rather than editing a nearby line. Native
 phase-zero recognition remains legal in the standalone parser; admission alone
 rejects it, including empty `## Phase 0:` sections.
 
@@ -94,7 +121,7 @@ with the input path, so `problems_with` retains validator diagnostics and its
 ordinary domain-refusal contract even for a missing native feature. Do not
 convert these failures into an empty scenario dictionary.
 
-`cli.problems_with` uses adapter validation/scenarios and the shared parsed task
+`cli.problems_with` uses adapter validation/scenarios and `fmt.parse_tasks`
 records for no-task, duplicate-key, unknown-reference and gate checks. Native
 diagnostics name `## Phase N: Title`, not only `## N. Title`. Preserve validator
 `path:line: message` strings. For native format, a physical phase-zero heading
@@ -124,7 +151,8 @@ current round scan, JSON quoting, ordinal text and commit bytes. The native
 implementation recognizes only `speckit.PHASE` headings whose captured title
 fully matches `Review round (\d+)`, chooses `K = max(K) + 1`, then delegates
 to native append for phase `max phase + 1` and globally fresh T IDs. Apply the
-same physical-line/ambiguity rules as task operations. Different rounds have
+same native physical-line/identity rules as task operations; an OpenSpec
+heading is not a native round and never causes mixed-style refusal. Different rounds have
 different section titles and therefore different keys even for equal feedback.
 
 `revise._append` becomes a format-independent delegate. Pass the same selected
@@ -140,7 +168,11 @@ replay of the first key returning the first commit after the second lands.
 ### 4. Existing gates and seal, native context
 
 Audit task reads used by run, accept, status, PR counts and finish so all use the
-shared parser. `_copy_change` already calls `context_files`; create each returned
+selected adapter's `parse_tasks`. Route candidate replay ticking, task splitting,
+landing ticks, section strengthening/review fixes and final coverage/acceptance
+appends through its matching mutators; no direct `tasks.parse`/mutation calls
+remain in `cli.py`, `loop.py` or `revise.py`. Drafting stays unchanged and keeps
+using OpenSpec `tasks` functions. `_copy_change` already calls `context_files`; create each returned
 destination's parent directory and generalize its directory/file copy decision
 by source type rather than the destination name `specs`. Keep OpenSpec
 destinations unchanged. The unchanged IMPLEMENT, REVIEW and GATE_REVIEW prompts
@@ -247,7 +279,13 @@ are `test_admit_speckit_fixture`, `test_admit_refuses_broken_fixture`,
 `test_finish_marks_complete_without_npx`. Capture subprocess argv as the existing
 command JSON tests do; native finish asserts neither `npx` nor `git clone`, not
 merely a mocked archive call. Add distinct round, phase-zero, reviewer-note,
-seal, fake-driver, ordering, race and recovery cases. Larger test concerns may
+seal, fake-driver, ordering, race and recovery cases. Add adapter regressions
+that compare OpenSpec parse/tick/split/extend/append results byte-for-byte with
+the unchanged `tasks` functions on text containing literal native headings,
+and prove a native file containing `## N. Title` still follows only native
+phase boundaries. Native duplicate-identity cases refuse independently of
+other heading styles. Exercise every consumer operation through the selected
+adapter, including accept/candidate replay, status and PR counts. Larger test concerns may
 live in new `tests/test_speckit_revisions.py` and
 `tests/test_speckit_finish_recovery.py`; docs use new
 `tests/test_speckit_build_docs.py`. Selection/legacy contract migrations use new
@@ -294,7 +332,7 @@ docs/specloop/README.md, docs/specloop/command-json.md and
 plugins/nightshift/README.md cannot be avoided because this change makes their
 format/finish claims false. Merge their scoped wording with #182/#191 work;
 do not revert new readiness or OpenSpec binary guidance. Do not edit
-`specloop/openspec.py`, `bin/**`, `nightshift/**`, plugin server code, or the
+`specloop/tasks.py`, `specloop/openspec.py`, `bin/**`, `nightshift/**`, plugin server code, or the
 in-flight test files `tests/test_openspec_binary.py`,
 `tests/test_openspec_binary_docs.py`, `tests/test_preflight.py`,
 `tests/test_merge_readiness_evidence.py`, `tests/merge_readiness_fixtures.py`,
@@ -347,9 +385,11 @@ tokens/structure, and avoid exact explanatory-prose assertions.
 
 ## Risks / Trade-offs
 
-- Shared task recognition intentionally refuses mixed-format/ambiguous documents,
-  including matching example lines. This trades permissive authoring for a
-  deterministic mutation target; retain ordinary OpenSpec behavior and tests.
+- Explicit format dispatch preserves permissive OpenSpec behavior. Native
+  identity checks alone refuse repeated phase numbers, reused T labels and
+  ambiguous keys; matching native example lines get no exemption. A numeric
+  OpenSpec heading in a native file still closes a phase under the existing
+  heading-boundary rule, so task placement matters without mixed-style detection.
 - Native context is flow-forward history, not a maintained global specification.
   Authors name superseded features; this issue does not resolve contradictions
   across delivered feature records.

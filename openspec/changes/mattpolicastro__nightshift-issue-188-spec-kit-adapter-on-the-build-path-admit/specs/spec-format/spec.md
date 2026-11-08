@@ -46,6 +46,32 @@ Missing or unreadable committed plans SHALL block rather than imply no checks.
 - **THEN** readiness/publication fails with a diagnostic instead of dropping human checks
 - **THEN** a readable plan without pending selected lines returns an empty list
 
+### Requirement: Manifest selected task operations
+
+Task operations SHALL dispatch only through the manifest-selected adapter.
+OPENSPEC SHALL delegate at call time to unchanged `tasks` functions; SPECKIT
+SHALL delegate to `speckit.parse_tasks` and native mutation helpers. The build
+consumers SHALL use adapter parsing, mutations and review-round reconstruction.
+No implementation SHALL detect or refuse mixed heading styles. `tasks.py` and
+Engine routing compatibility SHALL remain unchanged.
+
+#### Scenario: OpenSpec ignores native heading declarations
+- **WHEN** an OpenSpec task document contains literal `## Phase 1: Example` lines, including inside examples, and is parsed, ticked, split, extended or appended through OPENSPEC
+- **THEN** task records and returned mutation bytes exactly match the unchanged corresponding `tasks` functions, including their numeric-section recognition, checkbox spelling, numbering and error behavior
+- **THEN** adapter parse_tasks delegates to tasks.parse, and tick, split, extend_section and append_section delegate to their same-named tasks functions
+- **THEN** native headings neither select SPECKIT nor cause mixed-style refusal, and late replacement of a delegated `tasks` function is observed with its original arguments, return value and exception identity
+
+#### Scenario: Native ignores OpenSpec phase declarations
+- **WHEN** a native task document contains `## N. Title` headings alongside literal native phase headings and is read or mutated through SPECKIT
+- **THEN** only native PHASE headings create phases; numeric OpenSpec headings close the current phase under the existing same-or-higher heading rule and tasks outside native phases remain unrecognized
+- **THEN** the document is not refused for mixing heading styles, native edits round-trip through speckit.parse_tasks, and late replacement of a delegated native helper is observed
+- **THEN** repeated native phase numbers, reused numeric T-label identities and ambiguous native keys still refuse according to native rules
+
+#### Scenario: Consumers use selected task operations
+- **WHEN** admission, run, accept, status, PR body construction, finish or revision needs to read or mutate tasks
+- **THEN** the manifest-selected adapter supplies parsing, ticking, splitting, extension, append or review-round reconstruction as applicable, including candidate replay and revision replay
+- **THEN** loop.py contains no heading-style detection or format-specific task branch, drafting keeps its existing OpenSpec task calls, and no run-state field or serialized adapter is added
+
 ## MODIFIED Requirements
 
 ### Requirement: Format seam
@@ -53,16 +79,19 @@ Missing or unreadable committed plans SHALL block rather than imply no checks.
 `specloop/spec_format.py` SHALL expose `OPENSPEC`, `SPECKIT`, `get(m: Manifest)`
 and a typed protocol containing `change_dir`, `tasks_path`, `tasks_paths_at`,
 `validate`, `scenarios`, `human_checks`, `context_files`, `drafter_root`,
-`finish`, `pr_title`, `pr_kind` and `append_round`. `finish` SHALL retain its
+`finish`, `pr_title`, `pr_kind`, `parse_tasks`, `tick`, `split`, `extend_section`,
+`append_section` and `append_round`. `finish` SHALL retain its
 existing positional arguments and add optional keyword-only `head`; native
 completion SHALL require that committed head. `append_round(text, blocks)`
 SHALL return `(round_number, rewritten_text)`. The OpenSpec adapter SHALL
 resolve delegated OpenSpec functions at call time and retain return values
 and exception identities.
 
-The exact-member restriction changes only to permit adapter-owned revision
-numbering and checkout-free native completion; existing OpenSpec calls keep
-their original signatures at the backend boundary.
+The exact-member restriction changes to permit manifest-selected task operations,
+adapter-owned revision numbering and checkout-free native completion; existing
+OpenSpec calls keep their original signatures at the backend boundary. This
+protocol extension does not modify Engine routing compatibility or OpenSpec
+task parsing/mutation behavior.
 
 #### Scenario: Legacy paths and publication labels
 - **WHEN** the OpenSpec adapter is used for sample change `sample-change`

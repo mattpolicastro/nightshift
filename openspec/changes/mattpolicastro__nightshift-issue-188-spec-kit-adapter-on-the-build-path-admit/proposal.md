@@ -10,7 +10,9 @@ house rules in `docs/specloop/speckit.md` and current main at `5284294d`.
 
 - Select a thin `SPECKIT` adapter over `specloop/speckit.py`; retain OpenSpec as
   the default and retain its paths, validator, archive and publication behavior.
-- Let shared task operations read and mutate native phase/T-labelled tasks.
+- Route task operations through the manifest-selected format adapter: OpenSpec
+  delegates to unchanged `tasks.py`; native phase/T-labelled operations live in
+  `speckit.py`. Never infer format or refuse a file from mixed heading styles.
   Admission validates the committed feature, rejects ambiguous identities and
   phase zero, and reports section/scenario counts. Native review rounds discover
   their own numbering through the adapter and preserve keyed replay.
@@ -43,7 +45,7 @@ name, qualifying native refusal by invalid feature input.
 
 Modified capabilities:
 
-- `spec-format`: expose the native adapter, extend the revision/completion seam,
+- `spec-format`: expose the native adapter, extend the task/revision/completion seam,
   and replace the temporary native-format refusal with selection.
 - `speckit-format`: retain offline parser contracts while adding native task
   mutation support and Git-backed completion.
@@ -56,5 +58,7 @@ Modified capabilities:
 - `specloop-documentation`: replace temporary unavailability guidance and explain
   native completion, frozen paths and flow-forward context limits.
 
-No requirements are removed. MODIFIED deltas identify the temporary restrictions
-and archive-only wording that must change; unrelated requirements stay in force.
+No requirements are removed. MODIFIED deltas identify the protocol extension,
+temporary restrictions and archive-only wording that must change. Engine routing
+compatibility remains untouched and needs no delta: OpenSpec task recognition
+and mutation retain their current behavior, including literal native headings.

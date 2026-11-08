@@ -7,19 +7,20 @@ needed by the build adapter, preserving its physical-line grammar.
 
 ### Requirement: Native task mutation
 
-Shared task operations SHALL recognize native phase headings using the
-design's deterministic physical-line dispatch, return existing `Task` records
-and round-trip native task edits through `speckit.parse_tasks`. Native ticking
-SHALL use `[X]`; OpenSpec ticking SHALL retain `[x]`. Mutation SHALL preserve
-unrelated lines, native flags and task identity rules.
+Native task operations SHALL live in `specloop/speckit.py` and be selected
+through `SPECKIT`, retaining existing Task records and native physical-line
+grammar. Parsing and mutation SHALL refuse repeated phase numbers, reused
+numeric T-label identities and ambiguous keys. Mutation SHALL preserve unrelated
+lines, native flags and task identity rules, tick `[X]` and round-trip through
+`speckit.parse_tasks`, without changing OpenSpec functions or detecting mixed styles.
 
 #### Scenario: Tick split extend and append
-- **WHEN** the three-phase fixture copy is ticked, T003 is split, a phase is extended and Review round 1 is appended
+- **WHEN** the selected SPECKIT adapter ticks the three-phase fixture copy, splits T003, extends a phase and appends Review round 1
 - **THEN** ticking changes the selected checkbox to `[X]`, split children include `T003.1` with inherited positional flags, extension uses globally fresh T roots and append creates `## Phase 4: Review round 1`
 - **THEN** parsing the result retains task records, flags and scenario references; labels above T999 are not truncated and unrelated text is unchanged
 
 #### Scenario: Ambiguous mutation refuses
-- **WHEN** task text mixes recognized native and numeric section headings, repeats a native phase number or numeric label identity, has multiple matches for the selected key, lacks the target, or a split supplies conflicting story ownership
+- **WHEN** native parsing or mutation finds a repeated native phase number, reused numeric T-label identity or ambiguous task key, or a mutation lacks its target or supplies conflicting story ownership
 - **THEN** the operation refuses without returning a partially rewritten document or choosing the first matching line
 - **THEN** collisions introduced by a proposed split/extension/append also refuse before returning the mutation
 - **THEN** matching lines in fences or HTML receive no exemption, and empty phases and dotted task roots participate in next-number discovery
@@ -56,7 +57,7 @@ and text interfaces without new dependencies or external calls from those
 interfaces. `feature_dir(repo, change)` SHALL return `repo / "specs" / change`.
 Additional build helpers MAY perform the explicitly specified Git completion
 operations. Importing the module SHALL have no I/O or dispatch side effects.
-Native integration SHALL occur through the format adapter/shared task seam,
+Native integration SHALL occur through the manifest-selected format adapter,
 without changing existing OpenSpec or daemon behavior. This replaces the
 parser-only prohibition on engine integration to enable the requested build path.
 
