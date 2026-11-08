@@ -12,6 +12,8 @@ import os
 import subprocess
 import urllib.request
 from dataclasses import fields, replace
+from importlib.resources import files
+from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import quote
 
@@ -22,9 +24,128 @@ from nightshift import cli, config, preflight
 from nightshift.config import Config, Repo
 from nightshift.forge import http
 from fake_gitea import FakeGitea, Reply
+from specloop import openspec
+
+pytestmark = pytest.mark.usefixtures("openspec_host")
 
 SANDBOX = "matt/sandbox"
 OFF_LIMITS = "matt/dotfiles"
+
+
+@pytest.mark.scenario("openspec-binary/installed-binary-preflight/verified-executable-passes")
+@pytest.mark.scenario("openspec-binary/installed-binary-preflight/wrong-checksum-blocks-readiness")
+@pytest.mark.parametrize("deep", [False, True])
+def test_openspec_binary_checksum_and_version(openspec_host, monkeypatch, deep):
+    host = openspec_host
+    monkeypatch.setattr(openspec, "_checked_paths", set())
+    env = {"GH_TOKEN": "github_pat_x", "NIGHTSHIFT_OPENSPEC_BIN": str(host.binary),
+           "NIGHTSHIFT_BIN_DIR": "invalid but unused", "OPENSPEC_TELEMETRY": "1"}
+    configuration = cfg(forbidden_probe=OFF_LIMITS, slack_webhook="https://hooks/x")
+    before = (host.binary.read_bytes(), host.binary.stat().st_mode, host.binary.stat().st_mtime_ns)
+    baseline = preflight.run(configuration, env, runner=reader({SANDBOX}), deep=deep)
+    assert all(c.ok for c in baseline)
+    assert host.calls[0][1]["env"] == {**env, **openspec.ENV}
+    assert not openspec._checked_paths
+    assert (host.binary.read_bytes(), host.binary.stat().st_mode, host.binary.stat().st_mtime_ns) == before
+    openspec._checked_paths.add(str(host.binary))
+    assert preflight.run(configuration, env, runner=reader({SANDBOX}), deep=deep) == baseline
+    assert len(host.calls) == 2  # A runtime cache hit still requires a fresh probe.
+    host.binary.write_bytes(b"wrong bytes, same claimed version")
+    failed = preflight.run(configuration, env, runner=reader({SANDBOX}), deep=deep)
+    assert not find(failed, "openspec").ok and len(host.calls) == 2
+    assert [c for c in failed if c.name != "openspec"] == [c for c in baseline if c.name != "openspec"]
+    assert "docs/deploy.md#install-openspec" in find(failed, "openspec").detail
+
+
+@pytest.mark.scenario("openspec-binary/installed-binary-preflight/unavailable-prerequisite-fails-closed")
+@pytest.mark.parametrize("fault", [
+    "missing", "directory", "non-executable", "unreadable", "manifest-missing", "manifest-unreadable",
+    "empty", "missing-key", "duplicate", "unknown-key", "unknown-binary", "spacing", "uppercase",
+    "short-hash", "whitespace", "indented-comment", "non-ascii", "crlf", "invalid-path",
+    "version", "banner", "exit", "timeout", "launch", "decode",
+    ("Darwin", "x86_64"), ("Linux", "aarch64"), ("Linux", "x86_64"),
+    ("Windows", "ARM64"), ("Windows", "AMD64"), ("Darwin", "ARM64"),
+])
+def test_openspec_failures_ignore_cached_success(openspec_host, monkeypatch, fault):
+    host = openspec_host
+    env = {"NIGHTSHIFT_OPENSPEC_BIN": str(host.binary)}
+    monkeypatch.setattr(openspec, "_checked_paths", {str(host.binary)})
+    assert preflight._OPENSPEC_HOSTS == {("Darwin", "arm64"): "darwin-arm64"}
+    data = host.sums.read_text()
+    entry = next(line for line in data.splitlines() if "  binary/" in line)
+    changed = {
+        "empty": "", "missing-key": data.replace(entry, ""), "duplicate": data + entry + "\n",
+        "unknown-key": data + entry.replace("binary/", "other/") + "\n",
+        "unknown-binary": data + entry.replace("darwin-arm64", "linux-arm64") + "\n",
+        "spacing": data.replace("  binary/", " binary/"), "uppercase": data.replace(entry, entry.upper()),
+        "short-hash": data.replace(entry, entry[1:]), "whitespace": data + " \n",
+        "indented-comment": data + " # ignored?\n", "non-ascii": data + "é\n",
+        "crlf": data.replace("\n", "\r\n"),
+    }
+    if isinstance(fault, tuple):
+        monkeypatch.setattr(preflight.platform, "system", lambda: fault[0])
+        monkeypatch.setattr(preflight.platform, "machine", lambda: fault[1])
+    elif fault in changed:
+        host.sums.write_bytes(changed[fault].encode())
+    elif fault in ("missing", "directory"):
+        host.binary.unlink()
+        if fault == "directory":
+            host.binary.mkdir()
+    elif fault == "non-executable":
+        host.binary.chmod(0o600)
+    elif fault == "manifest-missing":
+        host.sums.unlink()
+    elif fault in ("unreadable", "manifest-unreadable"):
+        original = Path.open
+        denied = host.binary if fault == "unreadable" else host.sums
+        def read(path, *args, **kwargs):
+            if path == denied:
+                raise PermissionError("unreadable fixture")
+            return original(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "open", read)
+    elif fault == "invalid-path":
+        env["NIGHTSHIFT_OPENSPEC_BIN"] = "relative-secret"
+    calls = []
+    def probe(args, **kwargs):
+        calls.append(args)
+        assert kwargs["timeout"] == 120
+        errors = {"timeout": subprocess.TimeoutExpired(args, 120), "launch": PermissionError(),
+                  "decode": UnicodeDecodeError("utf8", b"\xff", 0, 1, "invalid")}
+        if fault in errors:
+            raise errors[fault]
+        return subprocess.CompletedProcess(args, int(fault == "exit"),
+            "other" if fault == "version" else "OpenSpec " + openspec.VERSION if fault == "banner" else openspec.VERSION, "")
+    check = preflight._openspec_check(env, runner=probe)
+    assert not check.ok and "docs/deploy.md#install-openspec" in check.detail
+    assert "relative-secret" not in check.detail
+    assert len(calls) == int(fault in ("version", "banner", "exit", "timeout", "launch", "decode"))
+
+
+def test_openspec_symlink_and_default_bounded_runner(openspec_host, monkeypatch, tmp_path):
+    link = tmp_path / "selected"
+    link.symlink_to(openspec_host.binary)
+    def probe(args, **kwargs):
+        assert args == [str(link), "--version"] and kwargs["timeout"] == 120
+        assert kwargs["env"] == {"NIGHTSHIFT_OPENSPEC_BIN": str(link), **openspec.ENV}
+        return subprocess.CompletedProcess(args, 0, openspec.VERSION, "")
+    monkeypatch.setattr(subprocess, "run", probe)
+    assert openspec_host.check({"NIGHTSHIFT_OPENSPEC_BIN": str(link)}).ok
+
+
+@pytest.mark.scenario("openspec-binary/release-checksum-provenance/supplied-release-evidence-is-copied-offline")
+def test_openspec_committed_checksum_resource():
+    sums = preflight._openspec_checksums(files("specloop").joinpath("openspec-SHA256SUMS").read_text())
+    assert sums == {
+        "archive/openspec-darwin-arm64.tar.gz": "30e9f4b0a6ca4d9025a3c78a85343e15f60fa03ce042c358d6667d177a03ee19",
+        "archive/openspec-darwin-x64.tar.gz": "9c8fb2cec0b118f0dddd9db2455ee8c46fc458ccc60aa20230e1baeee85549a5",
+        "archive/openspec-linux-arm64-musl.tar.gz": "e72004a0ef31c8c32868a729fb3ce4e401b97ec7034dabdf5262aa10f6472b33",
+        "archive/openspec-linux-arm64.tar.gz": "06d2a38a322b4da993500edd6726a3b554adfe565d7e4834d140f72102c5c0b3",
+        "archive/openspec-linux-x64-musl.tar.gz": "c355b8d4b06b5734330f2e098d8c9fc1f3cf8b0b5fa1573f30d91e710a934e56",
+        "archive/openspec-linux-x64.tar.gz": "9e5215b8f9a7024fa635f693a6a691d82220703868f1949927e675b87503c608",
+        "archive/openspec-windows-arm64.zip": "b9a0d9eee8c36c06fab86bd89cd87138855b29a3afd2e47346991f8787a823b1",
+        "archive/openspec-windows-x64.zip": "6c00846a7e4813366ff8395cef71cadcc11d66eb7a112fe332358f8de5ae230e",
+        "binary/darwin-arm64/openspec": "bf0fbb541e79c3990906254be7d1b075c95efceb41e9e28899e72357ba4268a0",
+    }
 
 
 def cfg(**kw) -> Config:
@@ -128,8 +249,11 @@ def test_a_missing_or_classic_token_still_reports_presence(token):
 
 @pytest.mark.scenario("worker-retirement/service-prerequisites-match-the-surviving-engine/codex-enrollment-needs-no-worker-login")
 @pytest.mark.parametrize("deep", [False, True])
-@pytest.mark.parametrize("failure", [None, "missing-token", "scope", "reach", "negative-control", "alerts"])
-def test_cli_preflight_needs_only_front_door_prerequisites(tmp_path, monkeypatch, capsys, deep, failure):
+@pytest.mark.scenario("openspec-binary/installed-binary-preflight/wrong-checksum-blocks-readiness")
+@pytest.mark.parametrize("failure", [None, "missing-token", "scope", "reach", "negative-control", "alerts", "openspec"])
+def test_cli_preflight_needs_only_front_door_prerequisites(tmp_path, monkeypatch, capsys, deep, failure, openspec_host):
+    if failure == "openspec":
+        openspec_host.binary.write_bytes(b"tampered")
     manifest = tmp_path / "repository.toml"
     manifest.write_text(manifest_text(tmp_path / "source"))
     selected = tmp_path / "config.toml"
@@ -189,8 +313,11 @@ models = ["retired"]
             "reach": f"reach {SANDBOX}",
             "negative-control": f"cannot reach {OFF_LIMITS}",
             "alerts": "alerts",
+            "openspec": "openspec",
         }[failure]
         assert f"FAIL  {failed_check}:" in output.out
+    if failure == "openspec":
+        assert openspec_host.calls == [] and "docs/deploy.md#install-openspec" in output.out
 
 
 def test_deep_help_describes_the_retired_probe(capsys):

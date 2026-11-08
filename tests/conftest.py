@@ -17,6 +17,38 @@ install(LIVE_STATE_ROOTS)
 from nightshift import config, daemon, mirror, outcomes, queue, specloop_intake
 
 
+@pytest.fixture
+def openspec_host(tmp_path, monkeypatch):
+    """Supply verified fixture bytes and a bounded probe, retaining the real check."""
+    import hashlib
+    from types import SimpleNamespace
+    from nightshift import preflight
+    from specloop import openspec
+
+    binary = tmp_path / "openspec"
+    binary.write_bytes(b"fixture standalone executable\n")
+    binary.chmod(0o700)
+    sums = tmp_path / "SHA256SUMS"
+    data = preflight._OPENSPEC_SUMS.read_text()
+    old = preflight._openspec_checksums(data)["binary/darwin-arm64/openspec"]
+    sums.write_text(data.replace(old, hashlib.sha256(binary.read_bytes()).hexdigest()))
+    monkeypatch.setattr(preflight, "_OPENSPEC_SUMS", sums)
+    monkeypatch.setattr(preflight.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(preflight.platform, "machine", lambda: "arm64")
+    calls = []
+    def probe(args, **kwargs):
+        calls.append((args, kwargs))
+        assert args == [str(binary), "--version"]
+        assert kwargs == dict(env={**kwargs["env"], **openspec.ENV},
+                              capture_output=True, text=True, timeout=120)
+        return subprocess.CompletedProcess(args, 0, openspec.VERSION + "\n", "")
+    check = preflight._openspec_check
+    def supplied(env, *, runner=None):
+        return check({"NIGHTSHIFT_BIN_DIR": str(tmp_path), **env}, runner=runner or probe)
+    monkeypatch.setattr(preflight, "_openspec_check", supplied)
+    return SimpleNamespace(binary=binary, sums=sums, calls=calls, check=check, probe=probe)
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "scenario(id): OpenSpec scenario exercised by this test")
     config.addinivalue_line("markers", "real_trust: use the production author-association filter unmodified")

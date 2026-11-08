@@ -1,0 +1,22 @@
+# OpenSpec 1.16.1: supplied operator evidence, verified 2026-11-08.
+# Release: https://github.com/Fission-AI/OpenSpec/releases/tag/v1.16.1
+# Published: 2026-11-07T00:44:30Z. Copied offline; no implementer downloads.
+# archive/ entries reproduce the official SHA256SUMS digests.
+# Derivation from archive/openspec-darwin-arm64.tar.gz:
+# shasum -a 256 -c against the official list reported openspec-darwin-arm64.tar.gz: OK.
+# Extraction yielded LICENSE and openspec. shasum -a 256 openspec produced
+# bf0fbb541e79c3990906254be7d1b075c95efceb41e9e28899e72357ba4268a0.
+# ./openspec --version printed exactly 1.16.1 (exit 0).
+# ./openspec version printed OpenSpec 1.16.1 (standalone).
+# Only --version is used by the exact-match version gate.
+# Grammar: 64 lowercase hex digits, two spaces, artifact key; LF-delimited.
+# Only empty lines and column-zero # comments are ignored.
+30e9f4b0a6ca4d9025a3c78a85343e15f60fa03ce042c358d6667d177a03ee19  archive/openspec-darwin-arm64.tar.gz
+9c8fb2cec0b118f0dddd9db2455ee8c46fc458ccc60aa20230e1baeee85549a5  archive/openspec-darwin-x64.tar.gz
+e72004a0ef31c8c32868a729fb3ce4e401b97ec7034dabdf5262aa10f6472b33  archive/openspec-linux-arm64-musl.tar.gz
+06d2a38a322b4da993500edd6726a3b554adfe565d7e4834d140f72102c5c0b3  archive/openspec-linux-arm64.tar.gz
+c355b8d4b06b5734330f2e098d8c9fc1f3cf8b0b5fa1573f30d91e710a934e56  archive/openspec-linux-x64-musl.tar.gz
+9e5215b8f9a7024fa635f693a6a691d82220703868f1949927e675b87503c608  archive/openspec-linux-x64.tar.gz
+b9a0d9eee8c36c06fab86bd89cd87138855b29a3afd2e47346991f8787a823b1  archive/openspec-windows-arm64.zip
+6c00846a7e4813366ff8395cef71cadcc11d66eb7a112fe332358f8de5ae230e  archive/openspec-windows-x64.zip
+bf0fbb541e79c3990906254be7d1b075c95efceb41e9e28899e72357ba4268a0  binary/darwin-arm64/openspec
