@@ -27,7 +27,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from specloop import agents, critic, feasibility, manifest, spec_format, state, tasks
+from specloop import agents, critic, feasibility, manifest, speckit, spec_format, state
 from specloop.manifest import Manifest
 from specloop.seal import IDENTITY, git
 
@@ -105,6 +105,60 @@ human can answer (missing intent, not missing detail you can reasonably decide).
 """
 
 
+SPECKIT_PROMPT = """\
+# Draft a spec-kit feature: `{change}`
+
+Your working directory is a clone of the repository. Write only under
+{drafter_root}. Do not edit any other file.
+
+## The idea
+
+{idea}
+
+## Read first
+
+{sources}
+Read AGENTS.md, README.md, relevant code/tests, .specify/memory/constitution.md,
+and these local scaffolds: .specify/templates/spec-template.md,
+.specify/templates/plan-template.md, .specify/templates/tasks-template.md.
+Do not invoke `specify`, use the network, install templates, or rewrite templates
+or the constitution. Report missing templates as an actionable prerequisite.
+{in_flight}
+## What to write
+
+- Produce spec.md, plan.md and tasks.md from those scaffolds. These house rules
+  override incompatible template examples, including unlabelled scenarios and
+  optional tests. Do not reproduce sample tasks.
+- In spec.md use numbered, prioritized user stories and ASn-labelled acceptance
+  scenarios. Cite stable IDs in backticks as `{change}/us<k>/as<n>`.
+- In tasks.md start with Setup/Foundational, then exactly one positive
+  `## Phase N: User Story K - ...` per user story, ordered by numeric priority
+  (source order for ties). Use native T001 labels, optional positional [P], and
+  positional [USk] for every story task. Cover every scenario with a task;
+  setup tasks need no invented story citations.
+- Each task has one concern and about 300 changed lines at most. Combine related
+  same-file work within that ceiling, order dependencies, and put tests with code.
+  Target six tasks or fewer per user story; for documentation-only work target
+  one or two per story within the required story phases. Minimize unnecessary
+  splits: each task incurs a review cycle and each phase an evidence gate.
+  The whole-feature task count is not a size risk or rejection condition.
+- For rich text use deterministic physical-line rules, refusing ambiguous
+  identities; never require semantic Markdown/fence/HTML/indentation parsing.
+- Put human-only work in plan.md under `## Human checks`, with one scenario
+  citation per checklist item. For genuine missing intent, put at most three
+  `[NEEDS CLARIFICATION: ...]` questions in spec.md; decide routine details.
+- If the idea names an existing undelivered feature matching `{change}`, revise
+  it in place under {drafter_root}, preserving committed task/scenario identities,
+  unrelated content and directory identity. Do not create a second feature.
+  The effective change `{change}` is authoritative: conflicting target identities
+  require clarification without writing elsewhere or silently renaming it.
+  Complete records are immutable; later behavior changes require a new feature
+  identifying and justifying supersession in `## Assumptions`.
+{feedback}
+Finish with "drafted", or "needs_input" plus genuine clarification questions.
+"""
+
+
 # A task a person performs: "The operator verifies ...", "Manually ...". Named
 # people ("Matt checks ...") are left to the feasibility review, which reads the
 # task as language: a capitalised word and a verb-s also match "Append tests".
@@ -120,7 +174,7 @@ def paths(text: str, root: Path | None = None) -> set[str]:
     for token in BACKTICKED.findall(text):
         path = token.split("::")[0].rstrip(":,.")
         path = re.sub(r":[A-Za-z_][A-Za-z0-9_]*$", "", path)
-        if path.startswith(("openspec/", "/", "~", "http")):
+        if path.startswith(("openspec/", "specs/", "/", "~", "http")):
             continue
         if "/" in path:
             if re.search(r"\.\w+$|\*$", path):
@@ -184,7 +238,13 @@ def overlaps(work: Path, change: str, planned: dict[str, list[str]],
     """Tasks that edit a test file an unfinished run also plans to change."""
     task_file = work / fmt.tasks_path(change)
     found = []
-    for t in tasks.parse(task_file.read_text()) if task_file.exists() else []:
+    try:
+        parsed = fmt.parse_tasks(task_file.read_text()) if task_file.exists() else []
+    except spec_format.ValidatorUnavailable:
+        raise
+    except (spec_format.SpecError, OSError, UnicodeError) as e:
+        return [f"{fmt.tasks_path(change)}: {e}"]
+    for t in parsed:
         for path in sorted(p for p in edited_paths(t.text) if is_test(p) and p in planned):
             found.append(f"task {t.label}: `{path}` is also being changed by {', '.join(planned[path])}; "
                          "put these tests in a new file")
@@ -212,14 +272,26 @@ def lint(work: Path, change: str, fmt: spec_format.SpecFormat = spec_format.OPEN
     except spec_format.SpecError as e:
         return problems + [str(e)]
     task_file = work / fmt.tasks_path(change)
-    parsed = tasks.parse(task_file.read_text()) if task_file.exists() else []
+    try:
+        parsed = fmt.parse_tasks(task_file.read_text()) if task_file.exists() else []
+    except spec_format.ValidatorUnavailable:
+        raise
+    except (spec_format.SpecError, OSError, UnicodeError) as e:
+        return problems + [f"{fmt.tasks_path(change)}: {e}"]
+    native = fmt is spec_format.SPECKIT
     if not parsed:
-        problems.append("tasks.md has no tasks under '## N. Title' sections")
+        heading = "## Phase N: Title" if native else "## N. Title"
+        problems.append(f"tasks.md has no tasks under '{heading}' sections")
     cited = {s for t in parsed for s in t.scenarios}
     problems += [f"task {t.label}: unknown scenario `{s}`" for t in parsed for s in t.scenarios if s not in known]
     problems += [f"scenario `{s}` is not covered by any task" for s in sorted(set(known) - cited)]
-    problems += [f"task {t.label}: a person does this, but only an implementing agent works through "
-                 "tasks.md; describe the check in design.md instead" for t in parsed if HUMAN_TASK.match(t.text)]
+    for t in parsed:
+        label = speckit.TASK_LABEL.fullmatch(t.title()) if native else None
+        body = label[3] if label else t.text
+        if HUMAN_TASK.match(body):
+            document = "plan.md" if native else "design.md"
+            problems.append(f"task {t.label}: a person does this, but only an implementing agent works through "
+                            f"tasks.md; describe the check in {document} instead")
     root = fmt.drafter_root(change)
     stray = [p for p in _changed(work) if not p.startswith(root)]
     problems += [f"{p}: only files under {root} may change" for p in stray]
@@ -302,7 +374,8 @@ def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m
     critic_correction = False
     feedback = ""
     for n in range(1, rounds + 1):
-        prompt = PROMPT.format(change=change, drafter_root=fmt.drafter_root(change), idea=idea,
+        template = SPECKIT_PROMPT if m.format == "speckit" else PROMPT
+        prompt = template.format(change=change, drafter_root=fmt.drafter_root(change), idea=idea,
                                feedback=feedback, in_flight=_in_flight_section(planned),
                                sources="\n".join(f"- {s}" for s in sources) or "- (no extra sources named)")
         call = agents.Call(profile, "write", prompt, work, SCHEMA, out / f"draft-{n}.jsonl", m.implement_minutes * 60,
@@ -311,6 +384,18 @@ def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m
         if res.disposition != "ok":
             d.problems = [f"drafting session failed: {res.disposition} {res.detail[:300]}"]
             return d
+        if m.format == "speckit":
+            d.questions = list(res.output["questions"])
+            try:
+                spec = (fmt.change_dir(work, change) / "spec.md").read_text(encoding="utf-8")
+                d.questions.extend(speckit.questions(speckit.parse_spec(spec)))
+            except (OSError, UnicodeError) as e:
+                if not d.questions:
+                    d.problems = [f"{fmt.drafter_root(change)}spec.md: cannot read draft: {e}"]
+                    return d
+            if d.questions:
+                d.problems = []
+                return d
         if res.output["status"] == "needs_input":
             d.questions = res.output["questions"]
             return d

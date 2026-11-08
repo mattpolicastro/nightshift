@@ -612,6 +612,7 @@ def test_no_direct_openspec_path_literals_outside_adapter():
 
 @pytest.mark.scenario("spec-format/engine-routing-compatibility/consumers-contain-no-direct-format-operations")
 @pytest.mark.scenario("spec-format/engine-routing-compatibility/drafting-and-revision-retain-behavior")
+@pytest.mark.scenario("spec-drafting/native-feature-drafting/openspec-prompt-remains-unchanged")
 def test_drafting_prompt_retains_exact_bytes():
     rendered = propose.PROMPT.format(
         change="sample-change", drafter_root=spec_format.OPENSPEC.drafter_root("sample-change"),
@@ -646,13 +647,17 @@ def test_admission_and_lint_retain_late_bound_scenario_errors(repo, monkeypatch,
 
 
 @pytest.mark.scenario("spec-format/engine-routing-compatibility/drafting-and-revision-retain-behavior")
+@pytest.mark.scenario("spec-drafting/native-feature-drafting/openspec-prompt-remains-unchanged")
+@pytest.mark.parametrize("explicit", [False, True])
 @pytest.mark.parametrize("root", ["openspec/changes/sample-change/", "format-fixture/sample-change/"])
-def test_drafting_routes_paths_validation_confinement_and_staging(repo, tmp_path, monkeypatch, root):
+def test_drafting_routes_paths_validation_confinement_and_staging(repo, tmp_path, monkeypatch, root, explicit):
     from test_specloop_propose import M
 
+    M = replace(M, format="openspec") if explicit else M
     task_path = root + "work-items.md"
     adapter = Mock(spec=spec_format.SpecFormat)
     adapter.tasks_path.return_value = task_path
+    adapter.parse_tasks.side_effect = tasks.parse
     adapter.drafter_root.return_value = root
     adapter.validate.side_effect = lambda *a: []
     adapter.scenarios.return_value = {"cap/req/example": "text"}
@@ -666,6 +671,9 @@ def test_drafting_routes_paths_validation_confinement_and_staging(repo, tmp_path
     def draft(call):
         events.append("draft")
         assert f"the change, under {root}. Do not edit any other file." in call.prompt
+        assert call.prompt == propose.PROMPT.format(
+            change="sample-change", drafter_root=root, idea="idea", sources="- (no extra sources named)",
+            in_flight=propose._in_flight_section({"tests/shared.py": ["other"]}), feedback="")
         path = call.cwd / task_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("## 1. Core\n- [ ] 1.1 Implement `cap/req/example` in `tests/new.py`; "
@@ -689,6 +697,7 @@ def test_drafting_routes_paths_validation_confinement_and_staging(repo, tmp_path
     adapter.validate.assert_called_once_with(result.work, "sample-change")
     adapter.scenarios.assert_called_once_with(result.work, "sample-change")
     assert adapter.tasks_path.call_args_list == [call("sample-change")] * 3
+    assert adapter.parse_tasks.call_count == 3
     assert [c for c in spy.call_args_list if c.args[1] == "add"] == [
         call(result.work, "add", "-A", root.removesuffix("/"))]
     assert git(result.work, "show", "-s", "--format=%s", "HEAD") == (
@@ -820,6 +829,7 @@ def test_finish_routes_and_reuses_archive_after_interruption(service, monkeypatc
     assert service.run.state.status == "done" and service.run.state.pause is None
     assert asdict(Run(service.run.dir).state) == asdict(service.run.state)
     assert adapter.finish.call_count == 1
+    assert adapter.parse_tasks.call_count == 2
     assert adapter.tasks_paths_at.call_args_list == [
         call(service.bare, original, CHANGE), call(service.bare, archived, CHANGE)]
     assert capfd.readouterr().out == f"{CHANGE}: archived and marked ready for review — {service.url}\n"
