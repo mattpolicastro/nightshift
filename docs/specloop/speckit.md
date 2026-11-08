@@ -3,8 +3,12 @@
 These authoring rules and the `nightshift-speckit` preset belong to
 [issue #185](https://github.com/mattpolicastro/nightshift/issues/185) in
 [issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
-Native engine parsing, admission, freezing and finish support remain separate work;
-these rules do not enable them. Existing [OpenSpec naming and lifecycle guidance](README.md) stays in effect.
+Approved native features support explicit admission, build and publication with a
+trusted native manifest; see the [engine guide](README.md#native-spec-kit-builds)
+and [manifest example](../../examples/specloop/speckit.toml). Installing authoring
+assets does not enroll a repository or configure a build. Native drafting,
+feasibility and daemon intake remain future work. Existing
+[OpenSpec naming and lifecycle guidance](README.md) stays in effect.
 
 ## Feature directory and branch
 
@@ -66,10 +70,19 @@ Setup tasks need no invented story reference:
 - [ ] T003 [US1] Handle questions in src/gate.py; `042-add-a-gate/us1/as2`
 ```
 
-Harness-owned review and coverage additions append `## Phase N: Review round K`,
-with N after existing phases and IDs after the largest T number M, using
-`T{M+1:03d}` without truncation. The harness ticks completion `[X]`. Appending
-preserves identity without collisions; this contract adds no harness behavior.
+- Review feedback alone appends `## Phase N: Review round K`; K is the largest
+  existing review-round number plus one.
+- Section evidence and reviewer fixes extend the existing `## Phase N: Title`;
+  they keep its phase number and title.
+- Final fixes append `## Phase N: Coverage` or `## Phase N: Acceptance fixes`,
+  using the supplied title.
+
+Every appended phase uses the largest existing phase number plus one.
+All new base task IDs follow the largest existing numeric T root M (including
+dotted children), using
+`T{M+1:03d}` without truncation. Keep committed task IDs and scenario citations
+stable; never renumber or reuse removed IDs. Only the harness ticks `[X]` or
+updates frozen authoring files.
 
 ## Human-only checks
 
@@ -101,7 +114,9 @@ and stable references; it does not change OpenSpec's archival workflow.
 During implementation, agents cannot edit `specs/**` or `.specify/**`; only the
 harness updates `tasks.md` and the Status line. Authoring happens before this
 boundary. Freezing prevents an implementer from changing acceptance criteria to
-grade its own work. Runtime enforcement is separate work.
+grade its own work. Configure both globs in the trusted manifest's `[paths] frozen`,
+alongside workflow and steering-file protections, as in the
+[native example](../../examples/specloop/speckit.toml).
 
 ## No [NEEDS CLARIFICATION] at approval
 

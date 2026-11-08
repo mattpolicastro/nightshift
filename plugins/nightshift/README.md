@@ -24,7 +24,7 @@ current pause in the ordinary action group; Land is a separate confirmed control
 | Resume | Continue from a phase gate or another resumable pause, optionally with a note of up to 2,000 characters for the next attempt. |
 | Accept | Accept the paused task's verified candidate at a `stuck` or `needs_human` pause. |
 | Publish | At `ready_to_publish`, push to the manifest-selected GitHub or configured Gitea forge and update the recorded PR, or open a draft PR (WIP-title on Gitea). |
-| Finish | At `human_checks`, after completing the PR's human checks, archive, push to the manifest-selected forge and mark ready (remove and verify the Gitea WIP title prefix). |
+| Finish | At `human_checks`, after completing the PR's human checks, archive OpenSpec into `openspec/specs/` or set native `**Status**: Complete` without archival, then push to the manifest-selected forge and mark ready without merging (remove and verify the Gitea WIP title prefix). |
 | Abort | Stop a paused run. Available at every pause; a `secret` pause otherwise needs inspection by hand. |
 
 Each row also has **Details**, collapsed initially. Open it to see the change
@@ -65,7 +65,8 @@ and the summary counts always describe every run.
 ### Confirmed landing
 
 **Land** appears separately from Finish only for a verifiable, non-stale
-`human_checks` pause. Finish archives, pushes and marks ready; it does not
+`human_checks` pause. Finish archives OpenSpec into `openspec/specs/` or sets
+native `**Status**: Complete` without archival, then pushes and marks ready; it does not
 merge. Land asks you to confirm that you performed the PR's human checks and
 then invokes the existing reviewed-PR landing flow, including finish, CI and
 merge gates. The dialog shows the PR and head and freezes this identity:

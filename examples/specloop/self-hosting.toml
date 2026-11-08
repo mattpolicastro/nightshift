@@ -6,8 +6,8 @@
 
 [run]
 format = "openspec"          # optional; omission selects the same supported format
-# "speckit" parses but is unavailable: admit --json exits 1 with outcome "refused"
-# and reason "spec-kit format is not available yet". See docs/specloop/command-json.md.
+# For explicit native spec-kit builds, use examples/specloop/speckit.toml.
+# See docs/specloop/command-json.md for the format selection contract.
 repo = "/path/to/nightshift"   # your local checkout
 change = "example-change"
 branch = "spec/example-change"
