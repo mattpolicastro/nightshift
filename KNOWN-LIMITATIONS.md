@@ -358,12 +358,15 @@ real-host Stop/evidence inspection remain human checks, not fixture evidence.
 | Setting | Default | Consumers |
 | --- | --- | --- |
 | `NIGHTSHIFT_BIN_DIR` | `/opt/homebrew/bin` | Python preparation, verification, agent subprocesses and Codex quota reads; both plugin command adapters |
-| `NIGHTSHIFT_NODE_BIN` | `~/n/bin` | Plugin Factory, including OpenSpec `npx` calls for finish |
+| `NIGHTSHIFT_NODE_BIN` | `~/n/bin` | Plugin Factory's own Node tools |
 | `NIGHTSHIFT_UV` | `<resolved NIGHTSHIFT_BIN_DIR>/uv` | Exact executable for both plugin adapters |
 | `NIGHTSHIFT_CHECKOUT` | `~/Projects/nightshift` | Working directory for both plugin adapters and attention's installation check |
 
 Explicit settings override defaults; an unset `NIGHTSHIFT_UV` follows the
-selected bin directory. Python consumes only `NIGHTSHIFT_BIN_DIR`; the other
+selected bin directory. Python also consumes `NIGHTSHIFT_OPENSPEC_BIN` for the
+standalone validator, defaulting to `<NIGHTSHIFT_BIN_DIR>/openspec`
+(`/opt/homebrew/bin/openspec`). An explicit executable override takes precedence
+without consuming an unused bin-directory setting. Node, uv and checkout
 settings do not select a Python CLI's checkout or executable. Paths must be
 absolute or begin with `~/`, expanded against the host user's home before
 verification substitutes its isolated `HOME`. Spaces and other filename
@@ -406,8 +409,15 @@ worktrees. Existing worktrees, state, credentials and manifests do not move;
 this inert root enables no worker execution and is separate from specloop state. See
 [the example config](config.example.toml).
 
-**Frozen service wrappers: portability deferred.** `bin/**` is frozen for this
-change, as are `launchd/**` and wrapper/plist comments. The unchanged wrappers
+[Install OpenSpec 1.16.1](docs/deploy.md#install-openspec) at the selected absolute
+path. Only Darwin arm64 (`darwin-arm64`) has reviewed executable provenance;
+Intel macOS, Linux, Windows and every other host fail preflight as unknown.
+Other upstream archive hashes do not establish host support. Preflight refuses
+wrong installed-file hashes or versions before readiness; runtime checks the
+version and never acquires packages or falls back to `npx`.
+
+**Frozen service wrappers: portability deferred.** `bin/**` is frozen without
+exceptions, as are `launchd/**` and wrapper/plist comments. The unchanged wrappers
 retain these bootstrap commands:
 
 | Wrapper | Checkout | Executable and arguments | PATH |
@@ -417,7 +427,12 @@ retain these bootstrap commands:
 
 The daemon's bare `nightshift run` is the sole implicit daemon compatibility
 form; the supervisor's `specloop serve` uses the one-release alias. Neither
-requires a wrapper edit for this rollout.
+requires a wrapper edit for this rollout. The supervisor retains its `~/n/bin`
+prefix and stale OpenSpec/Node comment. Their exact cleanup remains deferred on
+[issue #184](https://github.com/mattpolicastro/nightshift/issues/184)'s ledger.
+Absolute executable selection plus the [Mac Studio cut-over](docs/deploy.md#openspec-rollout-checks)
+establish backend dependency removal; no separate supervisor-without-`~/n/bin`
+experiment is required.
 
 Neither wrapper consumes the new settings for its own bootstrap. Environment
 settings do not relocate these commands; changing a plist's wrapper pathname
@@ -442,7 +457,8 @@ prepare/verify steps, check agent/quota tool lookup and real sandbox denials,
 and confirm existing worktrees did not move. Validate daemon rollout only after
 separate service work or confirmation of frozen-wrapper prerequisites; otherwise
 leave it pending. In the actual Paseo host, check attention/Factory and a disposable
-action requiring `npx` (finish only after its normal human checks), including
-checkout selection and confirmation/error behavior. These second-install and
+action using the verified standalone validator (finish only after its normal
+human checks), including checkout selection and confirmation/error behavior.
+Confirm the plugin still resolves its own Node tools. These second-install and
 Paseo host integration checks remain pending; a temporary directory on the
 original machine or CI does not establish them or validate wrapper portability.

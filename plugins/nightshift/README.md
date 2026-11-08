@@ -226,8 +226,12 @@ as their working directory and `NIGHTSHIFT_UV` as the exact executable. An
 unset `NIGHTSHIFT_UV` follows `NIGHTSHIFT_BIN_DIR` (default `/opt/homebrew/bin`)
 plus `/uv`. Attention uses that bin directory followed by
 `/usr/bin:/bin:/usr/sbin:/sbin`; Factory prepends `NIGHTSHIFT_NODE_BIN` (default
-`~/n/bin`) for Node/`npx`, including finish. Neither appends arbitrary inherited
+`~/n/bin`) for the plugin's own Node tools. Neither appends arbitrary inherited
 PATH entries. Attention's installation check uses the same configured checkout.
+OpenSpec uses the absolute `NIGHTSHIFT_OPENSPEC_BIN` override or
+`<NIGHTSHIFT_BIN_DIR>/openspec` (default `/opt/homebrew/bin/openspec`), inherited
+by the Python subprocess. [Install the verified 1.16.1 binary](../../docs/deploy.md#install-openspec);
+only `darwin-arm64` is mapped, and other hosts fail preflight as unknown.
 
 For an alternate layout, supply these assignments in the **Paseo host process
 environment** before starting it (substitute actual installed paths):
@@ -237,6 +241,7 @@ export NIGHTSHIFT_BIN_DIR="/alternate/tools"
 export NIGHTSHIFT_NODE_BIN="/alternate/node/bin"
 export NIGHTSHIFT_UV="/alternate/tools/uv"
 export NIGHTSHIFT_CHECKOUT="/alternate/nightshift"
+export NIGHTSHIFT_OPENSPEC_BIN="/alternate/tools/openspec"
 ```
 
 Restart the Paseo host after changing its environment. Exporting in a terminal
@@ -266,8 +271,10 @@ Python services need their own applicable environment and restart; see
 [host setup](../../README.md#host-path-setup). The unchanged
 `bin/nightshift-daemon` and `bin/specloop-serve` retain fixed bootstrap checkout,
 uv and PATH locations. These settings do not relocate their commands. Wrapper
-portability is deferred because `bin/**` is frozen; direct CLI examples do not
-configure bundled service startup. Full daemon rollout requires separate
+portability is deferred because `bin/**` is frozen without exceptions, including
+comments, as are launchd plists. The supervisor retains `~/n/bin` and its stale
+OpenSpec comment; cleanup is deferred on [issue #184](https://github.com/mattpolicastro/nightshift/issues/184)'s ledger.
+Direct CLI examples do not configure bundled service startup. Full daemon rollout requires separate
 wrapper work or an independently provisioned operator service preserving
 equivalent credential and preflight guards. Second-install and actual Paseo
 host integration validation for alternate paths remain pending; see the

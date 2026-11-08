@@ -10,6 +10,104 @@ uv run --no-sync python -m nightshift.deploy --apply  # repair after migration/h
 
 `uv run python -m nightshift.deploy` is supported, but the outer uv may synchronize before the command can observe dependency drift. Prefer `--no-sync` in both modes to preserve observation and repair order. If `.venv` is absent, use an available Python 3.12+ from the checkout: `python3 -m nightshift.deploy` (or add `--apply`). The module needs no third-party dependencies; uv must still be available for environment probes and repair.
 
+## Install OpenSpec
+
+Install the official standalone **OpenSpec 1.16.1** from the
+[v1.16.1 release](https://github.com/Fission-AI/OpenSpec/releases/tag/v1.16.1).
+Only `(Darwin, arm64)` → `darwin-arm64` is mapped. Intel macOS, Linux, Windows
+and every other host fail preflight as unknown; upstream archives alone do not
+establish Nightshift support. Additional targets require reviewed executable
+provenance and a host-map update.
+
+The trusted process setting `NIGHTSHIFT_OPENSPEC_BIN` overrides
+`<NIGHTSHIFT_BIN_DIR>/openspec`, default `/opt/homebrew/bin/openspec`.
+Use the [literal host path rules](../KNOWN-LIMITATIONS.md#platform-assumptions):
+absolute or leading `~/`, no shell expansion or PATH search. Supply applicable
+settings separately to Python services and the Paseo host. The daemon env file
+wins over inherited downstream settings; the supervisor does not source it.
+
+During the quiet window, with writers stopped as described below, run this from
+the intended checkout on the mapped host. It uses the same resolver as runtime
+and preflight. Set an override first if needed, for example
+`export NIGHTSHIFT_OPENSPEC_BIN='/absolute/tool directory/openspec'`.
+The destination parent must already exist and be writable by the operator.
+These are operator download commands; neither runtime nor preflight downloads,
+repairs an installation or falls back to `npx`.
+
+```sh
+(
+set -eu
+checkout="$PWD"
+openspec_bin=$(uv run --no-sync python -c 'from specloop.openspec import resolve_binary; print(resolve_binary())')
+release='https://github.com/Fission-AI/OpenSpec/releases/download/v1.16.1'
+stage=$(mktemp -d "${TMPDIR:-/tmp}/openspec.XXXXXXXX")
+cd "$stage"
+curl --fail --location --proto '=https' --proto-redir '=https' "$release/openspec-darwin-arm64.tar.gz" -o openspec-darwin-arm64.tar.gz
+curl --fail --location --proto '=https' --proto-redir '=https' "$release/SHA256SUMS" -o SHA256SUMS
+awk '$2 == "openspec-darwin-arm64.tar.gz"' SHA256SUMS > archive.sha256
+printf '%s\n' '30e9f4b0a6ca4d9025a3c78a85343e15f60fa03ce042c358d6667d177a03ee19  openspec-darwin-arm64.tar.gz' > expected.sha256
+cmp expected.sha256 archive.sha256
+shasum -a 256 -c archive.sha256
+tar -xzf openspec-darwin-arm64.tar.gz
+printf '%s\n' 'bf0fbb541e79c3990906254be7d1b075c95efceb41e9e28899e72357ba4268a0  openspec' > binary.sha256
+shasum -a 256 -c binary.sha256
+install -m 755 openspec "$openspec_bin"
+"$openspec_bin" --version
+cd "$checkout"
+uv run --no-sync nightshift preflight
+)
+```
+
+Both checksum checks must pass; `--version` must print exactly `1.16.1` and exit
+0. The archive hash verifies the compressed release **before extraction**; the
+different executable hash verifies the extracted/installed file. Both come from
+the supplied operator evidence in [the committed checksum manifest](../specloop/openspec-SHA256SUMS),
+verified on 2026-11-08 for the release published 2026-11-07T00:44:30Z.
+Preflight freshly checks the executable hash before executing its version probe,
+independently of runtime's successful-version cache. Unknown targets, missing or
+unusable files, invalid checksum data, hash/version mismatch and probe failures
+all block readiness. Runtime performs only the version gate; launch/version and
+non-JSON errors are ordinary refusals, while only subprocess timeouts use
+[transient recovery](specloop/command-json.md). Each subprocess has 120 seconds;
+first use can need separate version and operation budgets.
+
+Restart affected consumers after replacement, even at the same path: successful
+runtime version checks are cached per path per process. Preserve the existing
+quiet-window/hold order below: plugin reload (restart Paseo if its environment
+changed), daemon restart, then supervisor restart, inspect before resuming.
+Rollback requires matching code and binary pins plus fresh preflight/restarts.
+All `bin/**` and launchd plists remain frozen without exceptions, including
+comments. The supervisor keeps `~/n/bin` and its stale OpenSpec/Node comment;
+exact PATH/comment cleanup remains deferred on
+[issue #184](https://github.com/mattpolicastro/nightshift/issues/184)'s ledger.
+
+## OpenSpec rollout checks
+
+Exactly three checks for [issue #191](https://github.com/mattpolicastro/nightshift/issues/191)
+remain pending, with results linked from [issue #184](https://github.com/mattpolicastro/nightshift/issues/184):
+
+- [ ] Before merge, run verified `openspec validate --all --strict` on a throwaway
+  clone of Nightshift `main` and the Scheming Vizier checkout. In a separate
+  disposable fixture root, verify failures for missing WHEN/GIVEN, missing THEN
+  and an unrecognized requirements header; verify a valid four-hash scenario
+  with closing heading hashes passes. Record revisions, executable version/digest,
+  exits, example outcomes and every failing path/diagnostic. Active failures
+  need review; archived history is informational. Do not repair those specs here.
+- [ ] Before deploy, repeat `openspec validate --all --strict` on both enrolled
+  repositories' intended deployment checkouts; record revisions and failures.
+- [ ] In a quiet window on the Mac Studio, install the verified executable, run
+  preflight, restart affected consumers, admit one real OpenSpec change and
+  finish one through the deployed service path, preserving normal human gates.
+  Confirm the plugin resolves its own Node tools; record executable/version/digest,
+  service PATH, run identities and outcomes, explicitly noting the unchanged
+  bundled wrapper. Absolute executable selection plus this cut-over establish
+  dependency removal; no separate supervisor-without-`~/n/bin` experiment is needed.
+
+Offline tests do not prove the upstream strict parser or live deployment success.
+The [retained four-hash lint](specloop/README.md#how-the-engine-works), duplicate-ID
+checks and unfinished-task archive gate remain. Existing portability and legacy-run
+resume checks retain their separate tracking; these three checks cover this cut-over.
+
 ## Options and results
 
 | Option | Default and behavior |
