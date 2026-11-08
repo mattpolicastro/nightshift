@@ -1990,7 +1990,8 @@ def _deliver(repo: Repo, labels: queue.Labels, number: int, change: str,
         branch = f"spec/{change}"
         # Propose places its commit in the manifest's source repository, which
         # need not be the worker clone configured by Repo.dir.
-        source = _require_manifest(repo, readiness, new_work=False).repo
+        manifest = _require_manifest(repo, readiness, new_work=False)
+        source = manifest.repo
         git = partial(_bounded_run, runner=git_runner)
         push_options = []
         if receipt.get("replaces_pr"):
@@ -2012,6 +2013,8 @@ def _deliver(repo: Repo, labels: queue.Labels, number: int, change: str,
         if proc.returncode:
             raise DeliveryError(f"could not push {branch}: {proc.stderr.strip()}")
         body = f"Closes #{number}\n"
+        if manifest.format == "speckit":
+            body += f"\nspec-kit feature `specs/{change}/`\n"
         if result.get("risks"):
             body += "\nFeasibility risks:\n" + "\n".join(f"- {risk}" for risk in result["risks"])
         url = forge.create_draft_pr(

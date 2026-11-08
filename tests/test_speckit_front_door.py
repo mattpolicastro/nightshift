@@ -375,13 +375,15 @@ def front_door(repo, tmp_path, monkeypatch, request):
     e.add = add
     e.format = lambda value: path.write_text(manifest_text(repo).replace(
         "[run]", "[run]" + (f'\nformat = "{value}"' if value else "")))
-    e.poll = lambda: intake.propose_pending(pipeline.repo, queue.Labels(), tmp_path, forge=forge,
-        specloop_runner=command, git_runner=command, on_error=lambda n, exc: e.errors.append(exc))
+    e.poll = lambda **kwargs: intake.propose_pending(pipeline.repo, queue.Labels(), tmp_path, forge=forge,
+        **{"specloop_runner": command, "git_runner": command,
+           "on_error": lambda n, exc: e.errors.append(exc), **kwargs})
     return e
 
 
 @pytest.mark.real_trust
 @pytest.mark.scenario("issue-intake/owner-qualified-new-identities/manifest-selects-native-naming")
+@pytest.mark.scenario("issue-intake/drafting-from-an-issue/draft-pr-opened")
 @pytest.mark.parametrize("format", [None, "openspec", "speckit"])
 @pytest.mark.parametrize("files", ["openspec", "specs"])
 def test_manifest_selects_intake_naming(front_door, format, files):
