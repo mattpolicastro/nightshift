@@ -492,6 +492,7 @@ Modules are under `nightshift/`; directory paths are repository-relative.
 | `queue.py` | Retained GitHub transport, retries and shared queue policy; daemon owns GitHub-only leftover recovery |
 | `outcomes.py`, `trace.py`, `mirror.py` | Historical outcomes, transcripts and optional import utility |
 | `specloop/` | Build engine, supervisor, verification and evidence gates |
+| `presets/` | Authoring assets: [Nightshift spec-kit preset](presets/nightshift-speckit/README.md) and [house rules](docs/specloop/speckit.md) |
 | `tests/` | Regression checks; run `uv run pytest` |
 
 The forge boundary is staged ([issue #126](https://github.com/mattpolicastro/nightshift/issues/126)):
