@@ -12,11 +12,17 @@ import json
 import os
 import re
 import subprocess
+import threading
 import unicodedata
+from collections.abc import Mapping
 from pathlib import Path
 
-PACKAGE = "@fission-ai/openspec@1.14.3"
+from nightshift.host_paths import host_path
+
+VERSION = "1.16.1"
 ENV = {"OPENSPEC_TELEMETRY": "0", "OPENSPEC_NO_UPDATE_CHECK": "1", "DO_NOT_TRACK": "1"}
+_checked_paths: set[str] = set()
+_version_lock = threading.Lock()
 
 
 class SpecError(RuntimeError):
@@ -27,22 +33,51 @@ class ValidatorUnavailable(SpecError):
     """The validator could not run because of a transient infrastructure failure."""
 
 
-def _run(repo: Path, *args: str) -> tuple[int, dict]:
-    env = {**os.environ, **ENV}
+def resolve_binary(env: Mapping[str, str] | None = None) -> str:
+    """Select a literal trusted host path; never search PATH or inspect the file."""
+    env = os.environ if env is None else env
     try:
-        p = subprocess.run(
-            ["npx", "-y", "--prefer-offline", PACKAGE, *args, "--json"],
+        if "NIGHTSHIFT_OPENSPEC_BIN" in env:
+            return host_path("NIGHTSHIFT_OPENSPEC_BIN", "", env)
+        return host_path("NIGHTSHIFT_BIN_DIR", "/opt/homebrew/bin", env).rstrip("/") + "/openspec"
+    except ValueError as e:
+        raise SpecError(str(e)) from e
+
+
+def _install_hint(binary: str) -> str:
+    return f"install OpenSpec {VERSION} at {binary}; see docs/deploy.md#install-openspec"
+
+
+def _process(repo: Path, argv: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            argv,
             cwd=repo, env=env, capture_output=True, text=True, timeout=120,
         )
     except subprocess.TimeoutExpired as e:
-        raise ValidatorUnavailable(f"openspec {' '.join(args)}: timed out after {e.timeout} seconds") from e
+        raise ValidatorUnavailable(f"{' '.join(argv)}: timed out after {e.timeout} seconds") from e
+    except UnicodeDecodeError as e:
+        raise SpecError(f"cannot decode OpenSpec output; {_install_hint(argv[0])}") from e
+    except OSError as e:
+        raise SpecError(f"cannot launch OpenSpec: {e}; {_install_hint(argv[0])}") from e
+
+
+def _run(repo: Path, *args: str) -> tuple[int, dict]:
+    env = {**os.environ, **ENV}
+    binary = resolve_binary(env)
+    # Cache only success. Serialize first use so concurrent callers share one probe.
+    # Replacing a checked binary at the same path requires a consumer restart.
+    with _version_lock:
+        if binary not in _checked_paths:
+            probe = _process(repo, [binary, "--version"], env)
+            if probe.returncode != 0 or probe.stdout.strip() != VERSION:
+                raise SpecError(f"OpenSpec version check failed; {_install_hint(binary)}")
+            _checked_paths.add(binary)
+    p = _process(repo, [binary, *args, "--json"], env)
     try:
         return p.returncode, json.loads(p.stdout)
     except json.JSONDecodeError:
-        error = (ValidatorUnavailable if re.search(
-            r"\b(?:ENOTFOUND|ETIMEDOUT|ECONNRESET|EAI_AGAIN|ECONNREFUSED)\b", p.stderr,
-        ) else SpecError)
-        raise error(f"openspec {' '.join(args)}: exit {p.returncode}, no JSON: {p.stderr.strip()[:400]}")
+        raise SpecError(f"openspec {' '.join(args)}: exit {p.returncode}, no JSON: {p.stderr.strip()[:400]}")
 
 
 def slug(s: str) -> str:

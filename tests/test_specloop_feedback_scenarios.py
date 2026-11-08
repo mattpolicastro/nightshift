@@ -179,9 +179,10 @@ def test_failed_lookup_cannot_pass_evidence_or_append_tasks(env, monkeypatch, co
     head = ctx.head()
     text = ctx.tasks_text(head)
     before = asdict(ctx.run.state)
+    failure = error("scenario service unavailable")
 
     def failed_lookup(repo, change):
-        raise error("scenario service unavailable")
+        raise failure
 
     def unexpected(*args, **kwargs):
         pytest.fail("a failed scenario lookup must stop before evidence or task writes")
@@ -190,8 +191,9 @@ def test_failed_lookup_cannot_pass_evidence_or_append_tasks(env, monkeypatch, co
     monkeypatch.setattr(evidence, "gather", unexpected)
     monkeypatch.setattr(loop, "_rewrite_tasks", unexpected)
     monkeypatch.setattr(verify, "run_steps", unexpected)
-    with pytest.raises(openspec.SpecError, match="scenario service unavailable"):
+    with pytest.raises(openspec.SpecError, match="scenario service unavailable") as raised:
         loop.section_evidence(ctx, 2, head, tasks.parse(text))
+    assert raised.value is failure
     assert ctx.head() == head and ctx.tasks_text(head) == text
     assert asdict(ctx.run.state) == before
     assert asdict(Run(ctx.run.dir).state) == before
