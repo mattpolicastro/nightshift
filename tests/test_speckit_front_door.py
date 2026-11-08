@@ -1,16 +1,21 @@
 from dataclasses import replace
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
 from nightshift.cli import main
+from nightshift import specloop_intake as intake
 from specloop import agents, cli, manifest, propose, spec_format, state
 from test_specloop_command_json import TASKS, template
 from test_specloop_propose import M, draft_evidence_snapshot
 import test_specloop_command_json as commands
 import test_spec_format as compatibility
-from test_spec_format import service, admitted
+from test_spec_format import service, admitted, repo, commit
+from specloop.seal import git
+import test_owner_qualified_changes as qualified
+from test_owner_qualified_changes import template as intake_template
 
 
 def isolated_proposals(template, monkeypatch, capfd, repositories, reverse=False):
@@ -141,3 +146,172 @@ def test_namespace_keeps_format_boundary(tmp_path):
     for root in (None, tmp_path):
         for extract in (propose.paths, propose.edited_paths):
             assert extract("Edit `specs/helper.py` and `src/helper.py`", root) == {"src/helper.py"}
+
+
+@pytest.mark.scenario("issue-intake/owner-qualified-new-identities/different-owners-have-distinct-changes")
+def test_format_aware_names_keep_distinct_openspec_delivery(intake_template):
+    qualified.test_change_names_are_owner_qualified(intake_template)
+
+
+@pytest.mark.scenario("issue-intake/owner-qualified-new-identities/safe-punctuation-is-preserved")
+@pytest.mark.parametrize("title,slug", [("Add a gate", "add-a-gate"), ("🔥 λ", "issue"),
+                                        ("A" * 39 + " B", "a" * 39)])
+def test_format_aware_names_keep_punctuation(intake_template, title, slug):
+    qualified.test_punctuation_and_bounded_slug(intake_template, "owner", title, slug)
+
+
+@pytest.mark.scenario("issue-intake/owner-qualified-new-identities/unsafe-spelling-holds-new-work")
+def test_format_aware_names_keep_health_hold(intake_template, monkeypatch):
+    qualified.test_unsafe_name_is_repository_health_hold(intake_template, monkeypatch, "owner/widget..js")
+    qualified.test_unsupported_name_allows_saved_safe_draft_delivery(intake_template, True)
+
+
+@pytest.mark.scenario("issue-intake/owner-qualified-new-identities/native-issue-numbers-pad-and-grow")
+@pytest.mark.parametrize("number,prefix", [(7, "007"), (42, "042"), (1234, "1234")])
+@pytest.mark.parametrize("title,slug", [("Add a gate", "add-a-gate"), ("CAFÉ !!", "caf"),
+                                        ("🔥", "issue"), ("A" * 50, "a" * 40)])
+def test_native_names_pad_and_grow(number, prefix, title, slug):
+    for repository in ("a/x", "b/x"):
+        name = intake._change_name(repository, number, title, format="speckit")
+        assert name == f"{prefix}-{slug}" and intake._safe_change(name)
+        assert intake._change_name(repository, number, title) == intake._change_name(
+            repository, number, title, format="openspec")
+    with pytest.raises(ValueError, match="positive"):
+        intake._change_name("a/x", 0, title, format="speckit")
+
+
+@pytest.fixture
+def target_repo(repo):
+    document = "# Gate\n**Status**: Draft\n\n### User Story 1 - Gate (Priority: P1)\n"
+    document += "**Acceptance Scenarios**:\n1. **AS1** Retain this identity.\n"
+    commit(repo, {"specs/042-add-a-gate/spec.md": document,
+                  "specs/042-add-a-gate/tasks.md": "- [ ] T001 Retain task identity\n"})
+    return repo, git(repo, "rev-parse", "HEAD").decode().strip()
+
+
+def select_target(target_repo, body, title="Changed title", **kwargs):
+    source, head = target_repo
+    return intake._native_change(source, head, "owner/repo", 42, title, body, **kwargs)
+
+
+@pytest.mark.scenario("issue-intake/native-existing-feature-selection/existing-feature-directory-is-reused")
+def test_native_target_reuses_pinned_directory(target_repo):
+    source, head = target_repo
+    before = git(source, "ls-tree", "-r", head)
+    commit(source, {"specs/042-add-a-gate/spec.md": "# Gate\n**Status**: Complete\n"})
+    body = "Revise `specs/042-add-a-gate/` and specs/042-add-a-gate/"
+    assert select_target(target_repo, body) == "042-add-a-gate"
+    assert git(source, "ls-tree", "-r", head) == before
+    with pytest.raises(intake.DeliveryError, match="Complete"):
+        select_target((source, git(source, "rev-parse", "HEAD").decode().strip()), body)
+    local = source / "specs/042-only-local/spec.md"
+    local.parent.mkdir()
+    local.write_text("# Uncommitted feature")
+    with pytest.raises(intake.DeliveryError, match="unavailable"):
+        select_target(target_repo, "specs/042-only-local/")
+
+
+@pytest.mark.scenario("issue-intake/native-existing-feature-selection/ambiguous-or-unavailable-target-refuses")
+@pytest.mark.parametrize("wrapper", ["{}", "`{}`", "```md\n{}\n```", "<!-- {} -->", "    {}"])
+def test_native_tokens_are_physical_and_deduplicated(target_repo, wrapper):
+    body = wrapper.format("specs/042-add-a-gate/")
+    assert intake._native_targets(body + "\n" + body, 42) == ["042-add-a-gate"]
+    assert select_target(target_repo, body) == "042-add-a-gate"
+    with pytest.raises(intake.DeliveryError, match="ambiguous"):
+        select_target(target_repo, body + "\n" + wrapper.format("specs/042-another/"))
+    assert intake._native_targets(wrapper.format("specs/00042-add-a-gate/"), 42) == ["00042-add-a-gate"]
+
+
+@pytest.mark.scenario("issue-intake/native-existing-feature-selection/ambiguous-or-unavailable-target-refuses")
+@pytest.mark.parametrize("kind", ["missing", "file", "link", "spec-link", "no-spec", "unreadable", "complete"])
+def test_native_unavailable_targets_refuse(target_repo, kind):
+    source, _ = target_repo
+    target = source / "specs/042-target"
+    if kind == "file":
+        target.write_text("not a tree")
+    elif kind == "link":
+        target.symlink_to("042-add-a-gate", target_is_directory=True)
+    elif kind != "missing":
+        target.mkdir()
+        if kind == "spec-link":
+            (target / "spec.md").symlink_to("../042-add-a-gate/spec.md")
+        elif kind == "no-spec":
+            (target / "plan.md").write_text("No spec")
+        else:
+            (target / "spec.md").write_bytes(b"\xff" if kind == "unreadable" else
+                                            b"# Gate\n**Status**: Complete\n**Status**: Draft\n")
+    if kind != "missing":
+        commit(source, {})
+    pinned = source, git(source, "rev-parse", "HEAD").decode().strip()
+    with pytest.raises(intake.DeliveryError):
+        select_target(pinned, "specs/042-target/")
+
+
+@pytest.mark.scenario("issue-intake/native-existing-feature-selection/untargeted-native-issue-uses-title")
+@pytest.mark.parametrize("body", ["", "specs/043-add-a-gate/", "specs/042-add-a-gate/spec.md",
+    "./specs/042-add-a-gate/", "xspecs/042-add-a-gate/", "specs/042-add-a-gate/_child",
+    "specs/42-add-a-gate/", "specs/042-Upper/", "specs/042-a--b/", "specs/042-a..b/",
+    "specs/042-" + "a" * 41 + "/", "specs/000-zero/", "specs/042-add-\na-gate/"])
+def test_native_untargeted_uses_title(target_repo, body):
+    assert intake._native_targets(body, 42) == []
+    assert select_target(target_repo, body) == "042-changed-title"
+
+
+@pytest.mark.scenario("issue-intake/native-existing-feature-selection/untargeted-native-issue-uses-title")
+def test_native_generated_path_cannot_overwrite_complete(target_repo):
+    source, _ = target_repo
+    commit(source, {"specs/042-add-a-gate/spec.md": "# Gate\n**Status**: Complete\n"})
+    pinned = source, git(source, "rev-parse", "HEAD").decode().strip()
+    with pytest.raises(intake.DeliveryError, match="Complete"):
+        select_target(pinned, "", "Add a gate")
+
+
+@pytest.mark.scenario("issue-intake/native-existing-feature-selection/untargeted-native-issue-uses-title")
+@pytest.mark.parametrize("root_kind", ["absent", "file", "link"])
+def test_native_discovery_checks_root_without_scanning(repo, root_kind):
+    if root_kind != "absent":
+        root = repo / "specs"
+        if root_kind == "link":
+            root.symlink_to("missing", target_is_directory=True)
+        else:
+            root.write_text("not a directory")
+        commit(repo, {})
+    pinned = repo, git(repo, "rev-parse", "HEAD").decode().strip()
+    reads = []
+    def runner(args, **kwargs):
+        reads.append(args[3:])
+        return subprocess.run(args, **kwargs)
+    if root_kind == "absent":
+        assert select_target(pinned, "", git_runner=runner) == "042-changed-title"
+    else:
+        with pytest.raises(intake.DeliveryError, match="unsafe"):
+            select_target(pinned, "", git_runner=runner)
+    assert reads == [["cat-file", "-t", pinned[1]], ["ls-tree", "-z", pinned[1], "--", "specs"]]
+
+
+@pytest.mark.scenario("issue-intake/native-existing-feature-selection/ambiguous-or-unavailable-target-refuses")
+@pytest.mark.scenario("issue-intake/native-existing-feature-selection/untargeted-native-issue-uses-title")
+@pytest.mark.parametrize("operation", ["ls-tree", "cat-file"])
+@pytest.mark.parametrize("failure", ["read", "timeout", "pause"])
+def test_native_uncertain_reads_propagate(target_repo, operation, failure):
+    def runner(args, **kwargs):
+        assert kwargs["timeout"] == 30 and kwargs["check"]
+        if operation in args and "-t" not in args:
+            if failure == "pause":
+                raise intake.Paused("paused")
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(args, 30)
+            raise subprocess.CalledProcessError(128, args)
+        return subprocess.run(args, **kwargs)
+    expected = {"pause": intake.Paused, "timeout": RuntimeError, "read": subprocess.CalledProcessError}[failure]
+    with pytest.raises(expected):
+        select_target(target_repo, "", "Add a gate", git_runner=runner)
+
+
+@pytest.mark.parametrize("pin", ["HEAD", "main", "0" * 40, "tree"])
+def test_native_discovery_requires_existing_exact_commit(target_repo, pin):
+    source, head = target_repo
+    if pin == "tree":
+        pin = git(source, "rev-parse", head + "^{tree}").decode().strip()
+    with pytest.raises((ValueError, subprocess.CalledProcessError)):
+        select_target((source, pin), "")

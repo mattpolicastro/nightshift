@@ -24,6 +24,7 @@ from typing import TypeGuard
 from urllib.parse import quote
 
 from specloop import manifest as manifests
+from specloop import speckit
 from specloop import state as run_state, tasks as run_tasks
 
 from . import queue, specloop_client, specloop_job
@@ -60,7 +61,7 @@ def _safe_change(change: str) -> bool:
             and ".." not in change and not change.endswith((".", ".lock")))
 
 
-def _change_name(repository: str, number: int, title: str) -> str:
+def _change_name(repository: str, number: int, title: str, *, format: str = "openspec") -> str:
     parts = repository.split("/", 1)
     if len(parts) != 2 or not all(parts) or "/" in parts[1]:
         raise UnsupportedName(
@@ -70,7 +71,76 @@ def _change_name(repository: str, number: int, title: str) -> str:
         )
     owner, name = parts
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40].rstrip("-")
+    if format == "speckit":
+        if number <= 0:
+            raise ValueError("native issue numbers must be positive")
+        return f"{number:03d}-{slug or 'issue'}"
     return f"{owner}__{name}-issue-{number}-{slug or 'issue'}"
+
+
+_NATIVE_TARGET = re.compile(
+    r"(?<![A-Za-z0-9_./-])specs/([0-9]{3,}-[a-z0-9]+(?:-[a-z0-9]+)*)/(?![A-Za-z0-9_./-])"
+)
+
+
+def _native_targets(body: str, number: int) -> list[str]:
+    """Literal same-issue directory tokens, deduplicated in source order."""
+    targets: dict[str, None] = {}
+    for line in body.splitlines():
+        for match in _NATIVE_TARGET.finditer(line):
+            digits, slug = match[1].split("-", 1)
+            # Compare canonical decimal strings without an unbounded int conversion.
+            if number > 0 and digits.lstrip("0") == str(number) and len(slug) <= 40:
+                targets[match[1]] = None
+    return list(targets)
+
+
+def _native_change(source: Path, base_commit: str, repository: str, number: int,
+                   title: str, body: str, *, git_runner=None) -> str:
+    """Select a feature at an exact commit; never consult the working tree.
+
+    Determinate target problems need human intervention. Failed Git reads,
+    including timeouts and pauses, propagate without implying absence. Callers
+    must run eligibility gates first and pass this same commit to drafting.
+    """
+    candidates = _native_targets(body, number)
+    if len(candidates) > 1:
+        raise DeliveryError("ambiguous native feature targets: " + ", ".join(candidates))
+    change = candidates[0] if candidates else _change_name(repository, number, title, format="speckit")
+    if not _safe_change(change):
+        raise DeliveryError(f"unsafe native feature target: {change}")
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base_commit):
+        raise ValueError("native discovery requires a full commit object")
+
+    def git(*args):
+        return _bounded_run(["git", "-C", str(source), *args], runner=git_runner,
+                            capture_output=True, check=True).stdout
+
+    if git("cat-file", "-t", base_commit).strip() != b"commit":
+        raise ValueError("native discovery requires a commit object")
+    tree = base_commit
+    for component in ("specs", change, "spec.md"):
+        # ls-tree succeeds with empty output only for a proven missing entry.
+        entry = git("ls-tree", "-z", tree, "--", component)
+        if not entry:
+            if not candidates and component != "spec.md":
+                return change
+            raise DeliveryError(f"unavailable native feature: specs/{change}/{component}")
+        metadata, path = entry.rstrip(b"\0").split(b"\t", 1)
+        mode, kind, oid = metadata.split()
+        expected = b"blob" if component == "spec.md" else b"tree"
+        if path != component.encode() or kind != expected or mode == b"120000":
+            raise DeliveryError(f"unsafe native feature entry: specs/{change}/{component}")
+        tree = oid.decode("ascii")
+    try:
+        document = git("cat-file", "blob", tree).decode("utf-8")
+    except UnicodeError as exc:
+        raise DeliveryError(f"unreadable native spec: specs/{change}/spec.md") from exc
+    for line in document.splitlines():
+        status = speckit.STATUS.fullmatch(line.strip(" \t"))
+        if status and status[1].casefold() == "complete":
+            raise DeliveryError(f"Complete native feature is immutable: specs/{change}/")
+    return change
 
 
 def _require_supported_name(repo: Repo, change: str) -> None:
