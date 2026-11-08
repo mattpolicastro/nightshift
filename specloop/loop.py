@@ -692,7 +692,14 @@ def _gate_context(ctx: Ctx, n: int, head: str, section: list[tasks.Task], ts: Ta
     (context / "diff.patch").write_text(diff)
     (context / "evidence.md").write_text(ctx.run.state.evidence_summary.get(str(n), "(no evidence gate ran for this section)") + "\n")
     notes = ctx.run.dir / "followups.md"
-    mine = [l for l in notes.read_text().splitlines() if l.startswith(f"- ({n}.")] if notes.exists() else []
+    labels = {t.label for t in section if t.label}
+    mine = []
+    if notes.exists():
+        for line in notes.read_text().splitlines():
+            if line.startswith("- ("):
+                label, delimiter, _ = line[3:].partition(") ")
+                if delimiter and label in labels:
+                    mine.append(line)
     (context / "followups.md").write_text("\n".join(mine or ["(none)"]) + "\n")
     if ts.feedback:
         (context / "prior-review.md").write_text(ts.feedback + "\n")
@@ -1168,10 +1175,12 @@ def _scenario_text(work: Path, ctx: Ctx, task: tasks.Task) -> str:
 
 def _copy_change(work: Path, ctx: Ctx, context: Path) -> None:
     for src, name in spec_format.get(ctx.m).context_files(work, ctx.m.change):
-        if name == "specs":
-            shutil.copytree(src, context / name, dirs_exist_ok=True)
+        dest = context / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_dir():
+            shutil.copytree(src, dest, dirs_exist_ok=True)
         else:
-            shutil.copy(src, context / name)
+            shutil.copy(src, dest)
 
 
 def _context(ctx: Ctx, task: tasks.Task, ts: TaskState, work: Path, context: Path, seeded: bool) -> bool:

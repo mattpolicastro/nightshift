@@ -12,10 +12,10 @@ from unittest.mock import Mock, call
 import pytest
 
 from nightshift.cli import main
-from specloop import agents, cli, manifest, openspec, speckit, spec_format, tasks
+from specloop import agents, cli, loop, manifest, openspec, seal, speckit, spec_format, tasks, verify
 from specloop.manifest import Manifest
 from specloop.seal import IDENTITY, git
-from specloop.state import Run
+from specloop.state import Run, TaskState
 from test_spec_format import saved_openspec_run
 from test_specloop_command_json import template
 import spec_format_legacy_fixtures as legacy
@@ -414,3 +414,414 @@ def test_native_selection_keeps_saved_openspec_schema(saved_openspec_run):
     text = git(run.dir / "repo.git", "show", f"{head}:{fmt.tasks_path(m.change)}").decode()
     assert fmt.parse_tasks(text)[0] == task
     assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.fixture
+def native_ctx(three_phase_feature, tmp_path):
+    root, _ = three_phase_feature
+    run = Run(tmp_path / "run")
+    run.dir.mkdir()
+    git(tmp_path, "clone", "-q", "--bare", str(root), str(run.dir / "repo.git"))
+    profile = manifest.Profile("fake", "codex", "test")
+    m = Manifest(root, CHANGE, "main", "main", "", dict.fromkeys(("implement", "review", "gate"), profile),
+                 ("src/**",), ("specs/**", ".specify/**"),
+                 (manifest.Step("tests", ("/usr/bin/true",)),), format="speckit")
+    run.save()
+    return loop.Ctx(run, m, {})
+
+
+def native_commit(ctx, files):
+    head = ctx.head()
+    commit = seal.commit_files(ctx.repo, head, files, "trusted fixture edit")
+    git(ctx.repo, "update-ref", ctx.ref, commit, head)
+    return commit
+
+
+def context_aliases(root):
+    return [(root / "specs" / CHANGE / "spec.md", "proposal.md"),
+            (root / "specs" / CHANGE / "spec.md", "specs/spec.md"),
+            (root / "specs" / CHANGE / "plan.md", "design.md"),
+            (root / ".specify/memory/constitution.md", "specs/constitution.md")]
+
+
+@pytest.mark.scenario("spec-format/native-context-and-human-checks/selected-feature-context")
+@pytest.mark.parametrize("consumer", ["implementation", "review", "gate"])
+def test_native_context_bytes(native_ctx, tmp_path, consumer):
+    ctx = native_ctx
+    # CRLF and non-ASCII bytes must survive disposable aliases unchanged.
+    for path in dict(context_aliases(ctx.m.repo)):
+        data = path.read_bytes().replace(b"\r\n", b"\n")
+        path.write_bytes(data.replace(b"\n", b"\r\n") + "\r\nNative café\r\n".encode())
+    historical = ctx.m.repo / "specs/001-old/spec.md"
+    historical.parent.mkdir()
+    historical.write_text("Historical feature must not be traversed")
+    before = {p: p.read_bytes() for p, _ in context_aliases(ctx.m.repo)}
+    assert spec_format.SPECKIT.context_files(ctx.m.repo, CHANGE) == context_aliases(ctx.m.repo)
+    task = spec_format.SPECKIT.parse_tasks(ctx.tasks_text(ctx.head()))[2]
+    context = tmp_path / consumer / "context"
+    if consumer == "implementation":
+        loop._context(ctx, task, TaskState(), ctx.m.repo, context, False)
+    elif consumer == "review":
+        loop._review_context(ctx, task, TaskState(), ctx.head(), ctx.head(), ctx.m.repo, context)
+    else:
+        loop._gate_context(ctx, 1, ctx.head(), [task], TaskState(), ctx.m.repo, context)
+    for source, dest in context_aliases(ctx.m.repo):
+        assert (context / dest).read_bytes() == before[source]
+        assert source.read_bytes() == before[source]
+    assert sorted(p.name for p in (context / "specs").iterdir()) == ["constitution.md", "spec.md"]
+    assert not (context / "tasks.md").exists()
+
+
+@pytest.mark.scenario("spec-format/native-context-and-human-checks/selected-feature-context")
+def test_context_copy_uses_source_type(native_ctx, tmp_path, monkeypatch):
+    file = tmp_path / "file"
+    file.write_bytes(b"literal\r\n\xff")
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    (directory / "child").write_bytes(b"nested\r\n")
+    adapter = Mock(wraps=spec_format.SPECKIT)
+    adapter.context_files.return_value = [(file, "specs"), (directory, "nested/other")]
+    monkeypatch.setattr(spec_format, "get", lambda m: adapter)
+    context = tmp_path / "context"
+    loop._copy_change(native_ctx.m.repo, native_ctx, context)
+    assert (context / "specs").read_bytes() == file.read_bytes()
+    assert (context / "nested/other/child").read_bytes() == (directory / "child").read_bytes()
+
+
+@pytest.mark.scenario("spec-format/native-context-and-human-checks/plan-checks-use-the-committed-revision")
+def test_human_checks_from_plan(native_ctx, monkeypatch):
+    ctx = native_ctx
+    plan = """- [ ] outside
+## Human checks
+ \t- [ ] first\t
+### Nested
+- [ ] second\u2028###### Deepest
+- [ ] third
+- [x] checked
+- [X] checked uppercase
+- [ ] \t
+- [ ] \u00a0
+- [ ]missing separator
+* [ ] wrong bullet
+## Other
+- [ ] outside
+### Verification and human rollout checklist
+- [ ] not a native selected heading
+## human checks
+- [ ] wrong case
+## Human checks ##
+- [ ] decorated heading
+\u00a0## Human checks
+- [ ] non-ASCII padding
+```md
+## Human checks
+- [ ] literal fenced example
+```
+<!--
+## Human checks
+- [ ] literal comment
+-->
+    ## Human checks
+    - [ ] indented example
+## Human checks
+- [ ] first
+####### Not a boundary
+#No separator
+- [ ] last
+# End
+- [ ] outside
+"""
+    path = f"specs/{CHANGE}/plan.md"
+    head = native_commit(ctx, {path: plan.replace("\n", "\r\n")})
+    (ctx.m.repo / path).write_text("## Human checks\n- [ ] dirty source\n")
+    expected = [f"- [ ] {item}" for item in (
+        "first", "second", "third", "literal fenced example", "literal comment", "indented example", "first", "last")]
+    collector = Mock(wraps=speckit.human_checks)
+    monkeypatch.setattr(speckit, "human_checks", collector)
+    assert loop.design_human_checks(ctx, head) == expected
+    collector.assert_called_once_with(plan.replace("\n", "\r\n"))
+    originals = [" \t- [ ] first\t", "- [ ] first"]
+    assert loop.append_design_checks(ctx, head, originals) == originals + list(dict.fromkeys(expected[1:-2])) + [expected[-1]]
+    ctx.m = replace(ctx.m, coverage_exempt={f"{CHANGE}/us3/as1": "Check manually"})
+    monkeypatch.setattr(loop, "prepare_publish", lambda ctx: True)
+    assert loop.finals(ctx, head) is False
+    assert ctx.run.state.pause.reason == "ready_to_publish"
+    for text, separator in ((ctx.run.state.pause.detail, ":"), (cli._pr_body(ctx), " —")):
+        rows = [line for line in text.splitlines() if line.startswith("- [ ]")]
+        assert rows == [f"- [ ] `{CHANGE}/us3/as1`{separator} Check manually", *dict.fromkeys(expected)]
+    newer = native_commit(ctx, {path: "## Human checks\n- [ ] newer\n"})
+    assert loop.design_human_checks(ctx, newer) == ["- [ ] newer"]
+    assert loop.design_human_checks(ctx, head) == expected
+
+
+@pytest.mark.scenario("spec-format/native-context-and-human-checks/plan-failure-blocks-readiness")
+@pytest.mark.parametrize("failure", ["missing", "lookup", "read", "os", "subprocess", "decode"])
+def test_plan_failure_blocks_readiness(native_ctx, monkeypatch, failure):
+    ctx = native_ctx
+    path = f"specs/{CHANGE}/plan.md"
+    if failure in {"missing", "decode"}:
+        source = ctx.m.repo / path
+        if failure == "missing":
+            source.unlink()
+        else:
+            source.write_bytes(b"\xff")
+        commit_feature(ctx.m.repo)
+        git(ctx.repo, "fetch", "-q", str(ctx.m.repo), f"+main:{ctx.ref}")
+        source.write_text("## Human checks\n- [ ] source cannot rescue committed plan\n")
+    original = spec_format.git
+
+    def fail(repo, *args, **kwargs):
+        if args[0] == "show" and args[1].endswith(":" + path):
+            if failure == "lookup":
+                return original(repo, "show", f"missing-revision:{path}")
+            if failure == "read":
+                raise RuntimeError("blob read failed")
+            if failure == "os":
+                raise OSError("cannot start git")
+            if failure == "subprocess":
+                raise subprocess.SubprocessError("git failed")
+        return original(repo, *args, **kwargs)
+
+    monkeypatch.setattr(spec_format, "git", fail)
+    monkeypatch.setattr(loop, "prepare_publish", lambda ctx: True)
+    for render in (lambda: loop.finals(ctx, ctx.head()), lambda: cli._pr_body(ctx)):
+        with pytest.raises(RuntimeError, match="could not collect human checks.*plan.md"):
+            render()
+        assert ctx.run.state.pause is None and ctx.run.state.pr == ""
+
+
+@pytest.mark.scenario("spec-format/native-context-and-human-checks/plan-failure-blocks-readiness")
+@pytest.mark.parametrize("plan", ["", "## Other\n- [ ] outside\n", "## Human checks\n- [x] done\n- [ ] \t\n"])
+def test_readable_plan_without_pending_checks(native_ctx, plan):
+    head = native_commit(native_ctx, {f"specs/{CHANGE}/plan.md": plan})
+    assert loop.design_human_checks(native_ctx, head) == []
+
+
+def fake_receipts(monkeypatch, ctx, seen=(), inspect=None, exit_code=0):
+    calls = []
+
+    def check(repo, head, steps, m, out, *, run_dir=None):
+        assert repo == ctx.repo and m is ctx.m and run_dir == ctx.run.dir
+        if inspect:
+            inspect(head)
+        calls.append(head)
+        out.mkdir(parents=True, exist_ok=True)
+        receipts = [verify.Receipt(s.id, list(s.run), s.expect, exit_code, s.expect == exit_code, 0.1, "fixture")
+                    for s in steps]
+        for step in steps:
+            (out / f"{step.id}.log").write_text("\n".join(seen))
+        (out / "receipts.json").write_text(json.dumps([asdict(r) for r in receipts]))
+        return receipts
+
+    monkeypatch.setattr(verify, "run_steps", check)
+    return calls
+
+
+@pytest.mark.scenario("specloop-interface/native-build-gates/evidence-groups-by-story")
+def test_section_evidence_groups_by_story(native_ctx, monkeypatch):
+    ctx = native_ctx
+    ctx.m = replace(ctx.m, coverage_step="tests", evidence=True)
+    fmt = spec_format.SPECKIT
+    text = ctx.tasks_text(ctx.head())
+    for task in fmt.parse_tasks(text):
+        if task.section == 1:
+            text = fmt.tick(text, task)
+    text = text.replace("Permit passing checks.", f"Permit passing checks. Unknown `{CHANGE}/us1/as999`.")
+    head = native_commit(ctx, {ctx.tasks_path: text})
+    parsed = fmt.parse_tasks(text)
+    fake_receipts(monkeypatch, ctx, [f"{CHANGE}/us1/as1"])
+    extend = Mock(wraps=fmt.extend_section)
+    monkeypatch.setattr(fmt, "extend_section", extend)
+    assert loop.section_evidence(ctx, 1, head, parsed)
+    event = next(e for e in agents.read_jsonl(ctx.run.dir / "events.jsonl") if e["event"] == "evidence")
+    assert event["uncovered"] == [f"{CHANGE}/us1/as2"] and not event["passed"]
+    assert ctx.run.state.evidenced == []
+    added, = [t for t in fmt.parse_tasks(ctx.tasks_text(ctx.head())) if t.label == "T008"]
+    assert added.section == 1 and added.scenarios == [f"{CHANGE}/us1/as2"]
+    extend.assert_called_once_with(text, 1, [added.text])
+    assert [(t.label, t.text, t.done) for t in fmt.parse_tasks(ctx.tasks_text(ctx.head())) if t.section != 1] == [
+        (t.label, t.text, t.done) for t in parsed if t.section != 1]
+    assert loop._group([f"{CHANGE}/us1/as1", f"{CHANGE}/us1/as2", f"{CHANGE}/us2/as1"]) == [
+        [f"{CHANGE}/us1/as1", f"{CHANGE}/us1/as2"], [f"{CHANGE}/us2/as1"]]
+
+
+@pytest.mark.scenario("specloop-interface/native-build-gates/evidence-groups-by-story")
+@pytest.mark.parametrize("failure", ["missing", "decode"])
+def test_failed_scenario_lookup_cannot_pass_or_append(native_ctx, monkeypatch, failure):
+    ctx = native_ctx
+    source = ctx.m.repo / "specs" / CHANGE / "spec.md"
+    if failure == "missing":
+        source.unlink()
+    else:
+        source.write_bytes(b"\xff")
+    commit_feature(ctx.m.repo)
+    git(ctx.repo, "fetch", "-q", str(ctx.m.repo), f"+main:{ctx.ref}")
+    head = ctx.head()
+    adapter = Mock(wraps=spec_format.SPECKIT)
+    monkeypatch.setattr(spec_format, "get", lambda m: adapter)
+    with pytest.raises(spec_format.SpecError, match="cannot read native scenarios"):
+        loop.section_evidence(ctx, 1, head, adapter.parse_tasks(ctx.tasks_text(head)))
+    assert ctx.head() == head and ctx.run.state.evidenced == [] and ctx.run.state.strengthen_rounds == {}
+    adapter.extend_section.assert_not_called()
+    adapter.append_section.assert_not_called()
+
+
+@pytest.mark.scenario("specloop-interface/native-build-gates/native-notes-reach-the-phase-reviewer")
+@pytest.mark.parametrize("format,label,other", [("speckit", "T003", "T005"), ("openspec", "1.1", "2.1")])
+def test_gate_notes_match_exact_parsed_labels(native_ctx, tmp_path, monkeypatch, format, label, other):
+    ctx = native_ctx
+    ctx.m = replace(ctx.m, format=format)
+    if format == "speckit":
+        parsed = spec_format.SPECKIT.parse_tasks(ctx.tasks_text(ctx.head()))
+    else:
+        parsed = tasks.parse("## 1. First\n- [x] 1.1 Done\n- [x] Unlabelled\n## 2. Other\n- [ ] 2.1 Pending\n")
+        monkeypatch.setattr(openspec, "scenarios", lambda *args: {})
+    selected = f"- ({label}) [scope] retained"
+    excluded = [f"- ({other}) other phase", f"- ({label}.1) child", f"- ({label}0) prefix",
+                f" - ({label}) indented", f"- ({label})missing space", f"- ({label})\twrong separator",
+                f"- ({label} ) padded", f"- ({label} missing close", f"- (({label}) nested",
+                f"- ({label})bad) later close", "- () empty", "unlabelled"]
+    notes = ctx.run.dir / "followups.md"
+    original = "\n".join([selected, *excluded, selected]) + "\n"
+    notes.write_text(original)
+    section = [t for t in parsed if t.section == 1]
+    context = tmp_path / "notes-context"
+    loop._gate_context(ctx, 1, ctx.head(), section, TaskState(), ctx.m.repo, context)
+    assert (context / "followups.md").read_text() == selected + "\n" + selected + "\n"
+    assert notes.read_text() == original
+    notes.write_text("\n".join(excluded))
+    loop._gate_context(ctx, 1, ctx.head(), section, TaskState(), ctx.m.repo, context)
+    assert (context / "followups.md").read_text() == "(none)\n"
+
+
+def review_result(findings=()):
+    return agents.Result("ok", {"verdict": "PASS", "prior": [], "findings": list(findings), "needs_human": []})
+
+
+@pytest.mark.scenario("specloop-interface/native-build-gates/native-notes-reach-the-phase-reviewer")
+def test_native_gate_fixes_extend_phase(native_ctx, monkeypatch):
+    ctx = native_ctx
+    head = ctx.head()
+    fmt = spec_format.SPECKIT
+    parsed = fmt.parse_tasks(ctx.tasks_text(head))
+    finding = {"blocking": True, "basis": f"scenario:{CHANGE}/us1/as2", "text": "Refusal still succeeds"}
+    ctx.agent = lambda call: review_result([finding])
+    extend = Mock(wraps=fmt.extend_section)
+    monkeypatch.setattr(fmt, "extend_section", extend)
+    assert loop.gate_review(ctx, 1, head, parsed)
+    added = fmt.parse_tasks(ctx.tasks_text(ctx.head()))[4]
+    assert (added.label, added.section, added.done) == ("T008", 1, False)
+    assert finding["text"] in added.text
+    extend.assert_called_once_with(ctx.tasks_text(head), 1, [added.text])
+    assert ctx.run.state.gates_passed == []
+
+
+@pytest.mark.scenario("specloop-interface/native-build-gates/evidence-groups-by-story")
+@pytest.mark.parametrize("title", ["Coverage", "Acceptance fixes"])
+def test_native_final_additions_use_adapter(native_ctx, monkeypatch, title):
+    ctx = native_ctx
+    if title == "Coverage":
+        ctx.m = replace(ctx.m, coverage_step="tests")
+    else:
+        ctx.m = replace(ctx.m, acceptance=(manifest.Step("acceptance", ("/usr/bin/true",)),))
+    fake_receipts(monkeypatch, ctx, [f"{CHANGE}/us1/as1"], exit_code=0 if title == "Coverage" else 1)
+    monkeypatch.setattr(loop, "prepare_publish", lambda ctx: True)
+    fmt = spec_format.SPECKIT
+    append = Mock(wraps=fmt.append_section)
+    monkeypatch.setattr(fmt, "append_section", append)
+    head = ctx.head()
+    assert loop.finals(ctx, head)
+    added = [t for t in fmt.parse_tasks(ctx.tasks_text(ctx.head())) if t.section == 4]
+    assert [t.label for t in added] == (["T008", "T009", "T010"] if title == "Coverage" else ["T008"])
+    assert all(t.section_title == title and not t.done for t in added)
+    append.assert_called_once_with(ctx.tasks_text(head), title, [t.text for t in added])
+    if title == "Coverage":
+        assert [t.scenarios for t in added] == [[f"{CHANGE}/us1/as2"], [f"{CHANGE}/us2/as1"], [f"{CHANGE}/us3/as1"]]
+
+
+@pytest.mark.scenario("specloop-interface/native-build-gates/real-story-build")
+@pytest.mark.scenario("specloop-interface/native-build-gates/harness-writes-preserve-frozen-criteria")
+@pytest.mark.scenario("specloop-interface/native-build-gates/native-notes-reach-the-phase-reviewer")
+def test_fake_agent_build_through_native_phase_gates(native_ctx, monkeypatch):
+    """Offline driver coverage; the real profiles, publication and finish remain a human check."""
+    ctx = native_ctx
+    ctx.m = replace(ctx.m, phase_gates=(1, 2, 3), gate_review="agent", evidence=True, coverage_step="tests")
+    fmt = spec_format.SPECKIT
+    base = ctx.head()
+    original = ctx.tasks_text(base)
+    frozen = {str(p.relative_to(ctx.m.repo)): p.read_bytes() for p, _ in context_aliases(ctx.m.repo)}
+    implemented, reviewed, gates = [], [], []
+    note = {"basis": "scope", "text": "Keep this T003 follow-up", "blocking": False}
+    loop._followups(ctx, "T003.1", [{"text": "not T003"}])
+    loop._followups(ctx, "T0030", [{"text": "not T003 either"}])
+    loop._followups(ctx, "T005", [{"text": "phase two only"}])
+
+    def inspect(head):
+        for path, data in frozen.items():
+            assert git(ctx.repo, "show", f"{head}:{path}") == data
+        assert b"src/T001.txt" in git(ctx.repo, "ls-tree", "-r", "--name-only", head)
+
+    verified = fake_receipts(monkeypatch, ctx, fmt.scenarios(ctx.m.repo, CHANGE), inspect)
+    monkeypatch.setattr(loop, "prepare_publish", lambda ctx: True)
+
+    def agent(call):
+        context = call.cwd.parent / "context"
+        for path, dest in context_aliases(ctx.m.repo):
+            assert (context / dest).read_bytes() == frozen[str(path.relative_to(ctx.m.repo))]
+        if call.access == "write":
+            task = next(t for t in fmt.parse_tasks(ctx.tasks_text(ctx.head())) if not t.done)
+            implemented.append(task.label)
+            (call.cwd / "src").mkdir(exist_ok=True)
+            (call.cwd / "src" / f"{task.label}.txt").write_text("allowed code\n")
+            if task.label == "T001":
+                for path in [*frozen, ctx.tasks_path]:
+                    (call.cwd / path).write_text("agent-authored criteria or completion\n")
+                spec_path = f"specs/{CHANGE}/spec.md"
+                (call.cwd / spec_path).write_text(speckit.mark_complete(frozen[spec_path].decode()))
+                (call.cwd / "specs/invented.md").write_text("invented criteria\n")
+            return agents.Result("ok", {"status": "ready", "summary": "fixture edit", "subtasks": []})
+        if (context / "section.md").exists():
+            section = int((context / "section.md").read_text().split()[2].rstrip(":"))
+            gates.append(section)
+            notes = (context / "followups.md").read_text()
+            assert notes == {1: "- (T003) [scope] Keep this T003 follow-up\n",
+                             2: "- (T005) [] phase two only\n", 3: "(none)\n"}[section]
+            assert (context / "evidence.md").read_text() == ctx.run.state.evidence_summary[str(section)] + "\n"
+            return review_result()
+        label = (context / "task.md").read_text().split()[2]
+        reviewed.append(label)
+        assert (context / "receipts.md").is_file()
+        return review_result([note] if label == "T003" else [])
+
+    ctx.agent = agent
+    assert loop.run(ctx) == "paused"
+    assert ctx.run.state.pause.reason == "ready_to_publish"
+    assert implemented == reviewed == [f"T{n:03d}" for n in range(1, 8)]
+    # Existing gate policy only reviews sections that still have pending work after them.
+    assert gates == ctx.run.state.gates_passed == [1, 2]
+    assert ctx.run.state.evidenced == [1, 2, 3]
+    assert len(verified) == 11  # seven candidates, three section receipts, final coverage
+    final = ctx.head()
+    assert ctx.tasks_text(final) == original.replace("- [ ]", "- [X]")
+    first = fmt.parse_tasks(original)[0]
+    ts = ctx.run.state.tasks[first.key]
+    assert sorted(ts.violations) == sorted(f"{path}: frozen path (change reverted)" for path in [
+        *frozen, ctx.tasks_path, "specs/invented.md"])
+    assert git(ctx.repo, "show", f"{ts.candidate}:{ctx.tasks_path}").decode() == original
+    assert not git(ctx.repo, "ls-tree", final, "specs/invented.md")
+    events = agents.read_jsonl(ctx.run.dir / "events.jsonl")
+    assert sum(e["event"] == "landed" for e in events) == 7
+    assert all(e["passed"] for e in events if e["event"] == "verified")
+    assert "- (T003.1)" in cli._pr_body(ctx)  # PR retains the full follow-up file.
+    # Exercise the trusted Status write primitive; lifecycle orchestration is a separate task.
+    spec_path = f"specs/{CHANGE}/spec.md"
+    complete = speckit.mark_complete(frozen[spec_path].decode())
+    completed = seal.commit_files(ctx.repo, final, {spec_path: complete}, "trusted Status completion")
+    assert loop._advance(ctx, final, completed)
+    assert git(ctx.repo, "diff", "--name-only", final, completed).decode().splitlines() == [spec_path]
+    assert git(ctx.repo, "show", f"{completed}:{spec_path}") == complete.encode()
+    assert ctx.tasks_text(completed) == ctx.tasks_text(final)
+    assert git(ctx.repo, "show", "-s", "--format=%an <%ae>", completed).decode().strip() == "specloop <specloop@localhost>"
+    for path, data in frozen.items():
+        assert (ctx.m.repo / path).read_bytes() == data
+    assert (ctx.m.repo / ctx.tasks_path).read_text() == original

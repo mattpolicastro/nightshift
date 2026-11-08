@@ -150,11 +150,20 @@ class _SpecKit:
         return f"{change}: spec-kit feature via specloop"
 
     def human_checks(self, repo: Path, head: str, change: str) -> list[str]:
-        # Context, committed checks and completion are wired in subsequent build tasks.
-        raise SpecError("native committed human checks are not implemented yet")
+        path = f"specs/{change}/plan.md"
+        try:
+            text = git(repo, "show", f"{head}:{path}").decode("utf-8")
+        except (RuntimeError, OSError, subprocess.SubprocessError, UnicodeError) as exc:
+            raise RuntimeError(f"could not collect human checks from {head}:{path}: {exc}") from exc
+        return speckit.human_checks(text)
 
     def context_files(self, repo: Path, change: str) -> list[tuple[Path, str]]:
-        raise SpecError("native build context is not implemented yet")
+        src = self.change_dir(repo, change)
+        entries = [(src / "spec.md", "proposal.md"),
+                   (src / "spec.md", "specs/spec.md"),
+                   (src / "plan.md", "design.md"),
+                   (repo / ".specify/memory/constitution.md", "specs/constitution.md")]
+        return [(path, name) for path, name in entries if path.exists()]
 
     def finish(self, work: Path, change: str, all_tasks_done: bool) -> dict:
         raise SpecError("native completion is not implemented yet")
