@@ -5,13 +5,18 @@ import subprocess
 from pathlib import Path
 from typing import Protocol
 
-from specloop import openspec
+from specloop import openspec, speckit, tasks
 from specloop.manifest import Manifest
 from specloop.openspec import SpecError as SpecError, ValidatorUnavailable as ValidatorUnavailable
 from specloop.seal import git
 
 
 class SpecFormat(Protocol):
+    def parse_tasks(self, text: str) -> list[tasks.Task]: ...
+    def tick(self, text: str, task: tasks.Task) -> str: ...
+    def split(self, text: str, task: tasks.Task, subtasks: list[str]) -> str: ...
+    def extend_section(self, text: str, section: int, items: list[str]) -> str: ...
+    def append_section(self, text: str, title: str, items: list[str]) -> str: ...
     def change_dir(self, repo: Path, change: str) -> Path: ...
     def tasks_path(self, change: str) -> str: ...
     def tasks_paths_at(self, repo: Path, head: str, change: str) -> list[str]: ...
@@ -29,6 +34,21 @@ class SpecFormat(Protocol):
 
 class _OpenSpec:
     pr_kind = "OpenSpec change"
+
+    def parse_tasks(self, text: str) -> list[tasks.Task]:
+        return tasks.parse(text)
+
+    def tick(self, text: str, task: tasks.Task) -> str:
+        return tasks.tick(text, task)
+
+    def split(self, text: str, task: tasks.Task, subtasks: list[str]) -> str:
+        return tasks.split(text, task, subtasks)
+
+    def extend_section(self, text: str, section: int, items: list[str]) -> str:
+        return tasks.extend_section(text, section, items)
+
+    def append_section(self, text: str, title: str, items: list[str]) -> str:
+        return tasks.append_section(text, title, items)
 
     def change_dir(self, repo: Path, change: str) -> Path:
         return openspec.change_dir(repo, change)
@@ -93,7 +113,25 @@ class _OpenSpec:
         return f"{change}: OpenSpec change via specloop"
 
 
+class _SpecKit:
+    def parse_tasks(self, text: str) -> list[tasks.Task]:
+        return speckit.parse_tasks(text)
+
+    def tick(self, text: str, task: tasks.Task) -> str:
+        return speckit.tick(text, task)
+
+    def split(self, text: str, task: tasks.Task, subtasks: list[str]) -> str:
+        return speckit.split(text, task, subtasks)
+
+    def extend_section(self, text: str, section: int, items: list[str]) -> str:
+        return speckit.extend_section(text, section, items)
+
+    def append_section(self, text: str, title: str, items: list[str]) -> str:
+        return speckit.append_section(text, title, items)
+
+
 OPENSPEC: SpecFormat = _OpenSpec()
+SPECKIT = _SpecKit()
 
 
 def get(m: Manifest) -> SpecFormat:

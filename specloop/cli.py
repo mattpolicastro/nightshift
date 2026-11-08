@@ -99,7 +99,7 @@ def problems_with(repo: Path, rev: str, m: manifest.Manifest) -> list[str]:
         task_file = Path(tmp) / fmt.tasks_path(m.change)
         if not task_file.exists():
             return found + ["the change has no tasks.md"]
-        parsed = tasks.parse(task_file.read_text())
+        parsed = fmt.parse_tasks(task_file.read_text())
         if not parsed:
             found.append("tasks.md has no tasks under '## N. Title' sections")
         keys = [t.key for t in parsed]
@@ -345,7 +345,7 @@ def _candidate_landed(ctx: loop.Ctx, task: tasks.Task, ts: TaskState, head: str)
         return False
     if git(ctx.repo, "diff", "--name-only", ts.candidate, head).decode().splitlines() != [ctx.tasks_path]:
         return False
-    return ctx.tasks_text(head) == tasks.tick(ctx.tasks_text(ts.candidate_base), task)
+    return ctx.tasks_text(head) == spec_format.get(ctx.m).tick(ctx.tasks_text(ts.candidate_base), task)
 
 
 def _accept(args, run: Run) -> int:
@@ -359,7 +359,7 @@ def _accept(args, run: Run) -> int:
         print("no candidate to accept for that task", file=sys.stderr)
         return 1
     head = ctx.head()
-    task = next((t for t in tasks.parse(ctx.tasks_text(head)) if t.key == key), None)
+    task = next((t for t in spec_format.get(ctx.m).parse_tasks(ctx.tasks_text(head)) if t.key == key), None)
     if not task:
         print("that task is no longer in tasks.md", file=sys.stderr)
         return 1
@@ -557,8 +557,9 @@ def _pr_body(ctx: loop.Ctx) -> str:
     checks = "\n".join(loop.append_design_checks(ctx, head, [
         f"- [ ] `{sid}` — {why}" for sid, why in sorted(m.coverage_exempt.items())]))
     follow = (ctx.run.dir / "followups.md").read_text() if (ctx.run.dir / "followups.md").exists() else "(none)\n"
-    done = [t for t in tasks.parse(ctx.tasks_text(head)) if t.done]
-    return (f"{spec_format.get(m).pr_kind} `{m.change}`, driven by specloop: {len(done)} tasks, each sealed, verified by the "
+    fmt = spec_format.get(m)
+    done = [t for t in fmt.parse_tasks(ctx.tasks_text(head)) if t.done]
+    return (f"{fmt.pr_kind} `{m.change}`, driven by specloop: {len(done)} tasks, each sealed, verified by the "
             f"harness and independently reviewed.\n\n## Checks a human must make\n\n{checks or '(none)'}\n\n"
             f"## Non-blocking review findings\n\n{follow}\n"
             f"🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
@@ -772,9 +773,10 @@ def _finish(args, run: Run) -> int:
         print(f"expected head {expected}; observed run branch head {head}; refusing to finish",
               file=sys.stderr)
         return 1
-    task_path = _tasks_path(ctx.repo, head, ctx.m.change, spec_format.get(ctx.m))
+    fmt = spec_format.get(ctx.m)
+    task_path = _tasks_path(ctx.repo, head, ctx.m.change, fmt)
     text = git(ctx.repo, "show", f"{head}:{task_path}").decode()
-    if any(not t.done for t in tasks.parse(text)):
+    if any(not t.done for t in fmt.parse_tasks(text)):
         print("tasks are unfinished; refusing to archive", file=sys.stderr)
         return 1
     # Validate before the archive's internal push as well as the external push.
@@ -1096,9 +1098,10 @@ def _status_entry(name: str) -> dict:
     m = _manifest(run)
     repo = run.dir / "repo.git"
     head = git(repo, "rev-parse", f"refs/heads/{m.branch}").decode().strip()
-    task_path = _tasks_path(repo, head, m.change, spec_format.get(m))
+    fmt = spec_format.get(m)
+    task_path = _tasks_path(repo, head, m.change, fmt)
     text = git(repo, "show", f"{head}:{task_path}").decode()
-    all_tasks = tasks.parse(text)
+    all_tasks = fmt.parse_tasks(text)
     auto_resumes_remaining = 0
     if st.pause and st.pause.resume_at and st.pause.reason in serve.AUTO_RESUME:
         cap = serve.AUTO_RESUME[st.pause.reason]
@@ -1222,8 +1225,9 @@ def status(args) -> int:
             m = _manifest(run)
             repo = run.dir / "repo.git"
             head = git(repo, "rev-parse", f"refs/heads/{m.branch}").decode().strip()
-            task_path = _tasks_path(repo, head, m.change, spec_format.get(m))
-            all_tasks = tasks.parse(git(repo, "show", f"{head}:{task_path}").decode())
+            fmt = spec_format.get(m)
+            task_path = _tasks_path(repo, head, m.change, fmt)
+            all_tasks = fmt.parse_tasks(git(repo, "show", f"{head}:{task_path}").decode())
             done = sum(t.done for t in all_tasks)
             print(f"  tasks: {done}/{len(all_tasks)} done on {m.branch} @ {head[:12]}")
             nxt = next((t for t in all_tasks if not t.done), None)
