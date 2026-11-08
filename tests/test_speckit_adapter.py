@@ -11,7 +11,7 @@ from unittest.mock import Mock, call
 import pytest
 
 from nightshift.cli import main
-from specloop import agents, cli, evidence, loop, manifest, openspec, speckit, spec_format, tasks
+from specloop import agents, cli, evidence, loop, manifest, openspec, propose, speckit, spec_format, tasks
 from specloop.manifest import Manifest
 from specloop.openspec import SpecError
 from specloop.seal import git
@@ -39,7 +39,7 @@ def operation_args(operation, text, task):
 
 @pytest.mark.scenario(LEGACY_SCENARIO)
 @pytest.mark.parametrize("operation", OPERATIONS)
-@pytest.mark.parametrize("wrapper", [("", ""), ("```md\n", "```\n"), ("<!--\n", "-->\n")])
+@pytest.mark.parametrize("wrapper", [("", ""), ("```md\n", "```\n"), ("<!--\n", "-->\n"), ("<div>\n", "</div>\n")])
 def test_openspec_task_operations_match_unchanged_backend(operation, wrapper):
     text = ("## Phase 1: Before\n- [ ] T001 Outside\n## 1. Core\n- [ ] 1.1 First\n"
             + wrapper[0] + "## Phase 1: Example\n- [ ] T002 Literal\n" + wrapper[1]
@@ -90,13 +90,15 @@ def test_task_delegation_is_late_bound(monkeypatch, adapter, backend, operation)
 
 
 @pytest.mark.scenario(NATIVE_SCENARIO)
-def test_numeric_headings_close_native_phases_without_selecting_them():
+@pytest.mark.parametrize("wrapper", ["", "```markdown\n", "<!--\n"])
+def test_numeric_headings_close_native_phases_without_selecting_them(wrapper):
     text = ("## 9. Outside\n- [ ] T001 Outside\n"
             "## Phase 1: Core\n- [ ] T003 [US1] Native\n"
             "### Nested\n- [ ] T004 Nested\n"
             "## 99. Boundary\n- [ ] T003 Outside duplicate ignored\n"
             " ## Phase 8: Indented\n- [ ] T005 Still outside\n"
             "## Phase 2: Empty\n")
+    text = wrapper + text
     fmt = spec_format.SPECKIT
     parsed = fmt.parse_tasks(text)
     assert [(t.section, t.label) for t in parsed] == [(1, "T003"), (1, "T004")]
@@ -157,8 +159,9 @@ def test_proposed_mutations_are_validated(operation, extra, tail):
 
 
 @pytest.mark.scenario(CONSUMER_SCENARIO)
+@pytest.mark.scenario("spec-format/engine-routing-compatibility/consumers-contain-no-direct-format-operations")
 def test_build_consumers_have_no_direct_task_operations():
-    for module in (cli, loop):
+    for module in (cli, loop, propose):
         tree = ast.parse(Path(module.__file__).read_text())
         assert not [node for node in ast.walk(tree) if isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)

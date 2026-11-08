@@ -13,15 +13,18 @@ Otherwise, `/speckit.specify` stops with
 
 The inspected baseline is v1.3.2; future-version compatibility is untested.
 Installing this preset installs authoring assets only: it does not enroll a
-repository or configure a build. For approved features, follow the
+repository or configure a build. Start with the
+[native drafting and ordinary admission workflow](../../docs/specloop/README.md#native-spec-kit-drafting).
+For approved features, follow the
 [explicit native build guide](../../docs/specloop/README.md#native-spec-kit-builds)
 with a trusted [`format = "speckit"` manifest](../../examples/specloop/speckit.toml)
 kept outside the target repository. Set `[paths] frozen` to include `specs/**`
 and `.specify/**` plus workflow and steering protections. Explicit `nightshift admit`
-uses `--skip-feasibility` while retaining structural validation; `nightshift run`
+runs feasibility and structural validation; `--skip-feasibility` is an optional
+operator-requested bypass of feasibility only. `nightshift run`
 builds and `nightshift publish` publishes. After human checks, `nightshift finish`
 sets `**Status**: Complete`, archives nothing, pushes and marks ready without merging.
-Native drafting, feasibility and daemon intake support remain future work.
+Native daemon intake support remains future work.
 
 ## Installation
 

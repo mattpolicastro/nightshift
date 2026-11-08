@@ -3,12 +3,72 @@
 These authoring rules and the `nightshift-speckit` preset belong to
 [issue #185](https://github.com/mattpolicastro/nightshift/issues/185) in
 [issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
-Approved native features support explicit admission, build and publication with a
-trusted native manifest; see the [engine guide](README.md#native-spec-kit-builds)
+Native features support explicit drafting, admission, build and publication with a
+trusted native manifest; see the [drafting guide](README.md#native-spec-kit-drafting),
+[build guide](README.md#native-spec-kit-builds)
 and [manifest example](../../examples/specloop/speckit.toml). Installing authoring
-assets does not enroll a repository or configure a build. Native drafting,
-feasibility and daemon intake remain future work. Existing
+assets does not enroll a repository or configure a build. Native admission runs
+feasibility normally; daemon intake remains unsupported. Existing
 [OpenSpec naming and lifecycle guidance](README.md) stays in effect.
+
+## What the drafter produces
+
+Explicit `nightshift propose` reads the local `.specify/templates/spec-template.md`,
+`plan-template.md` and `tasks-template.md`, the constitution and relevant code/tests.
+House rules override incompatible scaffold examples; missing templates must be
+supplied locally. The drafter does not download templates, run `specify`, or
+rewrite templates or the constitution. It writes only the selected feature's
+`spec.md`, `plan.md` and initial `tasks.md` under `specs/<change>/`.
+
+The spec has numbered, prioritized user stories and stable `ASn` acceptance
+labels. Tasks begin with Setup/Foundational work, followed by exactly one positive
+`## Phase N: User Story K - ...` per story, ordered by numeric priority and source
+order for ties. Use `T001` labels, optional `[P]`, positional `[USk]` story tags
+and backticked citations such as `042-add-a-gate/us1/as2`. Cover every scenario;
+setup tasks need no invented citations. Human-only work goes in `plan.md` under
+`## Human checks`, with one scenario citation per checklist item.
+
+Choose one concern per task within the unchanged ceiling of about 300 changed
+lines at most. Combine related same-file work, order dependencies and keep tests
+with code. Target six tasks or fewer per user story: every task incurs a review
+cycle and every phase an evidence gate. Documentation-only features normally use
+one or two tasks per story, preserving story phases rather than splitting by
+document heading. Six is advisory, not a rejection threshold.
+
+### Story sizing examples
+
+| Tasks per story phase | Feature total | Six-task target met | Count-only critic risk |
+| --- | ---: | --- | --- |
+| 5, 5, 5 | 15 | Yes | No |
+| 8 | 8 | No | No |
+| 9 | 9 | No | Yes |
+
+More than eight parsed task entries in any one story phase warrants advisory
+merge advice, never a count-only contradiction or correction round. Checked and
+unchecked entries, including dotted children, count. Setup, Foundational and
+Polish do not contribute to this story threshold; ordinary feasibility and
+design review still apply. Whole-feature totals, including documentation-only
+totals, never cause a count-only finding. The per-task ceiling still applies.
+
+### Questions and revisions
+
+Ask at most three genuine missing-intent questions as
+`[NEEDS CLARIFICATION: ...]` in `spec.md`; decide routine details. Unresolved
+questions return `needs_input` before lint correction, commit or review, and
+must be answered before approval. To revise an undelivered feature, name it in
+the idea and use the same change, branch and directory; retain committed task
+and scenario IDs and unrelated content. Conflicting target names require
+resolution. Complete features stay immutable; later changes need a new feature
+identifying supersession in `## Assumptions`.
+
+Follow the [ordinary propose/admit examples](README.md#native-spec-kit-drafting)
+and [revision example](README.md#revise-an-undelivered-feature). Feasibility and
+critic reviews read the constitution and explicitly named Complete features
+within the [bounded review context](README.md#bounded-review-context).
+The [real-profile quality observation](README.md#draft-quality-observation)
+remains pending human work on
+[issue #184](https://github.com/mattpolicastro/nightshift/issues/184); offline
+tests do not prove draft quality or complete the spec-PR inspection.
 
 ## Feature directory and branch
 

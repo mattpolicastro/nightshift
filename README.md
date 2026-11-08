@@ -237,10 +237,11 @@ providers. See [manifest templates and CLI outcomes](docs/specloop/command-json.
 The trusted manifest's `[run] format` defaults to `"openspec"`; explicit
 `format = "openspec"` selects the same path. For approved native features, use
 `format = "speckit"` and the [native manifest example](examples/specloop/speckit.toml)
-with the [explicit build commands](docs/specloop/README.md#native-spec-kit-builds),
-including `--skip-feasibility`. Keep the effective trusted manifest outside the
-target repository. Preset asset installation does not enroll or configure a build;
-native drafting and daemon intake remain future work. OpenSpec Finish archives into
+with the [native drafting and ordinary admission workflow](docs/specloop/README.md#native-spec-kit-drafting)
+and [explicit build commands](docs/specloop/README.md#native-spec-kit-builds).
+The existing `--skip-feasibility` bypass is optional. Keep the effective trusted
+manifest outside the target repository. Preset asset installation does not enroll or configure a build;
+native daemon intake remains future work. OpenSpec Finish archives into
 `openspec/specs/`; native Finish sets `**Status**: Complete` without archival.
 Both push and mark ready after human checks, without merging.
 

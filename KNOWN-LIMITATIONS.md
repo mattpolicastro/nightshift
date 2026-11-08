@@ -38,16 +38,21 @@ None of these follow-ups establishes live validation or a completed host rollout
 ## Open gaps
 
 - **Native spec-kit context:** explicit native builds supply only the selected
-  feature and `.specify/memory/constitution.md`. There is no consolidated current
-  spec, automatic supersession traversal or cross-feature conflict detection.
+  feature's `spec.md`, `plan.md` and `.specify/memory/constitution.md` with native
+  names. Feasibility and critic reviews additionally read explicitly named Complete
+  features under Depends on or Assumptions. There is no consolidated current
+  spec, automatic supersession traversal or exhaustive cross-feature conflict detection.
   Delivered feature records remain in place; later features name superseded
   features under `## Assumptions` (for example `Supersedes 042-add-a-gate`).
-  Native drafting, feasibility and daemon intake remain future work. Follow the
-  [explicit build guide](docs/specloop/README.md#native-spec-kit-builds), including
-  `--skip-feasibility` and structural admission validation. The real story build,
-  publication/Finish observation and touchpoint count remain an unchecked design
+  Explicit [native drafting and ordinary admission](docs/specloop/README.md#native-spec-kit-drafting)
+  support feasibility; native daemon intake remains future work. Follow the
+  [explicit build guide](docs/specloop/README.md#native-spec-kit-builds), retaining
+  structural validation; `--skip-feasibility` is an optional operator-requested bypass.
+  The real story build, publication/Finish observation and touchpoint count remain an unchecked design
   item on [issue #184](https://github.com/mattpolicastro/nightshift/issues/184);
-  offline tests do not establish them.
+  offline tests do not establish them. The real-profile scratch-repository feature
+  draft and spec-PR quality inspection also remain pending human checks: record
+  issue/PR identity, drafting rounds, questions and critic findings on that issue.
 
 - **Readiness test-only fallback:** with evidence enabled, the missing-event
   fallback recognizes only repository-root `tests/` paths after excluding the

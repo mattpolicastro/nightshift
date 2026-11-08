@@ -444,10 +444,9 @@ def native_commit(ctx, files):
 
 
 def context_aliases(root):
-    return [(root / "specs" / CHANGE / "spec.md", "proposal.md"),
-            (root / "specs" / CHANGE / "spec.md", "specs/spec.md"),
-            (root / "specs" / CHANGE / "plan.md", "design.md"),
-            (root / ".specify/memory/constitution.md", "specs/constitution.md")]
+    return [(root / "specs" / CHANGE / "spec.md", "spec.md"),
+            (root / "specs" / CHANGE / "plan.md", "plan.md"),
+            (root / ".specify/memory/constitution.md", ".specify/memory/constitution.md")]
 
 
 @pytest.mark.scenario("spec-format/native-context-and-human-checks/selected-feature-context")
@@ -474,7 +473,9 @@ def test_native_context_bytes(native_ctx, tmp_path, consumer):
     for source, dest in context_aliases(ctx.m.repo):
         assert (context / dest).read_bytes() == before[source]
         assert source.read_bytes() == before[source]
-    assert sorted(p.name for p in (context / "specs").iterdir()) == ["constitution.md", "spec.md"]
+    assert not (context / "specs").exists()
+    assert not (context / "proposal.md").exists()
+    assert not (context / "design.md").exists()
     assert not (context / "tasks.md").exists()
 
 

@@ -156,16 +156,19 @@ selection. OpenSpec uses the pinned
 runtime download or npx fallback. Native format selection does not change this
 OpenSpec executable contract.
 
-`format = "speckit"` selects native build support and is retained through
+`format = "speckit"` selects native drafting/build support and is retained through
 change/branch template overrides. Use the
 [native manifest example](../../examples/specloop/speckit.toml) outside the target
-repository and follow [explicit native admission](README.md#native-spec-kit-builds)
-with `--skip-feasibility`; native feasibility, drafting and daemon intake remain
-future work. Structural admission validates the committed feature, scenario
-references, unique task identities and positive phase gates. Successful native
+repository and follow [native drafting and ordinary admission](README.md#native-spec-kit-drafting)
+with feasibility; native daemon intake remains future work. Structural admission
+validates the committed feature, scenario references, unique task identities and
+positive phase gates. Successful native
 `admit --json` includes integer `sections` and `scenarios` counts. Invalid or
 missing features return version-1 `"outcome": "refused"` with diagnostics in
 `reasons`; partial admission is cleaned up and no admitted `state.json` is saved.
+
+The following is an optional operator-requested feasibility bypass example;
+`--skip-feasibility` is not required for native admission:
 
 ```sh
 nightshift admit /path/to/manifests/speckit.toml --skip-feasibility --json
