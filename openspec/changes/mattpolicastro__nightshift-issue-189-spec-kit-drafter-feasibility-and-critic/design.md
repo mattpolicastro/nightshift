@@ -206,9 +206,13 @@ Add `tests/test_specloop_critic_task_risk.py::test_speckit_counts_per_story`:
 assert the native rendered instructions and drive fake verdicts for 15/3,
 8/1 and 9/1 tasks through proposal handling, including no correction for a risk.
 Keep all existing OpenSpec assertions. Add
-`tests/test_specloop_drafting_guidance.py::test_speckit_sizing_guidance` beside,
-not instead of, the existing tests. These are requested guidance contracts;
-other new documentation checks use real CLI/TOML parsers and local links.
+`tests/test_speckit_drafting.py::test_speckit_sizing_guidance` alongside the new
+native workflow/link checks. All new documentation checks live in that new file,
+preserving the canonical “Native documentation verification” requirement.
+This relocates the issue's requested sizing test without changing its coverage;
+leave `tests/test_specloop_drafting_guidance.py` and its assertions unchanged.
+Verify per-story sizing without exact explanatory-prose assertions, and use
+real CLI/TOML parsers and local-link checks for the workflow examples.
 Select documentation passages by a unique exact column-zero heading through
 the next same-or-higher heading; missing or duplicate boundaries fail. Do not
 interpret fences, HTML or indentation semantically.
