@@ -798,8 +798,11 @@ existing manifests and saved runs need no migration or rewrite. Select
 adapter in [issue #188](https://github.com/mattpolicastro/nightshift/issues/188),
 following [issue #187](https://github.com/mattpolicastro/nightshift/issues/187)
 in [issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
-[issue #191](https://github.com/mattpolicastro/nightshift/issues/191) replaces the
-validator with [verified standalone OpenSpec 1.16.1](../deploy.md#install-openspec).
+OpenSpec uses the pinned
+[verified standalone OpenSpec 1.16.1](../deploy.md#install-openspec) binary introduced
+by [issue #191](https://github.com/mattpolicastro/nightshift/issues/191), with no
+runtime download or npx fallback. Native selection leaves that executable
+contract unchanged.
 Finish, human checks and recovery retain their gates. See the
 [manifest contract](command-json.md#manifest-format),
 [OpenSpec example](../../examples/specloop/self-hosting.toml) and

@@ -197,11 +197,14 @@ def test_local_helper_publication_examples(monkeypatch):
 
 @pytest.mark.scenario("specloop-documentation/format-selection-guidance/operator-selects-the-supported-format")
 @pytest.mark.scenario("specloop-documentation/format-selection-guidance/compatibility-claims-retain-their-limits")
+@pytest.mark.scenario("specloop-documentation/native-build-operator-guidance/operator-finishes-the-selected-format")
 def test_format_references_and_pending_legacy_resume():
     for path, heading in ((GUIDE, "## How the engine works"),
                           ("docs/specloop/command-json.md", "## Manifest format")):
         body = passage(read(path), heading)
-        assert {'format = "openspec"', 'format = "speckit"', "npx"} <= inline(body)
+        assert {'format = "openspec"', 'format = "speckit"',
+                "openspec/specs/", "**Status**: Complete"} <= inline(body)
+        assert "../deploy.md#install-openspec" in local_links(path, body)
         links = local_links(path, body)
         assert {"../../examples/specloop/self-hosting.toml", "../../examples/specloop/speckit.toml"} <= links
         assert {f"https://github.com/mattpolicastro/nightshift/issues/{n}" for n in (184, 187, 188)} <= links

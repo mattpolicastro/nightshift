@@ -150,9 +150,11 @@ The optional `[run] format` field defaults to `"openspec"`. Explicit
 runs need no migration, state change or manifest rewrite. The
 [self-hosting example](../../examples/specloop/self-hosting.toml) shows the
 explicit selection. Format selection is independent of provider and forge
-selection. The separate [issue #191](https://github.com/mattpolicastro/nightshift/issues/191)
-change installs [standalone OpenSpec 1.16.1](../deploy.md#install-openspec);
-the format seam itself neither replaces the validator nor implements spec-kit.
+selection. OpenSpec uses the pinned
+[standalone OpenSpec 1.16.1](../deploy.md#install-openspec) binary introduced by
+[issue #191](https://github.com/mattpolicastro/nightshift/issues/191), with no
+runtime download or npx fallback. Native format selection does not change this
+OpenSpec executable contract.
 
 `format = "speckit"` selects native build support and is retained through
 change/branch template overrides. Use the
@@ -173,9 +175,10 @@ The adapter is tracked by
 [issue #188](https://github.com/mattpolicastro/nightshift/issues/188), following
 [issue #187](https://github.com/mattpolicastro/nightshift/issues/187) in
 [issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
-OpenSpec Finish, human-check and recovery rules remain unchanged. Native Finish
-sets `**Status**: Complete` without archival; both formats push and mark ready
-without merging. Offline compatibility tests do not establish live legacy-run
+OpenSpec Finish archives into `openspec/specs/`; its human-check and recovery
+rules remain unchanged. Native Finish sets `**Status**: Complete` without archival;
+both formats push and mark ready without merging. Offline compatibility tests
+do not establish live legacy-run
 resume: the [pending deployed-resume check](README.md#how-the-engine-works) must be
 performed by a human after deployment and its result recorded on issue #184,
 linked from issue #187.
