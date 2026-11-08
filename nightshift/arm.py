@@ -247,7 +247,16 @@ def front_door_issue(repository: str, change: str) -> int | None:
     owner = re.escape(repository.split("/", 1)[0]) if "/" in repository else None
     prefix = rf"(?:{owner}__)?" if owner else ""
     match = re.fullmatch(rf"{prefix}{basename}-issue-([1-9][0-9]*)-[a-z0-9-]{{1,40}}", change)
-    return int(match[1]) if match else None
+    issues = {int(match[1])} if match else set()
+    # Native names are repository-local; only the exact owner/repo may qualify them.
+    parts = repository.rsplit("/", 2)[-2:]
+    qualified = re.escape("__".join(parts)) if len(parts) == 2 else None
+    prefix = rf"(?:{qualified}-)?" if qualified else ""
+    match = re.fullmatch(rf"{prefix}([0-9]{{3,}})-([a-z0-9]+(?:-[a-z0-9]+)*)", change)
+    if match and len(match[2]) <= 40 and int(match[1]) > 0:
+        issues.add(int(match[1]))
+    # A numeric repository can make one name valid under both conventions.
+    return issues.pop() if len(issues) == 1 else None
 
 
 def read_pr_context(repository: str, *, runner=None,

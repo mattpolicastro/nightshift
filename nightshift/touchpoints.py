@@ -169,10 +169,16 @@ def collect_history(nightshift_root: Path | None = None, runs_root: Path | None 
                 prefixes = (repo.replace("/", "__"), repo.split("/")[1])
                 pattern = ("(?:" + "|".join(re.escape(prefix) for prefix in prefixes) + ")"
                            + r"-issue-([1-9][0-9]*)-([a-z0-9]+(?:-[a-z0-9]+)*)")
-                match = re.fullmatch(pattern, change)
-                if not match or len(match[2]) > 40:
+                native = (rf"(?:{re.escape(prefixes[0])}-)?"
+                          r"([0-9]{3,})-([a-z0-9]+(?:-[a-z0-9]+)*)")
+                issues = {int(match[1]) for candidate in (pattern, native)
+                          if (match := re.fullmatch(candidate, change))
+                          and len(match[2]) <= 40 and int(match[1]) > 0}
+                if not issues:
                     raise ValueError("missing proposal and no front-door change identity")
-                issue = int(match[1])
+                if len(issues) > 1:
+                    raise ValueError("missing proposal and ambiguous front-door change identity")
+                issue = issues.pop()
             if record["issue"] is not None and record["issue"] != issue:
                 raise ValueError("issue conflicts with joined change identity")
             key = repo, issue, change
