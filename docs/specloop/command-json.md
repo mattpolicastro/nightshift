@@ -33,13 +33,19 @@ Publication exceptions (such as a failed or timed-out push) exit 1 with
 `{"version":1,"error":"..."}` instead of a domain outcome. The daemon records
 the failure in repository health and keeps publication eligible for a later
 poll; it does not cache the failure as a delivered refusal. A `needs-human`
-label still holds retries until removed. Transient OpenSpec validator failures during
+label still holds retries until removed. Only OpenSpec subprocess timeouts during
 `admit` or `propose`, including scenario discovery and critic-correction lint,
 also exit 1 with only `version` and a nonempty `error`, without an `outcome`,
 validation retry or drafting correction. Partial admission is cleaned up.
 The daemon retains approval/arming triggers for later eligible polls; existing
 eligibility holds and the failure threshold for `needs-human` still apply.
-Ordinary validation problems keep their refusal/rejection behavior.
+Each subprocess has a 120-second budget; first use can spend one budget on
+`--version` and another on the operation. Missing/non-executable binaries,
+wrong versions and non-JSON output (even npm-style stderr codes) are ordinary
+`SpecError` failures, not timeout recovery. Admission refuses without admitted
+state; validation problems retain refusal/rejection behavior. Repair the
+[verified installation](../deploy.md#install-openspec), run preflight (including
+the installed-file checksum), and restart consumers after binary replacement.
 
 Unused lists are empty; an unavailable head or commit is an empty string.
 Draft contradictions retain their `task`, `problem`, and `evidence` fields.
@@ -144,7 +150,9 @@ The optional `[run] format` field defaults to `"openspec"`. Explicit
 runs need no migration, state change or manifest rewrite. The
 [self-hosting example](../../examples/specloop/self-hosting.toml) shows the
 explicit selection. Format selection is independent of provider and forge
-selection, and leaves OpenSpec's `npx` invocation and binary requirements intact.
+selection. The separate [issue #191](https://github.com/mattpolicastro/nightshift/issues/191)
+change installs [standalone OpenSpec 1.16.1](../deploy.md#install-openspec);
+the format seam itself neither replaces the validator nor implements spec-kit.
 
 `format = "speckit"` is accepted by the manifest parser and retained through
 change/branch template overrides, but the adapter is not available.

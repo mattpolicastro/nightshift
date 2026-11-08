@@ -186,7 +186,7 @@ test('paseo-runs-page/server-checks-before-acting/argv-not-shell', async () => {
       assert.equal(call.file, '/opt/homebrew/bin/uv');
       assert.equal(call.options.shell, false);
       assert.equal(call.options.timeout, 330_000);
-      assert.ok(String(call.options.env?.PATH).split(':')[0].endsWith('/n/bin'), 'finish needs npx from ~/n/bin');
+      assert.ok(String(call.options.env?.PATH).split(':')[0].endsWith('/n/bin'), 'the plugin needs its own Node tools from ~/n/bin first on PATH');
       assert.deepEqual(call.args, ['run', '--no-sync', 'nightshift', 'act', run.change, 'resume', `--note=${note}`, '--json']);
     }
   } finally {

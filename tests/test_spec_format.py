@@ -22,7 +22,7 @@ from specloop.seal import SAFE_FLAGS, git
 from specloop.state import Run, TaskState
 from test_finish_expect_head import service
 from test_specloop_act import admitted
-from test_specloop_command_json import BRANCH, CHANGE, template
+from test_specloop_command_json import BRANCH, CHANGE, template, validator_process
 import spec_format_legacy_fixtures as legacy
 
 
@@ -142,7 +142,7 @@ def run_context(repo, tmp_path):
 @pytest.mark.scenario("spec-format/format-seam/legacy-paths-and-publication-labels")
 def test_openspec_adapter_matches_legacy_paths(tmp_path):
     adapter = spec_format.OPENSPEC
-    for repo in (tmp_path, Path("relative/repo")):
+    for repo in (tmp_path, Path("relative/repo"), tmp_path / "repo with spaces"):
         assert adapter.change_dir(repo, "sample-change") == repo / "openspec/changes/sample-change"
         assert adapter.change_dir(repo, "sample-change") == openspec.change_dir(repo, "sample-change")
     assert adapter.tasks_path("sample-change") == "openspec/changes/sample-change/tasks.md"
@@ -366,16 +366,16 @@ def test_delegation_is_late_bound(tmp_path, monkeypatch, method, backend, tail, 
 
 @pytest.mark.scenario("spec-format/format-seam/delegation-stays-late-bound")
 @pytest.mark.parametrize("failure", [None, "timeout", "ENOTFOUND", "domain"])
-def test_validator_invocation_and_classification(tmp_path, monkeypatch, failure):
-    process = Mock(return_value=subprocess.CompletedProcess([], 0, '{"items": []}', ""))
+def test_validator_invocation_and_classification(tmp_path, monkeypatch, validator_process, failure):
+    process = validator_process
+    process.return_value = subprocess.CompletedProcess([], 0, '{"items": []}', "")
     if failure == "timeout":
-        process.side_effect = subprocess.TimeoutExpired("npx", 120)
+        process.side_effect = subprocess.TimeoutExpired(openspec.resolve_binary(), 120)
     elif failure:
         process.return_value = subprocess.CompletedProcess([], 1, "not JSON", failure)
-    monkeypatch.setattr(openspec.subprocess, "run", process)
     monkeypatch.setenv("FORMAT_TEST_ENV", "inherited")
     if failure:
-        expected = openspec.SpecError if failure == "domain" else openspec.ValidatorUnavailable
+        expected = openspec.ValidatorUnavailable if failure == "timeout" else openspec.SpecError
         with pytest.raises(expected) as raised:
             spec_format.OPENSPEC.validate(tmp_path, "sample-change")
         assert type(raised.value) is expected
@@ -385,10 +385,11 @@ def test_validator_invocation_and_classification(tmp_path, monkeypatch, failure)
         assert spec_format.OPENSPEC.validate(tmp_path, "sample-change") == []
     process.assert_called_once()
     assert process.call_args.args == ([
-        "npx", "-y", "--prefer-offline", openspec.PACKAGE,
+        openspec.resolve_binary(),
         "validate", "sample-change", "--strict", "--json",
     ],)
     kwargs = process.call_args.kwargs
+    process.probe.assert_called_once_with([openspec.resolve_binary(), "--version"], **kwargs)
     assert kwargs["cwd"] == tmp_path
     assert kwargs["timeout"] == 120
     assert kwargs["capture_output"] is True and kwargs["text"] is True
@@ -708,6 +709,8 @@ def test_no_direct_openspec_path_literals_outside_adapter():
         assert "openspec/changes/" not in source, module.__name__
         assert not any(isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                        and node.value.id == "openspec" for node in ast.walk(ast.parse(source))), module.__name__
+        assert not any(isinstance(node, ast.ImportFrom) and node.module == "specloop.openspec"
+                       for node in ast.walk(ast.parse(source))), module.__name__
     assert cli.openspec is openspec
 
 
@@ -794,6 +797,7 @@ def test_drafting_routes_paths_validation_confinement_and_staging(repo, tmp_path
         call(result.work, "add", "-A", root.removesuffix("/"))]
     assert git(result.work, "show", "-s", "--format=%s", "HEAD") == (
         b"Draft OpenSpec change sample-change (specloop propose, round 1)\n")
+    assert git(result.work, "show", f"HEAD:{task_path}") == (result.work / task_path).read_bytes()
     (result.work / "outside.py").write_text("stray")
     assert propose.lint(result.work, "sample-change", adapter) == [
         f"outside.py: only files under {root} may change"]
@@ -918,6 +922,7 @@ def test_finish_routes_and_reuses_archive_after_interruption(service, monkeypatc
     assert cli._finish(args, service.run) == 0
     assert service.local_head() == service.remote_head() == archived
     assert service.run.state.status == "done" and service.run.state.pause is None
+    assert asdict(Run(service.run.dir).state) == asdict(service.run.state)
     assert adapter.finish.call_count == 1
     assert adapter.tasks_paths_at.call_args_list == [
         call(service.bare, original, CHANGE), call(service.bare, archived, CHANGE)]
