@@ -258,7 +258,7 @@ def test_format_aware_names_keep_health_hold(intake_template, monkeypatch):
 @pytest.mark.parametrize("number,prefix", [(7, "007"), (42, "042"), (1234, "1234")])
 @pytest.mark.parametrize("title,slug", [("Add a gate", "add-a-gate"), ("CAFÉ !!", "caf"),
                                         ("🔥", "issue"), ("A" * 50, "a" * 40)])
-def test_native_names_pad_and_grow(number, prefix, title, slug):
+def test_change_name_pads_to_three_and_grows(number, prefix, title, slug):
     for repository in ("a/x", "b/x"):
         name = intake._change_name(repository, number, title, format="speckit")
         assert name == f"{prefix}-{slug}" and intake._safe_change(name)
@@ -283,7 +283,7 @@ def select_target(target_repo, body, title="Changed title", **kwargs):
 
 
 @pytest.mark.scenario("issue-intake/native-existing-feature-selection/existing-feature-directory-is-reused")
-def test_native_target_reuses_pinned_directory(target_repo):
+def test_existing_feature_dir_is_reused(target_repo):
     source, head = target_repo
     before = git(source, "ls-tree", "-r", head)
     commit(source, {"specs/042-add-a-gate/spec.md": "# Gate\n**Status**: Complete\n"})
@@ -489,6 +489,30 @@ def test_manifest_selects_intake_naming(front_door, format, files):
     assert command[command.index("--change") + 1] == change
     assert ("--base-commit" in command) == (format == "speckit")
     assert not e.errors and receipt["delivered"]
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("issue-intake/native-spec-pr-description/spec-pr-body-names-feature-directory")
+@pytest.mark.parametrize("format", [None, "openspec", "speckit"])
+def test_spec_pr_body_names_feature_dir(front_door, monkeypatch, format):
+    e = front_door
+    e.format(format)
+    bodies = []
+    create = e.forge.create_draft_pr
+
+    def capture(repository, branch, base, title, body):
+        bodies.append(body)
+        return create(repository, branch, base, title, body)
+
+    monkeypatch.setattr(e.forge, "create_draft_pr", capture)
+    rows = e.poll()
+    assert not e.errors
+    receipt, = rows
+    assert receipt["delivered"]
+    body, = bodies
+    feature_lines = [line for line in body.splitlines() if line.startswith("spec-kit feature")]
+    assert feature_lines == (["spec-kit feature `specs/007-add-a-gate/`"]
+                             if format == "speckit" else [])
 
 
 @pytest.mark.real_trust
