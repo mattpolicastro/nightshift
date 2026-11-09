@@ -20,7 +20,9 @@ State path resolution SHALL be lazy, default to ~/.nightshift with ~/.specloop f
 
 ### Requirement: Separate draft namespace
 
-Build drafting SHALL use <state_root>/drafts/<change>, separate from daemon proposals/<repository> receipts and jobs. Creating or replacing a draft SHALL preserve daemon evidence regardless of change-name collisions.
+Build drafting SHALL use `<state_root>/drafts/<change>` for OpenSpec and `<state_root>/drafts/@speckit/<owner>/<repo>/<change>` for native spec-kit, selecting the format and repository from the trusted manifest as specified by Repository qualified native draft workspaces. Both locations SHALL remain separate from daemon `proposals/<repository>` receipts and jobs. Creating or replacing a draft SHALL preserve daemon evidence regardless of change-name collisions. Replacement SHALL affect only the selected leaf workspace and SHALL refuse symlink or non-directory managed ancestors before deletion or cloning.
+
+This format exception replaces the former unconditional flat draft-path rule to isolate repository-local native names without allowing a valid flat change name to occupy the native namespace. OpenSpec paths, existing legacy-workspace refusals and completed compatibility links SHALL remain unchanged. Existing legacy relocation and journal recovery SHALL retain their recorded flat destinations; this change SHALL NOT migrate or adopt old flat native outputs, rewrite receipts or namespace runs. Subsequent native drafts SHALL use the new managed location and leave old outputs intact.
 
 #### Scenario: Draft replacement preserves daemon evidence
 - **WHEN** canonical and alias propose invocations create and re-draft the valid change owner__repo while daemon proposals/owner__repo contains receipts and job evidence

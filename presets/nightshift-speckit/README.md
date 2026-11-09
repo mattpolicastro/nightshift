@@ -24,7 +24,8 @@ runs feasibility and structural validation; `--skip-feasibility` is an optional
 operator-requested bypass of feasibility only. `nightshift run`
 builds and `nightshift publish` publishes. After human checks, `nightshift finish`
 sets `**Status**: Complete`, archives nothing, pushes and marks ready without merging.
-Native daemon intake support remains future work.
+Native daemon intake uses the same trusted-manifest enrollment and authorization
+gates; follow [the native front door](../../docs/specloop/speckit.md#the-front-door).
 
 ## Installation
 

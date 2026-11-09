@@ -160,7 +160,7 @@ OpenSpec executable contract.
 change/branch template overrides. Use the
 [native manifest example](../../examples/specloop/speckit.toml) outside the target
 repository and follow [native drafting and ordinary admission](README.md#native-spec-kit-drafting)
-with feasibility; native daemon intake remains future work. Structural admission
+with feasibility; enrolled native intake uses the [front door](speckit.md#the-front-door). Structural admission
 validates the committed feature, scenario references, unique task identities and
 positive phase gates. Successful native
 `admit --json` includes integer `sections` and `scenarios` counts. Invalid or

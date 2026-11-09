@@ -24,6 +24,8 @@ from typing import TypeGuard
 from urllib.parse import quote
 
 from specloop import manifest as manifests
+from specloop import speckit, spec_format
+from specloop import propose as drafting
 from specloop import state as run_state, tasks as run_tasks
 
 from . import queue, specloop_client, specloop_job
@@ -60,7 +62,7 @@ def _safe_change(change: str) -> bool:
             and ".." not in change and not change.endswith((".", ".lock")))
 
 
-def _change_name(repository: str, number: int, title: str) -> str:
+def _change_name(repository: str, number: int, title: str, *, format: str = "openspec") -> str:
     parts = repository.split("/", 1)
     if len(parts) != 2 or not all(parts) or "/" in parts[1]:
         raise UnsupportedName(
@@ -70,7 +72,76 @@ def _change_name(repository: str, number: int, title: str) -> str:
         )
     owner, name = parts
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40].rstrip("-")
+    if format == "speckit":
+        if number <= 0:
+            raise ValueError("native issue numbers must be positive")
+        return f"{number:03d}-{slug or 'issue'}"
     return f"{owner}__{name}-issue-{number}-{slug or 'issue'}"
+
+
+_NATIVE_TARGET = re.compile(
+    r"(?<![A-Za-z0-9_./-])specs/([0-9]{3,}-[a-z0-9]+(?:-[a-z0-9]+)*)/(?![A-Za-z0-9_./-])"
+)
+
+
+def _native_targets(body: str, number: int) -> list[str]:
+    """Literal same-issue directory tokens, deduplicated in source order."""
+    targets: dict[str, None] = {}
+    for line in body.splitlines():
+        for match in _NATIVE_TARGET.finditer(line):
+            digits, slug = match[1].split("-", 1)
+            # Compare canonical decimal strings without an unbounded int conversion.
+            if number > 0 and digits.lstrip("0") == str(number) and len(slug) <= 40:
+                targets[match[1]] = None
+    return list(targets)
+
+
+def _native_change(source: Path, base_commit: str, repository: str, number: int,
+                   title: str, body: str, *, git_runner=None) -> str:
+    """Select a feature at an exact commit; never consult the working tree.
+
+    Determinate target problems need human intervention. Failed Git reads,
+    including timeouts and pauses, propagate without implying absence. Callers
+    must run eligibility gates first and pass this same commit to drafting.
+    """
+    candidates = _native_targets(body, number)
+    if len(candidates) > 1:
+        raise DeliveryError("ambiguous native feature targets: " + ", ".join(candidates))
+    change = candidates[0] if candidates else _change_name(repository, number, title, format="speckit")
+    if not _safe_change(change):
+        raise DeliveryError(f"unsafe native feature target: {change}")
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base_commit):
+        raise ValueError("native discovery requires a full commit object")
+
+    def git(*args):
+        return _bounded_run(["git", "-C", str(source), *args], runner=git_runner,
+                            capture_output=True, check=True).stdout
+
+    if git("cat-file", "-t", base_commit).strip() != b"commit":
+        raise ValueError("native discovery requires a commit object")
+    tree = base_commit
+    for component in ("specs", change, "spec.md"):
+        # ls-tree succeeds with empty output only for a proven missing entry.
+        entry = git("ls-tree", "-z", tree, "--", component)
+        if not entry:
+            if not candidates and component != "spec.md":
+                return change
+            raise DeliveryError(f"unavailable native feature: specs/{change}/{component}")
+        metadata, path = entry.rstrip(b"\0").split(b"\t", 1)
+        mode, kind, oid = metadata.split()
+        expected = b"blob" if component == "spec.md" else b"tree"
+        if path != component.encode() or kind != expected or mode == b"120000":
+            raise DeliveryError(f"unsafe native feature entry: specs/{change}/{component}")
+        tree = oid.decode("ascii")
+    try:
+        document = git("cat-file", "blob", tree).decode("utf-8")
+    except UnicodeError as exc:
+        raise DeliveryError(f"unreadable native spec: specs/{change}/spec.md") from exc
+    for line in document.splitlines():
+        status = speckit.STATUS.fullmatch(line.strip(" \t"))
+        if status and status[1].casefold() == "complete":
+            raise DeliveryError(f"Complete native feature is immutable: specs/{change}/")
+    return change
 
 
 def _require_supported_name(repo: Repo, change: str) -> None:
@@ -80,6 +151,45 @@ def _require_supported_name(repo: Repo, change: str) -> None:
             "Use a repository spelling that passes branch validation and update enrollment; "
             "restart after configuration changes. Recorded safe branches remain usable."
         )
+
+
+def _proposal_pr(repo: Repo, number: int, raw: dict, recorded: str | None,
+                 readiness: manifests.Manifest | ConfigurationError | None,
+                 forge: Forge) -> tuple[str, int | None, dict]:
+    """Bounded exact recovery; a failed lookup never establishes absence."""
+    native = False
+    if recorded:
+        candidates = [recorded]
+    else:
+        manifest = readiness if readiness is not None else manifest_readiness(repo, new_work=False)
+        native = not isinstance(manifest, ConfigurationError) and manifest.format == "speckit"
+        qualified = _change_name(repo.name, number, raw["title"])
+        candidates = [qualified, qualified.removeprefix(repo.name.split("/", 1)[0] + "__")]
+        if native:
+            candidates = [_change_name(repo.name, number, raw["title"], format="speckit"),
+                          *_native_targets(raw.get("body") or "", number), *candidates]
+    found = []
+    for change in dict.fromkeys(candidates):
+        pr = forge.latest_pr_number(repo.name, f"spec/{change}", strict=True)
+        if pr is not None:
+            previous = forge.pr_for_recovery(repo.name, pr)
+            found.append((change, pr, previous))
+            if not native:
+                break  # Preserve qualified-then-legacy OpenSpec lookup order.
+    if sum(previous["state"] == "OPEN" for _, _, previous in found) > 1:
+        raise DeliveryError("ambiguous open proposal identities: " + ", ".join(c for c, _, _ in found))
+    # Merged work suppresses drafting even if another candidate was closed.
+    for state in ("MERGED", "OPEN"):
+        for match in found:
+            if match[2]["state"] == state:
+                return match
+    if native:
+        # Lease the destination's closed PR, not an earlier candidate's head.
+        # Discovery later validates this same literal selection at the base.
+        targets = _native_targets(raw.get("body") or "", number)
+        destination = targets[0] if len(targets) == 1 else candidates[0]
+        found.sort(key=lambda match: match[0] != destination)
+    return found[0] if found else (candidates[0], None, {})
 
 
 def manifest_readiness(repo: Repo, *, new_work: bool = True) -> manifests.Manifest | ConfigurationError:
@@ -321,23 +431,23 @@ look like an absent label or an empty set of comments.
                     or drafting_events != receipt.get("drafting_events", drafting_events)):
                 receipt = None
         if receipt:
-            change = receipt["change"]
             receipt.setdefault("title", raw["title"])
-        else:
-            change = recorded_change or _change_name(repo.name, number, raw["title"])
-        branch = f"spec/{change}"
-        pr = forge.latest_pr_number(repo.name, branch, strict=True)
-        if not receipt and not recorded_change and pr is None:
-            # Bounded recovery after receipt loss: exact branches in this
-            # repository, using the current title. Errors must not look like
-            # absence, and recorded identities never depend on today's title.
-            legacy = change.removeprefix(repo.name.split("/", 1)[0] + "__")
-            pr = forge.latest_pr_number(repo.name, f"spec/{legacy}", strict=True)
-            if pr is not None:
-                change = legacy
+        change, pr, previous = _proposal_pr(
+            repo, number, raw, receipt["change"] if receipt else recorded_change, readiness, forge,
+        )
+        if (previous.get("state") == "CLOSED" and (receipt or recorded_change)
+                and (not receipt or receipt.get("replaces_pr", {}).get("number") != pr)):
+            # Retiring a recorded round releases its identity. Native recovery
+            # must now inspect the new candidates, including the destination's
+            # own closed PR, before binding a replacement lease or drafting.
+            receipt = None
+            manifest = readiness if readiness is not None else manifest_readiness(repo, new_work=False)
+            if not isinstance(manifest, ConfigurationError) and manifest.format == "speckit":
+                candidate = _proposal_pr(repo, number, raw, None, manifest, forge)
+                if candidate[1] is not None:
+                    change, pr, previous = candidate
         replaces_pr = None
         if pr is not None:
-            previous = forge.pr_for_recovery(repo.name, pr)
             if previous["state"] == "CLOSED":
                 # A re-armed issue starts a new draft after a human closes its
                 # PR. Keep replacement receipts on delivery retries, even
@@ -383,10 +493,10 @@ look like an absent label or an empty set of comments.
         # same applications used for rearming before replacing any receipt.
         if not authorize():
             return None
-        _require_manifest(repo, readiness)
+        manifest = _require_manifest(repo, readiness)
         # Closing a legacy PR ends that identity's round. Only genuinely new
-        # work gets today's qualified name; delivery retries keep the receipt.
-        change = _change_name(repo.name, number, raw["title"])
+        # work gets today's manifest-selected name; retries keep the receipt.
+        change = _change_name(repo.name, number, raw["title"], format=manifest.format)
         _require_supported_name(repo, change)
         if not _recover_item_cleanup(path):
             return _PENDING
@@ -408,9 +518,21 @@ look like an absent label or an empty set of comments.
                      git_runner=git_runner, readiness=readiness)
             _finish_delivery(path, receipt)
             return receipt
+        pinned = []
+        if manifest.format == "speckit":
+            def draft_git(args, *, timeout, **kwargs):
+                return _bounded_run(args, runner=git_runner, **kwargs)
+
+            base_commit = drafting.start_commit(manifest.repo, repo.base,
+                                               runner=draft_git)
+            change = _native_change(manifest.repo, base_commit, repo.name, number,
+                                    raw["title"], raw.get("body") or "", git_runner=git_runner)
+            receipt["change"] = change
+            branch = f"spec/{change}"
+            pinned = ["--base-commit", base_commit]
         if not _start(path, receipt, [
             "propose", str(repo.manifest), "--change", change,
-            "--branch", branch, "--base", repo.base,
+            "--branch", branch, "--base", repo.base, *pinned,
         ], idea=idea, runner=specloop_runner, launcher=launcher):
             return _PENDING
         _save(path, receipt)
@@ -1146,10 +1268,20 @@ def _readiness_human_checks(row: dict, body: object, *, git_runner=None,
         run = run_state.Run.for_change(change, require_existing=True)
         if run.state.change != change or run.state.pr != row["pr"]:
             return unknown
+        manifest = manifests.load(run.manifest_path)
+        if manifest.change != change or manifest.branch != f"spec/{change}":
+            return unknown
 
         def git(*args):
             return (git_runner or run_git)(["git", "--git-dir", str(run.dir / "repo.git"), *args],
                                           timeout=POLL_COMMAND_TIMEOUT, capture_output=True, text=True, check=True).stdout
+
+        if manifest.format == "speckit":
+            document = git("show", f"{head}^{{commit}}:specs/{change}/spec.md")
+            native = speckit.scenario_ids(change, speckit.parse_spec(document))
+            return [f"human checks: outstanding or unknown post-deploy annotation for `{sid}`"
+                    for sid in dict.fromkeys(ids)
+                    if "<!-- nightshift:post-deploy -->" not in native.get(sid, "")]
 
         def slug(name):
             return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
@@ -1174,7 +1306,8 @@ def _readiness_human_checks(row: dict, body: object, *, git_runner=None,
                     requirement = ""
         return [f"human checks: outstanding or unknown post-deploy annotation for `{sid}`"
                 for sid in dict.fromkeys(ids) if scenarios.get(sid) != [True]]
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, speckit.SpecError,
+            subprocess.SubprocessError):
         return unknown
 
 
@@ -1257,10 +1390,12 @@ def _readiness_evidence(row: dict, *, git_runner=None) -> list[str]:
                                           timeout=POLL_COMMAND_TIMEOUT, capture_output=True, text=True, check=True).stdout
 
         source = "committed tasks.md/repo.git"
-        tasks_path = f"openspec/changes/{change}/tasks.md"
+        fmt = spec_format.get(manifest)
+        tasks_path = fmt.tasks_path(change)
         document = git("show", f"{head}^{{commit}}:{tasks_path}")
-        sections = list(dict.fromkeys(t.section for t in run_tasks.parse(document)))
-        headings = [int(m[1]) for line in document.splitlines() if (m := run_tasks.SECTION.match(line))]
+        sections = list(dict.fromkeys(t.section for t in fmt.parse_tasks(document)))
+        heading = speckit.PHASE if manifest.format == "speckit" else run_tasks.SECTION
+        headings = [int(m[1]) for line in document.splitlines() if (m := heading.match(line))]
         if not sections or sections != headings:
             raise ValueError("missing, empty or duplicate task sections")
         source = "events.jsonl"
@@ -1277,7 +1412,8 @@ def _readiness_evidence(row: dict, *, git_runner=None) -> list[str]:
                 if type(n) is not int or n < 1:
                     raise ValueError("invalid evidence section")
                 latest[n] = event
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError,
+            speckit.SpecError, subprocess.SubprocessError) as exc:
         return [f"evidence: check {source} ({type(exc).__name__}: {exc})"]
 
     reasons = []
@@ -1868,7 +2004,8 @@ def _deliver(repo: Repo, labels: queue.Labels, number: int, change: str,
         branch = f"spec/{change}"
         # Propose places its commit in the manifest's source repository, which
         # need not be the worker clone configured by Repo.dir.
-        source = _require_manifest(repo, readiness, new_work=False).repo
+        manifest = _require_manifest(repo, readiness, new_work=False)
+        source = manifest.repo
         git = partial(_bounded_run, runner=git_runner)
         push_options = []
         if receipt.get("replaces_pr"):
@@ -1890,6 +2027,8 @@ def _deliver(repo: Repo, labels: queue.Labels, number: int, change: str,
         if proc.returncode:
             raise DeliveryError(f"could not push {branch}: {proc.stderr.strip()}")
         body = f"Closes #{number}\n"
+        if manifest.format == "speckit":
+            body += f"\nspec-kit feature `specs/{change}/`\n"
         if result.get("risks"):
             body += "\nFeasibility risks:\n" + "\n".join(f"- {risk}" for risk in result["risks"])
         url = forge.create_draft_pr(

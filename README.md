@@ -72,7 +72,7 @@ the separate `nightshift serve` supervisor executes admitted tasks.
 
 | Label | Where and stage | Effect |
 | --- | --- | --- |
-| `spec:draft` | Issue, intake | Draft an OpenSpec change from the title, body and comments. |
+| `spec:draft` | Issue, intake | Draft the selected format from the title, body and comments. |
 | `agent:ready` | Issue, intake | Alias for `spec:draft` on a specloop repository. |
 | `spec:review` | Draft PR, spec review | Added by the daemon when the draft is ready for human review. |
 | `spec:approved` | PR, approval | Added by a human to request admission and start the build. |
@@ -111,7 +111,7 @@ top-level status read retains a `STALE` snapshot. See the
 for details ([issue #10](https://github.com/mattpolicastro/nightshift/issues/10),
 [PR #32](https://github.com/mattpolicastro/nightshift/pull/32)).
 
-For example, issue 7, "Add a gate", in `owner/sample` produces change
+For OpenSpec, issue 7, "Add a gate", in `owner/sample` produces change
 `owner__sample-issue-7-add-a-gate` on `spec/owner__sample-issue-7-add-a-gate`. The daemon
 opens a draft PR titled `Spec: Add a gate`, links it back to the issue, includes
 `Closes #7` and feasibility risks in the PR body, and removes the intake labels.
@@ -120,6 +120,10 @@ and both intake labels are removed. To retry, answer the questions or resolve
 the rejection on the issue, remove `needs-human`, and reapply `spec:draft` or
 `agent:ready`. With both triggers removed, removing `needs-human` alone does not
 requeue the issue.
+
+With a native manifest, the same issue becomes `007-add-a-gate` on
+`spec/007-add-a-gate`, with its feature in `specs/007-add-a-gate/`. See the
+[native front door](docs/specloop/speckit.md#the-front-door) for reuse and recovery.
 
 Gitea verifies all label additions before removing source labels
 ([issue #150](https://github.com/mattpolicastro/nightshift/issues/150)). An ambiguous
@@ -235,13 +239,16 @@ sorted key-only ignored-setting notes. They do not configure manifests or
 providers. See [manifest templates and CLI outcomes](docs/specloop/command-json.md).
 
 The trusted manifest's `[run] format` defaults to `"openspec"`; explicit
-`format = "openspec"` selects the same path. For approved native features, use
+`format = "openspec"` selects the same path. For native front-door intake and explicit builds, use
 `format = "speckit"` and the [native manifest example](examples/specloop/speckit.toml)
 with the [native drafting and ordinary admission workflow](docs/specloop/README.md#native-spec-kit-drafting)
 and [explicit build commands](docs/specloop/README.md#native-spec-kit-builds).
 The existing `--skip-feasibility` bypass is optional. Keep the effective trusted
 manifest outside the target repository. Preset asset installation does not enroll or configure a build;
-native daemon intake remains future work. OpenSpec Finish archives into
+native daemon intake uses the same enrollment and authorization gates, with no new
+`[[repos]]` field. See [native naming, reuse and recovery](docs/specloop/speckit.md#the-front-door):
+issue 7 becomes `007-add-a-gate` on `spec/007-add-a-gate`, in `specs/007-add-a-gate/`.
+OpenSpec Finish archives into
 `openspec/specs/`; native Finish sets `**Status**: Complete` without archival.
 Both push and mark ready after human checks, without merging.
 

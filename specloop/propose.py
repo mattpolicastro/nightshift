@@ -311,7 +311,7 @@ def _changed(work: Path) -> list[str]:
 
 
 
-def start_commit(source: Path, base: str, from_branch: str | None = None) -> str:
+def start_commit(source: Path, base: str, from_branch: str | None = None, *, runner=None) -> str:
     """The commit a draft branches from, resolved in the source checkout.
 
     A clone names its default branch after the source's current branch and
@@ -320,23 +320,51 @@ def start_commit(source: Path, base: str, from_branch: str | None = None) -> str
     so the source's origin is fetched first (best effort) and its copy of the
     base wins when present. A reviewed `from_branch` tip is used as given.
     """
+    def resolve(ref):
+        args = ["rev-parse", "--verify", f"{ref}^{{commit}}"]
+        if runner is None:
+            return git(source, *args).decode().strip()
+        result = runner(["git", "-C", str(source), *args], capture_output=True, text=True, timeout=30)
+        return result.stdout.strip() if result.returncode == 0 else None
+
     if from_branch:
-        return git(source, "rev-parse", "--verify", f"{from_branch}^{{commit}}").decode().strip()
+        resolved = resolve(from_branch)
+        if resolved:
+            return resolved
+        raise RuntimeError(f"reviewed ref {from_branch!r} is not a commit in {source}")
     candidates = [base]
     try:
-        fetched = subprocess.run(
+        fetched = (runner or subprocess.run)(
             ["git", "-C", str(source), "fetch", "-q", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}"],
-            capture_output=True, timeout=60)
+            capture_output=True, timeout=30 if runner else 60)
         if fetched.returncode == 0:
             candidates.insert(0, f"refs/remotes/origin/{base}")
     except (OSError, subprocess.TimeoutExpired):
         pass
     for ref in candidates:
         try:
-            return git(source, "rev-parse", "--verify", f"{ref}^{{commit}}").decode().strip()
+            resolved = resolve(ref)
         except RuntimeError:
+            if runner is not None:
+                raise
             continue
+        if resolved:
+            return resolved
     raise RuntimeError(f"base {base!r} is not a commit in {source}")
+
+
+def draft_output(m: Manifest) -> Path:
+    """Select disposable output from the trusted format and repository tuple."""
+    root = state.proposals_dir()
+    if m.format == "speckit":
+        parts = m.github.split("/") if isinstance(m.github, str) else []
+        if len(parts) not in (2, 3) or not all(parts) or not all(
+            re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", p)
+            and ".." not in p and not p.endswith((".", ".lock")) for p in parts[-2:]
+        ):
+            raise ValueError(f"unsafe native repository {m.github!r}: expected owner/repository")
+        root = root / "@speckit" / parts[-2] / parts[-1]
+    return root / m.change
 
 
 def _check_draft_output(change: str, out: Path) -> None:
@@ -344,7 +372,12 @@ def _check_draft_output(change: str, out: Path) -> None:
     if not state.SAFE_CHANGE.fullmatch(change or "") or change in (".", ".."):
         raise ValueError(f"unsafe change name {change!r}")
     # Inspect the parent first: never follow it into daemon evidence.
-    for path in (out.parent, out):
+    root = state.proposals_dir()
+    paths = [out.parent, out]
+    if out.is_relative_to(root):
+        paths = [
+            root, *(root / p for p in reversed(out.relative_to(root).parents) if p != Path(".")), out]
+    for path in paths:
         try:
             mode = path.lstat().st_mode
         except FileNotFoundError:
@@ -363,11 +396,20 @@ def _check_draft_output(change: str, out: Path) -> None:
 
 def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m: Manifest, out: Path,
           rounds: int = 4, agent=None, *, branch: str | None = None,
-          from_branch: str | None = None) -> Draft:
+          from_branch: str | None = None, base_commit: str | None = None) -> Draft:
     _check_draft_output(change, out)
     fmt = spec_format.get(m)
     agent = agent or agents.run
-    start = start_commit(source, base, from_branch)
+    if base_commit is not None:
+        if from_branch is not None or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base_commit):
+            raise ValueError("base_commit must be a full commit object and cannot accompany from_branch")
+        identity = git(source, "cat-file", "--batch-check=%(objectname) %(objecttype)",
+                       input=f"{base_commit}\n".encode()).decode().strip()
+        if identity != f"{base_commit} commit":
+            raise ValueError("base_commit must name an existing commit object")
+        start = base_commit
+    else:
+        start = start_commit(source, base, from_branch)
     shutil.rmtree(out, ignore_errors=True)
     work = out / "work"
     subprocess.run(["git", "clone", "-q", str(source), str(work)], check=True)

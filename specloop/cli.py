@@ -917,9 +917,10 @@ def propose(args) -> int:
         _outcome(args, problems=["give --idea or --idea-file"])
         print("give --idea or --idea-file", file=sys.stderr)
         return 1
-    out = proposals_dir() / m.change
+    out = drafting.draft_output(m)
     d = drafting.draft(m.repo, args.base, m.change, idea, args.source or [], m, out,
-                       branch=m.branch, from_branch=args.from_branch)
+                       branch=m.branch, from_branch=args.from_branch,
+                       **({"base_commit": args.base_commit} if getattr(args, "base_commit", None) is not None else {}))
     _outcome(args, commit=d.commit, questions=d.questions, contradictions=d.contradictions,
              risks=d.risks, problems=d.problems)
     notify = notifier(load_env(m.env_file))
@@ -1376,6 +1377,7 @@ def add_build_parsers(sub, *, optional_run=False):
     pr.add_argument("--source", action="append", help="repo-relative documents the drafter must read")
     pr.add_argument("--base", default="main")
     pr.add_argument("--from-branch", help="revise from this existing local branch/ref instead of the base")
+    pr.add_argument("--base-commit", help=argparse.SUPPRESS)
     dr = sub.add_parser("drill")
     dr.add_argument("change")
     sv = sub.add_parser("serve")

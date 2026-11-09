@@ -4,7 +4,7 @@
 # Optional operator-requested feasibility bypass:
 # nightshift admit /path/to/manifests/speckit.toml --skip-feasibility --json
 # Structural validation still runs. Native propose and feasibility are supported;
-# daemon intake remains unsupported. See docs/specloop/README.md native drafting.
+# enrolled daemon intake selects this format too. See docs/specloop/speckit.md.
 
 [run]
 format = "speckit"

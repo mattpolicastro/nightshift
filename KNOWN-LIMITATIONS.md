@@ -45,7 +45,8 @@ None of these follow-ups establishes live validation or a completed host rollout
   Delivered feature records remain in place; later features name superseded
   features under `## Assumptions` (for example `Supersedes 042-add-a-gate`).
   Explicit [native drafting and ordinary admission](docs/specloop/README.md#native-spec-kit-drafting)
-  support feasibility; native daemon intake remains future work. Follow the
+  support feasibility; [native daemon intake](docs/specloop/speckit.md#the-front-door)
+  uses trusted-manifest enrollment. Follow the
   [explicit build guide](docs/specloop/README.md#native-spec-kit-builds), retaining
   structural validation; `--skip-feasibility` is an optional operator-requested bypass.
   The real story build, publication/Finish observation and touchpoint count remain an unchecked design
@@ -53,6 +54,18 @@ None of these follow-ups establishes live validation or a completed host rollout
   offline tests do not establish them. The real-profile scratch-repository feature
   draft and spec-PR quality inspection also remain pending human checks: record
   issue/PR identity, drafting rounds, questions and critic findings on that issue.
+  First native enrollment through merge, touchpoints against the baseline and
+  readability/live-reference checks remain in design.md's human checklist on #184.
+  Native `drafts/@speckit/<owner>/<repo>/<change>` isolates disposable drafts only.
+  Run storage remains globally change-keyed: existing collision refusal prevents
+  adopting another repository's run; use separate state roots for concurrent
+  identical native names. Daemon one-job-per-item receipts and stopped-job holds
+  remain in force; direct CLI writers for the same repository/change need operator
+  coordination or separate state roots and isolated source clones. No draft lock
+  or run namespace is added. Drain pre-upgrade writers and inspect stopped jobs.
+  Recovery is bounded by saved identities and exact repository-scoped candidates;
+  receipt loss plus an unreferenced title/directory rename is not recoverable.
+  These limits and the two unchanged OpenSpec slug functions stay on the #184 ledger.
 
 - **Readiness test-only fallback:** with evidence enabled, the missing-event
   fallback recognizes only repository-root `tests/` paths after excluding the
