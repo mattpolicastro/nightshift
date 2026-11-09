@@ -2,13 +2,14 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
 from nightshift.cli import main
 from nightshift import queue, specloop_intake as intake
 from nightshift.config import Repo
-from specloop import agents, cli, manifest, propose, spec_format, state
+from specloop import agents, cli, manifest, propose, revise, seal, spec_format, state
 from test_specloop_command_json import TASKS, template
 from test_specloop_propose import M, draft_evidence_snapshot
 import test_specloop_command_json as commands
@@ -621,3 +622,168 @@ def test_closed_round_retains_replacement_lease(front_door, format, target, stat
         push = [c for c in e.commands if "push" in c][-1]
         assert f"--force-with-lease=refs/heads/spec/{expected}:{replacement['head']}" in push
         assert receipt["delivered"]
+
+
+@pytest.fixture
+def three_phase_revision(repo, tmp_path):
+    path = f"specs/{CHANGE}/tasks.md"
+    original = ("## Phase 1: Setup\n- [X] T001 Prepare\n\n"
+                "## Phase 2: Foundational\n- [X] T005 Support\n\n"
+                f"## Phase 3: User Story 1 - Gate\n- [X] T009 [US1] Gate; `{SID}`\n")
+    parent = commit(repo, {path: original, SPEC_PATH: SPEC + "\n"})
+    git(repo, "branch", f"spec/{CHANGE}")
+    ctx = compatibility.run_context(repo, tmp_path)
+    m = replace(ctx.m, change=CHANGE, branch=f"spec/{CHANGE}", format="speckit")
+    ctx.run.state.change = CHANGE
+    ctx.run.state.gates_passed = [1, 2, 3]
+    ctx.run.pause("human_checks", detail="Review the native PR")
+    return SimpleNamespace(run=ctx.run, m=m, repo=ctx.repo, ref=f"refs/heads/{m.branch}",
+                           path=path, original=original, parent=parent)
+
+
+def native_revision(ctx, blocks=None, key="native-review-1"):
+    if blocks is None:
+        blocks = [f'Keep the "café" gate; `{SID}`.\n- [ ] Verify it.', "Handle empty input."]
+    return revise.revise_result(state.Run(ctx.run.dir, require_existing=True), ctx.m,
+                                json.dumps(blocks), feedback_format="json", round_id=key)
+
+
+def native_revision_snapshot(ctx):
+    return (git(ctx.repo, "show-ref"),
+            {p.relative_to(ctx.run.dir): p.read_bytes() for p in ctx.run.dir.rglob("*")
+             if p.is_file() and "repo.git" not in p.relative_to(ctx.run.dir).parts
+             and p.name != "lock"})
+
+
+@pytest.mark.scenario("pr-revision/native-front-door-review-rounds/native-round-appends-phase-and-next-task-ids")
+@pytest.mark.scenario("pr-revision/native-front-door-review-rounds/native-keyed-replay-returns-same-commit")
+def test_revision_round_appends_phase_with_next_task_ids(three_phase_revision):
+    ctx = three_phase_revision
+    result = native_revision(ctx)
+    text = git(ctx.repo, "show", f"{result.commit}:{ctx.path}").decode()
+    parsed = spec_format.SPECKIT.parse_tasks(text)
+    assert text.startswith(ctx.original + "\n## Phase 4: Review round 1\n\n")
+    assert parsed[:3] == spec_format.SPECKIT.parse_tasks(ctx.original)
+    assert [(t.section, t.section_title, t.label, t.done) for t in parsed[3:]] == [
+        (4, "Review round 1", "T010", False), (4, "Review round 1", "T011", False)]
+    assert [t.text for t in parsed[3:]] == [
+        "Address review feedback 1: " + json.dumps(f'Keep the "café" gate; `{SID}`.\n- [ ] Verify it.'),
+        "Address review feedback 2: " + json.dumps("Handle empty input.")]
+    assert git(ctx.repo, "diff-tree", "--no-commit-id", "--name-only", "-r", result.commit).decode().splitlines() == [ctx.path]
+    assert git(ctx.repo, "show", f"{result.commit}:{SPEC_PATH}") == (SPEC + "\n").encode()
+    assert git(ctx.repo, "rev-parse", result.commit + "^").decode().strip() == ctx.parent
+    assert not result.replayed and (result.status, result.pause) == ("running", None)
+    before = native_revision_snapshot(ctx)
+    assert native_revision(ctx) == replace(result, replayed=True)
+    assert native_revision_snapshot(ctx) == before
+
+
+@pytest.mark.scenario("pr-revision/native-front-door-review-rounds/native-round-appends-phase-and-next-task-ids")
+@pytest.mark.parametrize("root,next_label", [("T009.2", "T010"), ("T999", "T1000"), ("T1001.7", "T1002")])
+@pytest.mark.parametrize("wrapper", [("", ""), ("```md\n", "```\n"), ("<!--\n", "-->\n")])
+def test_native_revision_uses_physical_maxima(three_phase_revision, root, next_label, wrapper):
+    ctx = three_phase_revision
+    original = (ctx.original.replace("T009", root) + wrapper[0]
+                + "## Phase 9: Review round 7\n## Phase 20: Review round 2\n"
+                "## Phase 12: Review round 99 extra\n"
+                "    ## Phase 900: Review round 900\n"
+                "## 999. Review round 999\n    - [ ] T9999 Outside native phase\n" + wrapper[1])
+    parent = seal.commit_files(ctx.repo, ctx.parent, {ctx.path: original}, "physical fixture")
+    git(ctx.repo, "update-ref", ctx.ref, parent)
+    result = native_revision(ctx)
+    text = git(ctx.repo, "show", f"{result.commit}:{ctx.path}").decode()
+    assert text.startswith(original + "\n## Phase 21: Review round 8\n\n")
+    added = spec_format.SPECKIT.parse_tasks(text)[-2:]
+    assert [t.label for t in added] == [next_label, f"T{int(next_label[1:]) + 1:03d}"]
+    assert all(t.section == 21 and t.section_title == "Review round 8" for t in added)
+    assert native_revision(ctx).commit == result.commit
+
+
+@pytest.mark.scenario("pr-revision/native-front-door-review-rounds/native-round-appends-phase-and-next-task-ids")
+@pytest.mark.parametrize("extra", [
+    "## Phase 03: Duplicate\n", "- [ ] T0009 Duplicate numeric root\n",
+    "- [ ] T010.1 First child\n- [ ] T010.01 Duplicate child\n",
+    "- [ ] T010 Same title\n- [ ] T011 Same title\n",
+    "```md\n- [ ] T009 Fenced duplicate\n```\n",
+    "<!--\n- [ ] T009 HTML duplicate\n-->\n", "    - [ ] T009 Indented duplicate\n",
+])
+def test_native_revision_refuses_ambiguous_ids(three_phase_revision, extra):
+    ctx = three_phase_revision
+    parent = seal.commit_files(ctx.repo, ctx.parent, {ctx.path: ctx.original + extra}, "ambiguous fixture")
+    git(ctx.repo, "update-ref", ctx.ref, parent)
+    before = native_revision_snapshot(ctx)
+    with pytest.raises(spec_format.SpecError, match="duplicate|ambiguous"):
+        native_revision(ctx)
+    assert native_revision_snapshot(ctx) == before
+
+
+@pytest.mark.scenario("pr-revision/native-front-door-review-rounds/native-keyed-replay-returns-same-commit")
+@pytest.mark.parametrize("later", ["commit", "control", "both"])
+def test_native_keyed_replay_preserves_later_state(three_phase_revision, later):
+    ctx = three_phase_revision
+    first = native_revision(ctx)
+    tip = first.commit
+    if later in ("commit", "both"):
+        tip = native_revision(ctx, ["A later review."], key="native-review-2").commit
+    ctx.run.reload()
+    assert ctx.run.state.gates_passed == [1, 2, 3]
+    if later in ("control", "both"):
+        ctx.run.pause("stuck", detail="Later operator decision")
+        ctx.run.request_pause()
+    before = native_revision_snapshot(ctx)
+    replay = native_revision(ctx)
+    assert replay.replayed and replay.commit == first.commit
+    assert replay.status == ("running" if later == "commit" else "paused")
+    if later != "commit":
+        assert replay.pause["reason"] == "stuck" and ctx.run.pause_requested()
+    assert git(ctx.repo, "rev-parse", ctx.ref).decode().strip() == tip
+    assert native_revision_snapshot(ctx) == before
+    with pytest.raises(ValueError, match="revision record conflict"):
+        native_revision(ctx, ["Conflicting feedback."])
+    assert native_revision_snapshot(ctx) == before
+
+
+@pytest.mark.real_trust
+@pytest.mark.scenario("pr-revision/native-front-door-review-rounds/native-keyed-replay-returns-same-commit")
+@pytest.mark.parametrize("moved", [False, True])
+def test_native_spec_revision_binds_reviewed_head(tmp_path, moved):
+    from manifest_fixtures import manifest_text
+    from test_specloop_spec_revision import Commands, RevisionGh, HEAD, REVISED
+
+    path = tmp_path / "native.toml"
+    path.write_text(manifest_text(tmp_path / "source").replace("[run]", '[run]\nformat = "speckit"'))
+    target = Repo("owner/sample", engine="specloop", manifest=path)
+    gh = RevisionGh()
+    gh.branch = f"spec/{CHANGE}"
+    commands = Commands(gh)
+    commands.result["branch"] = gh.branch
+    commands.fetch_head = "c" * 40 if moved else HEAD
+    pushes = []
+    def runner(args, **kwargs):
+        if args[0] == "git" and args[3] == "push":
+            pushes.append(args)
+            gh.head = REVISED
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return commands(args, **kwargs)
+    def poll():
+        return intake.revise_pending(target, queue.Labels(), tmp_path, runner=gh,
+                                     specloop_runner=runner, git_runner=runner)
+    fetched_ref = f"refs/nightshift/revise/{CHANGE}"
+    if moved:
+        with pytest.raises(RuntimeError, match="changed during revision"):
+            poll()
+        assert not commands.proposals and not pushes
+        assert gh.head == HEAD and "agent:revise" in gh.labels
+    else:
+        poll()
+        poll()
+        proposal, = commands.proposals
+        assert proposal[:9] == ["specloop", "propose", str(path), "--change", CHANGE,
+                                "--branch", gh.branch, "--from-branch", fetched_ref]
+        assert "--base-commit" not in proposal
+        assert pushes[0][3:] == ["push", "origin", f"{REVISED}:refs/heads/{gh.branch}"] and len(pushes) == 1
+        receipt = json.loads((tmp_path / "revisions/owner__sample/8.json").read_text())
+        assert receipt["head"] == HEAD and receipt["change"] == CHANGE and receipt["delivered"]
+        assert gh.head == REVISED and gh.labels == {"spec:review"}
+    assert [c[3:] for c in commands.calls if c[0] == "git"] == [
+        ["fetch", "origin", f"+refs/heads/{gh.branch}:{fetched_ref}"], ["rev-parse", fetched_ref]]
