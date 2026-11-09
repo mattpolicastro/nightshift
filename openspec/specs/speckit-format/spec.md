@@ -14,8 +14,7 @@ interfaces. `feature_dir(repo, change)` SHALL return `repo / "specs" / change`.
 Additional build helpers MAY perform the explicitly specified Git completion
 operations. Importing the module SHALL have no I/O or dispatch side effects.
 Native integration SHALL occur through the manifest-selected format adapter,
-without changing existing OpenSpec or daemon behavior. This replaces the
-parser-only prohibition on engine integration to enable the requested build path.
+preserving existing OpenSpec behavior. The daemon MAY use these helpers for the native front-door behavior explicitly specified by issue-intake and merge-readiness; all unrelated daemon policy SHALL remain unchanged. This qualifies the former daemon-behavior exclusion to enable native front-door integration; it does not change the pure parser API or physical-line grammar.
 
 #### Scenario: Resolve a feature without integration
 - **WHEN** a caller imports the module or resolves `042-add-a-gate` under a repository path

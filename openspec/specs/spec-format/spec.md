@@ -76,7 +76,7 @@ changing publication's deduplication and rendering.
 The four consumer modules `cli.py`, `loop.py`, `revise.py` and `propose.py`
 SHALL route the extracted operations through the selected adapter, containing
 no `openspec/changes/` literal and no direct `openspec.` attribute call.
-Except for the pinned OpenSpec backend invocation, version gate, strict-validator upgrade and error classification explicitly specified by this change, and the shared planned-file exclusion below, OpenSpec rendered prompts, messages, argv, commits, state transitions and recovery behavior SHALL remain unchanged.
+Except for the pinned OpenSpec backend invocation, version gate, strict-validator upgrade and error classification explicitly specified by this change, and the shared planned-file exclusion below, OpenSpec rendered prompts, messages, argv, commits, state transitions and recovery behavior SHALL remain unchanged for unpinned calls. An explicitly supplied discovery-base pin under spec-drafting is a narrow exception: a pinned call SHALL use its already resolved commit. This exception SHALL NOT change OpenSpec prompts, ordinary resolution, flat draft-workspace paths, task operations or successful result shapes.
 
 Shared planned-file extraction (`propose.paths` and `edited_paths`) SHALL
 exclude tokens beginning `specs/` as well as `openspec/`, for every format

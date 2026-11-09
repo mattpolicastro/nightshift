@@ -100,10 +100,8 @@ and command execution.
 The preset README SHALL describe explicit native drafting and builds using a
 trusted `format = "speckit"` manifest and links to the engine guide and manifest
 example. It SHALL distinguish asset installation from build configuration,
-retain prerequisites and installation guidance, and leave native front-door
-support and unperformed live checks pending. It SHALL describe
-skip-feasibility only as an optional existing bypass. This replaces #188's
-pending drafting/feasibility claims; preset assets and command behavior do not
+retain prerequisites and installation guidance, describe native front-door support under trusted-manifest enrollment, and leave unperformed live checks pending. It SHALL describe
+skip-feasibility only as an optional existing bypass. This replaces the obsolete pending-front-door claim; preset assets and command behavior do not
 change.
 
 #### Scenario: Preset reader finds the native build path
