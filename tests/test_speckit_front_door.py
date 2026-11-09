@@ -6,7 +6,8 @@ import subprocess
 import pytest
 
 from nightshift.cli import main
-from nightshift import specloop_intake as intake
+from nightshift import queue, specloop_intake as intake
+from nightshift.config import Repo
 from specloop import agents, cli, manifest, propose, spec_format, state
 from test_specloop_command_json import TASKS, template
 from test_specloop_propose import M, draft_evidence_snapshot
@@ -16,6 +17,92 @@ from test_spec_format import service, admitted, repo, commit
 from specloop.seal import git
 import test_owner_qualified_changes as qualified
 from test_owner_qualified_changes import template as intake_template
+from speckit_front_door_fixtures import (
+    CHANGE, HEADING, ITEM, MARKER, SID, SPEC, SPEC_PATH, native_checklist, native_run,
+)
+
+
+@pytest.mark.scenario("merge-readiness/native-committed-human-check-lookup/native-scenarios-with-marker-permit-readiness")
+@pytest.mark.parametrize("wrapper", [("", ""), ("```md\n", "```\n"), ("<!--\n", "-->\n"), ("    ", "")])
+def test_readiness_resolves_as_scenarios_with_marker(native_run, native_checklist, wrapper):
+    env = native_run
+    document = wrapper[0] + SPEC + MARKER + "\n2. **AS2** Another " + MARKER + "\n" + wrapper[1]
+    head = env.commit({SPEC_PATH: document})
+    before = (env.run.dir / "state.json").read_bytes()
+    env.commit({SPEC_PATH: SPEC + "unmarked\n"})
+    (env.work / SPEC_PATH).write_text("uncommitted source")
+    enrollment = env.work / "enrollment.toml"
+    enrollment.write_text(env.run.manifest_path.read_text().replace('"speckit"', '"openspec"')
+                          .replace('repo = "."', f'repo = "{env.work}"'))
+    checks = native_checklist(ITEM + "\n" + ITEM.replace("as1", "as2"))
+    assert intake._readiness_human_checks({**env.row, "head": head}, **checks) == []
+    result = intake._readiness_assessment(Repo(name="owner/repo", engine="specloop", manifest=enrollment),
+        queue.Labels(), env.work, 1, {**env.row, "head": head},
+        dict(headRefOid=head, labels=[], body=checks["body"]),
+        publication=dict(checks=checks["publication_checks"]),
+        runner=lambda args: json.dumps([dict(name="CI", state="COMPLETED", bucket="pass")]))
+    assert result["label"] == "merge:ready" and result["reasons"] == []
+    assert (env.run.dir / "state.json").read_bytes() == before
+    assert "[ ]" in str(checks)
+
+
+@pytest.mark.scenario("merge-readiness/native-committed-human-check-lookup/unknown-or-unmarked-native-ids-block")
+@pytest.mark.parametrize("case", ["unknown", "unmarked", "neighbor", "other", "plan", "duplicate",
+    "fenced-duplicate", "html-duplicate", "malformed", "checked", "missing", "decode", "unreadable",
+    "double-heading", "fenced-checklist", "html-checklist", "two-citations", "manifest-identity",
+    "manifest-missing", "manifest-malformed"])
+def test_readiness_blocks_unknown_or_unmarked_id(native_run, native_checklist, case):
+    env = native_run
+    document, item = SPEC + MARKER + "\n", ITEM
+    if case in ("unmarked", "neighbor", "other", "plan", "checked"):
+        document = SPEC + "unmarked\n"
+        document += {"neighbor": MARKER, "other": "2. **AS2** Another " + MARKER}.get(case, "")
+    if case in ("duplicate", "fenced-duplicate", "html-duplicate"):
+        document += {"duplicate": "", "fenced-duplicate": "```\n", "html-duplicate": "<!--\n"}[case]
+        document += "2. **AS1** Duplicate " + MARKER
+    if case in ("unknown", "malformed"):
+        item = item.replace("as1", "as99" if case == "unknown" else "AS1")
+    if case == "checked":
+        item = item.replace("[ ]", "[x]")
+    if case == "two-citations":
+        item += f" `{SID}`"
+    env.commit({SPEC_PATH: None if case == "missing" else document,
+                f"specs/{CHANGE}/plan.md": MARKER})
+    if case == "decode":
+        (env.work / SPEC_PATH).write_bytes(b"\xff")
+        env.commit({})
+    if case == "manifest-identity":
+        path = env.run.manifest_path
+        path.write_text(path.read_text().replace(f'change = "{CHANGE}"', 'change = "other"'))
+    elif case == "manifest-missing":
+        env.run.manifest_path.unlink()
+    elif case == "manifest-malformed":
+        env.run.manifest_path.write_text("[broken")
+    checks = native_checklist(item)
+    if case == "double-heading":
+        checks["body"] = HEADING + ITEM + "\n" + HEADING + ITEM
+    elif case in ("fenced-checklist", "html-checklist"):
+        checks = native_checklist(("```\n" if case == "fenced-checklist" else "<!--\n") + item)
+    def runner(args, **kwargs):
+        if case == "unreadable":
+            raise OSError("unreadable committed spec")
+        return subprocess.run(args, **kwargs)
+    reasons = intake._readiness_human_checks(env.row, **checks, git_runner=runner)
+    assert reasons and all("human checks:" in r and "unknown" in r for r in reasons)
+
+
+@pytest.mark.scenario("speckit-format/local-feature-api/resolve-a-feature-without-integration")
+def test_readiness_integration_keeps_feature_lookup_pure(tmp_path, monkeypatch):
+    import importlib
+    from specloop import speckit
+    def forbidden(*args, **kwargs):
+        pytest.fail("pure native lookup performed I/O or format selection")
+    with monkeypatch.context() as patch:
+        for owner, name in ((Path, "open"), (Path, "stat"), (subprocess, "run"), (spec_format, "get")):
+            patch.setattr(owner, name, forbidden)
+        importlib.reload(speckit)
+        assert speckit.feature_dir(tmp_path, CHANGE) == tmp_path / "specs" / CHANGE
+        assert SID in speckit.scenario_ids(CHANGE, speckit.parse_spec(SPEC + MARKER))
 
 
 def isolated_proposals(template, monkeypatch, capfd, repositories, reverse=False):

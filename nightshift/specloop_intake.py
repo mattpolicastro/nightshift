@@ -24,7 +24,7 @@ from typing import TypeGuard
 from urllib.parse import quote
 
 from specloop import manifest as manifests
-from specloop import speckit
+from specloop import speckit, spec_format
 from specloop import propose as drafting
 from specloop import state as run_state, tasks as run_tasks
 
@@ -1268,10 +1268,20 @@ def _readiness_human_checks(row: dict, body: object, *, git_runner=None,
         run = run_state.Run.for_change(change, require_existing=True)
         if run.state.change != change or run.state.pr != row["pr"]:
             return unknown
+        manifest = manifests.load(run.manifest_path)
+        if manifest.change != change or manifest.branch != f"spec/{change}":
+            return unknown
 
         def git(*args):
             return (git_runner or run_git)(["git", "--git-dir", str(run.dir / "repo.git"), *args],
                                           timeout=POLL_COMMAND_TIMEOUT, capture_output=True, text=True, check=True).stdout
+
+        if manifest.format == "speckit":
+            document = git("show", f"{head}^{{commit}}:specs/{change}/spec.md")
+            native = speckit.scenario_ids(change, speckit.parse_spec(document))
+            return [f"human checks: outstanding or unknown post-deploy annotation for `{sid}`"
+                    for sid in dict.fromkeys(ids)
+                    if "<!-- nightshift:post-deploy -->" not in native.get(sid, "")]
 
         def slug(name):
             return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
@@ -1296,7 +1306,8 @@ def _readiness_human_checks(row: dict, body: object, *, git_runner=None,
                     requirement = ""
         return [f"human checks: outstanding or unknown post-deploy annotation for `{sid}`"
                 for sid in dict.fromkeys(ids) if scenarios.get(sid) != [True]]
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, speckit.SpecError,
+            subprocess.SubprocessError):
         return unknown
 
 
@@ -1379,10 +1390,12 @@ def _readiness_evidence(row: dict, *, git_runner=None) -> list[str]:
                                           timeout=POLL_COMMAND_TIMEOUT, capture_output=True, text=True, check=True).stdout
 
         source = "committed tasks.md/repo.git"
-        tasks_path = f"openspec/changes/{change}/tasks.md"
+        fmt = spec_format.get(manifest)
+        tasks_path = fmt.tasks_path(change)
         document = git("show", f"{head}^{{commit}}:{tasks_path}")
-        sections = list(dict.fromkeys(t.section for t in run_tasks.parse(document)))
-        headings = [int(m[1]) for line in document.splitlines() if (m := run_tasks.SECTION.match(line))]
+        sections = list(dict.fromkeys(t.section for t in fmt.parse_tasks(document)))
+        heading = speckit.PHASE if manifest.format == "speckit" else run_tasks.SECTION
+        headings = [int(m[1]) for line in document.splitlines() if (m := heading.match(line))]
         if not sections or sections != headings:
             raise ValueError("missing, empty or duplicate task sections")
         source = "events.jsonl"
@@ -1399,7 +1412,8 @@ def _readiness_evidence(row: dict, *, git_runner=None) -> list[str]:
                 if type(n) is not int or n < 1:
                     raise ValueError("invalid evidence section")
                 latest[n] = event
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError,
+            speckit.SpecError, subprocess.SubprocessError) as exc:
         return [f"evidence: check {source} ({type(exc).__name__}: {exc})"]
 
     reasons = []

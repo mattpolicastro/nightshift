@@ -9,6 +9,7 @@ from nightshift import specloop_intake
 from nightshift import daemon
 from nightshift.config import Repo
 from gitea_dispatch_fixtures import install_gitea
+from manifest_fixtures import manifest_text
 from specloop import cli, loop, spec_format
 from test_specloop_base_sync import base_env, commit, controlled_verify, publish_env, sh
 
@@ -136,6 +137,9 @@ def test_task_checks_keep_order_before_design_checks(design_env, surface, separa
 @pytest.mark.parametrize("post_deploy", [False, True])
 def test_literal_examples_remain_pending(design_env, opening, closing, indent, post_deploy):
     ctx = design_env.ctx
+    # Readiness selects the format from the admitted run's copied manifest.
+    ctx.run.manifest_path.write_text(manifest_text(design_env.src).replace(
+        "[run]", '[run]\nchange = "c"\nbranch = "spec/c"'))
     annotation = "<!-- nightshift:post-deploy -->" if post_deploy else ""
     commit(design_env.src, "openspec/changes/c/specs/cap/spec.md",
            "### Requirement: Checks\n#### Scenario: Observe\n" + annotation)
