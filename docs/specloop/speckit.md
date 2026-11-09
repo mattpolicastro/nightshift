@@ -8,8 +8,84 @@ trusted native manifest; see the [drafting guide](README.md#native-spec-kit-draf
 [build guide](README.md#native-spec-kit-builds)
 and [manifest example](../../examples/specloop/speckit.toml). Installing authoring
 assets does not enroll a repository or configure a build. Native admission runs
-feasibility normally; daemon intake remains unsupported. Existing
+feasibility normally; enrolled daemon intake uses [the front door](#the-front-door). Existing
 [OpenSpec naming and lifecycle guidance](README.md) stays in effect.
+
+## The front door
+
+[Enroll the repository](../../README.md#enroll-a-repository) with a trusted manifest
+whose `[run]` has `format = "speckit"`; use the [native example](../../examples/specloop/speckit.toml).
+There is no new `[[repos]]` field or format auto-detection. The
+[existing front-door gates](README.md#github-front-door-nightshift--specloop)
+apply on GitHub and configured Gitea, including labels and actor authorization.
+Issue numbers are repository-local; names grow beyond three digits:
+
+| Issue | Title | Change | Branch | Feature directory |
+| --- | --- | --- | --- | --- |
+| 7 | Add a gate | `007-add-a-gate` | `spec/007-add-a-gate` | `specs/007-add-a-gate/` |
+| 1234 | Add a gate | `1234-add-a-gate` | `spec/1234-add-a-gate` | `specs/1234-add-a-gate/` |
+
+To reuse an undelivered feature, put a literal directory reference such as
+`specs/007-add-a-gate/` in the issue body. Its numeric prefix must match the issue;
+other-number references remain context. A file reference is not a directory
+selection. Discovery reads the resolved upstream-first drafting commit, and
+drafting uses that same commit. Multiple matching targets, a missing/unreadable
+target or a Complete feature block instead of silently creating another feature.
+Recorded receipt, PR and run identities remain unchanged after title edits;
+reuse preserves committed task/scenario IDs. No sequential number scan occurs.
+
+The spec PR retains `Spec: Add a gate`, `Closes #7`, feasibility risks, the review
+label and issue link, and adds a line identifying `spec-kit feature` followed by
+`specs/007-add-a-gate/`. Recovered PRs are not rewritten just to add this line.
+Before admission, feedback revises the same feature; afterwards the adapter
+appends review rounds using maximum phase N, exact Review round K and numeric
+T root M plus one, including dotted children. IDs grow from T999 to T1000;
+see [task addition rules](#tasks-cite-scenarios).
+
+Readiness parses the committed feature at the run head. A post-deploy marker
+must be on the AS line itself, as in this `spec.md` excerpt:
+
+```markdown
+### User Story 1 - Gate (Priority: P1)
+**Acceptance Scenarios**:
+1. **AS1** **Given** deployment **When** checked **Then** the gate opens. <!-- nightshift:post-deploy -->
+```
+
+Native disposable drafts use `<state_root>/drafts/@speckit/<owner>/<repo>/<change>`.
+The reserved `@speckit` component cannot be a valid change name. Owner and
+repository come from the trusted manifest as separate components, preserving
+embedded underscores; these workspaces are distinct:
+
+| Repository | Draft path relative to state root |
+| --- | --- |
+| `a__b/c` | `drafts/@speckit/a__b/c/007-add-a-gate` |
+| `a/b__c` | `drafts/@speckit/a/b__c/007-add-a-gate` |
+
+OpenSpec drafts keep their flat `drafts/<change>` paths. Existing daemon
+one-job-per-item receipts and stopped-job holds govern same-issue concurrency.
+Direct CLI proposals do not share those holds: coordinate writers for the same
+repository/change, or use separate state roots and isolated source clones.
+Drain pre-upgrade proposal writers and inspect stopped jobs using the existing
+[recovery procedure](README.md#pause-stop-and-the-supervisor) before upgrading.
+There is no new draft lock. Run storage remains globally change-keyed; collision
+refusal prevents adopting another repository's run. Concurrent identical native
+names require separate state roots; draft isolation does not namespace runs.
+
+Recovery uses saved identities first, then exact repository-scoped PR candidates:
+the current native name, same-number body references and current-title qualified/
+legacy OpenSpec names. Conflicting open identities block; lookup errors do not
+prove absence. Receipt loss plus an unreferenced title/directory rename cannot
+be recovered by scanning arbitrary titles. These limits remain on the
+[issue #184](https://github.com/mattpolicastro/nightshift/issues/184) ledger and in
+[known limitations](../../KNOWN-LIMITATIONS.md#open-gaps).
+
+The approved design.md human checklist still owns first live enrollment on either
+forge: install the preset, create labels, select the trusted native manifest,
+then take an issue through draft, review, approval, build, publish and merge.
+Record issue/PR identity and the touchpoint report against the baseline on #184.
+Live references/readability, draft-quality inspection, build/Finish observations
+and the separate deployed legacy-resume check remain pending; offline tests do
+not complete these checks.
 
 ## What the drafter produces
 
@@ -86,7 +162,8 @@ if empty. Do not transliterate Unicode or invent a semantic short name.
 Issue numbers are repository-local on GitHub and Gitea; gaps are fine. This meets
 upstream's `^[0-9]{3,}-` directory rule and avoids parallel drafts picking the same
 next number from a sequential scan. It does not prevent concurrent edits to the
-same issue: isolate drafts in worktrees. Never rename a committed feature after
+same issue: coordinate writers as described under [the front door](#the-front-door).
+Never rename a committed feature after
 a title edit; stable identities keep references valid. OpenSpec names are unchanged.
 
 ## Open the issue first
@@ -153,8 +230,9 @@ In `plan.md`, add a checklist with exactly one scenario ID per item:
 - [ ] Confirm the deployed gate waits for an answer; `042-add-a-gate/us1/as2`
 ```
 
-For a post-deploy check, put `<!-- nightshift:post-deploy -->` inside that scenario's
-body in `spec.md`, matching today's OpenSpec `design.md` convention. Human/live
+For a post-deploy check, put `<!-- nightshift:post-deploy -->` on that scenario's
+AS-labelled physical line in `spec.md`; see [the example](#the-front-door).
+A neighboring line or a marker in `plan.md` does not qualify. Human/live
 checks require observation outside automated verification: keep them out of agent
 tasks and do not claim CI performed them. No plan template override is needed.
 

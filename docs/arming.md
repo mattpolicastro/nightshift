@@ -206,14 +206,19 @@ their actor, edits bodies, posts comments, creates PRs, or writes local receipts
   This applies to both target and other armed issues. Existing root files such as
   `README.md` and new nested files such as `docs/new-guide.md` participate; new root
   filenames are missed. Function suffixes (`nightshift/arm.py::main` or `:main`) are removed.
-  Absolute, home-relative, URL, and `openspec/` tokens are excluded by the helper.
+  Absolute, home-relative, URL, `openspec/` and `specs/` tokens are excluded by the helper.
 - Matching uses exact normalized tokens, including production, documentation,
   and test files. Globs remain literal: `tests/*.py` does not intersect a concrete
   `tests/test_arm.py` token. Directories/globs are not expanded, undeclared edits
   cannot be discovered, and paths outside Scope do not contribute issue evidence.
 - The run helper silently skips unreadable runs. Recognized run names fully match
   `<repo-basename>-issue-<positive-number>-<slug>` with a 1–40 character lowercase
-  alphanumeric/hyphen slug. Titles need not still match. Unknown runs stay visible.
+  alphanumeric/hyphen slug, or the owner-qualified OpenSpec form
+  `<owner>__<repo>-issue-<positive-number>-<slug>`. Native names are `<NNN>-<slug>`
+  (at least three digits) or compatibility `<owner>__<repo>-<NNN>-<slug>`;
+  their positive numeric prefix identifies the source issue, not the PR number.
+  Qualification must match the current repository exactly. Titles need not still
+  match. Unknown runs stay visible; see [native identities](specloop/speckit.md#the-front-door).
 - PRs participate only for same-repository heads named `spec/<front-door-run-name>`.
   Ordinary/custom and fork PRs are excluded. PR numbers are not source issue
   numbers. File evidence includes old/new rename paths and retains PR links.

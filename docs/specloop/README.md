@@ -1,6 +1,6 @@
 # specloop — Nightshift's build engine
 
-Nightshift turns approved OpenSpec changes into reviewed, verified pull requests.
+Nightshift turns approved OpenSpec changes and native spec-kit features into reviewed, verified pull requests.
 The sole/default engine, specloop, takes an admitted change through
 its `tasks.md` one task at a time, and the daemon provides its GitHub and configured
 Gitea front end. For the JSON contract see [command-json.md](command-json.md);
@@ -32,6 +32,15 @@ are inert, with key-only ignored-setting notes; no manifest is generated from th
 See [enrollment and preparation](../../README.md#enroll-a-repository) and the
 [CLI contract](command-json.md).
 
+The trusted manifest's `[run] format = "speckit"` selects native intake; omission
+selects OpenSpec. No format field is added to `[[repos]]`, and repository files
+never auto-select the format. Native issue 7, "Add a gate", becomes `007-add-a-gate`
+on `spec/007-add-a-gate` with `specs/007-add-a-gate/`; issue 1234 becomes
+`1234-add-a-gate` without truncation. The copied manifest selects admitted work.
+See [the native front door](speckit.md#the-front-door) for existing-feature reuse,
+PRs, inline AS markers, revision rounds, draft isolation and recovery limits.
+Both formats retain the authorization, dependency, pause and stopped-job gates below.
+
 Daemon forge selection defaults to GitHub independently of named table order. Optional
 `repos.forge` selects an exact name; owner/repository collisions across forges
 are rejected ignoring case. See [forge configuration](../../config.example.toml).
@@ -59,7 +68,7 @@ still apply. The [remaining Gitea limits](../../KNOWN-LIMITATIONS.md) are tracke
 
 | Label | Stage and action |
 | --- | --- |
-| `spec:draft` or `agent:ready` on an issue | Draft its title, body and comments into an OpenSpec change. |
+| `spec:draft` or `agent:ready` on an issue | Draft its title, body and comments in the selected format. |
 | `spec:review` on the draft PR | The daemon requests human spec review. |
 | `spec:approved` on the PR | A human requests admission; the daemon records that PR and starts the build. |
 | `agent:revise` on the PR, before admission | Re-draft the spec on the same branch with new review feedback. |
@@ -115,7 +124,7 @@ See [daemon delivery assumptions](../../KNOWN-LIMITATIONS.md#open-gaps): resumed
 completion and publication-comment recovery retain results and full checklists,
 but comment/PR uniqueness is conditional across pause/resume and restart.
 
-For issue 7, "Add a gate", in `owner/sample`, the change is
+For OpenSpec issue 7, "Add a gate", in `owner/sample`, the change is
 `owner__sample-issue-7-add-a-gate`, on `spec/owner__sample-issue-7-add-a-gate`. The draft PR
 is titled `Spec: Add a gate`, links the issue with `Closes #7`, and carries
 the feasibility risks. Successful admission removes `spec:review` and
@@ -794,7 +803,7 @@ for usage, refresh behavior and installation.
 
 **Formats.** Omit `[run] format` or set `format = "openspec"` for OpenSpec;
 existing manifests and saved runs need no migration or rewrite. Select
-`format = "speckit"` for explicit native drafting and builds of approved features,
+`format = "speckit"` for native front-door intake, explicit drafting and builds,
 through the adapter in [issue #188](https://github.com/mattpolicastro/nightshift/issues/188),
 following [issue #187](https://github.com/mattpolicastro/nightshift/issues/187)
 in [issue #184](https://github.com/mattpolicastro/nightshift/issues/184).
@@ -938,7 +947,7 @@ the target repository and edit its source, branch, profiles and trusted check
 paths. Commit the approved `specs/<NNN>-<slug>/spec.md`, `plan.md`, `tasks.md`
 and `.specify/memory/constitution.md` on that source branch before admission.
 Use the [native drafting workflow](#native-spec-kit-drafting) for ordinary
-admission with feasibility. Native daemon intake remains unsupported.
+admission with feasibility, or enroll through the [native front door](speckit.md#the-front-door).
 The following is an optional operator-requested feasibility bypass example;
 `--skip-feasibility` is not a native prerequisite:
 
@@ -989,7 +998,8 @@ assets separately; the drafter reads local `.specify/templates/spec-template.md`
 and tests. Missing templates are a prerequisite to fix locally, not a request
 to download them or invoke `specify`. Follow the
 [house rules and draft artifacts](speckit.md#what-the-drafter-produces).
-Native daemon intake remains unsupported; select the feature and branch explicitly.
+For explicit CLI calls, select the feature and branch; for daemon intake, use
+the [native front door](speckit.md#the-front-door) under the existing enrollment gates.
 
 #### Draft and admit
 
