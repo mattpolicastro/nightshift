@@ -25,8 +25,12 @@ present in this checkout. Preserve that dependency and its action boundaries.
   contract. Preserve claim/evidence recovery assertions and test historical
   reconciliation through `outcomes.refresh()` directly; attention no longer
   performs that reconciliation as a side effect.
-- Update the plugin projection and both allowed READMEs, with host-independent
-  tests for collection, stale handling, pointers and worker-row retirement.
+- Update the plugin projection, `README.md`, `plugins/nightshift/README.md`,
+  `config.example.toml` and `docs/specloop/README.md`, with host-independent tests
+  for collection, stale handling, pointers and worker-row retirement. Correct the
+  example config's historical-attention promise and the specloop guide's JSON
+  description and rollout checklist so they distinguish active attention from
+  retained outcome APIs.
 
 Explicitly out of scope: Factory run listing, search, sorting, detail and actions;
 label definitions or transitions; daemon escalation behavior; Slack configuration;
@@ -38,7 +42,11 @@ Implementation files are limited to `nightshift/cli.py` (attention),
 `nightshift/outcomes.py`, `nightshift/specloop_attention.py`,
 `plugins/nightshift/server/attention.ts`, `plugins/nightshift/shared/attention.ts`,
 `plugins/nightshift/client/main.tsx`, tests under the two allowed test directories,
-`README.md` and `plugins/nightshift/README.md`.
+`README.md`, `plugins/nightshift/README.md`, `config.example.toml` (attention and
+retirement comments only) and `docs/specloop/README.md` (attention and retirement
+guidance only). The last two files extend the original allowance to remove active
+operator guidance made false by retiring worker rows; config values, enrollment
+examples and unrelated operational guidance remain unchanged.
 
 ## Capabilities
 

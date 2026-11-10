@@ -260,6 +260,27 @@ Human checklist for the implementation PR, pending the next real escalation:
   and the readability of the Factory pointer, then find that change's existing row.
   Compact rendered fixtures do not substitute for native device validation.
 
+### 7. Keep all active attention guidance consistent
+
+Task 2.3 updates four allowed documents: `README.md`,
+`plugins/nightshift/README.md`, `config.example.toml` and
+`docs/specloop/README.md`. Limit the extra config and guide edits to attention
+and retirement prose. In the example config, replace the promise that historical
+outcomes remain available through `nightshift attention` and broaden its
+human-pause description to current front-door entries and Factory pointers.
+Keep every TOML value and enrollment example unchanged.
+
+In the specloop guide, replace the claim that JSON carries historical worker
+tasks with the version-1 contract: empty `tasks`/`stale`, additive `repositories`
+and retained `specloop` fields. Explain current-source stale/offline behavior and
+historical database/API readability separately. Replace the rollout checklist's
+historical-attention check with checks of current attention and retained history
+through historical APIs, preserving leftover recovery and independent supervisor
+checks. These live checks stay pending; editing their prose does not perform them.
+Preserve unrelated enrollment, labels, service prerequisites, migration and
+Factory guidance. Documentation consistency can be checked without Paseo; the
+real escalation and phone checks above still require a person.
+
 ## Risks / Trade-offs
 
 - The 40-second bound wins over completeness. Large repositories or long threads

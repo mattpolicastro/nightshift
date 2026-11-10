@@ -7,11 +7,13 @@ without changing enrollment, Factory controls or daemon escalation policy.
 
 ### Requirement: Front door attention guidance
 
-Both allowed READMEs SHALL explain escalation entries, optional summaries, Factory
-pointers and retired worker display with retained historical APIs. They SHALL
-document bounded repository reads, stale/offline states, JSON compatibility and
-unchanged refresh triggers. Live escalation latency and phone readability SHALL
-remain pending human checks, never claimed automated results.
+Attention guidance in `README.md`, `plugins/nightshift/README.md`,
+`docs/specloop/README.md` and `config.example.toml` SHALL consistently describe
+escalations, optional summaries, Factory pointers, retained historical APIs,
+bounded reads, stale/offline states and JSON compatibility. Refresh triggers,
+config values and enrollment examples SHALL remain unchanged. Live escalation
+latency and phone readability SHALL remain pending human checks, never claimed
+automated results.
 
 #### Scenario: Operator understands the attention list
 - **WHEN** an operator reads the CLI usage, What needs you and plugin refresh passages
@@ -19,6 +21,7 @@ remain pending human checks, never claimed automated results.
 - **THEN** they can identify the configured label, the 40-second shared GitHub budget, eight-second requests, four-job concurrency, 32-repository rotating cap and JSON compatibility limits without obsolete worker-refresh promises
 - **THEN** the guidance leaves label meaning, daemon escalation and Factory actions unchanged and identifies real escalation/phone checks as pending
 - **THEN** version-1 additive fields, empty legacy arrays, legacy-producer unavailability, unsupported-forge diagnostics and retained historical APIs are explicit
+- **THEN** `config.example.toml` no longer promises historical outcomes through attention, and `docs/specloop/README.md` describes empty legacy arrays rather than historical worker tasks in attention JSON
 
 ## MODIFIED Requirements
 
@@ -39,6 +42,7 @@ without claiming unperformed validation.
 #### Scenario: Existing installation is checked before merge
 - **WHEN** an operator reads retirement and rollout guidance
 - **THEN** it identifies retained outcome history/recovery, current front-door attention and Factory references, the canonical nightshift CLI/state root and one-release legacy compatibility, separate daemon/supervisor jobs and the need to inspect live config/plists/external callers before merge
+- **THEN** the specloop guide's rollout checklist distinguishes checking current attention from checking retained history through historical APIs, preserving leftover recovery and independent supervisor checks without requiring historical worker rows in attention
 - **THEN** it explains the CLI merge and state migration delivered by #40, preserves unrelated limitations, and cites issue #16 without inventing an implementation PR
 - **THEN** live config, plist and external-caller inspection remains a pre-merge human checklist, never a claimed CI result
 - **THEN** it describes guarded migration without claiming host checks performed, safety on the live machine, rollback of remote effects or automatic restart of interrupted worker work
