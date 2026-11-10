@@ -123,7 +123,9 @@ root README SHALL link or summarize these specloop operations consistently.
 
 ### Requirement: Current limitations
 
-KNOWN-LIMITATIONS.md SHALL remove demonstrated fixed claims, preserve unresolved portions of mixed claims, and describe remaining gaps from issue #17's ledger. It SHALL not claim a gap fixed solely because a related feature shipped. It SHALL describe confirmed stopped-job release as supported recovery and distinguish explicit Gitea engine publication from eligible Gitea daemon publication and its normal gates. For #130, it SHALL correct the GitHub-only command boundaries entry to describe human-initiated terminal Gitea landing with the configured human `land_token_env`, link `docs/landing.md` and cite issue #130 or its verified implementation PR. It SHALL preserve unresolved command boundaries and all unrelated limitations, including concurrent #151 loopback guidance, and SHALL keep real Gitea merge validation pending until performed.
+KNOWN-LIMITATIONS.md SHALL remove demonstrated fixed claims, preserve unresolved
+portions of mixed claims, and describe remaining gaps from issue #17's ledger. It SHALL
+not claim a gap fixed solely because a related feature shipped.
 
 #### Scenario: Fixed limitations leave the open list
 - **WHEN** the limitations list is reconciled with the merged behavior
@@ -138,6 +140,10 @@ KNOWN-LIMITATIONS.md SHALL remove demonstrated fixed claims, preserve unresolved
 - **THEN** it describes `nightshift jobs release <id>` as explicit recovery for confirmed stops while retaining the limits on automatic retry, committed effects and legacy/unkeyed revision commit/result risk and unproven machine-crash durability for keyed revisions
 - **THEN** it distinguishes configured `mutation_skip` from automatic JSX filtering and local execution, explicit forge publication and gated automated hosted front-door support, linking the tracking ledger
 
+It SHALL describe confirmed stopped-job release as supported recovery and distinguish
+explicit Gitea engine publication from eligible Gitea daemon publication and its normal
+gates.
+
 #### Scenario: Landing correction preserves unresolved boundaries
 - **WHEN** the command-boundaries entry is reconciled with terminal Gitea landing and eligible daemon dispatch on the latest documentation revision
 - **THEN** only entries made false by implemented Gitea support change in KNOWN-LIMITATIONS.md, preserving concurrent #151 loopback text and every unrelated limitation
@@ -146,9 +152,19 @@ KNOWN-LIMITATIONS.md SHALL remove demonstrated fixed claims, preserve unresolved
 - **THEN** neighboring publication title-edit, critic timeout and delayed-create risks and pending live publication checks remain intact
 - **THEN** structural validation selects the unique physical `- **GitHub-only command boundaries:**` start through the next column-zero `- ` bullet, physical `^#{1,6} +\S.*$` heading or EOF; missing or duplicate starts block, and fences, HTML and indentation receive no semantic interpretation
 
+For #130, it SHALL correct the GitHub-only command boundaries entry to describe
+human-initiated terminal Gitea landing with the configured human `land_token_env`, link
+`docs/landing.md` and cite issue #130 or its verified implementation PR. It SHALL
+preserve unresolved command boundaries and all unrelated limitations, including
+concurrent #151 loopback guidance, and SHALL keep real Gitea merge validation pending
+until performed.
+
 ### Requirement: Documentation integrity
 
-Documentation-only refreshes SHALL stay within scoped docs and leave runtime code unchanged. They MAY add documentation-integrity tests in `tests/test_specloop_documentation_integrity.py` for the structures they introduce, and MAY add Markdown or YAML authoring assets under `presets/`, without changing any existing assertion, fixture or other test file. Runtime changes MAY update matching docs and tests within explicit scope, including justified schema, fixture or assertion migrations. All edits SHALL preserve unaffected requirements and assertions, use concise present-tense prose and verified references, and require green uv run pytest plus the applicable design's human checklist.
+Documentation-only refreshes SHALL stay within scoped docs and leave runtime code
+unchanged. All edits SHALL preserve unaffected requirements and assertions, use concise
+present-tense prose and verified references, and require green uv run pytest plus the
+applicable design's human checklist.
 
 #### Scenario: Scope and regression checks remain intact
 - **WHEN** the implementation diff and local validation are reviewed
@@ -157,6 +173,13 @@ Documentation-only refreshes SHALL stay within scoped docs and leave runtime cod
 - **THEN** only explicitly justified runtime-contract migrations may replace affected assertions, preserving equivalent behavioral coverage, and every unaffected assertion remains intact
 - **THEN** the previously specified migrations of the exact request schema, git runner doubles, status inventory seam and trusted post-delivery request/input assertions remain intact, preserving authorization-denial snapshots, exact args, offline inventory and all scheduling/delivery assertions
 - **THEN** relative documentation links resolve and uv run pytest passes without weakening preserved behavior
+
+They MAY add documentation-integrity tests in
+`tests/test_specloop_documentation_integrity.py` for the structures they introduce, and
+MAY add Markdown or YAML authoring assets under `presets/`, without changing any
+existing assertion, fixture or other test file. Runtime changes MAY update matching docs
+and tests within explicit scope, including justified schema, fixture or assertion
+migrations.
 
 #### Scenario: References and reader checks are reviewable
 - **WHEN** the documentation is prepared for merge
@@ -545,7 +568,11 @@ parsing.
 
 ### Requirement: Explicit forge command guidance
 
-README.md and docs/specloop/README.md SHALL continue to explain manifest-host selection, trusted config and bot credential sources, origin matching, workflow refusal and Gitea WIP publication/finish. Guidance SHALL distinguish explicit engine commands from eligible daemon execution and human-initiated landing. For #130, `docs/landing.md` SHALL document terminal landing for GitHub and configured Gitea and explicitly supersede historical GitHub-only terminal landing wording in those shared guides; those guides SHALL also correct their obsolete daemon-hold statements in this change. Factory Land SHALL remain GitHub-only, and arming and unrelated plugin paths SHALL retain their existing boundaries. Existing runnable examples and unrelated guidance SHALL remain valid.
+README.md and docs/specloop/README.md SHALL continue to explain manifest-host selection,
+trusted config and bot credential sources, origin matching, workflow refusal and Gitea
+WIP publication/finish. Guidance SHALL distinguish explicit engine commands from
+eligible daemon execution and human-initiated landing. Existing runnable examples and
+unrelated guidance SHALL remain valid.
 
 #### Scenario: Operator selects and publishes
 - **WHEN** an operator follows the explicit engine publication guidance
@@ -560,16 +587,18 @@ README.md and docs/specloop/README.md SHALL continue to explain manifest-host se
 - **THEN** `docs/landing.md` explicitly supersedes the shared guides' historical GitHub-only terminal landing wording, describes human-initiated terminal Gitea landing with the configured `land_token_env` sourced by land from `~/.config/nightshift/land.env` and no bot-token fallback, and keeps finish's separate bot/git credentials distinct
 - **THEN** existing base preparation and recovery, frozen wrappers, enrollment examples and issue #135 per-step env guidance remain intact during the scoped README.md and docs/specloop/README.md corrections
 
+For #130, `docs/landing.md` SHALL document terminal landing for GitHub and configured
+Gitea and explicitly supersede historical GitHub-only terminal landing wording in those
+shared guides; those guides SHALL also correct their obsolete daemon-hold statements in
+this change. Factory Land SHALL remain GitHub-only, and arming and unrelated plugin
+paths SHALL retain their existing boundaries.
+
 ### Requirement: Factory forge action guidance
 
-The plugin README and engine guide SHALL describe Factory Publish/Finish as
-confirmed shared-engine calls using the manifest-selected forge. They SHALL
-explain Gitea WIP behavior, host credentials and existing display restrictions,
-preserve GitHub-only Land and distinguish daemon eligibility from confirmation.
-Finish SHALL be described as OpenSpec archival or native Status completion,
-followed by push/readiness without merge. This permits the two scoped plugin
-README corrections previously excluded by the earlier forge-only change;
-plugin behavior and tests stay unchanged.
+The plugin README and engine guide SHALL describe Factory Publish/Finish as confirmed
+shared-engine calls using the manifest-selected forge. They SHALL explain Gitea WIP
+behavior, host credentials and existing display restrictions, preserve GitHub-only Land
+and distinguish daemon eligibility from confirmation.
 
 #### Scenario: Factory operator understands the destination
 - **WHEN** an operator reads Factory's action table, confirmation and act guidance
@@ -577,15 +606,27 @@ plugin behavior and tests stay unchanged.
 - **THEN** it retains Paseo-host config/bot/git credential instructions, engine links and display-origin versus write-routing distinctions
 - **THEN** HTTPS/root-path display limits, direct-CLI needs for HTTP loopback/prefixed URLs and GitHub-only Land remain explicit, while both Finish passages state the selected format's lifecycle without changing plugin code
 
+Finish SHALL be described as OpenSpec archival or native Status completion, followed by
+push/readiness without merge. This permits the two scoped plugin README corrections
+previously excluded by the earlier forge-only change; plugin behavior and tests stay
+unchanged.
+
 ### Requirement: Gitea operation limitations
 
-KNOWN-LIMITATIONS.md SHALL state that finish can overwrite a concurrent human title edit and read-back cannot detect that loss. It SHALL describe critic's 30-second socket timeout and 120-second request-start cutoff, explicitly permitting slowly arriving responses to overrun. It SHALL retain delayed-create duplication risk, explicitly describe the daemon read-after-write/single-creator assumptions under Gitea dispatch recovery guidance, and mark real Gitea publication as pending human verification.
+KNOWN-LIMITATIONS.md SHALL state that finish can overwrite a concurrent human title edit
+and read-back cannot detect that loss.
 
 #### Scenario: Operator understands residual risks
 - **WHEN** an operator reads the updated limitations and retry guidance
 - **THEN** they learn that GET followed by title PATCH can overwrite an intervening edit, no conflict detection is supplied, and verification proves only the resulting title
 - **THEN** they learn that socket timeouts are not elapsed-time bounds, slow response bodies can overrun, and concurrent creators or late visibility can defeat lookup-before-create deduplication
 - **THEN** the first real Gitea publish must be checked by a human for WIP PR creation and finish prefix removal; CI does not claim that validation
+
+It SHALL describe critic's 30-second socket timeout and 120-second request-start cutoff,
+explicitly permitting slowly arriving responses to overrun. It SHALL retain
+delayed-create duplication risk, explicitly describe the daemon
+read-after-write/single-creator assumptions under Gitea dispatch recovery guidance, and
+mark real Gitea publication as pending human verification.
 
 ### Requirement: Forge guidance integrity
 
@@ -675,13 +716,9 @@ blanket archive wording changes only because native completion retains files.
 
 ### Requirement: Format selection guidance
 
-The engine guide, command/manifest guide and self-hosting example SHALL document
-`[run] format` and its OpenSpec default. They SHALL replace the temporary
-spec-kit admission refusal with explicit native build support and its scope.
-Guidance SHALL preserve OpenSpec workflow/executable requirements and incoming
-binary guidance, cite #187 and #184 alongside #188, and distinguish offline
-compatibility checks from deployed resume. This removes a deliberately temporary
-unavailability claim, not the compatibility guarantees.
+The engine guide, command/manifest guide and self-hosting example SHALL document `[run]
+format` and its OpenSpec default. They SHALL replace the temporary spec-kit admission
+refusal with explicit native build support and its scope.
 
 #### Scenario: Operator selects the supported format
 - **WHEN** an operator reads How the engine works, command-json.md's Manifest format and the self-hosting example
@@ -694,6 +731,11 @@ unavailability claim, not the compatibility guarantees.
 - **THEN** the three named obsolete native-refusal cases are relocated into new tests/test_speckit_adapter.py and the revision adapter case into new tests/test_speckit_revisions.py; only the new files receive changed expectations or mock wiring, preserving selection/refusal-cleanup coverage, parameterization, markers and all unaffected assertions
 - **THEN** the shared source test file receives only the four necessary definition removals, retaining its helpers and incoming binary assertions; no skip, xfail or collection override hides an obsolete expectation
 - **THEN** documentation checks use deterministic physical boundaries, block ambiguity and avoid semantic Markdown parsing or exact-prose assertions
+
+Guidance SHALL preserve OpenSpec workflow/executable requirements and incoming binary
+guidance, cite #187 and #184 alongside #188, and distinguish offline compatibility
+checks from deployed resume. This removes a deliberately temporary unavailability claim,
+not the compatibility guarantees.
 
 ### Requirement: Spec-kit feature identity
 
@@ -738,21 +780,22 @@ grouping. It SHALL relate stable labels to `/speckit.converge`'s task-ID rule.
 
 ### Requirement: Spec-kit task traceability
 
-The guide SHALL retain spec-kit's task grammar
-`- [ ] T001 [P] [US1] Description with file path`, backticked scenario IDs on
-every user-story task and at least one covering task for every scenario. It
-SHALL document review-feedback appends as `## Phase N: Review round K`, section
-evidence/reviewer fixes as extensions of their existing phase, and final
-Coverage/Acceptance fixes as new phases with those supplied titles. All new
-base task IDs SHALL follow the largest existing T root using `T{M+1:03d}`;
-harness ticking SHALL use `[X]`. This replaces the prior documentation-only
-description that conflated coverage additions with review-round appends, to
-match the existing engine's distinct operations without changing scoring.
+The guide SHALL retain spec-kit's task grammar `- [ ] T001 [P] [US1] Description with
+file path`, backticked scenario IDs on every user-story task and at least one covering
+task for every scenario.
 
 #### Scenario: Author links tasks and scenarios
 - **WHEN** an author reads Tasks cite scenarios
 - **THEN** examples retain optional parallel markers, story tags, file paths and backticked scenario IDs, while setup tasks need no invented story reference
 - **THEN** the guide requires full scenario coverage, stable task identities and distinct harness addition forms with collision-free phase/T numbering
+
+It SHALL document review-feedback appends as `## Phase N: Review round K`, section
+evidence/reviewer fixes as extensions of their existing phase, and final
+Coverage/Acceptance fixes as new phases with those supplied titles. All new base task
+IDs SHALL follow the largest existing T root using `T{M+1:03d}`; harness ticking SHALL
+use `[X]`. This replaces the prior documentation-only description that conflated
+coverage additions with review-round appends, to match the existing engine's distinct
+operations without changing scoring.
 
 ### Requirement: Spec-kit human checks
 
@@ -807,18 +850,19 @@ validator behavior.
 
 ### Requirement: Spec-kit discovery
 
-The engine guide SHALL retain its one-sentence house-rules link under How the
-engine works, and root README SHALL retain its presets/ Layout entry.
-Guidance SHALL distinguish authoring asset installation from explicit native
-drafting/builds and manifest-enrolled native front-door support. It SHALL
-preserve existing assertions and other in-flight changes, correcting only
-passages made false. This replaces the future-front-door wording because this
-change supplies that integration; installation alone still does not enroll it.
+The engine guide SHALL retain its one-sentence house-rules link under How the engine
+works, and root README SHALL retain its presets/ Layout entry. Guidance SHALL
+distinguish authoring asset installation from explicit native drafting/builds and
+manifest-enrolled native front-door support.
 
 #### Scenario: Find authoring guidance
 - **WHEN** a reader follows the engine guide link or root Layout entry
 - **THEN** house rules/preset remain discoverable, relative links resolve and no unperformed installation or live validation is described as complete
 - **THEN** the eight authoring rules retain distinct headings or bold leads and the guide retains 042-add-a-gate/us1/as2, with original authoring-asset assertions unchanged
+
+It SHALL preserve existing assertions and other in-flight changes, correcting only
+passages made false. This replaces the future-front-door wording because this change
+supplies that integration; installation alone still does not enroll it.
 
 ### Requirement: Standalone OpenSpec operator guidance
 
@@ -838,26 +882,25 @@ The prerequisite, engine, deployment, platform and plugin guides SHALL consisten
 
 ### Requirement: Native build operator guidance
 
-The engine guide SHALL describe explicit native drafting/builds, Complete Status,
-no archive and frozen authoring paths. Enrollment guidance SHALL explain
-[run] format as the selector for native front-door support, with no new repository configuration field. Both plugin
-Finish passages SHALL continue qualifying completion by format. False
-pending-drafting/feasibility passages in root README, the house rules, command
-JSON guide, preset README, native manifest comments and the native-spec-kit
-KNOWN-LIMITATIONS bullet SHALL receive scoped corrections.
-
-Existing skip-feasibility examples SHALL remain valid as explicitly optional
-operator-requested bypass examples, while a separate native workflow SHALL show
-normal admission with feasibility. This replaces the obsolete requirement that
-native builds need that interim bypass, without changing the option or protected
-example assertions. Task-scaffold revision/coverage instructions SHALL remain
-unchanged.
+The engine guide SHALL describe explicit native drafting/builds, Complete Status, no
+archive and frozen authoring paths. Enrollment guidance SHALL explain [run] format as
+the selector for native front-door support, with no new repository configuration field.
+Both plugin Finish passages SHALL continue qualifying completion by format.
 
 #### Scenario: Operator finishes the selected format
 - **WHEN** an operator reads How the engine works, Publication, root enrollment and the plugin Finish action/confirmation guidance
 - **THEN** the docs agree that OpenSpec Finish archives into openspec/specs/, native Finish sets Status Complete and archives nothing, and both push and mark ready without merging
 - **THEN** native examples distinguish the optional existing skip-feasibility bypass from the normal reviewed admission path, retain structural admission validation and describe native daemon intake under the existing enrollment and authorization gates
 - **THEN** the preset README describes the same support without claiming installation configures it, and its task template retains review-round appends, existing-phase fixes and final Coverage/Acceptance fixes
+
+False pending-drafting/feasibility passages in root README, the house rules, command
+JSON guide, preset README, native manifest comments and the native-spec-kit
+KNOWN-LIMITATIONS bullet SHALL receive scoped corrections. Existing skip-feasibility
+examples SHALL remain valid as explicitly optional operator-requested bypass examples,
+while a separate native workflow SHALL show normal admission with feasibility. This
+replaces the obsolete requirement that native builds need that interim bypass, without
+changing the option or protected example assertions. Task-scaffold revision/coverage
+instructions SHALL remain unchanged.
 
 #### Scenario: Flow forward context limits are explicit
 - **WHEN** an operator reads KNOWN-LIMITATIONS.md and the native engine path

@@ -8,12 +8,23 @@ and after the spec is approved.
 
 ### Requirement: Spec-stage revision
 
-`agent:revise` on an otherwise eligible spec PR whose change is not admitted SHALL re-run `specloop propose` only after Revision actor gate succeeds and repository readiness permits new drafting, with the PR's eligible unconsumed review feedback added to the idea, push the revised branch, acknowledge the selected IDs, remove the corresponding label application and comment what changed using Attempt scoped revision results. Selection and acknowledgement SHALL follow Consumption based eligibility and Durable round snapshot. Unhealthy enrollment SHALL hold new drafting without consuming feedback or its trigger; existing successful work SHALL retain recovery under Health gates new work only. Build-stage revision and empty-feedback handling SHALL remain unchanged except for the compatible delivery identity extension.
+`agent:revise` on an otherwise eligible spec PR whose change is not admitted SHALL
+re-run `specloop propose` only after Revision actor gate succeeds and repository
+readiness permits new drafting, with the PR's eligible unconsumed review feedback added
+to the idea, push the revised branch, acknowledge the selected IDs, remove the
+corresponding label application and comment what changed using Attempt scoped revision
+results.
 
 #### Scenario: Spec revised from review
 - **WHEN** a reviewer comments on an unapproved spec PR in a healthy repository with an eligible unconsumed ID and a trusted actor labels it agent:revise
 - **THEN** propose runs again with that comment as feedback, the branch is updated, its ID is consumed, and the corresponding agent:revise application is removed
 - **THEN** a success replacing an earlier rejected or needs-input result under the same round is posted separately and preserves the earlier result comment
+
+Selection and acknowledgement SHALL follow Consumption based eligibility and Durable
+round snapshot. Unhealthy enrollment SHALL hold new drafting without consuming feedback
+or its trigger; existing successful work SHALL retain recovery under Health gates new
+work only. Build-stage revision and empty-feedback handling SHALL remain unchanged
+except for the compatible delivery identity extension.
 
 ### Requirement: Build-stage revision
 
@@ -34,7 +45,11 @@ An authorized revise request with no eligible unconsumed review feedback SHALL b
 
 ### Requirement: Revision actor gate
 
-Revision requests SHALL use issue-intake's Latest label actor authorization, Actor relationship resolution, and Rejection comment idempotency requirements for the configured `agent:revise` label. The gate SHALL run before feedback/status reads, feedback-state writes, new drafting or revision dispatch, recovery delivery, and empty-feedback handling. Feedback trust SHALL remain independent of label authorization. The consumed-ID filter SHALL replace the timestamp filter without broadening author trust.
+Revision requests SHALL use issue-intake's Latest label actor authorization, Actor
+relationship resolution, and Rejection comment idempotency requirements for the
+configured `agent:revise` label. The gate SHALL run before feedback/status reads,
+feedback-state writes, new drafting or revision dispatch, recovery delivery, and
+empty-feedback handling. Feedback trust SHALL remain independent of label authorization.
 
 #### Scenario: Unauthorized revision ignored at either stage
 - **WHEN** an unadmitted or admitted change has a revision label last applied by an untrusted actor
@@ -44,6 +59,9 @@ Revision requests SHALL use issue-intake's Latest label actor authorization, Act
 #### Scenario: Trusted label does not trust feedback
 - **WHEN** a trusted actor applies the revision label and the PR includes feedback from trusted, untrusted, and missing-association authors, along with self-prefixed comments and consumed IDs
 - **THEN** only trusted actionable feedback with unconsumed IDs reaches the revision command, including eligible comments older than the tip
+
+The consumed-ID filter SHALL replace the timestamp filter without broadening author
+trust.
 
 ### Requirement: Identified feedback
 
@@ -87,9 +105,11 @@ Intake SHALL select unconsumed IDs per repository and PR without timestamp filte
 
 ### Requirement: Durable round snapshot
 
-Intake SHALL atomically save selected IDs, rendered blocks, and consumed history before dispatch and retain that snapshot through edits and restart. It SHALL durably consume only selected IDs after a validated build revision result with a landed commit or a successful spec push, before notifications or label removal and without waiting for publication. Unsuccessful new attempts SHALL consume nothing; legacy baseline initialization SHALL follow Feedback state compatibility. Explicit
-release MAY detach a stopped attempt for normal selection of a new snapshot,
-without consuming the stopped result or erasing prior consumed history.
+Intake SHALL atomically save selected IDs, rendered blocks, and consumed history before
+dispatch and retain that snapshot through edits and restart. It SHALL durably consume
+only selected IDs after a validated build revision result with a landed commit or a
+successful spec push, before notifications or label removal and without waiting for
+publication.
 
 #### Scenario: Snapshot is fixed before dispatch
 - **WHEN** either revision stage starts, then a selected comment is edited and another comment appears while its job runs across a daemon restart
@@ -100,6 +120,9 @@ without consuming the stopped result or erasing prior consumed history.
 - **WHEN** a revision attempt fails to launch, returns refused, rejected, needs-input, or an invalid result, or its spec push fails
 - **THEN** it adds no IDs to the consumed set and preserves previously consumed IDs
 - **THEN** after normal failure resolution, the unconsumed feedback remains available; a saved successful draft retries delivery without drafting again
+
+Unsuccessful new attempts SHALL consume nothing; legacy baseline initialization SHALL
+follow Feedback state compatibility.
 
 #### Scenario: Completion delivery retries preserve consumption
 - **WHEN** a successful spec push or validated build revision is followed by a lost completion-comment response, failed label removal, or restart before delivery completes
@@ -115,6 +138,9 @@ without consuming the stopped result or erasing prior consumed history.
 - **WHEN** a selected revision job completes while daemon delivery is paused, or the selected job has durable stop intent
 - **THEN** pause retains the saved result for authorized resume without duplicate dispatch, and stopped work remains held without delivery or consumption until explicit release detaches its receipt; the stopped result remains ineligible afterward
 - **THEN** resume of an eligible unstopped result acknowledges only the saved snapshot under the existing stage success rule
+
+Explicit release MAY detach a stopped attempt for normal selection of a new snapshot,
+without consuming the stopped result or erasing prior consumed history.
 
 ### Requirement: Feedback state compatibility
 

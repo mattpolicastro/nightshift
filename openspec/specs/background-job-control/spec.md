@@ -10,16 +10,11 @@ network access.
 ### Requirement: Local job inventory
 
 `nightshift jobs --all` SHALL list all persisted background attempts with full job ID,
-stage, repository/item, command, execution state, available PID/PGID and log
-path. It SHALL read local state independently of daemon process handles and
-configuration, in deterministic stage/repository/item/ID order. It SHALL
-distinguish execution completion from delivery and retain historical attempts.
-Default `nightshift jobs` SHALL show starting, running (including overdue),
-stopping, stopped and finished-undelivered attempts, plus diagnostic rows.
-It SHALL hide other historical rows, including ordinary failed attempts and
-finished-delivered rows, and print their count when nonzero. Filtering SHALL
-be confined to CLI rendering; shared inventory and other consumers SHALL
-continue to receive all attempts. Listing SHALL never mutate or compact state.
+stage, repository/item, command, execution state, available PID/PGID and log path. It
+SHALL read local state independently of daemon process handles and configuration, in
+deterministic stage/repository/item/ID order. It SHALL distinguish execution completion
+from delivery and retain historical attempts. Listing SHALL never mutate or compact
+state.
 
 #### Scenario: List jobs after daemon restart
 - **WHEN** persisted drafting, admission and revision jobs exist and the daemon's process handles have been lost
@@ -39,6 +34,12 @@ continue to receive all attempts. Listing SHALL never mutate or compact state.
 - **THEN** default output includes all active, stopped and pending rows and excludes finished-delivered and ordinary failed rows, preserving inventory order
 - **THEN** it prints exactly one `Hidden historical jobs: N (use --all to show).` line counting excluded rows, and omits that line when none are excluded
 - **THEN** the unfiltered inventory interface and status, stop, release and deployment consumers retain existing behavior
+
+Default `nightshift jobs` SHALL show starting, running (including overdue), stopping,
+stopped and finished-undelivered attempts, plus diagnostic rows. It SHALL hide other
+historical rows, including ordinary failed attempts and finished-delivered rows, and
+print their count when nonzero. Filtering SHALL be confined to CLI rendering; shared
+inventory and other consumers SHALL continue to receive all attempts.
 
 #### Scenario: All lists history
 - **WHEN** the operator invokes `nightshift jobs --all` on mixed inventory
@@ -78,13 +79,11 @@ other jobs.
 
 ### Requirement: Durable cancellation
 
-Stop intent SHALL take precedence over later job results and SHALL survive
-daemon restart. A cancelled attempt SHALL not be delivered, relaunched or
-counted as a job failure for automatic escalation. Resume and unchanged intake
-labels SHALL not clear cancellation. Only explicit release of a confirmed
-stopped attempt SHALL detach its receipt hold; the attempt itself SHALL remain
-cancelled and ineligible for delivery. Completed attempts SHALL retain their
-completion state when stop is requested after completion wins the race.
+Stop intent SHALL take precedence over later job results and SHALL survive daemon
+restart. A cancelled attempt SHALL not be delivered, relaunched or counted as a job
+failure for automatic escalation. Resume and unchanged intake labels SHALL not clear
+cancellation. Only explicit release of a confirmed stopped attempt SHALL detach its
+receipt hold; the attempt itself SHALL remain cancelled and ineligible for delivery.
 
 #### Scenario: Stopped job stays stopped
 - **WHEN** a stopped job has not been explicitly released, its issue or PR remains armed, and the daemon polls, restarts, or resumes after a pause
@@ -97,6 +96,9 @@ completion state when stop is requested after completion wins the race.
 #### Scenario: Completion wins stop race
 - **WHEN** completion is durable or collection has accepted a result before the stop request is accepted
 - **THEN** stop exits 0 reporting already finished, sends no termination signal, and preserves completion and its existing delivery eligibility
+
+Completed attempts SHALL retain their completion state when stop is requested after
+completion wins the race.
 
 #### Scenario: Repeat stop safely
 - **WHEN** an operator repeats stop for a confirmed stopped job, including from a new CLI process
@@ -189,12 +191,19 @@ locks SHALL be created only for a validated matching release.
 
 ### Requirement: Durable command timing
 
-New background requests SHALL persist stage, exact args, started_at, timeout_seconds, deadline_at and round_id before launch. round_id SHALL be the saved key for keyed revise commands and null otherwise; older five-field requests SHALL remain readable as unkeyed. Keyed request identity SHALL agree with argv and the parent snapshot. Budgets SHALL be 3600 seconds for propose, 300 for admit and 1800 for revise. UTC epoch timing SHALL survive restart without extension and SHALL remain readable without subprocess or network access.
+New background requests SHALL persist stage, exact args, started_at, timeout_seconds,
+deadline_at and round_id before launch. round_id SHALL be the saved key for keyed revise
+commands and null otherwise; older five-field requests SHALL remain readable as unkeyed.
+Keyed request identity SHALL agree with argv and the parent snapshot. UTC epoch timing
+SHALL survive restart without extension and SHALL remain readable without subprocess or
+network access.
 
 #### Scenario: Timing survives restart
 - **WHEN** proposal, admission and revision jobs launch and in-memory handles are discarded before another poll
 - **THEN** each request has exactly the six specified fields, including a matching round_id for keyed revise or null for unkeyed commands, the original complete args and stage, and a deadline equal to its original start plus the command budget
 - **THEN** inventory preserves IDs, execution state, deterministic ordering and timing without launching commands, contacting services or rewriting records
+
+Budgets SHALL be 3600 seconds for propose, 300 for admit and 1800 for revise.
 
 #### Scenario: Legacy and malformed timing
 - **WHEN** inventory reads a legacy request with no timing, a compacted legacy request with null timing, and a request with partial, non-finite, boolean or inconsistent timing alongside healthy records
@@ -203,7 +212,10 @@ New background requests SHALL persist stage, exact args, started_at, timeout_sec
 
 ### Requirement: Active jobs in status
 
-`nightshift daemon status` SHALL read local job inventory once and display active attempts before repository network queries, including elapsed and deadline state when available. Worker-engine status output, including live worker claim/phase/transcript lines, worker working counts and the off-subscription model report, SHALL be removed with the worker engine. All other status output and exit behavior SHALL remain unchanged, including liveness, alerts, ready/blocked queues, contradiction diagnostics and active background jobs. Status SHALL omit full argv and perform no job mutation, escalation or cleanup.
+`nightshift daemon status` SHALL read local job inventory once and display active
+attempts before repository network queries, including elapsed and deadline state when
+available. Status SHALL omit full argv and perform no job mutation, escalation or
+cleanup.
 
 #### Scenario: Active attempts are visible
 - **WHEN** explicit daemon status or default daemon-group status runs with starting, running, stopping and historical jobs, including a job from a repository absent from current configuration
@@ -215,6 +227,12 @@ New background requests SHALL persist stage, exact args, started_at, timeout_sec
 - **THEN** default daemon-group and explicit daemon status each perform one inventory read without an extra empty-jobs line, preserving liveness, alerts, non-worker output, configuration loading, options and exit codes, with no worker session or off-subscription model report
 - **THEN** unrelated commands do not acquire an inventory read or a job-control side effect
 
+Worker-engine status output, including live worker claim/phase/transcript lines, worker
+working counts and the off-subscription model report, SHALL be removed with the worker
+engine. All other status output and exit behavior SHALL remain unchanged, including
+liveness, alerts, ready/blocked queues, contradiction diagnostics and active background
+jobs.
+
 #### Scenario: Status tolerates damaged inventory
 - **WHEN** daemon status encounters unreadable job records alongside a healthy active job
 - **THEN** it displays diagnostics and the healthy row, continues existing status processing and retains the existing status exit behavior
@@ -222,13 +240,21 @@ New background requests SHALL persist stage, exact args, started_at, timeout_sec
 
 ### Requirement: Delivered attempt compaction
 
-Only durably delivered, idle and unstopped attempts with validated matching identity SHALL be compacted. Automatic compaction SHALL require an eligible authorized unpaused item visit. Explicit `nightshift jobs compact` SHALL instead authorize a local historical pass, including while paused, but only with the current matching delivered receipt and the same identity, locking and ownership checks. Compaction SHALL remove logs and owned idea inputs, redact idea arguments and retain a minimal request, original request mtime, result and control records. It SHALL leave workflow receipts and build-feedback files intact.
+Only durably delivered, idle and unstopped attempts with validated matching identity
+SHALL be compacted. Automatic compaction SHALL require an eligible authorized unpaused
+item visit. Explicit `nightshift jobs compact` SHALL instead authorize a local
+historical pass, including while paused, but only with the current matching delivered
+receipt and the same identity, locking and ownership checks.
 
 #### Scenario: Delivered artifacts are removed
 - **WHEN** a valid background attempt has completed all authorized delivery operations and its matching receipt is durably marked delivered
 - **THEN** compaction removes its log, its safely owned idea file and inline or file-based idea arguments, including legacy equals-form arguments
 - **THEN** the directory survives with stage, remaining exact args, original timing or legacy nulls, unchanged request mtime, byte-identical result and retained process, lock and collection records
 - **THEN** inventory still reads the historical attempt without errors, and workflow receipts and build-feedback JSON files remain intact
+
+Compaction SHALL remove logs and owned idea inputs, redact idea arguments and retain a
+minimal request, original request mtime, result and control records. It SHALL leave
+workflow receipts and build-feedback files intact.
 
 #### Scenario: Ineligible work keeps evidence
 - **WHEN** a job is live, stopped, released after a stop, overdue but still pending, failed without completed delivery, paused awaiting delivery, or awaiting authorization or notification retry
@@ -242,12 +268,21 @@ Only durably delivered, idle and unstopped attempts with validated matching iden
 
 ### Requirement: Recoverable cleanup
 
-Compaction SHALL journal delivery evidence and original request timestamps before destructive changes and SHALL be idempotent after interruption. Automatic recovery SHALL run only during an eligible authorized unpaused visit to that item, without redelivering results or mutating a replacement receipt. Receipts and journals SHALL NOT substitute for current daemon authorization. Explicit `nightshift jobs compact` MAY resume interrupted cleanup only with a still-matching current delivered receipt; it SHALL NOT use a journal alone to recover a superseded attempt. This local exception SHALL NOT change any daemon poll or replacement behavior below.
+Compaction SHALL journal delivery evidence and original request timestamps before
+destructive changes and SHALL be idempotent after interruption. Automatic recovery SHALL
+run only during an eligible authorized unpaused visit to that item, without redelivering
+results or mutating a replacement receipt. Receipts and journals SHALL NOT substitute
+for current daemon authorization.
 
 #### Scenario: Interruption resumes safely
 - **WHEN** cleanup fails or the daemon restarts after journal creation, request replacement, input deletion or before recording completion
 - **THEN** a later eligible authorized unpaused visit resumes the same attempt from its journal, tolerates already-removed files and preserves the original request mtime and result
 - **THEN** it neither relaunches work nor repeats remote delivery, and filesystem cleanup failures remain local diagnostics rather than item escalation
+
+Explicit `nightshift jobs compact` MAY resume interrupted cleanup only with a
+still-matching current delivered receipt; it SHALL NOT use a journal alone to recover a
+superseded attempt. This local exception SHALL NOT change any daemon poll or replacement
+behavior below.
 
 #### Scenario: Unarmed cleanup waits for authorized eligibility
 - **WHEN** a matching delivered receipt was saved but the daemon exited before creating its cleanup journal, and the item is no longer armed

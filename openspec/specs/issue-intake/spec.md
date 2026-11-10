@@ -8,11 +8,21 @@ engine routing, drafting from issues, approval and publication.
 
 ### Requirement: Drafting from an issue
 
-For a healthy specloop repository, an otherwise eligible issue labelled `spec:draft` (or `agent:ready`) SHALL be drafted with `specloop propose`, using its title, body and comments, only after Latest label actor authorization succeeds. New drafts SHALL use the manifest-selected naming rules in Owner qualified new identities, while recovery SHALL follow Recorded identities remain authoritative. Existing issue-author and comment trust checks SHALL remain in force. On success the daemon SHALL push `spec/<change>`, open a draft PR titled `Spec: <issue title>` that links the issue, label it `spec:review`, comment the PR link on the issue and remove the drafting label. Unhealthy enrollment SHALL defer new dispatch without consuming its trigger.
+For a healthy specloop repository, an otherwise eligible issue labelled `spec:draft` (or
+`agent:ready`) SHALL be drafted with `specloop propose`, using its title, body and
+comments, only after Latest label actor authorization succeeds. Existing issue-author
+and comment trust checks SHALL remain in force. Unhealthy enrollment SHALL defer new
+dispatch without consuming its trigger.
 
 #### Scenario: Draft PR opened
 - **WHEN** eligible issue 7 "Add a gate" in healthy OpenSpec repository owner/sample is labelled spec:draft by a trusted actor and propose drafts successfully
 - **THEN** a draft PR from spec/owner__sample-issue-7-add-a-gate is opened, labelled spec:review, linked from a comment on issue 7, and spec:draft is removed
+
+New drafts SHALL use the manifest-selected naming rules in Owner qualified new
+identities, while recovery SHALL follow Recorded identities remain authoritative. On
+success the daemon SHALL push `spec/<change>`, open a draft PR titled `Spec: <issue
+title>` that links the issue, label it `spec:review`, comment the PR link on the issue
+and remove the drafting label.
 
 #### Scenario: Questions posted
 - **WHEN** an authorized drafting request returns questions for the issue
@@ -24,7 +34,11 @@ For a healthy specloop repository, an otherwise eligible issue labelled `spec:dr
 
 ### Requirement: Approval admits
 
-`spec:approved` on an otherwise eligible spec PR SHALL admit its change with `specloop admit --pr` only after Latest label actor authorization succeeds and repository readiness permits new admission. Unhealthy enrollment SHALL retain the request without a new admission, approval-head write or refusal escalation; already-committed admissions SHALL retain completion recovery. A refused admission SHALL be explained in a PR comment with needs-human added. Unauthorized label applications SHALL use the separate rejection behavior instead of admission refusal.
+`spec:approved` on an otherwise eligible spec PR SHALL admit its change with `specloop
+admit --pr` only after Latest label actor authorization succeeds and repository
+readiness permits new admission. A refused admission SHALL be explained in a PR comment
+with needs-human added. Unauthorized label applications SHALL use the separate rejection
+behavior instead of admission refusal.
 
 #### Scenario: Approved spec admitted
 - **WHEN** a spec PR in a healthy repository is labelled spec:approved by a trusted actor and admission succeeds
@@ -37,6 +51,10 @@ For a healthy specloop repository, an otherwise eligible issue labelled `spec:dr
 #### Scenario: Unhealthy enrollment retains approval
 - **WHEN** a trusted approval requests new admission while enrollment is unhealthy
 - **THEN** no admission starts, the approval label and existing receipts remain, and no needs-human refusal is posted for the configuration problem
+
+Unhealthy enrollment SHALL retain the request without a new admission, approval-head
+write or refusal escalation; already-committed admissions SHALL retain completion
+recovery.
 
 ### Requirement: Publication
 When a daemon-managed run is paused ready-to-publish, the daemon SHALL run
@@ -182,7 +200,12 @@ For specloop repositories, Nightshift SHALL authorize the latest current applica
 
 ### Requirement: Actor relationship resolution
 
-For GitHub, Nightshift SHALL resolve label actors from event identity and positive repository-owner, collaborator-membership, or organization-membership evidence without changing existing validation or behavior. For Gitea, core SHALL resolve a nonblank string actor login as OWNER only when its casefolded value exactly belongs to the selected forge's trusted_logins and differs from bot_login; otherwise it SHALL return no association. The Gitea branch SHALL precede GitHub login validation and owner/membership lookups and SHALL make no relationship request. Server associations SHALL NOT override this projection; membership APIs SHALL remain unsupported. Public read access, issue/PR authorship, feedback authorship, account type, and site-administrator flags SHALL NOT independently authorize a label. Unknown event history or failed relationship lookups SHALL prevent action and retain the existing error/retry behavior.
+For GitHub, Nightshift SHALL resolve label actors from event identity and positive
+repository-owner, collaborator-membership, or organization-membership evidence without
+changing existing validation or behavior. For Gitea, core SHALL resolve a nonblank
+string actor login as OWNER only when its casefolded value exactly belongs to the
+selected forge's trusted_logins and differs from bot_login; otherwise it SHALL return no
+association.
 
 #### Scenario: Identity without association resolved
 - **WHEN** a GitHub label event contains an actor login without an association field
@@ -193,18 +216,31 @@ For GitHub, Nightshift SHALL resolve label actors from event identity and positi
 - **WHEN** event history or membership lookup has a transport error, authorization error, rate limit, malformed response, missing event ID, or a last event that is an unlabel
 - **THEN** the stage performs no triggered action or authorization rejection write and preserves its workflow receipts and labels for the existing failure/retry path
 
+Unknown event history or failed relationship lookups SHALL prevent action and retain the
+existing error/retry behavior.
+
 #### Scenario: Other authors cannot authorize
 - **WHEN** an issue author, PR author, or feedback author is trusted but the latest trigger actor is untrusted
 - **THEN** the trigger is ignored regardless of the other authors' associations
+
+Public read access, issue/PR authorship, feedback authorship, account type, and
+site-administrator flags SHALL NOT independently authorize a label.
 
 #### Scenario: Gitea allowlist alone authorizes actors
 - **WHEN** Gitea latest label events identify a mixed-case allowlisted login, an unlisted repository owner, a login with a misleading server association, a missing identity or an allowlisted bot
 - **THEN** only the allowlisted non-bot gets OWNER through casefolded exact comparison without stripping or prefix matching; all others get no association and no membership or repository-owner lookup occurs
 - **THEN** Gitea logins are not constrained by GitHub's username regex, both intake aliases must pass independently, and trusted issue or feedback authors cannot authorize another actor's trigger
 
+The Gitea branch SHALL precede GitHub login validation and owner/membership lookups and
+SHALL make no relationship request. Server associations SHALL NOT override this
+projection; membership APIs SHALL remain unsupported.
+
 ### Requirement: Rejection comment idempotency
 
-An unauthorized application SHALL receive one explanatory comment keyed by repository, issue/PR number, and label-event ID. Repeated polls and restart SHALL NOT POST or PATCH it again. Lost-response retry SHALL create no second comment; transport reconciliation MAY PATCH the same body to the original. Rejection SHALL leave labels unchanged and SHALL NOT prevent processing later eligible items. Lookups SHALL follow Canonical daemon markers, considering only bot-owned evidence on Gitea. Gitea no-duplicate recovery SHALL assume read-after-write-consistent listings and no concurrent creator for the same marker; if an accepted ambiguous POST remains invisible, a later daemon poll may duplicate it. No persistent create state SHALL be introduced. GitHub rejection wording SHALL remain unchanged; Gitea wording SHALL describe configured allowlist membership and trusted reapplication, using a safe display identity independent of authorization.
+An unauthorized application SHALL receive one explanatory comment keyed by repository,
+issue/PR number, and label-event ID. Repeated polls and restart SHALL NOT POST or PATCH
+it again. Rejection SHALL leave labels unchanged and SHALL NOT prevent processing later
+eligible items.
 
 #### Scenario: Repeated rejection comments once
 - **WHEN** the same unauthorized event is observed across multiple polls and a daemon restart
@@ -212,14 +248,27 @@ An unauthorized application SHALL receive one explanatory comment keyed by repos
 - **THEN** the comment identifies the label and known actor, explains the permitted GitHub associations or Gitea configured allowlist membership, and describes trusted reapplication
 - **THEN** later eligible issues or PRs continue to be processed
 
+Lookups SHALL follow Canonical daemon markers, considering only bot-owned evidence on
+Gitea.
+
 #### Scenario: Lost comment response reconciled
 - **WHEN** the rejection comment POST succeeds remotely but its response is lost
 - **THEN** retry finds the canonical event marker across the complete comment listing and does not create a duplicate under the stated Gitea consistency and single-creator assumptions
 - **THEN** a failed comment lookup prevents a blind POST and no triggered work runs
 
+Lost-response retry SHALL create no second comment; transport reconciliation MAY PATCH
+the same body to the original. Gitea no-duplicate recovery SHALL assume
+read-after-write-consistent listings and no concurrent creator for the same marker; if
+an accepted ambiguous POST remains invisible, a later daemon poll may duplicate it. No
+persistent create state SHALL be introduced.
+
 #### Scenario: New rejection has separate explanation
 - **WHEN** an untrusted actor removes and reapplies a previously rejected label
 - **THEN** the new event gets its own single rejection comment and the previous explanation remains unchanged
+
+GitHub rejection wording SHALL remain unchanged; Gitea wording SHALL describe configured
+allowlist membership and trusted reapplication, using a safe display identity
+independent of authorization.
 
 ### Requirement: Authorization preserves intake recovery
 
@@ -242,9 +291,10 @@ Authorization SHALL precede new work, approval-head recording, and recovery deli
 
 ### Requirement: Owner qualified new identities
 
-New OpenSpec issue drafts SHALL use `<owner>__<repository>-issue-<number>-<title-slug>` and branch `spec/<change>`, preserving owner/repository spelling and the existing title slug algorithm. The generated component SHALL pass the existing admission/revision branch predicate. Unsupported repository spellings SHALL report repository health and prevent new drafting and admission, without encoding or relaxing safety assertions.
-
-For a healthy trusted manifest selecting speckit, new issue drafts SHALL instead use <number:03d>-<title-slug> and branch spec/<change>. Padding SHALL be a minimum of three digits without truncation, with positive repository-local issue numbers on both forges and the unchanged bounded ASCII title slug. Existing safe-component and enrollment checks SHALL remain; no repository format setting or filesystem format inference SHALL be introduced.
+New OpenSpec issue drafts SHALL use `<owner>__<repository>-issue-<number>-<title-slug>`
+and branch `spec/<change>`, preserving owner/repository spelling and the existing title
+slug algorithm. For a healthy trusted manifest selecting speckit, new issue drafts SHALL
+instead use <number:03d>-<title-slug> and branch spec/<change>.
 
 #### Scenario: Different owners have distinct changes
 - **WHEN** OpenSpec repositories a/x and b/x each draft issue 7 titled Add a gate
@@ -254,33 +304,52 @@ For a healthy trusted manifest selecting speckit, new issue drafts SHALL instead
 - **WHEN** OpenSpec repository owner/widget.js_tools-x drafts an eligible issue
 - **THEN** the new name preserves widget.js_tools-x and uses the existing bounded title slug or issue fallback, passing the unchanged branch predicate
 
+The generated component SHALL pass the existing admission/revision branch predicate.
+
 #### Scenario: Unsafe spelling holds new work
 - **WHEN** an OpenSpec enrollment for owner/widget..js would generate spec/owner__widget..js-issue-7-add-a-gate
 - **THEN** repository health reports the unsupported name before dispatch, no new draft or admission runs, and existing unsafe-branch no-command assertions remain valid
 - **THEN** a safe recorded branch of an admitted run remains eligible for publication and build revision
+
+Unsupported repository spellings SHALL report repository health and prevent new drafting
+and admission, without encoding or relaxing safety assertions.
 
 #### Scenario: Native issue numbers pad and grow
 - **WHEN** native repositories draft issue 7 and issue 1234 titled Add a gate
 - **THEN** the changes are 007-add-a-gate and 1234-add-a-gate, with matching spec/ branches, CLI arguments and repository-scoped PR identities
 - **THEN** repositories may independently use the same issue number and native name; this does not bypass existing run-collision refusal
 
+Padding SHALL be a minimum of three digits without truncation, with positive
+repository-local issue numbers on both forges and the unchanged bounded ASCII title
+slug.
+
 #### Scenario: Manifest selects native naming
 - **WHEN** the trusted manifest selects speckit, omits format or explicitly selects openspec, independently of the files present in the repository
 - **THEN** only speckit selects native names; omitted/explicit openspec retain exact existing naming and slug assertions, and no repository configuration field is added
 
+Existing safe-component and enrollment checks SHALL remain; no repository format setting
+or filesystem format inference SHALL be introduced.
+
 ### Requirement: Recorded identities remain authoritative
 
-Existing receipts, PR branches and admitted runs SHALL retain their recorded identity. Without a receipt, OpenSpec intake SHALL look up exact qualified and legacy basename candidates within the repository before creating a new draft, and SHALL treat lookup failures as errors rather than absence. This bounded compatibility SHALL NOT rename runs or claim recovery after both receipt loss and title change.
-
-Native recovery SHALL also consider the exact current-title native branch and literal same-number issue-body directory candidates alongside current-title qualified/legacy branches. It SHALL recover existing open PRs before dependency-gated discovery, refuse conflicting open identities and treat every failed required lookup as an error. Recorded identities SHALL override regenerated names and discovery, even after title edits. This extends bounded discovery without changing OpenSpec lookup order or lifecycle gates.
+Existing receipts, PR branches and admitted runs SHALL retain their recorded identity.
+Recorded identities SHALL override regenerated names and discovery, even after title
+edits.
 
 #### Scenario: Legacy receipt survives title edits
 - **WHEN** an existing active proposal receipt records an ownerless identity and the issue title changes before restart or delivery
 - **THEN** intake reuses its saved change, branch, job and result without redrafting or renaming, and legacy PR admission/revision/publication use recorded identities
 
+This bounded compatibility SHALL NOT rename runs or claim recovery after both receipt
+loss and title change.
+
 #### Scenario: Legacy PR is recovered
 - **WHEN** no local proposal receipt exists but exact lookup finds the open legacy branch for the current issue/title
 - **THEN** authorized intake recovers delivery to that PR without creating another draft or PR
+
+Without a receipt, OpenSpec intake SHALL look up exact qualified and legacy basename
+candidates within the repository before creating a new draft, and SHALL treat lookup
+failures as errors rather than absence.
 
 #### Scenario: Lookup failure does not create duplicate work
 - **WHEN** either required exact PR lookup fails
@@ -295,9 +364,17 @@ Native recovery SHALL also consider the exact current-title native branch and li
 - **THEN** authorized recovery reuses its identity, saved work and PR without redrafting, renaming or consulting blockers merely for delivery
 - **THEN** new native rounds after closed PRs retain replacement leases and use native naming or the explicitly selected existing feature; merged PRs still suppress drafting
 
+Native recovery SHALL also consider the exact current-title native branch and literal
+same-number issue-body directory candidates alongside current-title qualified/legacy
+branches. This extends bounded discovery without changing OpenSpec lookup order or
+lifecycle gates.
+
 #### Scenario: Recovery ambiguity blocks new work
 - **WHEN** native exact-branch lookup fails or finds incompatible open identities among the bounded candidates
 - **THEN** intake retains history and triggers, reports the error and starts no proposal or duplicate PR
+
+It SHALL recover existing open PRs before dependency-gated discovery, refuse conflicting
+open identities and treat every failed required lookup as an error.
 
 ### Requirement: Released item intake
 
@@ -466,19 +543,20 @@ Every repository SHALL use specloop when engine is omitted or explicitly specloo
 
 ### Requirement: Forge mediated intake
 
-Intake SHALL obtain GitHub facts and perform GitHub mutations through named
-Forge operations, retaining its existing runner injection and all current
-workflow requirements. Git pushes and engine commands SHALL retain their
-existing runners. Existing runner-form argv assertions SHALL pass unchanged. The four stage
-entry points SHALL accept the optional forge keyword specified by Late bound
-runners; Gitea SHALL use its selected adapter, and GitHub callers SHALL retain
-existing construction and calls. The sole permitted GitHub inline-marker fake
-assertion migration is specified by Core policy preservation.
+Intake SHALL obtain GitHub facts and perform GitHub mutations through named Forge
+operations, retaining its existing runner injection and all current workflow
+requirements. Git pushes and engine commands SHALL retain their existing runners.
+Existing runner-form argv assertions SHALL pass unchanged.
 
 #### Scenario: Existing workflows retain transcripts
 - **WHEN** drafting, approval, revision, publication delivery and their recovery or failure-reporting paths run through GitHubForge
 - **THEN** existing runner-form tests pass without assertion or fixture edits, with the same GitHub calls, git operations, outputs and receipt effects
 - **THEN** backend construction causes no read and no operation bypasses the forge to construct GitHub argv in intake
+
+The four stage entry points SHALL accept the optional forge keyword specified by Late
+bound runners; Gitea SHALL use its selected adapter, and GitHub callers SHALL retain
+existing construction and calls. The sole permitted GitHub inline-marker fake assertion
+migration is specified by Core policy preservation.
 
 ### Requirement: Design checklist collection
 
@@ -517,17 +595,11 @@ Publication check collection SHALL append unchecked physical lines from the run 
 
 ### Requirement: Design checks survive publication
 
-Collected design checks SHALL flow through readiness detail into the publication receipt's `checks`, the delivered human-check comment and newly generated PR bodies. Recovery SHALL preserve these checks under existing publication contracts, without ticking items or rewriting historical receipts.
-
-For Gitea, exactly-one publication-comment recovery SHALL assume
-read-after-write-consistent complete listings and no concurrent creator for
-the same marker. If an accepted ambiguous comment POST remains invisible to
-a later successful lookup, a later eligible daemon poll MAY create a duplicate
-publication comment, including after pause/resume or restart. This accepted
-limitation SHALL NOT weaken checklist preservation or permit republishing
-solely for comment delivery. Failed comment lookups SHALL still prevent blind
-creates; no persistent create reservations or other new recovery state SHALL
-be introduced. GitHub recovery guarantees and assertions SHALL remain unchanged.
+Collected design checks SHALL flow through readiness detail into the publication
+receipt's `checks`, the delivered human-check comment and newly generated PR bodies.
+Recovery SHALL preserve these checks under existing publication contracts, without
+ticking items or rewriting historical receipts. GitHub recovery guarantees and
+assertions SHALL remain unchanged.
 
 #### Scenario: Design only checks reach the receipt
 - **WHEN** a change with no task/scenario human checks and an unchecked committed design check completes readiness and publishes to its adopted spec PR
@@ -553,6 +625,15 @@ be introduced. GitHub recovery guarantees and assertions SHALL remain unchanged.
 - **WHEN** an accepted ambiguous Gitea publication-comment POST remains invisible to a later successful lookup across polls, pause/resume or restart
 - **THEN** another comment create is possible under the documented daemon limitation, but every attempted delivery uses the matching receipt's complete checklist and stable round marker without republishing solely for comment delivery
 - **THEN** checklist contents, receipt identity, the hosted-CI reminder, historical receipts and outstanding-check readiness blocking remain governed by the unchanged preservation rules; the exception concerns comment uniqueness only
+
+For Gitea, exactly-one publication-comment recovery SHALL assume
+read-after-write-consistent complete listings and no concurrent creator for the same
+marker. If an accepted ambiguous comment POST remains invisible to a later successful
+lookup, a later eligible daemon poll MAY create a duplicate publication comment,
+including after pause/resume or restart. This accepted limitation SHALL NOT weaken
+checklist preservation or permit republishing solely for comment delivery. Failed
+comment lookups SHALL still prevent blind creates; no persistent create reservations or
+other new recovery state SHALL be introduced.
 
 ### Requirement: Native existing feature selection
 
