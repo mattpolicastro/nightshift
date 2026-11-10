@@ -7,7 +7,9 @@ Isolate specloop enrollment failures and recover leftover worker claims without 
 
 ### Requirement: Repository manifest health
 
-Omitted or unusable manifests SHALL cause repository health failures, not config-load failures. Every enrollment-manifest read SHALL require a regular file first. Readiness SHALL use `specloop.manifest.template()` with safe change/branch overrides, accepting omitted per-change fields without persisting probe values. Other schema and configuration-shape checks SHALL remain strict; omitted engines SHALL default to specloop and explicit worker engines SHALL be rejected. File repair SHALL clear the hold on a later eligible poll.
+Omitted or unusable manifests SHALL cause repository health failures, not config-load
+failures. Every enrollment-manifest read SHALL require a regular file first. File repair
+SHALL clear the hold on a later eligible poll.
 
 #### Scenario: Bad manifest isolates the repository
 - **WHEN** configuration enrolls a healthy default-engine repository, a healthy explicit-specloop repository and a repository with an absent, missing, unreadable, malformed or schema-invalid manifest
@@ -22,6 +24,9 @@ Omitted or unusable manifests SHALL cause repository health failures, not config
 - **THEN** readiness applies safe representative overrides before parsing, reports no configuration health failure and leaves the template bytes unchanged
 - **THEN** an unrelated missing required field such as `run.repo` still causes repository-local health failure
 
+Readiness SHALL use `specloop.manifest.template()` with safe change/branch overrides,
+accepting omitted per-change fields without persisting probe values.
+
 #### Scenario: Dispatch uses actual change identity
 - **WHEN** an authorized eligible issue draft, new admission or spec-stage revision uses a healthy template with omitted or default per-change fields
 - **THEN** dispatch passes the actual new or recorded change and branch as overrides, and that effective template passes the same parser
@@ -35,6 +40,9 @@ Omitted or unusable manifests SHALL cause repository health failures, not config
 #### Scenario: Configuration shape remains strict
 - **WHEN** config TOML is malformed, an engine is unknown, or a supplied manifest path is empty or has an invalid type
 - **THEN** configuration loading still rejects that shape error, while valid relative paths resolve beside the config and tilde paths retain expansion
+
+Other schema and configuration-shape checks SHALL remain strict; omitted engines SHALL
+default to specloop and explicit worker engines SHALL be rejected.
 
 ### Requirement: Health gates new work only
 

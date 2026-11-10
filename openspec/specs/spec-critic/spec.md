@@ -46,7 +46,9 @@ The critic SHALL receive the complete existing in-flight file map without a test
 
 ### Requirement: Ordered proposal gates
 
-`propose` SHALL invoke the critic only after lint and feasibility pass for the candidate. It SHALL preserve existing pre-critic retries, question handling, manifest overrides, and branch behavior, except that `ValidatorUnavailable` from OpenSpec validation or scenario discovery during lint SHALL propagate immediately through the Command JSON exception contract without becoming lint problems or drafting correction feedback. This exception SHALL apply to initial drafts and spec-stage revisions, including lint during a critic correction. Ordinary lint problems, plain `SpecError` scenario-discovery failures and feasibility findings SHALL retain their existing correction behavior and round limits. Admission and the build loop SHALL retain their existing reviews without acquiring the proposal critic.
+`propose` SHALL invoke the critic only after lint and feasibility pass for the
+candidate. Admission and the build loop SHALL retain their existing reviews without
+acquiring the proposal critic.
 
 #### Scenario: Clean draft receives the extra review
 - **WHEN** an initial draft or a spec-stage revision passes lint and feasibility without contradictions
@@ -62,14 +64,28 @@ The critic SHALL receive the complete existing in-flight file map without a test
 - **THEN** the exception exits the attempt without becoming correction feedback or starting another drafting round, feasibility review, PR-file lookup, critic review or proposal publication for that candidate
 - **THEN** `propose --json` exits 1 with exactly one version-1 document containing a nonempty `error` and no `outcome`, as specified by Command JSON
 
+It SHALL preserve existing pre-critic retries, question handling, manifest overrides,
+and branch behavior, except that `ValidatorUnavailable` from OpenSpec validation or
+scenario discovery during lint SHALL propagate immediately through the Command JSON
+exception contract without becoming lint problems or drafting correction feedback. This
+exception SHALL apply to initial drafts and spec-stage revisions, including lint during
+a critic correction.
+
 #### Scenario: Ordinary scenario lookup failure retains correction
 - **WHEN** scenario discovery raises plain `SpecError` during pre-critic lint and another ordinary drafting attempt remains
 - **THEN** the failure remains a lint problem passed as correction feedback to the next drafting attempt under the existing round limit
 - **THEN** the failed candidate receives no feasibility review, PR-file lookup or critic review, and subsequent candidates must pass the existing ordered gates
 
+Ordinary lint problems, plain `SpecError` scenario-discovery failures and feasibility
+findings SHALL retain their existing correction behavior and round limits.
+
 ### Requirement: Single critic correction
 
-Blocking critic findings SHALL occupy `Draft.contradictions` and feed all task/problem/evidence fields to at most one subsequent drafting attempt within the existing `rounds` limit. That correction SHALL pass lint, feasibility and a second critic review before success. A failed or unchanged correction SHALL never clear unresolved findings or trigger another critic correction. As an explicit exception to returning a failed correction's problems, contradictions or questions, `ValidatorUnavailable` from OpenSpec validation or scenario discovery during correction lint SHALL propagate immediately through the Command JSON exception contract: `propose --json` SHALL exit 1 with exactly `{"version": 1, "error": "..."}`, a nonempty diagnostic and no `outcome` or draft-result fields. This exception SHALL NOT count as resolving the critic findings, publish a proposal, or start another correction in the same invocation. Ordinary lint failures, plain `SpecError` scenario-discovery failures, feasibility failures, questions and drafting-session failures SHALL retain their existing result and correction limits.
+Blocking critic findings SHALL occupy `Draft.contradictions` and feed all
+task/problem/evidence fields to at most one subsequent drafting attempt within the
+existing `rounds` limit. That correction SHALL pass lint, feasibility and a second
+critic review before success. A failed or unchanged correction SHALL never clear
+unresolved findings or trigger another critic correction.
 
 #### Scenario: Blocking finding triggers one redraft
 - **WHEN** the first critic returns blocking findings, another drafting attempt remains, and the corrected candidate passes lint, feasibility and the critic
@@ -94,11 +110,23 @@ Blocking critic findings SHALL occupy `Draft.contradictions` and feed all task/p
 - **THEN** no critic call occurs for that unsuccessful correction
 - **THEN** a plain `SpecError` from scenario discovery remains a lint problem with the prior unresolved critic findings in the rejected result
 
+Ordinary lint failures, plain `SpecError` scenario-discovery failures, feasibility
+failures, questions and drafting-session failures SHALL retain their existing result and
+correction limits.
+
 #### Scenario: Validator unavailable during critic correction
 - **WHEN** a first candidate receives blocking critic findings and OpenSpec validation or scenario discovery raises `ValidatorUnavailable` during lint of its one correction, even with general drafting attempts remaining
 - **THEN** `propose --json` exits 1 with exactly one version-1 document containing only `version` and a nonempty `error`, instead of returning the correction's problems or prior critic findings as a domain outcome
 - **THEN** no further drafting attempt, feasibility review, PR-file lookup, critic review or proposal publication occurs in that invocation
 - **THEN** the outage does not resolve the findings; existing critic artifacts remain available for diagnosis, without adding persistence or cross-poll correction recovery
+
+As an explicit exception to returning a failed correction's problems, contradictions or
+questions, `ValidatorUnavailable` from OpenSpec validation or scenario discovery during
+correction lint SHALL propagate immediately through the Command JSON exception contract:
+`propose --json` SHALL exit 1 with exactly `{"version": 1, "error": "..."}`, a nonempty
+diagnostic and no `outcome` or draft-result fields. This exception SHALL NOT count as
+resolving the critic findings, publish a proposal, or start another correction in the
+same invocation.
 
 ### Requirement: Notes through existing risks
 
@@ -116,23 +144,18 @@ The accepted candidate's critic risks SHALL be appended to the existing draft ri
 
 ### Requirement: Advisory task count findings
 
-For OpenSpec, the critic's over-engineering item SHALL flag plans with more than
-eight tasks, or documentation-only plans with more than two tasks, as
-non-blocking risks. For spec-kit it SHALL count entries separately in each
-user-story phase using existing native physical-line task/phase rules and flag
-more than eight in any one story phase. It SHALL NOT flag the native total,
-including documentation-only totals, or count non-story phases toward this
-threshold. Other concrete design concerns SHALL remain reviewable.
-
-Both formats SHALL name task labels that could merge and their shared concern,
-or explain why necessary boundaries prevent a safe merge. Task count alone
-SHALL never be a contradiction or require a correction. Independent concrete
-defects SHALL retain their existing blocking criteria. This native exception
-replaces whole-change sizing because feature-shaped input spans multiple stories.
+For OpenSpec, the critic's over-engineering item SHALL flag plans with more than eight
+tasks, or documentation-only plans with more than two tasks, as non-blocking risks. Task
+count alone SHALL never be a contradiction or require a correction. Independent concrete
+defects SHALL retain their existing blocking criteria.
 
 #### Scenario: Excessive plans receive merge advice
 - **WHEN** the critic reviews an OpenSpec plan with nine or more tasks, or an OpenSpec documentation-only plan with three or more tasks
 - **THEN** its checklist instructs it to report a non-blocking risk identifying tasks that could merge and why, without inventing a merge when boundaries are necessary
+
+Other concrete design concerns SHALL remain reviewable. Both formats SHALL name task
+labels that could merge and their shared concern, or explain why necessary boundaries
+prevent a safe merge.
 
 #### Scenario: Threshold boundaries are advisory
 - **WHEN** an OpenSpec general plan has eight tasks or an OpenSpec documentation-only plan has two tasks
@@ -146,6 +169,12 @@ replaces whole-change sizing because feature-shaped input spans multiple stories
 - **WHEN** a native plan has fifteen tasks across three five-task story phases, eight tasks in one story phase, or nine in one story phase
 - **THEN** the first two plans receive no count-only risk and the third warrants a non-blocking risk naming that story phase and possible merges
 - **THEN** checked and unchecked native task entries and dotted children count, and the whole-feature total never triggers a count risk
+
+For spec-kit it SHALL count entries separately in each user-story phase using existing
+native physical-line task/phase rules and flag more than eight in any one story phase.
+It SHALL NOT flag the native total, including documentation-only totals, or count
+non-story phases toward this threshold. This native exception replaces whole-change
+sizing because feature-shaped input spans multiple stories.
 
 ### Requirement: Proportionate retry remedies
 

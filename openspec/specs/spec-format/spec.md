@@ -8,32 +8,32 @@ OpenSpec behavior and compatibility with existing admitted runs.
 
 ### Requirement: Format seam
 
-`specloop/spec_format.py` SHALL expose `OPENSPEC`, `SPECKIT`, `get(m: Manifest)`
-and a typed protocol containing `change_dir`, `tasks_path`, `tasks_paths_at`,
-`validate`, `scenarios`, `human_checks`, `context_files`, `drafter_root`,
-`finish`, `pr_title`, `pr_kind`, `parse_tasks`, `tick`, `split`, `extend_section`,
-`append_section` and `append_round`. `finish` SHALL retain its
-existing positional arguments and add optional keyword-only `head`; native
-completion SHALL require that committed head. `append_round(text, blocks)`
-SHALL return `(round_number, rewritten_text)`. The OpenSpec adapter SHALL
-resolve delegated OpenSpec functions at call time and retain return values
-and exception identities.
-
-The exact-member restriction changes to permit manifest-selected task operations,
-adapter-owned revision numbering and checkout-free native completion; existing
-OpenSpec calls keep their original signatures at the backend boundary. This
-protocol extension does not modify Engine routing compatibility or OpenSpec
-task parsing/mutation behavior.
+`specloop/spec_format.py` SHALL expose `OPENSPEC`, `SPECKIT`, `get(m: Manifest)` and a
+typed protocol containing `change_dir`, `tasks_path`, `tasks_paths_at`, `validate`,
+`scenarios`, `human_checks`, `context_files`, `drafter_root`, `finish`, `pr_title`,
+`pr_kind`, `parse_tasks`, `tick`, `split`, `extend_section`, `append_section` and
+`append_round`.
 
 #### Scenario: Legacy paths and publication labels
 - **WHEN** the OpenSpec adapter is used for sample change `sample-change`
 - **THEN** `change_dir(repo, change)` is `repo / "openspec/changes/sample-change"`, `tasks_path(change)` is `openspec/changes/sample-change/tasks.md`, and `drafter_root(change)` is `openspec/changes/sample-change/`
 - **THEN** `pr_kind` is `OpenSpec change` and `pr_title(change)` is `sample-change: OpenSpec change via specloop`
 
+`finish` SHALL retain its existing positional arguments and add optional keyword-only
+`head`; native completion SHALL require that committed head. `append_round(text,
+blocks)` SHALL return `(round_number, rewritten_text)`. The exact-member restriction
+changes to permit manifest-selected task operations, adapter-owned revision numbering
+and checkout-free native completion; existing OpenSpec calls keep their original
+signatures at the backend boundary.
+
 #### Scenario: Delegation stays late bound
 - **WHEN** `specloop.openspec.validate`, `.scenarios` or `.archive` is replaced after the singleton is created
 - **THEN** the corresponding adapter method calls that replacement with the original arguments, including `all_tasks_done`, and preserves results and exceptions
 - **THEN** the OpenSpec executable contract, environment, timeout and transient-versus-domain error classification remain unchanged by this change
+
+The OpenSpec adapter SHALL resolve delegated OpenSpec functions at call time and retain
+return values and exception identities. This protocol extension does not modify Engine
+routing compatibility or OpenSpec task parsing/mutation behavior.
 
 ### Requirement: Committed task discovery
 
@@ -73,17 +73,9 @@ changing publication's deduplication and rendering.
 
 ### Requirement: Engine routing compatibility
 
-The four consumer modules `cli.py`, `loop.py`, `revise.py` and `propose.py`
-SHALL route the extracted operations through the selected adapter, containing
-no `openspec/changes/` literal and no direct `openspec.` attribute call.
-Except for the pinned OpenSpec backend invocation, version gate, strict-validator upgrade and error classification explicitly specified by this change, and the shared planned-file exclusion below, OpenSpec rendered prompts, messages, argv, commits, state transitions and recovery behavior SHALL remain unchanged for unpinned calls. An explicitly supplied discovery-base pin under spec-drafting is a narrow exception: a pinned call SHALL use its already resolved commit. This exception SHALL NOT change OpenSpec prompts, ordinary resolution, flat draft-workspace paths, task operations or successful result shapes.
-
-Shared planned-file extraction (`propose.paths` and `edited_paths`) SHALL
-exclude tokens beginning `specs/` as well as `openspec/`, for every format
-and with or without a root argument. This deliberately changes OpenSpec
-planned-file behavior because the shared rootless caller has no manifest;
-both prefixes are reserved specification roots. All other OpenSpec routing,
-parsing, exclusions, argv, messages and state behavior SHALL remain unchanged.
+The four consumer modules `cli.py`, `loop.py`, `revise.py` and `propose.py` SHALL route
+the extracted operations through the selected adapter, containing no `openspec/changes/`
+literal and no direct `openspec.` attribute call.
 
 #### Scenario: Drafting and revision retain behavior
 - **WHEN** an OpenSpec draft is linted, checked for overlaps, staged or revised, or another run contributes to the in-flight file map
@@ -91,10 +83,22 @@ parsing, exclusions, argv, messages and state behavior SHALL remain unchanged.
 - **THEN** harness task/scenario parsing and the existing exclusion and hands-off rules do not change except for the shared `specs/` exclusion; external strict parsing follows the pinned OpenSpec release
 - **THEN** mixed canonical/legacy roots retain the same in-flight map and read order except for the shared `specs/` exclusion, without state mutation, and successful drafting retains its notification and manifest/change/branch command arguments; the two named `SimpleNamespace` fixture inputs may gain `format="openspec"` as specified in #187 task 1.3, with every existing assertion preserved apart from this change's explicit validator-contract migrations
 
+Except for the pinned OpenSpec backend invocation, version gate, strict-validator
+upgrade and error classification explicitly specified by this change, and the shared
+planned-file exclusion below, OpenSpec rendered prompts, messages, argv, commits, state
+transitions and recovery behavior SHALL remain unchanged for unpinned calls. An
+explicitly supplied discovery-base pin under spec-drafting is a narrow exception: a
+pinned call SHALL use its already resolved commit. This exception SHALL NOT change
+OpenSpec prompts, ordinary resolution, flat draft-workspace paths, task operations or
+successful result shapes.
+
 #### Scenario: Publication and interrupted finish retain behavior
 - **WHEN** an OpenSpec run publishes or finishes, including an expected-head mismatch or retry after an archive commit survives a failed push or ready operation
 - **THEN** adapter routing retains exact title/body and commit text, checks the expected head before inspecting tasks, and refuses unfinished tasks before archiving
 - **THEN** archive reuse, status reads, GitHub argv, Gitea readiness verification, pushes and durable state transitions retain their existing ordering and outcomes
+
+All other OpenSpec routing, parsing, exclusions, argv, messages and state behavior SHALL
+remain unchanged.
 
 #### Scenario: Consumers contain no direct format operations
 - **WHEN** the four consumer source files are checked after extraction
@@ -106,18 +110,17 @@ parsing, exclusions, argv, messages and state behavior SHALL remain unchanged.
 - **THEN** shared extraction through `propose.paths` and `edited_paths` no longer lists `specs/helper.py` as a planned edit, while `src/helper.py` is still listed, with or without a root argument
 - **THEN** the same lexical exclusion applies to spec-kit input and preserves the existing `openspec/` exclusion
 
+Shared planned-file extraction (`propose.paths` and `edited_paths`) SHALL exclude tokens
+beginning `specs/` as well as `openspec/`, for every format and with or without a root
+argument. This deliberately changes OpenSpec planned-file behavior because the shared
+rootless caller has no manifest; both prefixes are reserved specification roots.
+
 ### Requirement: Manifest format selection
 
-The trusted manifest SHALL expose `format` with default `"openspec"` and
-preserve explicit `"speckit"` through loading and template overrides.
-`get(m)` SHALL return `OPENSPEC` for OpenSpec and `SPECKIT` for spec-kit.
-Selection SHALL NOT add run-state fields, serialize an adapter or migrate
-existing runs. This replaces the temporary native-format unavailability
-refusal because the native build adapter is now implemented.
-The existing refusal scenario remains under its original name for invalid or
-missing native features: only the unconditional unavailable-format diagnostic
-and pre-validation refusal change. Its JSON, cleanup and no-agent guarantees
-remain in force.
+The trusted manifest SHALL expose `format` with default `"openspec"` and preserve
+explicit `"speckit"` through loading and template overrides. `get(m)` SHALL return
+`OPENSPEC` for OpenSpec and `SPECKIT` for spec-kit. Selection SHALL NOT add run-state
+fields, serialize an adapter or migrate existing runs.
 
 #### Scenario: Omitted and explicit OpenSpec agree
 - **WHEN** a manifest omits `[run] format` or explicitly sets `format = "openspec"`
@@ -129,10 +132,17 @@ remain in force.
 - **THEN** selection returns `SPECKIT` and admission invokes native validation rather than returning `spec-kit format is not available yet`
 - **THEN** an invalid or missing native feature still receives ordinary refusal JSON and cleanup without invoking an agent or saving admitted state
 
+This replaces the temporary native-format unavailability refusal because the native
+build adapter is now implemented.
+
 #### Scenario: Spec kit is refused at admission
 - **WHEN** a valid manifest sets `format = "speckit"`, including after change/branch template overrides, but its committed native feature is missing or invalid, and is checked by `problems_with` or `nightshift admit --json`
 - **THEN** manifest parsing succeeds and `problems_with` invokes native validation and returns the feature diagnostics instead of `spec-kit format is not available yet`
 - **THEN** admission exits 1 with one version-1 `outcome: refused` document whose reasons include those diagnostics, invokes no agent, cleans partial admission while preserving its lock inode and source refs, and saves no admitted state
+
+The existing refusal scenario remains under its original name for invalid or missing
+native features: only the unconditional unavailable-format diagnostic and pre-validation
+refusal change. Its JSON, cleanup and no-agent guarantees remain in force.
 
 #### Scenario: Saved OpenSpec runs remain compatible
 <!-- nightshift:post-deploy -->
@@ -159,21 +169,20 @@ for native archives or require an OpenSpec executable.
 
 ### Requirement: Native context and human checks
 
-The native adapter SHALL provide the selected feature's spec and plan and the
-repository constitution as existing context files, in that order, with
-context-relative destinations `spec.md`, `plan.md` and
-`.specify/memory/constitution.md`. It SHALL no longer supply proposal.md,
-design.md, specs/spec.md or specs/constitution.md aliases because native
-consumers now name real files. It SHALL read human checks from committed
-plan.md, use the existing literal collector and preserve publication's
-deduplication/rendering. Missing or unreadable committed plans SHALL block
-rather than imply no checks.
+The native adapter SHALL provide the selected feature's spec and plan and the repository
+constitution as existing context files, in that order, with context-relative
+destinations `spec.md`, `plan.md` and `.specify/memory/constitution.md`. It SHALL read
+human checks from committed plan.md, use the existing literal collector and preserve
+publication's deduplication/rendering.
 
 #### Scenario: Selected feature context
 - **WHEN** implementation, task review, phase review or arbitration assembles native context
 - **THEN** native spec content is copied to spec.md, plan content to plan.md and constitution content to .specify/memory/constitution.md, without transitional OpenSpec aliases
 - **THEN** copies retain original native bytes, with no invented capability-directory assumption, OpenSpec document conversion or automatic historical feature traversal
 - **THEN** OpenSpec retains its existing context destinations and directory copying
+
+It SHALL no longer supply proposal.md, design.md, specs/spec.md or specs/constitution.md
+aliases because native consumers now name real files.
 
 #### Scenario: Plan checks use the committed revision
 - **WHEN** a committed plan contains unchecked lines under exact ## Human checks, nested headings, repeated sections and literal examples, while source worktree text differs
@@ -185,23 +194,23 @@ rather than imply no checks.
 - **THEN** readiness/publication fails with a diagnostic instead of dropping human checks
 - **THEN** a readable plan without pending selected lines returns an empty list
 
+Missing or unreadable committed plans SHALL block rather than imply no checks.
+
 ### Requirement: Manifest selected task operations
 
-Task operations SHALL dispatch only through the manifest-selected adapter.
-OPENSPEC SHALL delegate at call time to unchanged tasks functions; SPECKIT
-SHALL delegate to speckit.parse_tasks and native mutation helpers. The build
-consumers SHALL use adapter parsing, mutations and review-round reconstruction.
-Proposal lint and overlap checks SHALL also use adapter parsing, replacing
-#188's explicit temporary exclusion of drafting from that routing.
-No implementation SHALL detect or refuse mixed heading styles. tasks.py SHALL
-remain unchanged; Engine routing compatibility SHALL retain its guarantees
-except for the shared planned-file exclusion explicitly modified above.
+Task operations SHALL dispatch only through the manifest-selected adapter. OPENSPEC
+SHALL delegate at call time to unchanged tasks functions; SPECKIT SHALL delegate to
+speckit.parse_tasks and native mutation helpers.
 
 #### Scenario: OpenSpec ignores native heading declarations
 - **WHEN** an OpenSpec task document contains literal ## Phase 1: Example lines, including inside examples, and is parsed, ticked, split, extended or appended through OPENSPEC
 - **THEN** task records and returned mutation bytes exactly match the unchanged corresponding tasks functions, including their numeric-section recognition, checkbox spelling, numbering and error behavior
 - **THEN** adapter parse_tasks delegates to tasks.parse, and tick, split, extend_section and append_section delegate to their same-named tasks functions
 - **THEN** native headings neither select SPECKIT nor cause mixed-style refusal, and late replacement of a delegated tasks function is observed with its original arguments, return value and exception identity
+
+No implementation SHALL detect or refuse mixed heading styles. tasks.py SHALL remain
+unchanged; Engine routing compatibility SHALL retain its guarantees except for the
+shared planned-file exclusion explicitly modified above.
 
 #### Scenario: Native ignores OpenSpec phase declarations
 - **WHEN** a native task document contains ## N. Title headings alongside literal native phase headings and is read or mutated through SPECKIT
@@ -213,6 +222,10 @@ except for the shared planned-file exclusion explicitly modified above.
 - **WHEN** admission, run, accept, status, PR body construction, finish, revision, proposal lint or overlap detection needs to read or mutate tasks
 - **THEN** the manifest-selected adapter supplies parsing, ticking, splitting, extension, append or review-round reconstruction as applicable, including candidate replay and revision replay
 - **THEN** loop.py contains no heading-style detection or format-specific task branch, drafting now uses the selected parser, and no run-state field or serialized adapter is added
+
+The build consumers SHALL use adapter parsing, mutations and review-round
+reconstruction. Proposal lint and overlap checks SHALL also use adapter parsing,
+replacing #188's explicit temporary exclusion of drafting from that routing.
 
 ### Requirement: Format aware build prompts
 

@@ -326,21 +326,9 @@ Factory Publish and Finish SHALL warn that they push to the forge selected by th
 
 ### Requirement: Search and sort
 
-When a loaded snapshot has runs, Factory SHALL offer a search field labelled
-`Search Factory runs` and a `Sort Factory runs` radio group of `Recent`
-(default), `Oldest` and `A–Z`. Search SHALL match case-insensitively, requiring
-every whitespace-separated term to appear in the run's change, PR, action
-headline, or context summary, repository or branch. A run's activity SHALL be
-the latest of its parseable `context.recent` times and `pause.since`; runs with
-neither sort last under both recency orders, and ties keep source order. `A–Z`
-sorts by change. The model SHALL export `arrangeFactoryRuns(runs, query, sort)`,
-which filters and sorts without mutating its input, and the page SHALL apply it
-before `groupFactoryRuns`, so paused runs stay first. Summary counts and the
-empty message SHALL describe the whole snapshot. While a search is non-empty,
-the page SHALL list matching finished runs after active ones without the
-Finished disclosure, show `N of M match` or `No runs match.`, and leave the
-disclosure's state unchanged for when the search is cleared. Search and sort
-SHALL NOT initiate an RPC or workspace lookup.
+When a loaded snapshot has runs, Factory SHALL offer a search field labelled `Search
+Factory runs` and a `Sort Factory runs` radio group of `Recent` (default), `Oldest` and
+`A–Z`. Search and sort SHALL NOT initiate an RPC or workspace lookup.
 
 #### Scenario: Search reaches finished runs
 - **WHEN** a snapshot has one active and two finished runs and the search matches only one finished run
@@ -348,6 +336,19 @@ SHALL NOT initiate an RPC or workspace lookup.
 - **WHEN** the search is cleared
 - **THEN** the active run is listed and `Finished (2)` returns collapsed
 
+Search SHALL match case-insensitively, requiring every whitespace-separated term to
+appear in the run's change, PR, action headline, or context summary, repository or
+branch. Summary counts and the empty message SHALL describe the whole snapshot. While a
+search is non-empty, the page SHALL list matching finished runs after active ones
+without the Finished disclosure, show `N of M match` or `No runs match.`, and leave the
+disclosure's state unchanged for when the search is cleared.
+
 #### Scenario: Sort reorders within groups
 - **WHEN** runs with differing activity are sorted by Recent, Oldest or A–Z
 - **THEN** each group follows that order, paused runs remain first among active runs, and undated runs come last under Recent and Oldest
+
+A run's activity SHALL be the latest of its parseable `context.recent` times and
+`pause.since`; runs with neither sort last under both recency orders, and ties keep
+source order. `A–Z` sorts by change. The model SHALL export `arrangeFactoryRuns(runs,
+query, sort)`, which filters and sorts without mutating its input, and the page SHALL
+apply it before `groupFactoryRuns`, so paused runs stay first.
