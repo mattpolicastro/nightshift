@@ -29,11 +29,12 @@ repository stale; it SHALL NOT silently publish a limited result as complete.
 
 ### Requirement: Escalation comment summary
 
-Each entry SHALL show the first physical line of its latest recognized escalation
-comment, or null. Recognition SHALL follow the design's exact headline and final
-marker line rules without interpreting rich text; ambiguity SHALL refuse summary
-evidence. Recency SHALL use updated time, creation time when updated time is absent,
-then numeric ID. Incomplete comment reads SHALL make the repository stale.
+Each entry SHALL show its latest recognized escalation's first physical line, or
+null, using the design's deterministic headline/marker and recency rules.
+Ambiguity SHALL refuse summary evidence. Summary enrichment SHALL be independent
+of listing success. Failed reads SHALL retain the item and its last good summary
+marked stale with a safe error, or show "Summary unavailable" when cold.
+Successful reads with no qualifying comment SHALL yield null without an error.
 
 #### Scenario: Most recent escalation supplies summary
 - **WHEN** a labelled item has multiple recognized drafting, admission, revision, publication or stage-error comments across pages, an older comment updated later, and newer ordinary discussion or success comments
@@ -46,50 +47,61 @@ then numeric ID. Incomplete comment reads SHALL make the repository stale.
 - **THEN** only bodies satisfying the exact physical first/final-line rule qualify, and an item with no qualifying comment remains visible with null summary
 - **THEN** LF splitting removes one terminal CR per line and only trailing empty lines, without trimming whitespace or semantically parsing fences, HTML or indentation
 
+#### Scenario: Failed summary does not hide listing changes
+- **WHEN** a complete listing adds an escalation and removes a closed item, but a comment request fails, is oversized, or has malformed qualifying recency metadata
+- **THEN** the complete listing and its timestamp are committed, the new item appears and the closed item disappears despite the enrichment failure
+- **THEN** affected items retain their prior summary and summary timestamp, or show "Summary unavailable" when cold, with item-level stale/error diagnostics and a repository summary-error indication
+- **THEN** successful summaries for other items update independently, and a later successful comment read clears the affected summary error without requiring a different listing
+
 ### Requirement: Independent repository snapshots
 
-Attention SHALL retain a complete last successful snapshot and timestamp per
-repository, forge and label. Any incomplete or failed read SHALL preserve it marked
-stale with a safe error, including a visible cold-failure status without entries.
-Healthy repositories SHALL update independently. Offline reads SHALL make no
-remote reads or advance timestamps. Different enrollment selections SHALL NOT
-share snapshots.
+Attention SHALL retain a complete last successful listing and listing timestamp
+per repository, forge and label, independently of summary enrichment. An incomplete
+or failed listing SHALL preserve that membership and timestamp marked stale with a
+safe error, including a visible cold-failure status without entries. Healthy
+repositories SHALL update independently. Offline reads SHALL make no remote reads
+or advance timestamps. Different enrollment selections SHALL NOT share snapshots.
 
 #### Scenario: Unreadable repository is stale not empty
-- **WHEN** a repository read fails either before its first success or after cached entries exist while another repository succeeds
+- **WHEN** a repository listing fails either before its first success or after cached entries exist while another repository succeeds
 - **THEN** it appears with a stale diagnostic and null or retained last-success timestamp, any previous entries remain, and the healthy repository updates normally
 - **THEN** text and JSON exit 1 and the page does not claim everything is clear
 
 #### Scenario: Incomplete read preserves complete snapshot
-- **WHEN** a later listing page, comment request or qualifying comment's recency metadata is unreadable or malformed
-- **THEN** none of that repository's partial replacement is committed and its complete previous entries and timestamp remain marked stale with the error
+- **WHEN** a later listing page is unreadable, truncated or malformed
+- **THEN** no partial listing replacement is committed and the repository's complete previous membership and listing timestamp remain marked stale with the error
 
 #### Scenario: Offline recovery and selection isolation
-- **WHEN** attention reads offline, then a complete online read recovers a previously failed repository
-- **THEN** offline uses persisted entries and errors without launching GitHub or status, and recovery replaces entries and clears that repository's stale error
+- **WHEN** attention reads offline, then complete online listing and comment reads recover a previously failed repository
+- **THEN** offline uses persisted entries, errors and separate listing/summary timestamps without launching GitHub or status, and successful operations replace their data and clear their errors
 - **WHEN** a repository is removed, its forge or label changes, or an enrolled repository has never been checked
 - **THEN** removed identities are absent, changed selections do not reuse old entries, and uncached enrollments show `not_checked` rather than a confirmed empty result
 
-#### Scenario: Older refresh cannot replace newer result
-- **WHEN** two CLI refreshes overlap and an earlier-started attempt finishes after a newer-started attempt for the same repository selection
-- **THEN** the earlier attempt cannot overwrite the newer attempt's entries, timestamp or error
+#### Scenario: Empty enrollment leaves state untouched
+- **WHEN** attention has no enrolled repositories and its specloop provider is isolated as in `test_reads_never_migrate`
+- **THEN** repository attention returns an empty array without opening or creating its cache, starting a subprocess, migrating state or scheduling work
+- **THEN** the regression's unchanged-state assertion, parameterization and forbidden-migration/scheduler guards remain intact
 
 ### Requirement: Bounded attention reads
 
-GitHub reads SHALL share a 40-second monotonic budget, with four repository jobs
-at most and each request limited to eight seconds or remaining time. Refresh SHALL
-select at most 32 repositories, oldest attempted first with name breaking ties;
-failures SHALL advance ordering and deferred repositories SHALL be stale.
+GitHub reads SHALL share a 40-second monotonic budget, with at most four concurrent
+reads and each subprocess limited to eight seconds or remaining time. Collection
+SHALL attempt complete repository listings before summary enrichment and SHALL
+mark unfinished listing or summary reads stale without discarding their last good
+data. There SHALL be no fixed repository-count cap or durable attempt scheduler.
 Specloop's eight-second limit and plugin timeout/output limits SHALL remain unchanged.
 
 #### Scenario: Deadline includes pagination and comments
 - **WHEN** list pages, comment pages or stalled requests consume the refresh budget
-- **THEN** no further request starts after the shared deadline, active requests are bounded by remaining time, and unfinished repositories retain snapshots marked stale
+- **THEN** no further request starts after the shared deadline and active requests are bounded by remaining time
+- **THEN** unfinished listings retain their previous membership/time marked stale, while completed listings remain committed even when summaries are deferred or fail
 - **THEN** specloop still receives its bounded status read and the plugin's 60-second online timeout is not increased
 
-#### Scenario: Large enrollment rotates failed attempts
-- **WHEN** more than 32 repositories are enrolled and some selected repositories repeatedly fail
-- **THEN** at most 32 repositories are attempted with at most four jobs in flight, unattempted repositories show deferral, and later refreshes select least-recently-attempted repositories without starvation by failed peers
+#### Scenario: Listings precede summary enrichment
+- **WHEN** multiple repositories are enrolled and a selected item has a slow comment thread
+- **THEN** listing attempts precede comment reads, at most four reads are in flight, and successful listings remain visible regardless of that thread's outcome
+- **WHEN** more than 32 repositories can complete within the shared deadline
+- **THEN** collection is not stopped by a 32-repository cap and needs no persisted attempt ordering or cross-process attempt identity
 
 ### Requirement: Additive attention JSON
 
@@ -105,6 +117,7 @@ remain unchanged.
 - **THEN** no historical worker row, count or error appears in attention, `tasks` and `stale` are empty arrays, and version 1 and existing specloop fields remain present
 - **THEN** only current repository/specloop read state determines the attention result, and legacy outcome data remains readable through its existing APIs
 - **THEN** each repository includes `repo`, `label`, `entries`, nullable `checked_at`, boolean `stale`, and nullable safe `error` and `error_code`
+- **THEN** each entry adds nullable `summary_checked_at`, boolean `summary_stale`, and nullable safe `summary_error` and `summary_error_code` alongside its nullable `summary`; listing and summary errors both affect the current-source result
 
 ### Requirement: Factory pause pointers
 
@@ -122,15 +135,17 @@ change Factory behavior, or add RPCs or timers for the pointer.
 ### Requirement: Safe plugin attention projection
 
 The plugin SHALL project validated escalation, health and pause display fields,
-ignore worker rows and preserve host execution/cache safeguards. Missing new data
+ignore worker rows and reuse `server/reader.ts::createReader` for its existing
+cache lifecycle through a small display adapter, without a second reader. Missing new data
 SHALL show front-door unavailability; malformed data SHALL fail the read. Links
 SHALL match repository, kind and number and use `openExternalUrl`. Raw subprocess
 errors and private paths SHALL NOT cross RPC.
 
 #### Scenario: Structured stale response reaches page
-- **WHEN** the command exits 1 with valid repository errors and retained entries, including a cold failed repository with no entries
-- **THEN** the plugin retains each repository's health and checked time and the page shows its safe error without discarding healthy entries
-- **THEN** the clear empty-state message appears only for a complete, successfully checked empty snapshot
+- **WHEN** the command exits 1 with valid listing or summary errors, including a cold failed repository and a newly listed item whose comment read failed
+- **THEN** the plugin retains repository and item health with separate listing/summary times, and the page shows safe errors without discarding healthy entries or the new item
+- **THEN** the page shows retained summary text marked stale or "Summary unavailable" when cold, and successful null summaries remain warning-free
+- **THEN** the clear empty-state message appears only for a complete, successfully checked online empty snapshot; cached-only data remains labelled cached
 
 #### Scenario: Legacy and malformed producers remain visible failures
 - **WHEN** a version-1 producer omits repository data or a refresh supplies malformed fields, unsafe URLs, invalid JSON or a transport failure

@@ -18,7 +18,8 @@ automated results.
 #### Scenario: Operator understands the attention list
 - **WHEN** an operator reads the CLI usage, What needs you and plugin refresh passages
 - **THEN** they can distinguish confirmed empty results, cached/stale or unchecked repositories, optional comment summaries, historical storage and Factory pause references
-- **THEN** they can identify the configured label, the 40-second shared GitHub budget, eight-second requests, four-job concurrency, 32-repository rotating cap and JSON compatibility limits without obsolete worker-refresh promises
+- **THEN** they can identify the configured label, the 40-second shared GitHub budget, eight-second request limits, at most four concurrent reads and JSON compatibility limits without obsolete worker-refresh or repository-scheduler promises
+- **THEN** they understand that a complete listing appears even when summary enrichment fails, with retained summary text or "Summary unavailable" and separate listing/summary freshness diagnostics
 - **THEN** the guidance leaves label meaning, daemon escalation and Factory actions unchanged and identifies real escalation/phone checks as pending
 - **THEN** version-1 additive fields, empty legacy arrays, legacy-producer unavailability, unsupported-forge diagnostics and retained historical APIs are explicit
 - **THEN** `config.example.toml` no longer promises historical outcomes through attention, and `docs/specloop/README.md` describes empty legacy arrays rather than historical worker tasks in attention JSON

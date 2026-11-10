@@ -13,9 +13,11 @@ present in this checkout. Preserve that dependency and its action boundaries.
 
 - Discover open labelled issues and PRs for enrolled GitHub repositories, with
   title, kind, URL and the first line of the latest recognized escalation comment.
-- Persist independent repository snapshots. Failed, incomplete or deferred reads
-  retain their last good entries and show a repository-level stale diagnostic,
-  including on a first failure with no entries. Preserve the existing read budget.
+- Cache the last complete listing per repository, forge and label. Failed listing
+  reads retain it with a stale diagnostic, including on a cold failure. Commit
+  successful listings independently of comment enrichment: a failed comment read
+  leaves the item visible with its retained summary or “summary unavailable” and
+  a stale/error diagnostic. Preserve the existing read budget.
 - Keep human-paused specloop runs and their selection rules; render compact
   references to the matching change in Factory without duplicating its controls.
 - Stop feeding CLI and page lists from worker outcomes. Preserve the historical
@@ -44,9 +46,10 @@ Implementation files are limited to `nightshift/cli.py` (attention),
 `plugins/nightshift/client/main.tsx`, tests under the two allowed test directories,
 `README.md`, `plugins/nightshift/README.md`, `config.example.toml` (attention and
 retirement comments only) and `docs/specloop/README.md` (attention and retirement
-guidance only). The last two files extend the original allowance to remove active
-operator guidance made false by retiring worker rows; config values, enrollment
-examples and unrelated operational guidance remain unchanged.
+guidance only). **Owner scope amendment from PR review:** the owner explicitly
+allows edits to `config.example.toml` and `docs/specloop/README.md`, limited to
+passages this change makes false. This is an owner amendment to the original
+allowance; config values, enrollment examples and unrelated guidance stay intact.
 
 ## Capabilities
 
