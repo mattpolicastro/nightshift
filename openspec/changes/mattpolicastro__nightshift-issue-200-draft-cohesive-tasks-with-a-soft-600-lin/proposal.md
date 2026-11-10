@@ -36,16 +36,21 @@ budgets or a claim that larger tasks improve outcomes.
   size alone establishes neither a contradiction nor impossibility and consumes no
   correction round. Preserve count thresholds, concrete merge advice and blockers
   supported by independent evidence.
-- Migrate the protected specifications, sizing assertions and affected operator
-  guidance, with offline prompt-contract and scripted gate regression coverage.
+- Record protected specification migrations in this change's deltas for the
+  existing harness Finish/archive flow. Implementation updates sizing assertions
+  and affected operator guidance, with offline prompt-contract and scripted gate
+  regression coverage.
 
 Implementation scope is limited to `specloop/propose.py`, `specloop/critic.py`,
 the size/impossibility clarification in `specloop/feasibility.py`,
 `tests/test_specloop_task_sizing.py`, `tests/test_specloop_critic_task_risk.py`,
-`tests/test_speckit_drafting.py`, `tests/test_specloop_propose.py`, the three
-capabilities below, `docs/specloop/speckit.md`, this change's artifacts, and any
-passage of `README.md`, `KNOWN-LIMITATIONS.md` or `docs/specloop/README.md` made
-false by this change. This draft writes only this change directory.
+`tests/test_speckit_drafting.py`, `tests/test_specloop_propose.py`,
+`docs/specloop/speckit.md`, and any passage of `README.md`, `KNOWN-LIMITATIONS.md`
+or `docs/specloop/README.md` made false by this change. This draft writes only
+this change directory. The three capabilities below are represented by deltas
+here; implementing agents do not edit the frozen `openspec/**` tree. The existing
+harness Finish/archive flow later incorporates those approved deltas into the
+three named consolidated specifications under its normal completion gates.
 
 Out of scope: size estimators, telemetry, configuration or enforcement machinery;
 agent adapters, session timeouts, turn limits, runtime task splitting, seal limits,

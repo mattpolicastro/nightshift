@@ -99,6 +99,24 @@ Do not post-process model text to suppress findings or change `draft`, `check`,
 
 ### 3. Explicitly migrate protected contracts without weakening other assertions
 
+Keep all specification changes in this change directory's approved deltas.
+The self-hosting manifest freezes `openspec/**` for implementing agents, as
+confirmed by the feasibility findings and `examples/specloop/self-hosting.toml`.
+The issue's specification scope names affected contracts; it does not override
+that execution boundary. Tasks 1.1–1.3 consume these deltas as read-only acceptance
+criteria and edit only their named runtime, test and operator-documentation files.
+They neither edit consolidated specs nor amend this change's frozen artifacts.
+
+Consolidation remains the existing harness completion operation:
+`specloop/cli.py` Finish delegates through `spec_format.OPENSPEC.finish` to
+`specloop/openspec.py:archive`, which invokes OpenSpec archive after completion
+gates. That flow applies these deltas to `openspec/specs/spec-drafting/spec.md`,
+`openspec/specs/spec-critic/spec.md` and
+`openspec/specs/specloop-documentation/spec.md`. No implementation task runs
+archive, changes a manifest, relaxes a frozen path or adds another lifecycle step.
+The retained deltas explicitly authorize the changed guarantees before archival;
+all unmodified guarantees remain in force throughout implementation.
+
 The deltas replace `spec-drafting`'s **Risk based task sizing** and **Compact
 documentation plans**, and amend **Native feature drafting** solely to permit the
 new guidance instead of its obsolete byte-identical OpenSpec promise. The new
@@ -164,9 +182,10 @@ or Markdown parser. Existing native phase/count parsing stays unchanged.
 
 ### 5. Keep implementation compact and rollout observational
 
-Use three tasks in one section: drafting contracts with their tests and spec
-delta; review contracts with their tests and spec delta; affected docs with their
-spec delta and assertions. Each is planned at about 300 changed lines or less,
+Use three tasks in one section: drafting prompts with their tests; review prompts
+with their tests; affected operator docs with their assertions. The corresponding
+spec deltas are already part of this draft, not writes assigned to these tasks.
+Each task is planned at about 300 changed lines or less,
 using current fixtures and short prompt edits; there is no need to pad to six or
 create a new mechanism. These estimates describe this implementation plan, not
 an enforcement mechanism for future drafts. Changes to the same test file across
