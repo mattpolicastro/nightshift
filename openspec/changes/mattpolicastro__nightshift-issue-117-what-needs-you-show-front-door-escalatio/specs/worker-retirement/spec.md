@@ -11,14 +11,23 @@ Retirement SHALL preserve historical state, outcomes, transcripts, branches and
 worktrees without migration. Claim cleanup SHALL occur only under existing durable
 recovery after saving its outcome. Existing outcome database tables and historical
 APIs SHALL remain readable with unchanged resolution behavior; attention SHALL
-stop rendering their records and instead follow the version-1, stale/offline and
-exit-code contracts in `attention`. Startup, polling and reconcile SHALL use safe
+stop rendering their records and SHALL NOT refresh or reconcile historical
+outcomes. Attention SHALL instead follow the version-1, stale/offline and
+exit-code contracts in `attention`. Explicit historical `outcomes.refresh()`
+calls SHALL retain their existing resolution and stale-observation behavior.
+Startup, polling and reconcile SHALL use safe
 leftover-claim recovery, never worker execution or destructive legacy reconciliation.
 
 #### Scenario: Historical attention remains readable
 - **WHEN** an existing worker outcome database is opened through its historical APIs before and after online or offline CLI/Paseo attention reads
 - **THEN** historical entries remain readable with the same schema and resolution rules, while attention omits worker records and shows its current sources
 - **THEN** reading history does not start a worker, move state or delete work, and adding a separate repository-snapshot table does not alter historical rows or columns
+
+#### Scenario: Historical reconciliation stays explicit
+- **WHEN** online or offline attention reads occur after historical worker outcomes have been recorded, including when repository discovery fails or no longer lists their issues
+- **THEN** attention leaves historical events and observations unchanged, returns empty legacy `tasks` and `stale` arrays and reports only current-source failures
+- **WHEN** an older caller explicitly invokes `outcomes.refresh()` against those historical records
+- **THEN** failed reads retain their prior observations and successful reads resolve closed issues or merged PRs under the existing rules, independently of attention's repository snapshots
 
 #### Scenario: Historical mirroring remains usable
 - **WHEN** the retained mirror utility is imported and used for a historical transcript after worker.py is removed, with an omitted or explicit config_root

@@ -21,6 +21,10 @@ present in this checkout. Preserve that dependency and its action boundaries.
 - Stop feeding CLI and page lists from worker outcomes. Preserve the historical
   database and compatibility APIs; retain version-1 JSON keys and types, with
   empty legacy `tasks`/`stale` arrays and additive repository data.
+- Migrate the attention portions of existing recovery regressions to that
+  contract. Preserve claim/evidence recovery assertions and test historical
+  reconciliation through `outcomes.refresh()` directly; attention no longer
+  performs that reconciliation as a side effect.
 - Update the plugin projection and both allowed READMEs, with host-independent
   tests for collection, stale handling, pointers and worker-row retirement.
 

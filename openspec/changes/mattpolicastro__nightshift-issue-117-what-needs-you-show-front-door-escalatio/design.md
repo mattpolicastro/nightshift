@@ -39,7 +39,7 @@ Add `outcomes.front_door_snapshot(cfg, *, offline=False, runner=None, clock=None
 and a private repository collector in `nightshift/outcomes.py`. Read `cfg.repos`,
 `cfg.forge_for(repo)` and `cfg.labels.needs_human` from this attention-only caller.
 Retain `record`, `tasks`, `refresh`, `attention` and `render` for older
-callers and their existing tests. The new collector never calls those historical
+callers and their direct API tests. The new collector never calls those historical
 selection or reconciliation functions.
 
 For implicit GitHub and explicit GitHub-kind enrollment, use the existing
@@ -155,7 +155,10 @@ The `attention/Allowance compatibility and snapshots` delta removes only its
 worker-results preservation clause. Existing pause selection, allowance
 validation, timestamps, status-error rows and stale/offline behavior remain.
 The two `worker-retirement` deltas explicitly retire historical list/projection
-promises, not historical storage, recovery or utility compatibility.
+promises and attention-triggered historical reconciliation, not historical
+storage, claim recovery or utility compatibility. Historical observations change
+only through an explicit historical API call, never through the new attention
+command.
 
 ### 5. Production plugin projection stays inside the allowed files
 
@@ -201,11 +204,52 @@ even if a legacy producer supplies them. Use existing host theme tokens.
 
 Test through injected subprocess runners, clocks and isolated SQLite databases,
 and through the existing plugin rendered harness approach with mocked SDK/native
-components. Keep assertions except those explicitly pinning worker rendering;
-extend whole-document JSON expectations additively rather than weakening checks.
+components. Preserve unaffected assertions. Migrate assertions that pin worker
+output, its exact pre-addition JSON key set or its historical-refresh side effect
+as described below, retaining coverage through the appropriate public interface.
 Add the four requested Python test names, with plugin rendered tests proving the
 actual page also lists escalations, reports cold failures and shows only compact
 Factory pointers. Run `uv run pytest`, plugin `npm test` and `npm run typecheck`.
+
+The regression migration belongs with CLI integration in task 1.3, not a separate
+test-only follow-up. Its concrete boundaries are:
+
+- In `tests/test_daemon_retirement.py::test_one_shot_recovery_then_public_attention`,
+  keep all three surviving/missing/unreadable cases and the daemon one-shot,
+  label, durable-outcome, journal, claim-byte, worktree and preserved-file
+  assertions. Keep the forbidden execution/destructive-cleanup guards, exact
+  status argv/timeout, specloop stale/timestamp checks and offline no-read guards.
+- Update its exact JSON key set to the six existing keys plus `repositories`;
+  assert `tasks == stale == []` on successful, failed and offline attention
+  reads. Move assertions about historical issue IDs and reasons to
+  `outcomes.tasks()`. Supply isolated paginated repository/comment responses for
+  the new collector, separately from the historical `issue view` runner.
+  Assert repository entries, errors and retained timestamps for the corresponding
+  healthy/outage/recovery phases; do not merely delete the old stale checks.
+- Replace its final expectation that attention resolves historical outcomes.
+  Compare historical event/observation rows before and after attention, including
+  after a repository refresh reports no labelled items, and assert no historical
+  mutation. Then call `outcomes.refresh(cfg.labels, runner=...)` explicitly with
+  the existing closed-issue fixture and keep the assertion that all historical
+  tasks become resolved. Do not compare whole SQLite file bytes: current-source
+  snapshot tables legitimately change. Retain the existing preserved-file checks.
+- Apply the same separation in `tests/test_outcomes.py`, particularly
+  `test_attention_refresh_stale_offline_and_resolution`: preserve historical
+  refresh failure, timestamp and resolution coverage through explicit API calls;
+  use enrolled repository fixtures for current-source CLI failures. Worker
+  deferred checks remain covered through `outcomes.refresh()`, while attention
+  tests assert historical errors cannot affect its result. In
+  `tests/test_specloop_attention.py`, update worker rows/text and additive JSON
+  expectations only, retaining all pause selection, reason/PR, allowance,
+  timestamp, timeout, alias and offline assertions. Historical `outcomes.render()`
+  assertions remain valid as direct API checks, without requiring that text in CLI
+  output. Historical mirror tests and standalone recovery tests remain unchanged.
+
+This is an explicit migration of the superseded attention contract, not permission
+to skip, xfail or delete recovery coverage. Use shared fixtures and parameterized
+phases to keep task 1.3, including the four named tests and these migrations,
+within roughly 300 changed lines. Existing direct historical API tests supply
+the unchanged behavior coverage without duplicating their implementations.
 
 Human checklist for the implementation PR, pending the next real escalation:
 
