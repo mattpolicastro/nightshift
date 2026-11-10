@@ -40,22 +40,32 @@ budgets or a claim that larger tasks improve outcomes.
   existing harness Finish/archive flow. Implementation updates sizing assertions
   and affected operator guidance, with offline prompt-contract and scripted gate
   regression coverage.
+- Explicitly migrate `tests/test_spec_format.py::test_drafting_prompt_retains_exact_bytes`
+  and `spec-format`'s **Engine routing compatibility** requirement, which also
+  protect the old OpenSpec drafting text. These are narrow exceptions to the
+  original file/capability scope required by the feasibility review: restore only
+  the authorized sizing passages before checking the original digest, preserving
+  all unrelated prompt bytes and routing assertions.
 
 Implementation scope is limited to `specloop/propose.py`, `specloop/critic.py`,
 the size/impossibility clarification in `specloop/feasibility.py`,
 `tests/test_specloop_task_sizing.py`, `tests/test_specloop_critic_task_risk.py`,
 `tests/test_speckit_drafting.py`, `tests/test_specloop_propose.py`,
+`tests/test_spec_format.py` solely for the named drafting-prompt hash migration,
 `docs/specloop/speckit.md`, and any passage of `README.md`, `KNOWN-LIMITATIONS.md`
 or `docs/specloop/README.md` made false by this change. This draft writes only
-this change directory. The three capabilities below are represented by deltas
+this change directory. The four capabilities below are represented by deltas
 here; implementing agents do not edit the frozen `openspec/**` tree. The existing
 harness Finish/archive flow later incorporates those approved deltas into the
-three named consolidated specifications under its normal completion gates.
+three originally named consolidated specifications and
+`openspec/specs/spec-format/spec.md` under its normal completion gates. The latter
+exception changes only prompt compatibility for this policy migration.
 
 Out of scope: size estimators, telemetry, configuration or enforcement machinery;
 agent adapters, session timeouts, turn limits, runtime task splitting, seal limits,
 verification/review/evidence gates, native parser grammar, templates, constitution,
-daemon scheduling and attention UI. No other `openspec/specs/**` capability changes.
+daemon scheduling and attention UI. No other `openspec/specs/**` capability changes
+beyond the three original capabilities and the narrow `spec-format` exception.
 
 ## Capabilities
 
@@ -67,6 +77,9 @@ daemon scheduling and attention UI. No other `openspec/specs/**` capability chan
   the size guidance and feasibility clarification.
 - **specloop-documentation** (modified): synchronize sizing and native authoring
   guidance and distinguish offline evidence from pending live quality observations.
+- **spec-format** (modified): qualify **Engine routing compatibility** only for
+  this drafting/review policy migration and require narrow prompt-hash migration;
+  preserve routing, parsing, publication, recovery and exact build-prompt contracts.
 
 Issue 2 shares `specloop/propose.py` and documentation and should follow this
 change. There is no direct overlap with #117's named attention files.

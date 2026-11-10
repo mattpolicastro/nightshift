@@ -27,6 +27,13 @@ No AGENTS.md was found in the checkout or its ancestors. The current protected
 requirements include hard sizing and prompt-byte promises that this change must
 explicitly modify; all unrelated requirements remain in force.
 
+Two additional compatibility owners must migrate with the drafting prompt:
+`tests/test_spec_format.py:616–622` hashes the entire rendered OpenSpec prompt,
+and `spec-format`'s **Engine routing compatibility** independently requires its
+original text. Changing only `spec-drafting` leaves that guarantee in force.
+This revision explicitly includes the named hash test and a `spec-format` delta
+as narrow exceptions to the original scope; neither needs runtime adapter edits.
+
 ## Goals / Non-Goals
 
 Make task boundaries reflect cohesion, verification and risk; retain coupled code
@@ -112,7 +119,8 @@ Consolidation remains the existing harness completion operation:
 `specloop/openspec.py:archive`, which invokes OpenSpec archive after completion
 gates. That flow applies these deltas to `openspec/specs/spec-drafting/spec.md`,
 `openspec/specs/spec-critic/spec.md` and
-`openspec/specs/specloop-documentation/spec.md`. No implementation task runs
+`openspec/specs/specloop-documentation/spec.md`, plus the narrow compatibility
+migration in `openspec/specs/spec-format/spec.md`. No implementation task runs
 archive, changes a manifest, relaxes a frozen path or adds another lifecycle step.
 The retained deltas explicitly authorize the changed guarantees before archival;
 all unmodified guarantees remain in force throughout implementation.
@@ -125,7 +133,15 @@ estimated-size guidance and amend **Native feasibility and critic context** only
 to qualify its OpenSpec prompt-byte promise. Count requirements remain intact.
 In documentation, modify **Task sizing guidance** and **Native drafting guidance**,
 including the latter's obsolete blanket ban on changes to OpenSpec drafting prose.
-No requirements are removed and no other capability is changed.
+In `spec-format`, modify the complete **Engine routing compatibility** requirement,
+retaining all four existing scenarios and their identities. Qualify each promise
+of unchanged/original OpenSpec prompt text only for the cohesive-task sizing
+guidance, dependent ceiling wording, explicit no-padding guidance, advisory-size
+critic guidance and feasibility size clarification. The discovery-base exception
+still cannot change prompts; this policy migration is a separate named exception.
+Routing, root confinement, parsing, shared exclusions, command arguments,
+publication, recovery, state, build prompts and all other prompt bytes stay
+protected. No requirements are removed and no other capability is changed.
 
 Migrate only affected 300-line/ceiling assertions and their replacement sizing
 clauses in `tests/test_specloop_task_sizing.py`,
@@ -139,6 +155,26 @@ new clause occurs exactly once, removing only that exact addition in the test,
 and hashing the remaining legacy prompt bytes. This narrow migration keeps every
 unaffected byte protected; do not broadly normalize prose or delete hash checks.
 Preserve native checklist composition assertions and all build-prompt hashes.
+
+Task 1.1 also migrates only
+`tests/test_spec_format.py::test_drafting_prompt_retains_exact_bytes` and its
+test-local literals, preserving its name, scenario markers and rendering inputs.
+For each changed OpenSpec sizing passage, record the exact old and new literal
+text in that test; assert the new passage occurs exactly once and the obsolete
+passage is absent, then replace the new passage with its old counterpart in a
+test-local copy. Hash the reconstructed complete prompt against the retained
+`42095800fc5d9f88e7e8e971d48b90efe0c1269a291524178baffcdb7b463ec1`
+digest. Limit these substitutions to the task-sizing, grouping/splitting,
+documentation-size and six-task recommendation passages, leaving the rich-text
+rule and coverage clauses outside the substitutions. Additions without an old
+counterpart map to the empty string. Missing or duplicate new literals fail;
+there is no semantic Markdown parsing, broad section removal or whitespace
+normalization. New prompt-contract assertions check the replacement policy.
+Do not replace the legacy digest with an unchecked new snapshot, skip the test,
+relax its markers or modify other assertions in `tests/test_spec_format.py`.
+This preserves exact-byte coverage outside the approved migration and makes
+the mandatory full-suite verification achievable in the same task as the prompt
+edit. Run that module with task 1.1's drafting tests and again in final acceptance.
 
 Add the following tests with existing fixtures and scripted agents, alongside
 the code they exercise; parameterize the applicable contracts across both formats:
@@ -186,7 +222,8 @@ Use three tasks in one section: drafting prompts with their tests; review prompt
 with their tests; affected operator docs with their assertions. The corresponding
 spec deltas are already part of this draft, not writes assigned to these tasks.
 Each task is planned at about 300 changed lines or less,
-using current fixtures and short prompt edits; there is no need to pad to six or
+including task 1.1's short test-local hash migration, using current fixtures and
+short prompt edits; there is no need to pad to six or
 create a new mechanism. These estimates describe this implementation plan, not
 an enforcement mechanism for future drafts. Changes to the same test file across
 tasks concern separate drafting, review or documentation contracts and land in
