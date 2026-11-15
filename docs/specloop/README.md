@@ -921,6 +921,8 @@ stage hand-offs, lifecycle, and shared-process blocking.
 
 `[roles] gate` can name a different model. A Claude gate reviewer needs
 `CLAUDE_CODE_OAUTH_TOKEN` in `~/.config/specloop/env`, which is your call.
+The manifest's `env_file` (that file by default) reaches every session the
+harness starts, drafting, feasibility and the spec critic included.
 Treat the agent gate as a net, not a proof, until it has been measured on
 seeded integration defects.
 
