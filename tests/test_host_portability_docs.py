@@ -9,7 +9,8 @@ from urllib.parse import unquote, urlsplit
 
 import pytest
 
-from nightshift import config
+from nightshift import cli, config
+from specloop import cli as build_cli
 from nightshift.host_paths import host_path, tool_path
 from doc_commands import parse_command
 from test_specloop_documentation_integrity import LINK, heading_ids
@@ -140,12 +141,12 @@ def test_fixed_bootstrap_commands_and_guarded_rollout_are_explicit():
     guards = re.findall(r'if \[ -z "\$\{(\w+):-\}" \]; then', wrapper)
     assert set(guards) == {"CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN"} <= literals
     assert "~/.config/nightshift/env" in literals
-    # The documented commands must agree with the unchanged, frozen wrappers.
+    # The documented commands must agree with the actual wrappers.
     for name, command, path in (
-        ("nightshift-daemon", "/opt/homebrew/bin/uv run nightshift run",
+        ("nightshift-daemon", "/opt/homebrew/bin/uv run nightshift daemon run",
          "/opt/homebrew/bin:$HOME/n/bin:$PATH"),
-        ("specloop-serve", "/opt/homebrew/bin/uv run --no-sync specloop serve",
-         "$HOME/n/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"),
+        ("specloop-serve", "/opt/homebrew/bin/uv run --no-sync nightshift serve",
+         "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"),
     ):
         wrapper = read(f"bin/{name}")
         assert f"exec {command}" in wrapper and f"`{command}`" in limits
@@ -157,6 +158,9 @@ def test_fixed_bootstrap_commands_and_guarded_rollout_are_explicit():
         if argv[:1] == ["--no-sync"]:
             argv = argv[1:]
         parsed, = parse_command(shlex.join(argv))
-        assert parsed.cmd == ("run" if name == "nightshift-daemon" else "serve")
+        if name == "nightshift-daemon":
+            assert parsed.handler is cli._daemon_command and parsed.command == "run"
+        else:
+            assert parsed.handler is build_cli.dispatch and parsed.cmd == "serve"
         assert f'export PATH="{path}"' in wrapper and f"`{path}`" in limits
         assert 'cd "$HOME/Projects/nightshift"' in wrapper

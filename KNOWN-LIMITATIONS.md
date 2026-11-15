@@ -447,23 +447,22 @@ Other upstream archive hashes do not establish host support. Preflight refuses
 wrong installed-file hashes or versions before readiness; runtime checks the
 version and never acquires packages or falls back to `npx`.
 
-**Frozen service wrappers: portability deferred.** `bin/**` is frozen without
-exceptions, as are `launchd/**` and wrapper/plist comments. The unchanged wrappers
-retain these bootstrap commands:
+**Frozen service wrappers: portability deferred.** `bin/**` is frozen to agents
+without exceptions, as are `launchd/**` and wrapper/plist comments; wrapper edits
+are hand-made direct PRs. The wrappers use these bootstrap commands:
 
 | Wrapper | Checkout | Executable and arguments | PATH |
 | --- | --- | --- | --- |
-| `bin/nightshift-daemon` | `$HOME/Projects/nightshift` | `/opt/homebrew/bin/uv run nightshift run` | `/opt/homebrew/bin:$HOME/n/bin:$PATH` (prepends to incoming PATH) |
-| `bin/specloop-serve` | `$HOME/Projects/nightshift` | `/opt/homebrew/bin/uv run --no-sync specloop serve` | `$HOME/n/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin` |
+| `bin/nightshift-daemon` | `$HOME/Projects/nightshift` | `/opt/homebrew/bin/uv run nightshift daemon run` | `/opt/homebrew/bin:$HOME/n/bin:$PATH` (prepends to incoming PATH) |
+| `bin/specloop-serve` | `$HOME/Projects/nightshift` | `/opt/homebrew/bin/uv run --no-sync nightshift serve` | `/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin` |
 
-The daemon's bare `nightshift run` is the sole implicit daemon compatibility
-form; the supervisor's `specloop serve` uses the one-release alias. Neither
-requires a wrapper edit for this rollout. The supervisor retains its `~/n/bin`
-prefix and stale OpenSpec/Node comment. Their exact cleanup remains deferred on
-[issue #184](https://github.com/mattpolicastro/nightshift/issues/184)'s ledger.
-Absolute executable selection plus the [Mac Studio cut-over](docs/deploy.md#openspec-rollout-checks)
-establish backend dependency removal; no separate supervisor-without-`~/n/bin`
-experiment is required.
+Both wrappers call the canonical CLI. Bare `nightshift run` and the `specloop`
+alias still parse for one release; [issue #115](https://github.com/mattpolicastro/nightshift/issues/115)'s
+second step removes them. The supervisor's PATH no longer includes `~/n/bin`:
+absolute executable selection plus the [Mac Studio cut-over](docs/deploy.md#openspec-rollout-checks)
+removed its OpenSpec dependency, and agent sessions and verify steps build their
+own PATH. The daemon keeps `~/n/bin` because its startup guard still requires
+`pnpm` and `node`.
 
 Neither wrapper consumes the new settings for its own bootstrap. Environment
 settings do not relocate these commands; changing a plist's wrapper pathname

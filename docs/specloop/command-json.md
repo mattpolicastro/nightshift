@@ -4,7 +4,7 @@ Use `nightshift status` for builds and `nightshift daemon status` for daemon
 liveness/jobs. `nightshift run <change>`, `nightshift pause <change>` and
 `nightshift resume <change>` control builds; `nightshift daemon run`,
 `nightshift daemon pause` and `nightshift daemon resume` control the independent
-daemon. Bare `nightshift run` remains its frozen wrapper's compatibility form.
+daemon. Bare `nightshift run` still parses as a one-release compatibility form.
 The `specloop` CLI/module is a one-release alias with a stderr rename notice;
 daemon subprocess callers still use it. The operator examples below use the
 canonical dispatcher with unchanged JSON schemas and enrollment values.
