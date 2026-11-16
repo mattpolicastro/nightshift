@@ -70,21 +70,29 @@ MODIFIED or REMOVED delta.
   with one or more `#### Scenario: <short name>` blocks written as `- **WHEN** ...`
   / `- **THEN** ...` bullets. Four `#` for scenarios, exactly.
 - `tasks.md` with `## N. Title` sections and `- [ ] N.M ...` tasks.
-  - Each task is a single session's work: about 300 changed lines at most, one
-    concern.
+  - Each task is one coherent, independently verifiable concern that fits a
+    single session. Keep coupled production changes and their tests together,
+    even across files. About 600 changed lines per task, counting production
+    code, tests and documentation together, is a soft planning guideline, never
+    a target or an automatic rejection threshold.
   - When a task must recognize structure in Markdown, HTML or other rich text (a
     checklist, a heading, a fenced example), specify a deterministic line rule and
     which way ambiguity resolves, choosing the safe direction (refuse or block).
     Never require semantic parsing of fences, HTML blocks or indentation: reviewers
     find a new edge case every round and the task never converges.
-  - Combine work touching the same file for one concern into one task within
-    that ceiling. Split when distinct concerns, dependencies or the ceiling
-    require it, not by document heading.
+  - Combine work touching the same file for one concern into one task. Split at
+    independent behavior, migration or recovery boundaries, distinct
+    verification strategies or substantial uncertainty, in dependency order,
+    not by document heading. Above roughly 600 changed lines prefer a safe
+    split; if splitting would break cohesion, keep the task and record its
+    boundary and verification rationale in design.md. Estimated lines or task
+    count alone never require another issue or pull request.
   - For documentation-only changes (documentation updates without changing
-    executable behavior), use one or two tasks in one section, subject to the
-    same single-session task ceiling.
+    executable behavior), use one or two tasks in one section, each coherent
+    single-session work under the same soft guideline.
   - Most changes should use six tasks or fewer and as few sections as
-    dependencies allow. Six is a normal target, not a hard rejection limit.
+    dependencies allow. Six is a recommendation, not a target or a hard
+    rejection limit: use fewer tasks when they suffice and never pad to six.
     Every task incurs a full implement, verify and review cycle; every section
     incurs an evidence gate. Size boundaries by risk and dependencies to avoid
     paying those costs for unnecessary splits.
@@ -136,13 +144,27 @@ or the constitution. Report missing templates as an actionable prerequisite.
   (source order for ties). Use native T001 labels, optional positional [P], and
   positional [USk] for every story task. Cover every scenario with a task;
   setup tasks need no invented story citations.
-- Each task has one concern and about 300 changed lines at most. Combine related
-  same-file work within that ceiling, order dependencies, and put tests with code.
-  Each task is a single session; the ceiling applies per task, not per story or
-  feature. Split when distinct concerns, dependencies or that ceiling require
-  it, never merely by document heading.
+- Keep detail proportional to observable behavior: write only the user stories,
+  requirements and acceptance scenarios needed to specify the feature and its
+  meaningful failure cases. Do not invent optional subsystems, duplicate
+  requirements or implementation-level requirements to fill template sections.
+  Required sections, phases, scenario identities and coverage still apply, and
+  genuinely missing intent is still a clarification question, never a guess.
+- Each task is one coherent, independently verifiable concern and a single
+  session. Combine related same-file work, order dependencies, and put
+  tests with code, keeping coupled production and test changes together even
+  across files. About 600 changed lines per task, counting production code, tests and
+  documentation together, is a soft planning guideline, never a target or an
+  automatic rejection threshold; it applies per task, not per story or feature.
+  Split at independent behavior, migration or recovery boundaries, distinct
+  verification strategies or substantial uncertainty, never merely by document
+  heading. Above roughly 600 changed lines prefer a safe split; if splitting
+  would break cohesion, keep the task and record its boundary and verification
+  rationale in plan.md. Estimated lines or task count alone never require
+  another issue or pull request.
   Target six tasks or fewer per user story. Six is a recommendation, not a hard
-  rejection limit: three stories with five tasks each satisfy it.
+  rejection limit: use fewer tasks when they suffice, never pad a story to six,
+  and three stories with five tasks each satisfy it.
   For documentation-only work (documentation updates without changing executable
   behavior), target one or two tasks per story within the required story phases.
   Minimize unnecessary splits: each task incurs a full implement, verify and

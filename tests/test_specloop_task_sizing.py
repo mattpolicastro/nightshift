@@ -8,6 +8,7 @@ import pytest
 
 from specloop import propose, tasks
 from test_specloop_documentation_integrity import LINK, heading_ids
+from test_specloop_propose import GOOD, M, drafter, source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,11 +31,13 @@ def assert_clause(clauses, expected):
 @pytest.mark.scenario("spec-drafting/risk-based-task-sizing/related-work-shares-a-task")
 def test_drafter_rules_size_tasks_by_risk(task_rules):
     assert_clause(task_rules,
-        "Combine work touching the same file for one concern into one task within that ceiling. "
-        "Split when distinct concerns, dependencies or the ceiling require it, not by document heading.")
+        "Keep coupled production changes and their tests together, even across files.")
+    assert_clause(task_rules,
+        "Combine work touching the same file for one concern into one task. Split at independent behavior")
     assert_clause(task_rules,
         "Most changes should use six tasks or fewer and as few sections as dependencies allow. "
-        "Six is a normal target, not a hard rejection limit.")
+        "Six is a recommendation, not a target or a hard rejection limit: "
+        "use fewer tasks when they suffice and never pad to six.")
     assert_clause(task_rules,
         "Every task incurs a full implement, verify and review cycle; every section incurs an "
         "evidence gate. Size boundaries by risk and dependencies to avoid paying those costs "
@@ -44,8 +47,9 @@ def test_drafter_rules_size_tasks_by_risk(task_rules):
 @pytest.mark.scenario("spec-drafting/risk-based-task-sizing/necessary-boundaries-remain")
 def test_drafter_keeps_task_boundaries_and_coverage(task_rules):
     for clause in (
-        "Each task is a single session's work: about 300 changed lines at most, one concern.",
-        "Split when distinct concerns, dependencies or the ceiling require it",
+        "Each task is one coherent, independently verifiable concern that fits a single session.",
+        "Split at independent behavior, migration or recovery boundaries, distinct verification "
+        "strategies or substantial uncertainty, in dependency order",
         "Each task names the scenario IDs it covers, in backticks, as "
         "`capability/requirement-slug/scenario-slug`. A slug is the name lowercased, "
         "with every run of other characters replaced by `-`.",
@@ -62,9 +66,53 @@ def test_drafter_keeps_task_boundaries_and_coverage(task_rules):
 def test_drafter_keeps_documentation_plans_compact(task_rules):
     assert_clause(task_rules,
         "For documentation-only changes (documentation updates without changing executable behavior), "
-        "use one or two tasks in one section, subject to the same single-session task ceiling.")
-    assert_clause(task_rules,
-        "Split when distinct concerns, dependencies or the ceiling require it, not by document heading.")
+        "use one or two tasks in one section, each coherent single-session work under the same soft guideline.")
+    assert_clause(task_rules, "in dependency order, not by document heading.")
+
+
+@pytest.mark.scenario("spec-drafting/risk-based-task-sizing/cohesive-task-exceeds-old-ceiling")
+@pytest.mark.scenario("spec-drafting/risk-based-task-sizing/related-work-shares-a-task")
+def test_cohesive_task_above_300_lines_is_not_rejected_for_size(source, tmp_path):
+    body = ("## 1. Sign\n\n- [ ] 1.1 Add sign in `calc.py` with its tests and README section, one concern "
+            "estimated at 450 changed lines (production, tests and documentation together), "
+            "covering `calc/sign/zero` and `calc/sign/negative`\n")
+    agent = drafter(body)
+    d = propose.draft(source, "main", "sign-helpers", "add sign", [], M, tmp_path / "out", agent=agent)
+    writes = [c for c in agent.calls if c.access == "write"]
+    reviews = [c for c in agent.calls if c.access == "read"]
+    assert len(writes) == 1 and len(reviews) == 2
+    assert d.commit and not d.problems and not d.contradictions and not d.risks
+    prompt = " ".join(writes[0].prompt.split())
+    assert "About 600 changed lines per task, counting production code, tests and documentation together, " \
+        "is a soft planning guideline, never a target or an automatic rejection threshold." in prompt
+    assert not re.search(r"\d+ changed lines at most", prompt)
+
+
+@pytest.mark.scenario("spec-drafting/risk-based-task-sizing/necessary-boundaries-remain")
+@pytest.mark.scenario("spec-drafting/risk-based-task-sizing/above-guideline-retains-rationale")
+@pytest.mark.scenario("spec-drafting/risk-based-task-sizing/related-work-shares-a-task")
+@pytest.mark.parametrize("fmt", ["openspec", "speckit"])
+def test_sizing_guidance_preserves_risk_boundaries_and_session_limits(source, tmp_path, fmt):
+    template, design = (propose.SPECKIT_PROMPT, "plan.md") if fmt == "speckit" else (propose.PROMPT, "design.md")
+    prompt = " ".join(template.format(change="c", drafter_root="root/", idea="i", sources="",
+                                      in_flight="", feedback="").split())
+    for clause in (
+        "Split at independent behavior, migration or recovery boundaries, distinct verification "
+        "strategies or substantial uncertainty",
+        "Above roughly 600 changed lines prefer a safe split; if splitting would break cohesion, keep the task "
+        f"and record its boundary and verification rationale in {design}.",
+        "Estimated lines or task count alone never require another issue or pull request.",
+        "use fewer tasks when they suffice", "never pad", "single session", "order",
+        "review cycle", "evidence gate",
+    ):
+        assert clause in prompt, clause
+    assert not re.search(r"\d+ changed lines at most|within (?:that|the) ceiling", prompt)
+    # Execution budgets are untouched: manifest limits for drafting, 20 minutes for each review.
+    agent = drafter(GOOD)
+    assert propose.draft(source, "main", "sign-helpers", "add sign", [], M, tmp_path / "out", agent=agent).commit
+    for call in agent.calls:
+        wall = M.implement_minutes * 60 if call.access == "write" else 20 * 60
+        assert (call.wall_seconds, call.idle_seconds) == (wall, M.idle_minutes * 60)
 
 
 @pytest.fixture

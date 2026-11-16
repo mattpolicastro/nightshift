@@ -613,10 +613,36 @@ def test_no_direct_openspec_path_literals_outside_adapter():
 @pytest.mark.scenario("spec-format/engine-routing-compatibility/consumers-contain-no-direct-format-operations")
 @pytest.mark.scenario("spec-format/engine-routing-compatibility/drafting-and-revision-retain-behavior")
 @pytest.mark.scenario("spec-drafting/native-feature-drafting/openspec-prompt-remains-unchanged")
+@pytest.mark.scenario("spec-format/scoped-prompt-compatibility-migration/drafting-hash-preserves-unrelated-bytes")
 def test_drafting_prompt_retains_exact_bytes():
     rendered = propose.PROMPT.format(
         change="sample-change", drafter_root=spec_format.OPENSPEC.drafter_root("sample-change"),
         idea="An idea\nwith details", sources="- README.md", in_flight="", feedback="")
+    # The approved #200 sizing migration: exact (old, new) passages, restored before hashing.
+    sizing = (
+        ("Each task is a single session's work: about 300 changed lines at most, one\n    concern.",
+         "Each task is one coherent, independently verifiable concern that fits a\n"
+         "    single session. Keep coupled production changes and their tests together,\n"
+         "    even across files. About 600 changed lines per task, counting production\n"
+         "    code, tests and documentation together, is a soft planning guideline, never\n"
+         "    a target or an automatic rejection threshold."),
+        ("one task within\n    that ceiling. Split when distinct concerns, dependencies or the ceiling\n"
+         "    require it, not by document heading.",
+         "one task. Split at\n    independent behavior, migration or recovery boundaries, distinct\n"
+         "    verification strategies or substantial uncertainty, in dependency order,\n"
+         "    not by document heading. Above roughly 600 changed lines prefer a safe\n"
+         "    split; if splitting would break cohesion, keep the task and record its\n"
+         "    boundary and verification rationale in design.md. Estimated lines or task\n"
+         "    count alone never require another issue or pull request."),
+        ("subject to the\n    same single-session task ceiling.",
+         "each coherent\n    single-session work under the same soft guideline."),
+        ("Six is a normal target, not a hard rejection limit.",
+         "Six is a recommendation, not a target or a hard\n"
+         "    rejection limit: use fewer tasks when they suffice and never pad to six."),
+    )
+    for old, new in sizing:
+        assert rendered.count(new) == 1 and old not in rendered, new
+        rendered = rendered.replace(new, old)
     # SHA-256 of the complete rendered pre-extraction prompt with these inputs.
     assert hashlib.sha256(rendered.encode()).hexdigest() == (
         "42095800fc5d9f88e7e8e971d48b90efe0c1269a291524178baffcdb7b463ec1")

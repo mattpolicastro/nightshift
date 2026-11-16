@@ -65,7 +65,7 @@ def test_speckit_prompt_names_house_rules(feature, tmp_path):
     for token in (ROOT, *[f".specify/templates/{name}-template.md" for name in ("spec", "plan", "tasks")],
                   ".specify/memory/constitution.md", "ASn", f"`{CHANGE}/us<k>/as<n>`", "[USk]",
                   "Setup/Foundational", "## Phase N: User Story K", "numeric priority", "source order",
-                  "300 changed lines", "tests with code", "plan.md under `## Human checks`", "at most three",
+                  "soft planning guideline", "tests with code", "plan.md under `## Human checks`", "at most three",
                   "revise", "in place", "committed task/scenario identities", "unrelated content",
                   "conflicting target identities", "without writing elsewhere", "Complete records are immutable",
                   "new feature", "## Assumptions", "Do not invoke `specify`", "missing templates"):
@@ -78,6 +78,28 @@ def test_speckit_prompt_names_house_rules(feature, tmp_path):
     assert git(d.work, "diff", "--name-only", "HEAD^", "HEAD").decode().splitlines() == [ROOT + "plan.md"]
     assert git(d.work, "show", "-s", "--format=%P", "HEAD") == git(feature, "rev-parse", "HEAD")
     assert (feature / ROOT / "plan.md").read_bytes() != b"Revised plan\n"
+
+
+@pytest.mark.scenario("spec-drafting/proportional-native-detail/small-feature-has-only-necessary-detail")
+@pytest.mark.scenario("spec-drafting/proportional-native-detail/smaller-plan-retains-meaningful-failures")
+@pytest.mark.scenario("spec-drafting/native-feature-drafting/native-prompt-names-house-rules")
+def test_small_native_feature_prompt_requires_proportional_detail(feature, tmp_path):
+    d, calls = draft(feature, tmp_path, lambda root: (root / "plan.md").write_text("Small plan\n"))
+    assert d.commit and len(calls) == 1
+    prompt = " ".join(calls[0].prompt.split())
+    for clause in (
+        "Keep detail proportional to observable behavior: write only the user stories, requirements and "
+        "acceptance scenarios needed to specify the feature and its meaningful failure cases.",
+        "Do not invent optional subsystems, duplicate requirements or implementation-level requirements "
+        "to fill template sections.",
+        "Required sections, phases, scenario identities and coverage still apply, and genuinely missing "
+        "intent is still a clarification question, never a guess.",
+        "Produce spec.md, plan.md and tasks.md from those scaffolds", "Setup/Foundational",
+        "ASn-labelled acceptance scenarios", f"`{CHANGE}/us<k>/as<n>`", "Cover every scenario with a task",
+        "at most three `[NEEDS CLARIFICATION: ...]` questions", "preserving committed task/scenario identities",
+        "Complete records are immutable",
+    ):
+        assert clause in prompt, clause
 
 
 @pytest.mark.scenario("spec-drafting/risk-based-task-sizing/related-work-shares-a-task")
@@ -93,15 +115,17 @@ def test_speckit_sizing_guidance(format):
         change=CHANGE, drafter_root=spec_format.get(replace(M, format=format)).drafter_root(CHANGE),
         idea="Document three stories", sources="", in_flight="", feedback="",
     ).split())
-    for clause in ("300 changed lines at most", "one concern", "single session",
-                   "Split when distinct concerns, dependencies or", "review cycle",
+    for clause in ("About 600 changed lines per task, counting production code, tests and documentation together",
+                   "independently verifiable concern", "single session",
+                   "Split at independent behavior", "review cycle",
                    "evidence gate", "document heading"):
         assert clause in prompt
     if format == "speckit":
         for clause in (
-            "Combine related same-file work within that ceiling, order dependencies, and put tests with code.",
-            "the ceiling applies per task, not per story or feature",
+            "Combine related same-file work, order dependencies, and put tests with code",
+            "it applies per task, not per story or feature",
             "Target six tasks or fewer per user story. Six is a recommendation, not a hard rejection limit",
+            "never pad a story to six",
             "three stories with five tasks each satisfy it",
             "documentation-only work (documentation updates without changing executable behavior)",
             "one or two tasks per story within the required story phases",
@@ -127,9 +151,9 @@ def test_speckit_sizing_guidance(format):
         assert "speckit.md#story-sizing-examples" in doc.local_links(doc.GUIDE, guide)
     else:
         for clause in (
-            "Combine work touching the same file for one concern into one task within that ceiling",
+            "Combine work touching the same file for one concern into one task",
             "six tasks or fewer and as few sections as dependencies allow",
-            "Six is a normal target, not a hard rejection limit",
+            "Six is a recommendation, not a target or a hard rejection limit", "never pad to six",
             "one or two tasks in one section", "Every scenario must be covered by at least one task",
             "Order tasks so each builds on landed work. Put tests with the code they test",
             "describe it in the design",
