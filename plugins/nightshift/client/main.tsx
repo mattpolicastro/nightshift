@@ -1,7 +1,7 @@
 import { openExternalUrl, type PluginSurfaceProps, useRpc } from '@getpaseo/plugin/client';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, Text, View } from 'react-native';
-import { attention, type Snapshot, type Task } from '../shared/attention';
+import { attention, type AttentionSnapshot, type Escalation } from '../shared/attention';
 import { FactorySection } from './factory';
 
 function date(value: string | null) {
@@ -14,8 +14,9 @@ export function MainSurface(props: PluginSurfaceProps) {
 
 function AttentionSurface({ theme, host, layout, navigation }: PluginSurfaceProps) {
   const rpc = useRpc(attention);
-  const [data, setData] = useState<Snapshot | null>(null);
+  const [data, setData] = useState<AttentionSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const alive = useRef(false);
   const running = useRef(false);
@@ -50,33 +51,40 @@ function AttentionSurface({ theme, host, layout, navigation }: PluginSurfaceProp
     return () => { alive.current = false; clearInterval(timer); subscription.remove(); };
   }, [refresh, host.id]);
 
-  function row(task: Task) {
+  const warn = { color: colors.statusWarning, fontSize: 12 };
+  function row(item: Escalation) {
+    const cold = item.summary === null && item.summaryStale;
     return (
-      <View key={task.key} style={{ padding: 16, gap: 8, borderWidth: 1, borderColor: colors.border, borderRadius: 12, backgroundColor: colors.surface1 }}>
+      <View key={item.key} style={{ padding: 16, gap: 8, borderWidth: 1, borderColor: colors.border, borderRadius: 12, backgroundColor: colors.surface1 }}>
         <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
-          {task.repo} #{task.issue}{task.repo.endsWith('-sandbox') ? ' · Sandbox' : ''}
+          {item.kind === 'pr' ? 'PR' : 'Issue'} · {item.repo} #{item.number}{item.repo.endsWith('-sandbox') ? ' · Sandbox' : ''}
         </Text>
-        <Text style={{ color: colors.foreground, fontSize: 17, fontWeight: '600' }}>{task.title}</Text>
-        {task.summary && task.summary !== task.title ? <Text style={{ color: colors.foreground }}>{task.summary}</Text> : null}
-        <Text style={{ color: task.stale ? colors.statusWarning : colors.foregroundMuted, fontSize: 12 }}>
-          {task.stale ? 'Stale · ' : ''}Last checked: {date(task.checkedAt)}
-        </Text>
-        <Pressable accessibilityRole="link" accessibilityLabel={`Open ${task.title} on GitHub`}
-          onPress={() => { void openExternalUrl(task.url).catch(() => setError('Could not open GitHub.')); }}
+        <Text style={{ color: colors.foreground, fontSize: 17, fontWeight: '600' }}>{item.title}</Text>
+        {item.summary !== null ? <Text style={{ color: colors.foreground }}>{item.summary}</Text> : null}
+        {cold ? <Text style={{ color: colors.foregroundMuted }}>Summary unavailable</Text> : null}
+        {item.summaryStale ? <Text style={warn}>
+          {cold ? '' : 'Stale summary · '}{item.summaryError || 'Summary could not be checked.'} · Summary checked: {date(item.summaryCheckedAt)}
+        </Text> : null}
+        <Pressable accessibilityRole="link" accessibilityLabel={`Open ${item.title} on GitHub`}
+          onPress={() => { setLinkError(null); void openExternalUrl(item.url).catch(() => { if (alive.current) setLinkError('Could not open GitHub.'); }); }}
           style={{ paddingVertical: 8, alignSelf: 'flex-start' }}>
           <Text style={{ color: colors.accent, fontWeight: '600' }}>Open on GitHub ↗</Text>
         </Pressable>
       </View>
     );
   }
-  const tasks = data?.tasks || [];
+  const repositories = data?.repositories || [];
+  const pauses = data?.pauses || [];
+  const count = repositories.reduce((total, repo) => total + repo.entries.length, 0);
+  const alerts = [...new Set([error, linkError, data?.error, data?.frontDoorError, data?.pausesError].filter((m): m is string => !!m))];
+  const empty = data && count === 0 && pauses.length === 0;
   return (
     <ScrollView style={{ flex: 1, backgroundColor: colors.surface0 }} contentContainerStyle={{ padding: layout.compact ? 16 : 28, gap: 20 }}>
       <View style={{ gap: 8 }}>
         <Text style={{ color: colors.foregroundMuted }}>{host.label}</Text>
         <Text accessibilityRole="header" style={{ color: colors.foreground, fontSize: 28, fontWeight: '700' }}>What needs you</Text>
         <Text style={{ color: colors.foregroundMuted }}>
-          {data ? `${tasks.length} outstanding ${tasks.length === 1 ? 'task' : 'tasks'}` : 'Loading Nightshift…'}
+          {data ? `${count} open ${count === 1 ? 'escalation' : 'escalations'}` : 'Loading Nightshift…'}
           {data?.cached ? ' · Cached' : ''}
         </Text>
         <Pressable accessibilityRole="button" accessibilityLabel="Refresh Nightshift" disabled={busy}
@@ -84,21 +92,30 @@ function AttentionSurface({ theme, host, layout, navigation }: PluginSurfaceProp
           <Text style={{ color: colors.accent, fontWeight: '600' }}>{busy ? 'Checking…' : 'Refresh'}</Text>
         </Pressable>
       </View>
-      {error || data?.error ? <Text accessibilityRole="alert" style={{ color: colors.statusWarning }}>{error || data?.error}</Text> : null}
-      {data && tasks.length === 0 ? <Text style={{ color: colors.foreground }}>No recorded tasks need your attention.</Text> : null}
-      {(['needs_decision', 'awaiting_merge'] as const).map(state => {
-        const group = tasks.filter(task => task.state === state);
-        return group.length ? <View key={state} style={{ gap: 12 }}>
-          <Text accessibilityRole="header" style={{ color: colors.foreground, fontSize: 20, fontWeight: '600' }}>
-            {state === 'needs_decision' ? 'Needs a decision' : 'Awaiting merge'} · {group.length}
-          </Text>
-          {group.map(row)}
-        </View> : null;
-      })}
-      {data?.stale.filter(task => !tasks.some(t => t.key === task.key)).map(task => (
-        <Text key={task.key} style={{ color: colors.statusWarning }}>Could not recheck {task.key}. Last known: {task.state.replaceAll('_', ' ')} · {date(task.checkedAt)}</Text>
+      {alerts.map(message => <Text key={message} accessibilityRole="alert" style={{ color: colors.statusWarning }}>{message}</Text>)}
+      {empty ? <Text style={{ color: colors.foreground }}>
+        {data.complete ? 'Nothing needs your attention.'
+          : data.cached ? 'Nothing listed in cached data. Not yet confirmed.'
+          : 'Nothing listed, but some sources could not be checked.'}
+      </Text> : null}
+      {repositories.filter(repo => repo.entries.length || repo.stale || repo.error).map(repo => (
+        <View key={repo.repo} style={{ gap: 12 }}>
+          <Text accessibilityRole="header" style={{ color: colors.foreground, fontSize: 20, fontWeight: '600' }}>{repo.repo}</Text>
+          {repo.stale || repo.error ? <Text style={warn}>
+            Stale · {repo.error || 'Could not be fully checked.'} · Listing checked: {date(repo.checkedAt)}
+          </Text> : null}
+          {repo.entries.map(row)}
+        </View>
       ))}
-      {data ? <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>List loaded: {date(data.fetchedAt)} · Opening a task does not resolve it.</Text> : null}
+      {pauses.length ? <View style={{ gap: 8 }}>
+        <Text accessibilityRole="header" style={{ color: colors.foreground, fontSize: 20, fontWeight: '600' }}>Paused builds</Text>
+        {pauses.map(pause => (
+          <Text key={pause.change} style={{ color: pause.stale ? colors.statusWarning : colors.foreground, flexShrink: 1 }}>
+            {pause.stale ? 'Stale · ' : ''}{pause.change} — {pause.reason} · See Factory below: {pause.change}
+          </Text>
+        ))}
+      </View> : null}
+      {data ? <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>List loaded: {date(data.fetchedAt)} · Opening an item does not resolve it.</Text> : null}
       <FactorySection theme={theme} host={host} navigation={navigation} />
     </ScrollView>
   );
