@@ -127,20 +127,38 @@ def drafting(guide):
     return " ".join(section.split())
 
 
+SIZE = re.compile(r"(\d[\d,]*) changed lines")
+ISSUE = "https://github.com/mattpolicastro/nightshift/issues/{}"
+
+
+def sizes(text):
+    return set(SIZE.findall(" ".join(text.split())))
+
+
 @pytest.mark.scenario("specloop-documentation/task-sizing-guidance/reader-sizes-a-plan")
 def test_guide_explains_sizing_and_preserves_proposal_stages(drafting):
+    # The documented line guideline is the one the drafter actually receives.
+    assert sizes(drafting) == sizes(propose.PROMPT) == {"600"}
+    links = {target for _, target in LINK.findall(drafting)}
+    assert {ISSUE.format(200), ISSUE.format(80), ISSUE.format(75), "#task-sizing-observation"} <= links
     for clause in (
-        "Size tasks by risk and dependencies: combine work touching the same file for one concern "
-        "within the single-session ceiling of about 300 changed lines.",
-        "Split when distinct concerns, dependencies or that ceiling require it.",
+        "Size tasks by cohesion, verification and risk: each task is one coherent, "
+        "independently verifiable concern for a single session.",
+        "keep coupled production changes with their tests even across files.",
+        "Split at independent behavior, migration or recovery boundaries, distinct verification "
+        "strategies or substantial uncertainty, keeping dependency order.",
+        "record the boundary and verification rationale in `design.md`.",
+        "Neither estimated lines nor task count alone requires another issue or PR",
         "Documentation-only changes update documentation without changing executable behavior; "
-        "use one or two tasks in one section within that ceiling, rather than splitting by document heading.",
+        "use one or two tasks in one section, rather than splitting by document heading.",
         "Most changes should use six tasks or fewer and as few sections as dependencies allow. "
-        "Six is a normal target, not a hard rejection limit.",
+        "Six is a recommendation, not a target or a hard rejection limit: fewer is fine, "
+        "and plans are never padded to six.",
         "Every task incurs a full implement, verify and review cycle; every section incurs an "
         "evidence gate, so unnecessary splits add overhead",
     ):
-        assert clause in drafting
+        assert clause in drafting, clause
+    assert not re.search(r"\d+ changed lines at most|within (?:that|the) (?:single-session )?ceiling", drafting)
     stages = (
         "1. validates and lints it;",
         "2. runs the feasibility review;",
@@ -193,3 +211,23 @@ def test_sizing_cites_tracking_issue_and_leaves_reader_checks_in_design(drafting
     assert implementation
     for task in implementation:
         assert not re.search(r"\bMatt\b|live-reference/ledger check|single readability pass", task.text)
+
+
+@pytest.mark.scenario("specloop-documentation/task-sizing-guidance/reader-distinguishes-guidance-from-limits")
+def test_operator_docs_match_advisory_size_contract(guide):
+    import test_speckit_build_docs as doc
+    from nightshift.specloop_job import COMMAND_TIMEOUT_SECONDS
+    from specloop import critic
+
+    expected = sizes(propose.PROMPT) | sizes(propose.SPECKIT_PROMPT) | sizes(critic.PROMPT) \
+        | sizes(critic.SPECKIT_PROMPT)
+    assert expected == {"600"}
+    for path, heading in ((doc.GUIDE, "### OpenSpec drafting"), (doc.GUIDE, "#### Draft and admit"),
+                          (doc.HOUSE, "## What the drafter produces")):
+        assert sizes(doc.passage(doc.read(path), heading)) == expected, (path, heading)
+    # No scoped operator document keeps a stale per-task line figure.
+    for path in ("README.md", "KNOWN-LIMITATIONS.md", doc.GUIDE, doc.HOUSE):
+        assert sizes(doc.read(path)) <= expected, path
+    # Documented reporting deadlines still match the daemon's budgets.
+    table = dict(re.findall(r"^\| `(\w+)` \| (\d+) \|$", guide, re.M))
+    assert {name: int(table[name]) for name in COMMAND_TIMEOUT_SECONDS} == COMMAND_TIMEOUT_SECONDS

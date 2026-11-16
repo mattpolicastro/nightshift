@@ -104,12 +104,22 @@ and backticked citations such as `042-add-a-gate/us1/as2`. Cover every scenario;
 setup tasks need no invented citations. Human-only work goes in `plan.md` under
 `## Human checks`, with one scenario citation per checklist item.
 
-Choose one concern per task within the unchanged ceiling of about 300 changed
-lines at most. Combine related same-file work, order dependencies and keep tests
-with code. Target six tasks or fewer per user story: every task incurs a review
-cycle and every phase an evidence gate. Documentation-only features normally use
-one or two tasks per story, preserving story phases rather than splitting by
-document heading. Six is advisory, not a rejection threshold.
+Write only the stories, requirements and acceptance scenarios needed for
+observable behavior and meaningful failures. Required sections remain, but do
+not invent optional subsystems or duplicate or implementation-level requirements.
+
+Make each task one coherent, independently verifiable concern for a single
+session. Combine related same-file work, order dependencies and keep tests with
+code, even across files. About 600 changed lines per task, counting code, tests
+and documentation, is a soft guideline rather than a target or rejection
+threshold; above it, prefer a safe split or record the cohesion and verification
+rationale in `plan.md`. Target six tasks or fewer per user story: every task
+incurs a review cycle and every phase an evidence gate. Documentation-only
+features normally use one or two tasks per story, preserving story phases rather
+than splitting by document heading. Six is advisory, not a rejection threshold,
+and stories are never padded to reach it. See the
+[OpenSpec sizing rules](README.md#openspec-drafting) and the
+[pending sizing observation](README.md#task-sizing-observation).
 
 ### Story sizing examples
 
@@ -124,7 +134,8 @@ merge advice, never a count-only contradiction or correction round. Checked and
 unchecked entries, including dotted children, count. Setup, Foundational and
 Polish do not contribute to this story threshold; ordinary feasibility and
 design review still apply. Whole-feature totals, including documentation-only
-totals, never cause a count-only finding. The per-task ceiling still applies.
+totals, never cause a count-only finding. The per-task soft size guideline still
+applies; estimated size alone is at most an advisory risk, never a contradiction.
 
 ### Questions and revisions
 

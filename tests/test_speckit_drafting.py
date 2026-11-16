@@ -149,6 +149,9 @@ def test_speckit_sizing_guidance(format):
         assert examples == [[5, 5, 5], [8], [9]]
         guide = doc.passage(doc.read(doc.GUIDE), "### Native spec-kit drafting")
         assert "speckit.md#story-sizing-examples" in doc.local_links(doc.GUIDE, guide)
+        # The house rules state the same per-task line guideline the drafter receives.
+        house = " ".join(doc.passage(doc.read(doc.HOUSE), "## What the drafter produces").split())
+        assert set(re.findall(r"(\d+) changed lines", house)) == set(re.findall(r"(\d+) changed lines", prompt))
     else:
         for clause in (
             "Combine work touching the same file for one concern into one task",
@@ -767,6 +770,29 @@ def test_native_draft_quality_observation_remains_pending():
     assert not re.search(r"^- \[[xX]\]", body, re.M)
     house = doc.passage(doc.read(doc.HOUSE), "## What the drafter produces")
     assert "README.md#draft-quality-observation" in doc.local_links(doc.HOUSE, house)
+
+
+@pytest.mark.scenario("specloop-documentation/sizing-evidence-limits/live-comparison-remains-pending")
+@pytest.mark.scenario("specloop-documentation/native-drafting-guidance/quality-evidence-remains-human")
+def test_sizing_observation_remains_pending_human_work():
+    guide = doc.read(doc.GUIDE)
+    body = doc.passage(guide, "### Task sizing observation")
+    rows = documentation_table(body)
+    assert len(rows) == 3
+    issues = "https://github.com/mattpolicastro/nightshift/issues/{}"
+    tracked = set()
+    for check, status, tracking in rows:
+        assert check.strip() and status == "Pending"
+        links = doc.local_links(doc.GUIDE, tracking)
+        assert links and links <= {issues.format(200), issues.format(80)}
+        tracked |= links
+    assert tracked == {issues.format(200), issues.format(80)}
+    assert FMT.parse_tasks(body) == []
+    assert not re.search(r"^- \[[xX ]\]", body, re.M)
+    # Both sizing guides route readers to the pending observation.
+    assert "#task-sizing-observation" in doc.local_links(doc.GUIDE, doc.passage(guide, "### OpenSpec drafting"))
+    house = doc.passage(doc.read(doc.HOUSE), "## What the drafter produces")
+    assert "README.md#task-sizing-observation" in doc.local_links(doc.HOUSE, house)
 
 
 @pytest.mark.scenario("specloop-documentation/spec-kit-discovery/find-authoring-guidance")
