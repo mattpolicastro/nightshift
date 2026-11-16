@@ -257,20 +257,21 @@ def _daemon_command(args) -> int:
         return 2
 
     if args.command == "attention":
-        items = outcomes.tasks() if args.offline else outcomes.refresh(cfg.labels)
+        # Current sources only: historical worker outcomes stay behind their own APIs.
+        repositories = outcomes.front_door_snapshot(cfg, offline=args.offline)
         specloop = specloop_attention.snapshot(offline=args.offline)
         if args.json:
-            print(json.dumps({"version": 1, "offline": args.offline,
-                              "tasks": outcomes.attention(items),
+            print(json.dumps({"version": 1, "offline": args.offline, "tasks": [],
+                              "repositories": repositories,
                               "specloop": specloop["entries"],
                               "specloop_error": specloop["error"],
-                              "stale": [i for i in items if i.get("error")]}, indent=2))
+                              "stale": []}, indent=2))
         else:
             if args.offline:
                 print("Cached outcomes (GitHub and specloop not checked)")
-            print(outcomes.render(items))
+            print(outcomes.render_front_door(repositories))
             print(specloop_attention.render(specloop))
-        return 1 if specloop["error"] or any(i.get("error") for i in items) else 0
+        return 1 if specloop["error"] or any(r["stale"] for r in repositories) else 0
 
     if args.command == "status":
         # The process, THEN the queue. Until 2026-09-05 this line said

@@ -76,9 +76,9 @@ def render(snapshot: dict) -> str:
     lines = [f"{len(entries)} specloop run(s) need you"]
     for entry in entries:
         prefix = "STALE " if entry["stale"] else ""
-        lines.append(f"  {prefix}{entry['change']} — {entry['reason']}")
-        if entry["pr"]:
-            lines.append(f"    {entry['pr']}")
+        pr = f" · {entry['pr']}" if entry["pr"] else ""
+        lines.append(f"  {prefix}{entry['change']} — {entry['reason']}"
+                     f" · See Factory: {entry['change']}{pr}")
     if snapshot["error"]:
         lines.append(f"  STALE specloop — last checked {snapshot['checked_at'] or 'never'}: "
                      + " ".join(snapshot["error"].split()))

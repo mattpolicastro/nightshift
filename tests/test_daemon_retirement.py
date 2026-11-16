@@ -15,7 +15,8 @@ import pytest
 
 from manifest_fixtures import manifest_text
 from nightshift import cli, config, daemon, outcomes, queue, specloop_job
-from nightshift.config import Config
+from nightshift.config import Config, Labels
+from test_attention import history_rows
 from test_engine_routing import DraftGh
 from test_engine_switch_recovery import RecoveryPipeline, labels, working
 from test_specloop_attention import run_record, status_result
@@ -320,6 +321,7 @@ def test_worker_cli_refuses_before_any_child(tmp_path, monkeypatch, capsys, capl
 
 @pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/recovery-preserves-interrupted-work")
 @pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/historical-attention-remains-readable")
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/historical-reconciliation-stays-explicit")
 @pytest.mark.parametrize("evidence", ["surviving", "missing", "unreadable"])
 def test_one_shot_recovery_then_public_attention(tmp_path, monkeypatch, capsys, evidence):
     selected = tmp_path / "config.toml"
@@ -359,26 +361,52 @@ def test_one_shot_recovery_then_public_attention(tmp_path, monkeypatch, capsys, 
     outcomes.record("owner/switched", 9, state="needs_decision", reason="Historical review")
     pipeline.issue(9)
     preserved = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
-    monkeypatch.setattr(outcomes, "_read_github", lambda args, deadline: pipeline.gh(args))
+    escalated = sorted(n for n in pipeline.issues if "needs-human" in labels(pipeline, n))
+    assert escalated == ([1] if evidence == "surviving" else [])
+    listing = "repos/owner/switched/issues?state=open&labels=needs-human&per_page=100"
+
+    def front_door(args, deadline, listed=escalated):
+        # Attention's current source: the labelled listing and its comments, never history.
+        assert args[0] == "api" and args[2:] == ["--paginate", "--slurp"], args
+        if args[1] == listing:
+            return json.dumps([[{"number": n, "title": f"Issue {n}", "state": "open",
+                                 "html_url": f"https://github.com/owner/switched/issues/{n}"}
+                                for n in listed]])
+        assert args[1] in [f"repos/owner/switched/issues/{n}/comments?per_page=100" for n in listed]
+        return "[[]]"
+
+    monkeypatch.setattr(outcomes, "_read_github", front_door)
+    history = history_rows()
 
     def status(args, **kwargs):
         assert args == ["specloop", "status", "--json"]
         assert kwargs["timeout"] == outcomes.REQUEST_SECONDS
         return status_result([run_record()])
 
+    def attention(offline, code):
+        argv = ["attention", "--json", "--config", str(selected)] + (["--offline"] if offline else [])
+        assert cli.main(argv) == code
+        payload = json.loads(capsys.readouterr().out)
+        assert set(payload) == {"version", "offline", "tasks", "repositories", "specloop",
+                                "specloop_error", "stale"}
+        assert payload["version"] == 1 and payload["offline"] is offline
+        assert payload["tasks"] == [] and payload["stale"] == []
+        assert [r["repo"] for r in payload["repositories"]] == ["owner/switched"]
+        assert history_rows() == history  # attention leaves historical rows unchanged
+        return payload, payload["repositories"][0]
+
     monkeypatch.setattr(subprocess, "run", status)
     for offline in (False, True):
         if offline:
             monkeypatch.setattr(subprocess, "run", forbidden)
             monkeypatch.setattr(outcomes, "_read_github", forbidden)
-        assert cli.main(["attention", "--json", "--config", str(selected)] + (["--offline"] if offline else [])) == 0
-        payload = json.loads(capsys.readouterr().out)
-        assert set(payload) == {"version", "offline", "tasks", "specloop", "specloop_error", "stale"}
-        assert payload["version"] == 1 and payload["offline"] is offline
-        assert {item["issue"] for item in payload["tasks"]} == ({9} if evidence == "unreadable" else {1, 9})
-        assert any(item["issue"] == 9 and item["reason"] == "Historical review" for item in payload["tasks"])
+        payload, repo = attention(offline, 0)
+        assert [e["number"] for e in repo["entries"]] == escalated and repo["stale"] is False
         assert payload["specloop"][0]["change"] == "add-gate"
-        assert payload["specloop"][0]["stale"] is False and payload["stale"] == []
+        assert payload["specloop"][0]["stale"] is False
+    historical = outcomes.tasks()
+    assert {item["issue"] for item in historical} == ({9} if evidence == "unreadable" else {1, 9})
+    assert any(item["issue"] == 9 and item["reason"] == "Historical review" for item in historical)
 
     def unavailable(*args, **kwargs):
         raise OSError("transport unavailable")
@@ -389,17 +417,24 @@ def test_one_shot_recovery_then_public_attention(tmp_path, monkeypatch, capsys, 
         if offline:
             monkeypatch.setattr(subprocess, "run", forbidden)
             monkeypatch.setattr(outcomes, "_read_github", forbidden)
-        assert cli.main(["attention", "--json", "--config", str(selected)] + (["--offline"] if offline else [])) == 1
-        stale = json.loads(capsys.readouterr().out)
+        stale, outage = attention(offline, 1)
         assert stale["specloop_error"] and stale["specloop"][0]["stale"] is True
         assert stale["specloop"][0]["checked_at"] == payload["specloop"][0]["checked_at"]
-        assert any(item["issue"] == 9 and item["error"] for item in stale["stale"])
-        assert any(item["issue"] == 9 for item in stale["tasks"])
+        assert outage["stale"] is True and outage["error_code"] == "read_failed"
+        assert outage["entries"] == repo["entries"] and outage["checked_at"] == repo["checked_at"]
+    # Historical failure is reported only by an explicit refresh, which keeps the record.
+    monkeypatch.setattr(outcomes, "_read_github", unavailable)
+    refreshed = outcomes.refresh(Labels())
+    assert any(item["issue"] == 9 and item["error"] for item in refreshed)
+    assert any(item["issue"] == 9 and item["state"] == "needs_decision" for item in refreshed)
+    history = history_rows()
     monkeypatch.setattr(subprocess, "run", status)
+    monkeypatch.setattr(outcomes, "_read_github", partial(front_door, listed=[]))
+    _, recovered = attention(False, 0)
+    assert recovered["entries"] == [] and recovered["stale"] is False and recovered["error"] is None
+    assert any(item["state"] != "resolved" for item in outcomes.tasks())
     monkeypatch.setattr(outcomes, "_read_github", lambda *a: '{"state":"CLOSED","labels":[]}')
-    assert cli.main(["attention", "--json", "--config", str(selected)]) == 0
-    assert json.loads(capsys.readouterr().out)["tasks"] == []
-    assert all(item["state"] == "resolved" for item in outcomes.tasks())
+    assert all(item["state"] == "resolved" for item in outcomes.refresh(Labels()))
     assert {p: p.read_bytes() for p in preserved} == preserved
 
 

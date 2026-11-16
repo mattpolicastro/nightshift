@@ -5,7 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from nightshift import outcomes, queue
-from nightshift.config import Labels
+from nightshift.config import Labels, Repo
+from test_attention import comments, history_rows, listing, row
 
 
 def github(issue_state="OPEN", labels=(), pr_state="OPEN"):
@@ -105,23 +106,23 @@ def test_cli_json_and_offline_do_not_write_github(tmp_path, monkeypatch, capsys,
     def forbidden(args):
         raise AssertionError("offline must not call GitHub")
     monkeypatch.setattr(queue, "_gh", forbidden)
-    def read(args, deadline):
-        assert not offline
-        assert args[:3] == ["issue", "view", "1"]
-        return github()(args)
-    monkeypatch.setattr(outcomes, "_read_github", read)
+    # Attention no longer refreshes history, online or offline.
+    monkeypatch.setattr(outcomes, "_read_github", lambda args, deadline: forbidden(args))
     if offline:
         monkeypatch.setattr(specloop_attention.specloop_client, "call", forbidden)
+    history = history_rows()
     assert cli.main(["attention", "--json"] + (["--offline"] if offline else [])) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["version"] == 1
     assert payload["offline"] is offline
-    assert payload["tasks"][0]["issue_url"] == "https://github.com/a/b/issues/1"
-    assert payload["tasks"][0]["reason"] == "needs review"
+    assert payload["tasks"] == [] and payload["repositories"] == []
+    assert outcomes.tasks()[0]["issue_url"] == "https://github.com/a/b/issues/1"
+    assert outcomes.tasks()[0]["reason"] == "needs review"
     assert payload["specloop"][0]["change"] == "pending"
     assert payload["specloop"][0]["reason"] == "stuck"
     assert payload["stale"] == []
     assert {path: path.read_bytes() for path in evidence} == evidence
+    assert history_rows() == history
     with outcomes.database() as db:
         assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
 
@@ -262,22 +263,29 @@ def test_cli_reports_deferred_checks_as_stale_json(monkeypatch, capsys):
     monkeypatch.setattr(cli.specloop_attention.specloop_client, "call",
                         lambda *args, **kwargs: {"version": 1, "runs": []})
     seed_history(active=40)
-    assert cli.main(["attention", "--json"]) == 1
+    history = history_rows()
+    # Attention reports current sources only; historical deferral is refresh()'s to report.
+    assert cli.main(["attention", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["tasks"]) == 40
-    assert len(payload["stale"]) == 8
-    assert all("deferred" in i["error"] for i in payload["stale"])
+    assert payload["tasks"] == [] and payload["stale"] == []
+    assert history_rows() == history
+    items = outcomes.refresh(Labels())
+    assert len(outcomes.attention(items)) == 40
+    stale = [i for i in items if i.get("error")]
+    assert len(stale) == 8
+    assert all("deferred" in i["error"] for i in stale)
 
 
 @pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/historical-attention-remains-readable")
 @pytest.mark.scenario("worker-retirement/client-command-boundaries-remain-stable/existing-clients-use-surviving-commands")
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/historical-reconciliation-stays-explicit")
 @pytest.mark.parametrize("failure", ["github", "specloop", "both"])
 def test_attention_refresh_stale_offline_and_resolution(tmp_path, monkeypatch, capsys, failure):
     from nightshift import cli
     from nightshift.config import Config
 
     monkeypatch.setattr(cli.config, "ENV_FILE", tmp_path / "absent-env")
-    monkeypatch.setattr(cli.config, "load", lambda path: Config(repos=[]))
+    monkeypatch.setattr(cli.config, "load", lambda path: Config(repos=[Repo("a/b")]))
     monkeypatch.setattr(outcomes, "HISTORY_INTERVAL", 0)
     outcomes.record("a/b", 1, state="awaiting_merge", reason="historical worker PR",
                     pr_url="https://github.com/a/b/pull/2")
@@ -285,9 +293,16 @@ def test_attention_refresh_stale_offline_and_resolution(tmp_path, monkeypatch, c
 
     def read_github(args, deadline):
         calls.append("github")
-        assert args[:3] in (["issue", "view", "1"], ["pr", "view", "https://github.com/a/b/pull/2"])
         if phase == "outage" and failure in ("github", "both"):
             raise RuntimeError("GitHub offline")
+        if args[0] == "api":  # attention's current source: the labelled listing
+            assert args in (["api", listing("a/b"), "--paginate", "--slurp"],
+                            ["api", comments("a/b", 1), "--paginate", "--slurp"])
+            if args[1] == comments("a/b", 1):
+                return "[[]]"
+            return json.dumps([[] if phase == "resolved" else [row("a/b", 1, "Needs input")]])
+        # Historical reads happen only through an explicit outcomes.refresh().
+        assert args[:3] in (["issue", "view", "1"], ["pr", "view", "https://github.com/a/b/pull/2"])
         return github(pr_state="MERGED" if phase == "resolved" else "OPEN")(args)
 
     def run(args, **kwargs):
@@ -305,39 +320,60 @@ def test_attention_refresh_stale_offline_and_resolution(tmp_path, monkeypatch, c
     monkeypatch.setattr(subprocess, "run", run)
 
     def attention(offline=False, code=0):
+        history = history_rows()
         assert cli.main(["attention", "--json", *(["--offline"] if offline else [])]) == code
         output = capsys.readouterr()
         assert output.err == ""
         payload = json.loads(output.out)
-        assert set(payload) == {"version", "offline", "tasks", "specloop", "specloop_error", "stale"}
+        assert set(payload) == {"version", "offline", "tasks", "repositories", "specloop",
+                                "specloop_error", "stale"}
         assert payload["version"] == 1 and payload["offline"] is offline
+        assert payload["tasks"] == [] and payload["stale"] == []
+        assert history_rows() == history  # attention never reconciles history
         return payload
 
     healthy = attention()
-    assert healthy["tasks"][0]["state"] == "awaiting_merge"
-    assert healthy["tasks"][0]["reason"] == "historical worker PR"
+    [repo] = healthy["repositories"]
+    assert [e["number"] for e in repo["entries"]] == [1] and repo["stale"] is False
     assert healthy["specloop"][0]["reason"] == "stuck"
+    [task] = outcomes.refresh(Labels())
+    assert task["state"] == "awaiting_merge" and task["reason"] == "historical worker PR"
+    assert task["error"] is None and task["checked_at"]
     phase = "outage"
     stale = attention(code=1)
-    assert bool(stale["stale"]) == (failure in ("github", "both"))
+    github_down = failure in ("github", "both")
+    [listed] = stale["repositories"]
+    assert listed["stale"] is github_down
+    assert [e["url"] for e in listed["entries"]] == [e["url"] for e in repo["entries"]]
+    if github_down:  # the last good listing, with its own timestamps, is retained
+        assert listed["entries"] == repo["entries"] and listed["checked_at"] == repo["checked_at"]
     assert bool(stale["specloop_error"]) == (failure in ("specloop", "both"))
-    for key, broken in (("tasks", failure != "specloop"), ("specloop", failure != "github")):
-        assert len(stale[key]) == 1
-        assert bool(stale[key][0]["error"]) is broken
-        if broken:
-            assert stale[key][0]["checked_at"] == healthy[key][0]["checked_at"]
+    assert len(stale["specloop"]) == 1
+    assert bool(stale["specloop"][0]["error"]) is (failure != "github")
+    if failure != "github":
+        assert stale["specloop"][0]["checked_at"] == healthy["specloop"][0]["checked_at"]
+    # Explicit historical refresh keeps its last successful observation on failure.
+    [kept] = outcomes.refresh(Labels())
+    assert bool(kept["error"]) is github_down and kept["state"] == "awaiting_merge"
+    if github_down:
+        assert kept["checked_at"] == task["checked_at"]
     before = list(calls)
     assert attention(offline=True, code=1) == {**stale, "offline": True}
     assert cli.main(["attention", "--offline"]) == 1
     rendered = capsys.readouterr().out
+    assert "Cached outcomes (GitHub and specloop not checked)" in rendered
     assert "STALE" in rendered and "historical-pause" in rendered and "a/b#1" in rendered
     assert calls == before
     phase = "resolved"
     resolved = attention()
+    [recovered] = resolved.pop("repositories")
+    assert recovered["entries"] == [] and recovered["stale"] is False and recovered["error"] is None
     assert resolved == {"version": 1, "offline": False, "tasks": [], "specloop": [],
                         "specloop_error": None, "stale": []}
+    assert outcomes.tasks()[0]["state"] == "awaiting_merge"  # an empty listing resolves nothing
     before = list(calls)
-    assert attention(offline=True) == {**resolved, "offline": True}
-    assert calls == before and outcomes.tasks()[0]["state"] == "resolved"
+    assert attention(offline=True) == {**resolved, "repositories": [recovered], "offline": True}
+    assert calls == before
+    assert outcomes.refresh(Labels())[0]["state"] == "resolved"
     with outcomes.database() as db:
         assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1

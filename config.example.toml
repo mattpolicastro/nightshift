@@ -65,8 +65,8 @@ base = "main"
 # Make specloop available on the daemon's PATH and run its separate supervisor
 # (`nightshift serve`). Pausing or stopping the daemon does not stop admitted builds.
 # `nightshift daemon status` omits worker sessions, working counts and the off-subscription
-# model report; all other status output remains unchanged. Historical outcomes
-# remain available through `nightshift attention`.
+# model report; all other status output remains unchanged. Historical outcomes stay in
+# the outcome database/APIs; `nightshift attention` shows needs_human escalations.
 #
 # Label flow: spec:draft (or agent:ready) on an issue -> draft PR with spec:review
 # -> human adds spec:approved on the PR -> admitted build -> publish to SAME PR
@@ -80,7 +80,7 @@ base = "main"
 # and reapply spec:draft or agent:ready. Removing needs-human alone does not
 # requeue the issue. A refused admission removes spec:approved; resolve it,
 # remove needs-human and reapply spec:approved on the PR.
-# `nightshift attention` lists human pauses; unreadable status retains STALE data.
+# `nightshift attention` lists needs_human issues/PRs and pauses; failed reads stay STALE.
 #
 # Optional [[prepare]] belongs in the MANIFEST, not this daemon config:
 #   [vars]

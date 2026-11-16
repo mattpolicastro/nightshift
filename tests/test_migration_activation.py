@@ -126,6 +126,7 @@ def test_startup_refusal_prevents_polling(monkeypatch, capsys, refusal):
 
 
 @pytest.mark.scenario("state-migration/migration-only-command/startup-fallback-precedes-scheduling")
+@pytest.mark.scenario("attention/independent-repository-snapshots/empty-enrollment-leaves-state-untouched")
 @pytest.mark.parametrize("argv", [["--help"], ["migrate", "--help"], [], ["status", "--json"],
                                  ["attention", "--offline", "--json"]])
 def test_reads_never_migrate(monkeypatch, tmp_path, argv):
