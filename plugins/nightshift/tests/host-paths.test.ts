@@ -20,6 +20,16 @@ const task = {
   repo: 'owner/repo', issue: 1, state: 'needs_decision', issue_url: 'https://github.com/owner/repo/issues/1',
   checked_at: null, error: null, internal: '/private/diagnostic',
 };
+const escalation = {
+  repo: 'owner/repo', number: 3, kind: 'pr', title: 'Spec needs input', url: 'https://github.com/owner/repo/pull/3',
+  summary: '**nightshift** — The spec draft needs human input.', summary_checked_at: '2026-11-01T00:00:00Z',
+  summary_stale: false, summary_error: null, summary_error_code: null, internal: '/private/diagnostic',
+};
+const repository = {
+  repo: 'owner/repo', label: 'needs-human', entries: [escalation], checked_at: '2026-11-01T00:00:00Z',
+  stale: false, error: null, error_code: null,
+};
+const pause = { change: 'gate', reason: 'review_rejected', pr: null, checked_at: '2026-11-01T00:00:00Z', error: null, stale: false };
 
 // Each fixture reloads the production singletons and restores only its own host mocks.
 function host(t: TestContext, env: NodeJS.ProcessEnv = {}) {
@@ -48,7 +58,7 @@ function host(t: TestContext, env: NodeJS.ProcessEnv = {}) {
   ) => {
     calls.push({ file, args, options });
     const output = args.includes('attention')
-      ? { version: 1, offline: args.includes('--offline'), tasks: [task], stale: [] }
+      ? { version: 1, offline: args.includes('--offline'), tasks: [task], stale: [], repositories: [repository], specloop: [pause], specloop_error: null }
       : args.includes('status') ? { version: 1, runs: [run] }
         : { version: 1, outcome: state.code ? 'refused' : 'done', verb: 'resume', detail: `${home}/result`, internal: '/private/diagnostic' };
     const error = state.timedOut ? Object.assign(new Error('/private/timeout'), { killed: true, code: 1 })
@@ -104,10 +114,17 @@ test('worker-retirement/client-command-boundaries-remain-stable/existing-clients
   const h = host(t);
   await commands(h, '/opt/homebrew/bin/uv', `${home}/Projects/nightshift`, '/opt/homebrew/bin', `${home}/n/bin`);
   const attention = await h.readAttention({ refresh: false });
-  assert.deepEqual(attention.tasks, [{
-    key: 'owner/repo#1', repo: 'owner/repo', issue: 1, title: 'Issue #1', summary: '',
-    state: 'needs_decision', url: task.issue_url, checkedAt: null, stale: false,
+  // Worker records are ignored; the surviving command supplies front-door rows and pause pointers.
+  assert.deepEqual(attention.tasks, []);
+  assert.deepEqual(attention.stale, []);
+  assert.deepEqual(attention.repositories, [{
+    repo: 'owner/repo', label: 'needs-human', checkedAt: repository.checked_at, stale: false, error: null,
+    entries: [{
+      key: 'owner/repo#3', repo: 'owner/repo', number: 3, kind: 'pr', title: escalation.title, url: escalation.url,
+      summary: escalation.summary, summaryCheckedAt: escalation.summary_checked_at, summaryStale: false, summaryError: null,
+    }],
   }]);
+  assert.deepEqual(attention.pauses, [{ change: 'gate', reason: 'review_rejected', checkedAt: pause.checked_at, stale: false }]);
   const snapshot = await h.readFactoryRuns();
   // Historical display commands remain data; only new invocations are renamed.
   assert.deepEqual(snapshot.runs, [{
@@ -249,7 +266,7 @@ test('host-paths/plugin-host-command-configuration/configuration-failures-preser
     if (mode === 'invalid') assert.equal(h.calls.length, calls);
     if (mode === 'missing checkout') assert.equal(h.calls.length, calls + 2); // Installation check prevents attention spawn.
     fail(false); h.tick(); h.state.code = 1;
-    assert.equal((await h.readAttention({ refresh: true })).error, 'Some outcomes could not be checked. Last known outcomes are shown.');
+    assert.equal((await h.readAttention({ refresh: true })).error, 'Some attention sources could not be checked. Last known data is shown.');
     assert.deepEqual(await h.actOnFactoryRun({ change: 'gate', verb: 'resume' }), {
       version: 1, outcome: 'refused', verb: 'resume', detail: '~/result',
     });
