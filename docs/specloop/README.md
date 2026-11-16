@@ -849,11 +849,10 @@ IDs and unfinished archive tasks still block; archived changes are excluded
 from harness validation. Upstream parser confirmation remains part of the
 [three pending rollout checks](../deploy.md#openspec-rollout-checks).
 
-All `bin/**` and launchd plists remain frozen, including comments. The unchanged
-`bin/specloop-serve` retains `~/n/bin` and its stale OpenSpec/Node comment;
-cleanup is deferred on [issue #184](https://github.com/mattpolicastro/nightshift/issues/184)'s ledger.
-Absolute executable selection and the Mac Studio cut-over establish dependency
-removal without a separate supervisor-without-`~/n/bin` experiment.
+All `bin/**` and launchd plists remain frozen to agents, including comments.
+Absolute executable selection and the Mac Studio cut-over removed the
+supervisor's dependency on `~/n/bin`, and `bin/specloop-serve` no longer puts
+it on PATH.
 
 The [spec-kit house rules](speckit.md) describe the authoring rules and the `nightshift-speckit` preset ([issue #184](https://github.com/mattpolicastro/nightshift/issues/184)).
 
@@ -921,6 +920,8 @@ stage hand-offs, lifecycle, and shared-process blocking.
 
 `[roles] gate` can name a different model. A Claude gate reviewer needs
 `CLAUDE_CODE_OAUTH_TOKEN` in `~/.config/specloop/env`, which is your call.
+The manifest's `env_file` (that file by default) reaches every session the
+harness starts, drafting, feasibility and the spec critic included.
 Treat the agent gate as a net, not a proof, until it has been measured on
 seeded integration defects.
 

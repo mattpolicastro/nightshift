@@ -441,6 +441,7 @@ def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m
     d = Draft(change, work, branch=branch)
     profile = (m.chains.get("implement") or (m.roles["implement"],))[0]
     planned = in_flight(source, change)
+    secrets = manifest.load_env(m.env_file)
     concurrent_context = None
     critic_correction = False
     feedback = ""
@@ -450,7 +451,7 @@ def draft(source: Path, base: str, change: str, idea: str, sources: list[str], m
                                feedback=feedback, in_flight=_in_flight_section(planned),
                                sources="\n".join(f"- {s}" for s in sources) or "- (no extra sources named)")
         call = agents.Call(profile, "write", prompt, work, SCHEMA, out / f"draft-{n}.jsonl", m.implement_minutes * 60,
-                           m.idle_minutes * 60, agents.homes_dir() / profile.name)
+                           m.idle_minutes * 60, agents.homes_dir() / profile.name, secrets)
         res = agent(call)
         if res.disposition != "ok":
             d.problems = [f"drafting session failed: {res.disposition} {res.detail[:300]}"]

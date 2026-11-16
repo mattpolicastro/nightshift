@@ -76,10 +76,9 @@ runtime version checks are cached per path per process. Preserve the existing
 quiet-window/hold order below: plugin reload (restart Paseo if its environment
 changed), daemon restart, then supervisor restart, inspect before resuming.
 Rollback requires matching code and binary pins plus fresh preflight/restarts.
-All `bin/**` and launchd plists remain frozen without exceptions, including
-comments. The supervisor keeps `~/n/bin` and its stale OpenSpec/Node comment;
-exact PATH/comment cleanup remains deferred on
-[issue #184](https://github.com/mattpolicastro/nightshift/issues/184)'s ledger.
+All `bin/**` and launchd plists remain frozen to agents without exceptions,
+including comments; wrapper edits are hand-made direct PRs. The supervisor's
+PATH no longer includes `~/n/bin`.
 
 ## OpenSpec rollout checks
 
@@ -225,9 +224,8 @@ A successful unchanged second apply prints `Nothing to do.` and exits 0: no pull
 - Stop the supervisor before checkout sync and prevent launchd KeepAlive restart
   during migration/inspection. Inspect the unchanged wrapper diff and inventory,
   actual service configuration, bootstrap paths, env-file and credential/tool guards.
-  Confirm daemon startup uses `nightshift daemon run` or frozen `nightshift run`,
-  and the installed alias supports frozen `specloop serve`. Wrapper modernization
-  is a follow-up, not a prerequisite edit.
+  Confirm daemon startup uses `nightshift daemon run` and the supervisor uses
+  `nightshift serve`.
 - With new code available, perform the stopped-supervisor migrate/inspect/hold
   sequence above across all repositories. Resolve refusals; inspect drafts, daemon
   receipts/jobs, revisions, references and credentials before enabling startup.

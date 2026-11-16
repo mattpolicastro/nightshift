@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 
 from specloop import agents, verify
-from specloop.manifest import Manifest
+from specloop.manifest import Manifest, load_env
 
 SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["contradictions", "risks"],
@@ -132,7 +132,7 @@ def check(repo: Path, rev: str, m: Manifest, out: Path, agent=None) -> dict:
     prompt = template.format(change=m.change, allowed=", ".join(m.allowed), frozen=", ".join(m.frozen), steps=steps)
     profile = (m.chains.get("feasibility") or m.chains.get("review") or (m.roles["review"],))[0]
     call = agents.Call(profile, "read", prompt, checkout, SCHEMA, out / "feasibility.jsonl", 20 * 60,
-                       m.idle_minutes * 60, agents.homes_dir() / profile.name)
+                       m.idle_minutes * 60, agents.homes_dir() / profile.name, load_env(m.env_file))
     res = agent(call)
     shutil.rmtree(checkout, ignore_errors=True)
     result = res.output if res.disposition == "ok" else {"error": f"{res.disposition}: {res.detail[:300]}"}

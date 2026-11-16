@@ -12,7 +12,7 @@ Read `docs/specloop/README.md` before engine work, and `KNOWN-LIMITATIONS.md`
 for what is open. Every enrolled repository runs the `specloop` engine.
 Since #40 one CLI drives both halves: `nightshift <verb> <change>` for builds
 and `nightshift daemon status|pause|resume` for the front door; bare
-`nightshift run` still starts the daemon for the frozen wrapper, and
+`nightshift run` still starts the daemon for one release, and
 `specloop` is a one-release alias. Build state lives in `~/.nightshift`
 (`runs/`, `drafts/`, `homes/`); `~/.specloop` keeps compatibility links. The
 original `worker` engine, which ran headless Claude Code sessions on

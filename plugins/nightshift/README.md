@@ -269,12 +269,13 @@ paseo plugin logs nightshift --json
 ```
 
 Python services need their own applicable environment and restart; see
-[host setup](../../README.md#host-path-setup). The unchanged
+[host setup](../../README.md#host-path-setup).
 `bin/nightshift-daemon` and `bin/specloop-serve` retain fixed bootstrap checkout,
 uv and PATH locations. These settings do not relocate their commands. Wrapper
-portability is deferred because `bin/**` is frozen without exceptions, including
-comments, as are launchd plists. The supervisor retains `~/n/bin` and its stale
-OpenSpec comment; cleanup is deferred on [issue #184](https://github.com/mattpolicastro/nightshift/issues/184)'s ledger.
+portability is deferred because `bin/**` is frozen to agents without exceptions,
+including comments, as are launchd plists; wrapper edits are hand-made direct PRs.
+The supervisor's PATH no longer includes `~/n/bin`; the plugin keeps its own
+Node prefix.
 Direct CLI examples do not configure bundled service startup. Full daemon rollout requires separate
 wrapper work or an independently provisioned operator service preserving
 equivalent credential and preflight guards. Second-install and actual Paseo
