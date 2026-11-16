@@ -103,7 +103,7 @@ def draft_plan(tmp_path, monkeypatch):
             call.transcript.write_text('{"event": "offline review"}\n')
             if call.access == "write":
                 directory = call.cwd / f"openspec/changes/{change}"
-                (directory / "specs/calc").mkdir(parents=True)
+                (directory / "specs/calc").mkdir(parents=True, exist_ok=True)
                 concern = "Document sign behavior" if docs_only else "Implement sign behavior"
                 (directory / "proposal.md").write_text(f"## Why\n{concern}.\n")
                 (directory / "design.md").write_text(
@@ -241,7 +241,9 @@ def test_speckit_count_prompt_contract(items):
         "subject to ordinary feasibility and over-engineering review",
         "same per-story threshold, not a two-task critic threshold",
         "six-task recommendation per story is not a critic rejection threshold",
-        "about 300 changed lines per task, not per story or feature",
+        "The size guideline below applies per task, not per story or feature",
+        "About 600 changed lines per task, counting production code, tests and documentation together, "
+        "is a soft planning guideline, never a target or an automatic rejection threshold",
         "Task count alone never belongs in contradictions, requires correction or rejects a proposal",
         "Independently evidenced unsafe designs still qualify as contradictions under the existing blocking criteria",
     ):
@@ -250,6 +252,89 @@ def test_speckit_count_prompt_contract(items):
     assert "more than two tasks (three or more)" in items[1]
     assert "Count task entries across the whole plan" not in native[1]
     assert "more than two tasks (three or more)" not in native[1]
+    assert not re.search(r"\b300 changed lines\b", native[1])
+
+
+SIZE_CLAUSES = (
+    "Estimated size is advisory.",
+    "About 600 changed lines per task, counting production code, tests and documentation together, "
+    "is a soft planning guideline, never a target or an automatic rejection threshold.",
+    "Weigh cohesion, safe split boundaries (independent behavior, migration or recovery boundaries, "
+    "distinct verification strategies, substantial uncertainty)",
+    "A coherent task of 301 to 600 lines needs no risk;",
+    "an above-guideline task with that rationale is reviewable without a numeric blocker.",
+    "A size concern belongs in risks.",
+    "Estimated size alone never belongs in contradictions, requires correction or rejects a proposal.",
+    "Estimated lines or task count alone never require another issue or pull request.",
+    "Soft sizing waives no frozen path, trusted verify command, protected guarantee, required context "
+    "or split warranted by substantial uncertainty.",
+)
+
+
+@pytest.mark.scenario("spec-critic/advisory-estimated-size/size-risk-consumes-no-correction")
+@pytest.mark.scenario("spec-critic/advisory-estimated-size/independent-unsafe-design-still-blocks")
+@pytest.mark.scenario("spec-critic/advisory-estimated-size/count-advice-retains-existing-boundaries")
+@pytest.mark.scenario("spec-critic/native-feasibility-and-critic-context/constitution-and-named-features-are-read")
+@pytest.mark.scenario("spec-critic/native-feasibility-and-critic-context/undisclosed-behavior-changes-contradict")
+@pytest.mark.scenario("spec-critic/native-feasibility-and-critic-context/missing-or-ambiguous-context-is-not-a-pass")
+@pytest.mark.parametrize("fmt", ["openspec", "speckit"])
+def test_critic_size_guidance_is_advisory_in_both_formats(fmt):
+    template, rationale = (critic.SPECKIT_PROMPT, "plan.md") if fmt == "speckit" else (critic.PROMPT, "design.md")
+    rendered = template.format(change=CHANGE, allowed="src/**", frozen="protected.py", planned="{}",
+                               pr_files="{}", pr_state="Not configured", context_notes="[]")
+    items = checklist_items(rendered)
+    assert list(items) == list(range(1, 9))
+    for clause in (*SIZE_CLAUSES, f"any task boundary and verification rationale in {rationale}."):
+        assert items[1].count(clause) == 1, clause
+    # Count thresholds, merge advice and independent blockers are retained beside the size guidance.
+    counts = (("More than eight tasks (nine or more) in one story phase", "Exactly eight tasks in a story phase",
+               "Fifteen tasks across three five-task story phases do not trigger a count finding",
+               "Ignore whole-feature totals") if fmt == "speckit" else
+              ("More than eight tasks (nine or more), or more than two tasks (three or more)",
+               "Exactly eight general tasks or exactly two documentation-only tasks do not trigger a count finding"))
+    for clause in (*counts, "concrete task labels that could merge and their shared concern",
+                   "if necessary boundaries prevent a safe merge, explain why rather than inventing a merge",
+                   "not a critic rejection threshold",
+                   "Task count alone never belongs in contradictions, requires correction or rejects a proposal",
+                   "Independently evidenced unsafe designs still qualify as contradictions"):
+        assert clause in items[1], clause
+    if fmt == "speckit":
+        # Native context reading and undisclosed-change contradictions are not waived by soft sizing.
+        assert rendered.count(feasibility.SPECKIT_CONTEXT.format(change=CHANGE)) == 1
+        assert rendered.index(feasibility.SPECKIT_CONTEXT.format(change=CHANGE)) < rendered.index(SIZE_CLAUSES[0])
+
+
+@pytest.mark.scenario("spec-critic/advisory-estimated-size/size-risk-consumes-no-correction")
+@pytest.mark.parametrize("prefix", ["", "Critic: "])
+def test_critic_size_risk_does_not_consume_correction_round(draft_plan, prefix):
+    risk = "Task 1.1 is estimated at 850 changed lines; design.md explains why it stays one concern."
+    verdict = {"contradictions": [], "risks": [prefix + risk]}
+    draft, calls, out, _ = draft_plan(agents.Result("ok", verdict), count=1)
+    assert not (draft.problems or draft.questions or draft.contradictions)
+    assert draft.commit and draft.risks == ["Critic: " + risk]
+    assert [call.access for call in calls] == ["write", "read", "read"]
+    assert calls[1].prompt.startswith("# Feasibility check")
+    assert calls[2].prompt.startswith("# Spec critic of an OpenSpec change")
+    assert "## Spec critic feedback" not in calls[0].prompt
+    assert not any((out / name).exists() for name in ("draft-2.jsonl", "feasibility-2", "critic-2"))
+    persisted = json.loads((out / "draft.json").read_text())
+    assert persisted.keys() == draft.__dict__.keys()
+    assert persisted["contradictions"] == persisted["problems"] == []
+    assert persisted["risks"] == ["Critic: " + risk]
+    assert json.loads((out / "critic-1/critic.json").read_text()) == verdict
+
+
+@pytest.mark.scenario("spec-critic/advisory-estimated-size/independent-unsafe-design-still-blocks")
+def test_evidenced_unsafe_design_still_gets_bounded_correction_beside_size_risk(draft_plan):
+    unsafe = {"task": "1.1", "problem": "Writes a frozen file regardless of size",
+              "evidence": "protected.py:1"}
+    verdict = {"contradictions": [unsafe], "risks": ["Task 1.1 is estimated at 850 changed lines."]}
+    draft, calls, out, _ = draft_plan(agents.Result("ok", verdict), count=1)
+    # One bounded correction, after which the evidenced contradiction stands.
+    assert [call.access for call in calls] == ["write", "read", "read", "write"]
+    assert "## Spec critic feedback" in calls[3].prompt and unsafe["evidence"] in calls[3].prompt
+    assert draft.contradictions == [unsafe] and draft.commit
+    assert json.loads((out / "draft.json").read_text())["contradictions"] == [unsafe]
 
 
 @pytest.mark.scenario("spec-critic/advisory-task-count-findings/native-counts-per-story")

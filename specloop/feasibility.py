@@ -53,6 +53,8 @@ for example:
   check belongs in design.md, not tasks.md.
 Cite the file and line that proves it in `evidence`. Put anything that is
 merely risky, vague or likely to need a retry in `risks`.
+An estimated line count alone, however large, never makes a task impossible
+as written; report a size concern in `risks`, not in contradictions.
 """
 
 

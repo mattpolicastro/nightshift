@@ -1,3 +1,4 @@
+import json
 import subprocess
 
 import pytest
@@ -310,6 +311,43 @@ def test_feasibility_reviewer_receives_alternative_reasons_to_refuse(source, tmp
 
     assert len(calls) == 1
     assert rule in " ".join(calls[0].prompt.split())
+
+
+@pytest.mark.scenario("spec-critic/advisory-estimated-size/size-estimate-is-not-impossibility")
+@pytest.mark.scenario("spec-critic/native-feasibility-and-critic-context/native-admission-uses-feasibility-normally")
+def test_size_estimate_alone_is_not_a_feasibility_contradiction(source, tmp_path):
+    clause = ("An estimated line count alone, however large, never makes a task impossible as written; "
+              "report a size concern in `risks`, not in contradictions.")
+    for template in (feasibility.PROMPT, feasibility.SPECKIT_PROMPT):
+        prompt = " ".join(template.split())
+        assert prompt.count(clause) == 1
+        # Ordinary impossibility rules and the evidence requirement are retained beside it.
+        assert "a contradiction ONLY when a task is impossible as written" in prompt
+        assert "Cite the file and line that proves it in `evidence`." in prompt
+    risk = "Task 1.1 is estimated at 900 changed lines and may need a retry."
+    calls = []
+
+    def agent(call):
+        calls.append(call)
+        if call.access == "write":
+            d = call.cwd / "openspec" / "changes" / "sign-helpers"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "tasks.md").write_text(GOOD)
+            return agents.Result("ok", {"status": "drafted", "summary": "", "questions": []})
+        if call.prompt.startswith("# Feasibility check"):
+            return agents.Result("ok", {"contradictions": [], "risks": [risk]})
+        assert call.prompt.startswith("# Spec critic of an OpenSpec change")
+        return agents.Result("ok", {"contradictions": [], "risks": []})
+
+    out = tmp_path / "out"
+    d = propose.draft(source, "main", "sign-helpers", "add sign", [], M, out, agent=agent)
+    assert [c.access for c in calls] == ["write", "read", "read"]
+    assert calls[2].prompt.startswith("# Spec critic of an OpenSpec change")
+    assert "feasibility review found tasks impossible" not in "".join(c.prompt for c in calls)
+    assert d.commit and not d.problems and not d.contradictions and d.risks == [risk]
+    assert not (out / "draft-2.jsonl").exists() and not (out / "feasibility-2").exists()
+    assert json.loads((out / "feasibility-1/feasibility.json").read_text())["risks"] == [risk]
+    assert json.loads((out / "draft.json").read_text())["risks"] == [risk]
 
 
 @pytest.mark.parametrize("gap, edited", [(0, True), (1, False), (60, False), (61, True)])

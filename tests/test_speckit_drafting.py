@@ -65,7 +65,7 @@ def test_speckit_prompt_names_house_rules(feature, tmp_path):
     for token in (ROOT, *[f".specify/templates/{name}-template.md" for name in ("spec", "plan", "tasks")],
                   ".specify/memory/constitution.md", "ASn", f"`{CHANGE}/us<k>/as<n>`", "[USk]",
                   "Setup/Foundational", "## Phase N: User Story K", "numeric priority", "source order",
-                  "300 changed lines", "tests with code", "plan.md under `## Human checks`", "at most three",
+                  "soft planning guideline", "tests with code", "plan.md under `## Human checks`", "at most three",
                   "revise", "in place", "committed task/scenario identities", "unrelated content",
                   "conflicting target identities", "without writing elsewhere", "Complete records are immutable",
                   "new feature", "## Assumptions", "Do not invoke `specify`", "missing templates"):
@@ -78,6 +78,28 @@ def test_speckit_prompt_names_house_rules(feature, tmp_path):
     assert git(d.work, "diff", "--name-only", "HEAD^", "HEAD").decode().splitlines() == [ROOT + "plan.md"]
     assert git(d.work, "show", "-s", "--format=%P", "HEAD") == git(feature, "rev-parse", "HEAD")
     assert (feature / ROOT / "plan.md").read_bytes() != b"Revised plan\n"
+
+
+@pytest.mark.scenario("spec-drafting/proportional-native-detail/small-feature-has-only-necessary-detail")
+@pytest.mark.scenario("spec-drafting/proportional-native-detail/smaller-plan-retains-meaningful-failures")
+@pytest.mark.scenario("spec-drafting/native-feature-drafting/native-prompt-names-house-rules")
+def test_small_native_feature_prompt_requires_proportional_detail(feature, tmp_path):
+    d, calls = draft(feature, tmp_path, lambda root: (root / "plan.md").write_text("Small plan\n"))
+    assert d.commit and len(calls) == 1
+    prompt = " ".join(calls[0].prompt.split())
+    for clause in (
+        "Keep detail proportional to observable behavior: write only the user stories, requirements and "
+        "acceptance scenarios needed to specify the feature and its meaningful failure cases.",
+        "Do not invent optional subsystems, duplicate requirements or implementation-level requirements "
+        "to fill template sections.",
+        "Required sections, phases, scenario identities and coverage still apply, and genuinely missing "
+        "intent is still a clarification question, never a guess.",
+        "Produce spec.md, plan.md and tasks.md from those scaffolds", "Setup/Foundational",
+        "ASn-labelled acceptance scenarios", f"`{CHANGE}/us<k>/as<n>`", "Cover every scenario with a task",
+        "at most three `[NEEDS CLARIFICATION: ...]` questions", "preserving committed task/scenario identities",
+        "Complete records are immutable",
+    ):
+        assert clause in prompt, clause
 
 
 @pytest.mark.scenario("spec-drafting/risk-based-task-sizing/related-work-shares-a-task")
@@ -93,15 +115,17 @@ def test_speckit_sizing_guidance(format):
         change=CHANGE, drafter_root=spec_format.get(replace(M, format=format)).drafter_root(CHANGE),
         idea="Document three stories", sources="", in_flight="", feedback="",
     ).split())
-    for clause in ("300 changed lines at most", "one concern", "single session",
-                   "Split when distinct concerns, dependencies or", "review cycle",
+    for clause in ("About 600 changed lines per task, counting production code, tests and documentation together",
+                   "independently verifiable concern", "single session",
+                   "Split at independent behavior", "review cycle",
                    "evidence gate", "document heading"):
         assert clause in prompt
     if format == "speckit":
         for clause in (
-            "Combine related same-file work within that ceiling, order dependencies, and put tests with code.",
-            "the ceiling applies per task, not per story or feature",
+            "Combine related same-file work, order dependencies, and put tests with code",
+            "it applies per task, not per story or feature",
             "Target six tasks or fewer per user story. Six is a recommendation, not a hard rejection limit",
+            "never pad a story to six",
             "three stories with five tasks each satisfy it",
             "documentation-only work (documentation updates without changing executable behavior)",
             "one or two tasks per story within the required story phases",
@@ -125,11 +149,14 @@ def test_speckit_sizing_guidance(format):
         assert examples == [[5, 5, 5], [8], [9]]
         guide = doc.passage(doc.read(doc.GUIDE), "### Native spec-kit drafting")
         assert "speckit.md#story-sizing-examples" in doc.local_links(doc.GUIDE, guide)
+        # The house rules state the same per-task line guideline the drafter receives.
+        house = " ".join(doc.passage(doc.read(doc.HOUSE), "## What the drafter produces").split())
+        assert set(re.findall(r"(\d+) changed lines", house)) == set(re.findall(r"(\d+) changed lines", prompt))
     else:
         for clause in (
-            "Combine work touching the same file for one concern into one task within that ceiling",
+            "Combine work touching the same file for one concern into one task",
             "six tasks or fewer and as few sections as dependencies allow",
-            "Six is a normal target, not a hard rejection limit",
+            "Six is a recommendation, not a target or a hard rejection limit", "never pad to six",
             "one or two tasks in one section", "Every scenario must be covered by at least one task",
             "Order tasks so each builds on landed work. Put tests with the code they test",
             "describe it in the design",
@@ -487,10 +514,41 @@ def test_native_admission_uses_feasibility_normally(native_admission, monkeypatc
     assert all((root / name).read_text() == "dirty\n" for name in snapshot)
 
 
+FEASIBILITY_SIZE_CLAUSE = """\
+An estimated line count alone, however large, never makes a task impossible
+as written; report a size concern in `risks`, not in contradictions.
+"""
+CRITIC_SIZE_CLAUSE = """\
+   Estimated size is advisory. About 600 changed lines per task, counting
+   production code, tests and documentation together, is a soft planning
+   guideline, never a target or an automatic rejection threshold. Weigh
+   cohesion, safe split boundaries (independent behavior, migration or
+   recovery boundaries, distinct verification strategies, substantial
+   uncertainty) and any task boundary and verification rationale in
+   design.md. A coherent task of 301 to 600 lines needs no risk; an
+   above-guideline task with that rationale is reviewable without a numeric
+   blocker. A size concern belongs in risks. Estimated size alone never belongs
+   in contradictions, requires correction or rejects a proposal. Estimated
+   lines or task count alone never require another issue or pull request.
+   Soft sizing waives no frozen path, trusted verify command, protected
+   guarantee, required context or split warranted by substantial uncertainty.
+"""
+
+
+def without_addition(prompt, addition):
+    # Remove only the authorized advisory-size addition; every other byte stays hashed.
+    assert prompt.count(addition) == 1
+    return prompt.replace(addition, "", 1)
+
+
 @pytest.mark.scenario("spec-critic/native-feasibility-and-critic-context/native-admission-uses-feasibility-normally")
+@pytest.mark.scenario("spec-format/scoped-prompt-compatibility-migration/review-additions-preserve-unrelated-bytes")
 def test_original_review_prompts_and_native_checklist_are_preserved():
-    assert hashlib.sha256(feasibility.PROMPT.encode()).hexdigest() == "58c2d98ae31ff9af8239ebbaeee9018ce37aa324494d261bd4bb9682dc0a74d3"
-    assert hashlib.sha256(critic.PROMPT.encode()).hexdigest() == "b221906f7a9e0d3fc5669ae58d3c22f093ebeb56aeada6abdb6187f074e52781"
+    legacy_feasibility = without_addition(feasibility.PROMPT, FEASIBILITY_SIZE_CLAUSE)
+    legacy_critic = without_addition(critic.PROMPT, CRITIC_SIZE_CLAUSE)
+    assert hashlib.sha256(legacy_feasibility.encode()).hexdigest() == "58c2d98ae31ff9af8239ebbaeee9018ce37aa324494d261bd4bb9682dc0a74d3"
+    assert hashlib.sha256(legacy_critic.encode()).hexdigest() == "b221906f7a9e0d3fc5669ae58d3c22f093ebeb56aeada6abdb6187f074e52781"
+    assert feasibility.SPECKIT_PROMPT.count(FEASIBILITY_SIZE_CLAUSE) == 1
     # Native sizing intentionally replaces only the count guidance in item 1.
     opening = critic.PROMPT.split("Work through all eight checklist items:\n", 1)[1].split("   Count task entries", 1)[0]
     assert opening in critic.SPECKIT_PROMPT
@@ -712,6 +770,29 @@ def test_native_draft_quality_observation_remains_pending():
     assert not re.search(r"^- \[[xX]\]", body, re.M)
     house = doc.passage(doc.read(doc.HOUSE), "## What the drafter produces")
     assert "README.md#draft-quality-observation" in doc.local_links(doc.HOUSE, house)
+
+
+@pytest.mark.scenario("specloop-documentation/sizing-evidence-limits/live-comparison-remains-pending")
+@pytest.mark.scenario("specloop-documentation/native-drafting-guidance/quality-evidence-remains-human")
+def test_sizing_observation_remains_pending_human_work():
+    guide = doc.read(doc.GUIDE)
+    body = doc.passage(guide, "### Task sizing observation")
+    rows = documentation_table(body)
+    assert len(rows) == 3
+    issues = "https://github.com/mattpolicastro/nightshift/issues/{}"
+    tracked = set()
+    for check, status, tracking in rows:
+        assert check.strip() and status == "Pending"
+        links = doc.local_links(doc.GUIDE, tracking)
+        assert links and links <= {issues.format(200), issues.format(80)}
+        tracked |= links
+    assert tracked == {issues.format(200), issues.format(80)}
+    assert FMT.parse_tasks(body) == []
+    assert not re.search(r"^- \[[xX ]\]", body, re.M)
+    # Both sizing guides route readers to the pending observation.
+    assert "#task-sizing-observation" in doc.local_links(doc.GUIDE, doc.passage(guide, "### OpenSpec drafting"))
+    house = doc.passage(doc.read(doc.HOUSE), "## What the drafter produces")
+    assert "README.md#task-sizing-observation" in doc.local_links(doc.HOUSE, house)
 
 
 @pytest.mark.scenario("specloop-documentation/spec-kit-discovery/find-authoring-guidance")

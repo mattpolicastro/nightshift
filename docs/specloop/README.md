@@ -1021,13 +1021,19 @@ citations such as `042-add-a-gate/us1/as2`. Every scenario needs covering work;
 setup needs no invented story citation. Human-only work belongs in `plan.md`
 under `## Human checks`, with one scenario citation per checklist item.
 
-Target six tasks or fewer per user story, with one concern and about 300 changed
-lines at most per task. Combine related work, order dependencies and put tests
-with their code. Every task costs a review cycle and every phase an evidence
-gate. Documentation-only work normally needs one or two tasks per story, retaining
-the required story phases. More than eight entries in a story phase warrants
-advisory critic merge advice; exactly eight does not. Whole-feature totals never
-trigger a count-only risk or rejection: three five-task stories are fine. See the
+Each task is one coherent, independently verifiable concern for a single
+session. About 600 changed lines per task, counting code, tests and documentation,
+is the same soft guideline as [OpenSpec drafting](#openspec-drafting); above it,
+prefer a safe split or record the rationale in `plan.md`.
+Specify only the stories, requirements and scenarios that observable behavior and
+meaningful failures need; required sections stay, but are not padded.
+Target six tasks or fewer per user story; fewer is fine and stories are never
+padded to six. Order dependencies and put tests with their code. Every task costs
+a review cycle and every phase an evidence gate. Documentation-only work normally
+needs one or two tasks per story, retaining the required story phases. More than
+eight entries in a story phase warrants advisory critic merge advice; exactly
+eight does not. Whole-feature totals never trigger a count-only risk or rejection:
+three five-task stories are fine. See the
 [sizing examples](speckit.md#story-sizing-examples).
 
 Shared planned-file extraction reserves both `specs/` and `openspec/` as
@@ -1105,16 +1111,31 @@ observation in human checks, never in an implementing agent's task list.
 5. leaves the draft on a local `spec/<change>` branch for a human to approve.
    For daemon-managed issues, Nightshift pushes it and opens the spec review PR.
 
-Size tasks by risk and dependencies: combine work touching the same file for
-one concern within the single-session ceiling of about 300 changed lines.
-Split when distinct concerns, dependencies or that ceiling require it.
+Size tasks by cohesion, verification and risk: each task is one coherent,
+independently verifiable concern for a single session. Combine work touching
+the same file, and keep coupled production changes with their tests even
+across files. About 600 changed lines per task, counting production code, tests
+and documentation together, is a soft guideline: neither a target nor a
+rejection threshold. Split at independent behavior, migration or recovery
+boundaries, distinct verification strategies or substantial uncertainty,
+keeping dependency order. Above roughly 600 lines, prefer a safe split; when
+that would break cohesion, record the boundary and verification rationale in
+`design.md`. A 450-line change for one behavior can stay one task, while a
+250-line migration with its own recovery boundary may still need a split.
+Neither estimated lines nor task count alone requires another issue or PR
+([issue #200](https://github.com/mattpolicastro/nightshift/issues/200),
+[issue #80](https://github.com/mattpolicastro/nightshift/issues/80)).
 Documentation-only changes update documentation without changing executable
-behavior; use one or two tasks in one section within that ceiling, rather
-than splitting by document heading. Most changes should use six tasks or
-fewer and as few sections as dependencies allow. Six is a normal target,
-not a hard rejection limit. Every task incurs a full implement, verify and
+behavior; use one or two tasks in one section, rather than splitting by
+document heading. Most changes should use six tasks or fewer and as few
+sections as dependencies allow. Six is a recommendation, not a target or a
+hard rejection limit: fewer is fine, and plans are never padded to six.
+Every task incurs a full implement, verify and
 review cycle; every section incurs an evidence gate, so unnecessary splits
 add overhead ([issue #75](https://github.com/mattpolicastro/nightshift/issues/75)).
+Session timeouts, turn limits, seal limits and the verification, review and
+evidence gates are unchanged; whether larger tasks pay off is still a
+[pending observation](#task-sizing-observation).
 
 **Work in flight.** Before drafting, the harness snapshots paths named in
 `tasks.md` by other running or paused runs for the same source repository.
@@ -1144,7 +1165,8 @@ agent ([PR #30](https://github.com/mattpolicastro/nightshift/pull/30)).
 Lint catches common human-task forms such as “Manually …” or “The operator …”.
 Feasibility also rejects named-person checks such as “Matt checks …” and tasks
 that are impossible under the allowed paths, frozen files or trusted verify
-commands. Preserve existing `openspec/specs/` guarantees: feasibility rejects
+commands. An estimated line count alone never establishes impossibility; it
+can be reported as a risk. Preserve existing `openspec/specs/` guarantees: feasibility rejects
 a change that removes, hides or breaks one without a justified `MODIFIED` or
 `REMOVED` delta for that requirement
 ([PR #36](https://github.com/mattpolicastro/nightshift/pull/36)).
@@ -1176,7 +1198,11 @@ budget, followed by lint, feasibility and critic review again. Remaining
 blockers are contradictions naming the task, problem and evidence; exhausted
 budgets and unchanged corrections leave them unresolved. Non-blocking notes
 appear as `Critic: ` risks. Overlap alone is not a blocker: the critic must
-explain why the plan is unsafe or unworkable. A failed critic review stops the
+explain why the plan is unsafe or unworkable. Estimated size is advisory too:
+size alone never produces a contradiction, rejection or correction round, a
+coherent 301–600-line task needs no risk, and an above-guideline task with a
+cohesion and verification rationale stays reviewable. Task-count thresholds
+are unchanged, and independently evidenced unsafe design still blocks. A failed critic review stops the
 draft with an error; it is not a pass
 ([PR #57](https://github.com/mattpolicastro/nightshift/pull/57)).
 
@@ -1193,6 +1219,23 @@ to `~/.logs/specloop.log`.
 
 **Admission** runs a feasibility review, which refuses tasks that are
 impossible as written under the frozen paths and verify commands.
+
+### Task sizing observation
+
+| Human check | Status | Tracking |
+| --- | --- | --- |
+| Small native drafts carry only necessary stories, requirements and failures | Pending | [issue #200](https://github.com/mattpolicastro/nightshift/issues/200) |
+| Sampled cohesive 301–600-line tasks against the baseline | Pending | [issue #200](https://github.com/mattpolicastro/nightshift/issues/200), [issue #80](https://github.com/mattpolicastro/nightshift/issues/80) |
+| Sampled Claude sessions fit unchanged turn and time limits | Pending | [issue #200](https://github.com/mattpolicastro/nightshift/issues/200) |
+
+The soft sizing guideline and proportional native detail are drafting
+guidance. A human still needs to inspect real small native drafts, then follow
+sampled cohesive 301–600-line tasks through review, comparing task counts,
+review cycles, elapsed time and human interventions with the baseline from
+issue #200. Confirming that those Claude sessions fit their unchanged limits is
+part of the same check; budgets are not raised to make it pass. Offline prompt
+and scripted gate tests establish contracts, not draft quality or causal
+improvement. Keep these checks in human checklists, never in agent tasks.
 
 ### Section evidence
 

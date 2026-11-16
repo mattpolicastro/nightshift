@@ -14,6 +14,25 @@ from specloop import agents, feasibility, verify
 from specloop.manifest import Manifest, load_env
 
 
+def _estimated_size(rationale: str) -> str:
+    """Soft per-task size guidance shared by both critic prompts."""
+    return f"""\
+   Estimated size is advisory. About 600 changed lines per task, counting
+   production code, tests and documentation together, is a soft planning
+   guideline, never a target or an automatic rejection threshold. Weigh
+   cohesion, safe split boundaries (independent behavior, migration or
+   recovery boundaries, distinct verification strategies, substantial
+   uncertainty) and any task boundary and verification rationale in
+   {rationale}. A coherent task of 301 to 600 lines needs no risk; an
+   above-guideline task with that rationale is reviewable without a numeric
+   blocker. A size concern belongs in risks. Estimated size alone never belongs
+   in contradictions, requires correction or rejects a proposal. Estimated
+   lines or task count alone never require another issue or pull request.
+   Soft sizing waives no frozen path, trusted verify command, protected
+   guarantee, required context or split warranted by substantial uncertainty.
+"""
+
+
 PROMPT = """\
 # Spec critic of an OpenSpec change
 
@@ -42,6 +61,7 @@ Work through all eight checklist items:
    rejection threshold. Task count alone never belongs in contradictions,
    requires correction or rejects a proposal. Independently evidenced unsafe
    designs still qualify as contradictions under the existing blocking criteria.
+""" + _estimated_size("design.md") + """\
 2. File collisions and hidden instructions: inspect colliding production or
    test files and restrictions referring to context the implementing agent
    never receives. Avoidance instructions must name files in the draft itself.
@@ -126,11 +146,11 @@ _SPECKIT_TASK_SIZING = """\
    means changing documentation without changing executable behavior; it uses
    the same per-story threshold, not a two-task critic threshold.
    The drafter's six-task recommendation per story is not a critic rejection
-   threshold. The ceiling remains about 300 changed lines per task, not per
-   story or feature. Task count alone never belongs in contradictions,
+   threshold. The size guideline below applies per task, not per story or
+   feature. Task count alone never belongs in contradictions,
    requires correction or rejects a proposal. Independently evidenced unsafe
    designs still qualify as contradictions under the existing blocking criteria.
-"""
+""" + _estimated_size("plan.md")
 
 
 SPECKIT_PROMPT = (
