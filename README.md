@@ -533,9 +533,10 @@ See [issue #128](https://github.com/mattpolicastro/nightshift/issues/128) and
 `nightshift resume <change>` control a build. Daemon controls use
 `nightshift daemon run`, `nightshift daemon status`, `nightshift daemon pause`
 and `nightshift daemon resume`. The daemon and supervisor remain independent.
-The frozen daemon wrapper's bare `nightshift run` is the sole implicit daemon
-exception; the frozen supervisor uses `specloop serve`, a one-release alias
-that prints a rename notice to stderr while preserving machine stdout.
+Bare `nightshift run` is the sole implicit daemon exception, and `specloop`
+is a one-release alias that prints a rename notice to stderr while preserving
+machine stdout. The service wrappers use `nightshift daemon run` and
+`nightshift serve`.
 
 Build state now uses `~/.nightshift`: legacy `~/.specloop/runs/<change>` maps
 to `~/.nightshift/runs/<change>`, `~/.specloop/proposals/<change>` to
@@ -622,13 +623,11 @@ credential provisioning is automatic.
 `$HOME/Projects/nightshift` and `/opt/homebrew/bin/uv`. `bin/nightshift-daemon`
 prepends `/opt/homebrew/bin:$HOME/n/bin` to incoming PATH;
 `bin/specloop-serve` sets
-`$HOME/n/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin`.
+`/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin`.
 Environment settings do not relocate these bootstrap commands, nor does moving
 the wrapper pathname in a plist. Wrapper portability is deferred because
-`bin/**` is frozen without exceptions, including comments, as are launchd plists.
-The supervisor retains its `~/n/bin` prefix and stale OpenSpec/Node comment;
-PATH/comment cleanup is deferred on [issue #184](https://github.com/mattpolicastro/nightshift/issues/184)'s ledger.
-Absolute validator selection removes that backend dependency without wrapper edits.
+`bin/**` is frozen to agents without exceptions, including comments, as are
+launchd plists; wrapper edits are hand-made direct PRs.
 Full daemon rollout on another
 layout remains pending separate wrapper work or an independently provisioned
 operator service preserving equivalent credential and preflight guards,

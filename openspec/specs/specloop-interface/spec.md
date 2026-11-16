@@ -21,9 +21,10 @@ and detail, or null), tasks done and total, branch head and PR URL.
 
 ### Requirement: Command JSON
 
-`propose`, `admit`, `revise` and `publish` SHALL accept `--json` and then print exactly one version-1 JSON document describing the outcome, including any questions, contradictions, risks, reasons, branch, commit or PR URL. As an explicit exception, `ValidatorUnavailable` from admission or drafting validation, including its scenario discovery, SHALL produce exactly `{"version": 1, "error": "..."}` with a nonempty diagnostic and exit 1, with no `outcome`. These paths SHALL catch the subclass before `SpecError` and broader refusal/rejection handling, and SHALL NOT retry validation or feed the infrastructure failure into drafting correction rounds. Existing publication exception behavior SHALL remain unchanged.
-
-`docs/specloop/command-json.md` SHALL extend its exception paragraph to describe this admission/drafting exception, retained approval/arming triggers, retry on later eligible daemon polls and existing threshold-based `needs-human` holds. Ordinary validation problems SHALL retain refusal/rejection semantics.
+`propose`, `admit`, `revise` and `publish` SHALL accept `--json` and then print exactly
+one version-1 JSON document describing the outcome, including any questions,
+contradictions, risks, reasons, branch, commit or PR URL. Existing publication exception
+behavior SHALL remain unchanged.
 
 #### Scenario: Refused admission as JSON
 - **WHEN** `specloop admit --json` refuses a change because a task is impossible as written
@@ -37,6 +38,15 @@ and detail, or null), tasks done and total, branch head and PR URL.
 - **WHEN** validation or its scenario discovery raises `ValidatorUnavailable` during `admit --json`
 - **THEN** the command exits 1 with exactly one version-1 error document and no outcome, cleans up partial admission without saving admitted state, and performs no in-process retry
 
+As an explicit exception, `ValidatorUnavailable` from admission or drafting validation,
+including its scenario discovery, SHALL produce exactly `{"version": 1, "error": "..."}`
+with a nonempty diagnostic and exit 1, with no `outcome`. These paths SHALL catch the
+subclass before `SpecError` and broader refusal/rejection handling, and SHALL NOT retry
+validation or feed the infrastructure failure into drafting correction rounds.
+`docs/specloop/command-json.md` SHALL extend its exception paragraph to describe this
+admission/drafting exception, retained approval/arming triggers, retry on later eligible
+daemon polls and existing threshold-based `needs-human` holds.
+
 #### Scenario: Draft validator unavailable
 - **WHEN** validation or its scenario discovery raises `ValidatorUnavailable` during `propose --json`
 - **THEN** the command exits 1 with exactly one version-1 error document and no outcome, without another correction round or proposal publication for that attempt
@@ -45,6 +55,8 @@ and detail, or null), tasks done and total, branch head and PR URL.
 - **WHEN** the validator returns parseable JSON with real validation problems
 - **THEN** admission exits 1 with outcome "refused" and the problems among its reasons, while drafting retains its existing correction and rejection behavior
 - **THEN** no transient error envelope replaces those outcomes, even if stderr contains a recognized network code
+
+Ordinary validation problems SHALL retain refusal/rejection semantics.
 
 ### Requirement: Manifest templates
 `admit` and `propose` SHALL accept `--change` and `--branch`, overriding the
@@ -64,31 +76,34 @@ SHALL then push the branch and keep using that PR rather than opening another.
 
 ### Requirement: Revision round
 
-`specloop revise <change> --feedback <file>` SHALL ask the selected adapter to
-append one task per feedback block and commit it through the harness, leaving
-a newly appended round running. OpenSpec SHALL retain `## N. Review round K`.
-Spec-kit SHALL use `## Phase N: Review round K`, with K after the highest native
-review-round title, N after the highest phase and globally fresh T labels.
-The adapter SHALL own numbering and fresh/replay text reconstruction, keeping
-`revise.py` format-agnostic. With `--round-id`, a matching already-landed round
-SHALL follow Idempotent revision recovery, returning its original commit and
-preserving later state. Unkeyed eligible invocations SHALL retain fresh-append
-behavior. Empty feedback SHALL refuse even with a key. This qualifies the
-previous OpenSpec-only heading requirement rather than changing its behavior.
+`specloop revise <change> --feedback <file>` SHALL ask the selected adapter to append
+one task per feedback block and commit it through the harness, leaving a newly appended
+round running. OpenSpec SHALL retain `## N. Review round K`.
 
 #### Scenario: Feedback becomes tasks
 - **WHEN** revise is given two feedback blocks for an admitted OpenSpec change
 - **THEN** tasks.md gains the original review-round section and two unchecked tasks quoting the blocks, and status becomes running
 
+Unkeyed eligible invocations SHALL retain fresh-append behavior. This qualifies the
+previous OpenSpec-only heading requirement rather than changing its behavior.
+
 #### Scenario: Empty feedback refused
 - **WHEN** revise receives no feedback, with or without a round key
 - **THEN** nothing is committed and the command exits nonzero
+
+Empty feedback SHALL refuse even with a key.
 
 #### Scenario: Native rounds advance and replay
 - **WHEN** two different keyed feedback submissions are applied to an eligible native run and the first key is replayed after the second commit
 - **THEN** the first two commits append Review round 1 then Review round 2 with increasing phase numbers, globally fresh T labels and distinct task keys
 - **THEN** replay returns the first commit without appending tasks or replacing later state, using native reconstruction for candidate validation
 - **THEN** equal feedback under different keys still gets distinct rounds; conflicting feedback under the same key still refuses
+
+Spec-kit SHALL use `## Phase N: Review round K`, with K after the highest native
+review-round title, N after the highest phase and globally fresh T labels. The adapter
+SHALL own numbering and fresh/replay text reconstruction, keeping `revise.py`
+format-agnostic. With `--round-id`, a matching already-landed round SHALL follow
+Idempotent revision recovery, returning its original commit and preserving later state.
 
 ### Requirement: Remaining automatic resumes
 
@@ -308,12 +323,17 @@ Revise SHALL accept optional --round-id as a nonempty ASCII identifier of at mos
 
 ### Requirement: Validator availability classification
 
-`specloop/openspec.py` SHALL define `ValidatorUnavailable(SpecError)`. The runtime version probe and operation SHALL raise it only for `subprocess.TimeoutExpired`. Launch errors, version failures and no-JSON results SHALL raise plain `SpecError`; parseable operation JSON SHALL retain existing interpretation. Each subprocess call SHALL use timeout 120 seconds with no in-process retry or backoff. A first operation SHALL perform the version probe before its operation call; successful probes SHALL be cached as specified by openspec-binary.
+`specloop/openspec.py` SHALL define `ValidatorUnavailable(SpecError)`. The runtime
+version probe and operation SHALL raise it only for `subprocess.TimeoutExpired`. Each
+subprocess call SHALL use timeout 120 seconds with no in-process retry or backoff.
 
 #### Scenario: Validator timeout is transient
 - **WHEN** the version probe or OpenSpec operation raises `subprocess.TimeoutExpired`
 - **THEN** the backend raises `ValidatorUnavailable`, also catchable as `SpecError`, with a command/timeout diagnostic and the timeout as its cause after one attempt at that subprocess with timeout 120
 - **THEN** a timed-out version probe starts no operation, while a timed-out operation is not retried
+
+A first operation SHALL perform the version probe before its operation call; successful
+probes SHALL be cached as specified by openspec-binary.
 
 #### Scenario: Registry failure is transient
 
@@ -327,6 +347,9 @@ This existing scenario name is retained for scenario-ID continuity. Its former n
 - **THEN** the backend raises plain `SpecError` with the existing bounded diagnostic rather than `ValidatorUnavailable`
 - **WHEN** stdout contains parseable validation JSON with problems, even with a recognized code in stderr
 - **THEN** the backend returns the parsed result and validation reports the problems normally
+
+Launch errors, version failures and no-JSON results SHALL raise plain `SpecError`;
+parseable operation JSON SHALL retain existing interpretation.
 
 #### Scenario: Runtime fallbacks remain effective
 - **WHEN** runtime scenario discovery raises `ValidatorUnavailable`

@@ -10,29 +10,32 @@ provider cannot run, while preserving bounded retries and compatible pauses.
 
 The Codex and Claude adapters SHALL classify explicit logged-out,
 authentication-required, expired/invalid authentication token, 401/403, and
-inactive/expired/cancelled plan or subscription failures as `unavailable`.
-They SHALL examine the existing failed-response diagnostic sources, preserve
-session/usage/detail fields, and keep existing `USAGE` patterns. Codex sources
-and priority SHALL remain unchanged. Claude SHALL apply Structured Claude usage classification first;
-only its diagnostic fallback SHALL use `USAGE`, restricted to stderr and
-explicit provider `errors`, with usage matches retaining priority over
-authentication matches. Claude authentication diagnostic sources SHALL remain
-unchanged. Timeout, successful-output and invalid-output semantics SHALL
-remain unchanged except for the explicitly specified structured rejection
-and overage outcomes.
+inactive/expired/cancelled plan or subscription failures as `unavailable`. They SHALL
+examine the existing failed-response diagnostic sources, preserve session/usage/detail
+fields, and keep existing `USAGE` patterns.
 
 #### Scenario: Authentication and plan diagnostics
 - **WHEN** either adapter receives a failed provider response without an overriding usage-limit signal reporting a logged-out session, required login, expired or invalid authentication token, standalone 401/403, or inactive, expired or cancelled plan or subscription
 - **THEN** it returns disposition `unavailable` with the provider diagnostic, session identifier and usage when available
 - **THEN** the same classification applies when the diagnostic occurs only in stderr
 
+Claude authentication diagnostic sources SHALL remain unchanged.
+
 #### Scenario: Usage matching retains priority
 - **WHEN** a failed response matches an existing adapter `USAGE` expression in an eligible diagnostic source, including a response that also mentions authentication or a plan, and Claude has no recognized structured status or overage signal
 - **THEN** the adapter returns `usage_limit` and preserves its existing usage-limit diagnostic behavior
 
+Codex sources and priority SHALL remain unchanged. Claude SHALL apply Structured Claude
+usage classification first; only its diagnostic fallback SHALL use `USAGE`, restricted
+to stderr and explicit provider `errors`, with usage matches retaining priority over
+authentication matches.
+
 #### Scenario: Other outcomes retain their meaning
 - **WHEN** the call has no structured rejection or overage signal and times out, fails with an unrelated transport error or a longer number containing 401/403, succeeds with output mentioning a plan or token, or succeeds with malformed structured output
 - **THEN** it retains respectively `infra`, `infra`, `ok`, or `invalid_output` behavior without classifying incidental words as unavailability
+
+Timeout, successful-output and invalid-output semantics SHALL remain unchanged except
+for the explicitly specified structured rejection and overage outcomes.
 
 ### Requirement: Task and profile retry allowance
 
@@ -144,6 +147,22 @@ A codex profile without `base_url` MAY name its own login file with `auth` (for 
 #### Scenario: Every codex login is a sealed secret
 - **WHEN** `~/.codex/auth.json` and `~/.codex-api/auth.json` both exist
 - **THEN** the seal's credential values include the token values from both
+
+### Requirement: Manifest credentials for every session
+
+Every agent session the harness starts for a manifest SHALL receive the values in that manifest's `env_file` (or `~/.config/specloop/env` when it names none) as its session secrets: build and review sessions, and also the drafting, feasibility and spec-critic sessions. The secrets SHALL reach only the adapter's child environment, never a prompt, so a `claude` subscription profile authenticates with the env file's `CLAUDE_CODE_OAUTH_TOKEN` in every role.
+
+#### Scenario: Drafting session carries the manifest credentials
+- **WHEN** a manifest's `env_file` sets `CLAUDE_CODE_OAUTH_TOKEN` and its drafting role selects a `claude` profile
+- **THEN** each drafting session's call carries that token and its prompt does not
+
+#### Scenario: Feasibility session carries the manifest credentials
+- **WHEN** a manifest's `env_file` sets `CLAUDE_CODE_OAUTH_TOKEN` and its feasibility role selects a `claude` profile
+- **THEN** the feasibility session's call carries that token and its prompt does not
+
+#### Scenario: Critic session carries the manifest credentials
+- **WHEN** a manifest's `env_file` sets `CLAUDE_CODE_OAUTH_TOKEN` and its critic selects a `claude` profile
+- **THEN** the critic session's call carries that token and its prompt does not
 
 ### Requirement: Shared rate limit telemetry
 

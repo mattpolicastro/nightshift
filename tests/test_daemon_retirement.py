@@ -451,8 +451,8 @@ def test_bundled_service_roles_read_only():
     root = Path(__file__).resolve().parents[1]
     home = "/Users/YOUR_USERNAME"
     for service, wrapper, target, keepalive, process_type in (
-        ("nightshift", "nightshift-daemon", ["nightshift", "run"], {"SuccessfulExit": False}, "Background"),
-        ("specloop", "specloop-serve", ["--no-sync", "specloop", "serve"], True, "Standard"),
+        ("nightshift", "nightshift-daemon", ["nightshift", "daemon", "run"], {"SuccessfulExit": False}, "Background"),
+        ("specloop", "specloop-serve", ["--no-sync", "nightshift", "serve"], True, "Standard"),
     ):
         with (root / "launchd" / f"com.mattpolicastro.{service}.plist").open("rb") as stream:
             job = plistlib.load(stream)
@@ -466,7 +466,7 @@ def test_bundled_service_roles_read_only():
         lines = [shlex.split(line, comments=True) for line in (root / "bin" / wrapper).read_text().splitlines()]
         assert [line for line in lines if line[:1] == ["exec"]] == [["exec", "/opt/homebrew/bin/uv", "run", *target]]
         assert ["cd", "$HOME/Projects/nightshift"] in lines
-        # Parse the frozen argv without executing a wrapper or touching launchd.
+        # Parse the wrapper argv without executing a wrapper or touching launchd.
         argv = target[1:] if service == "nightshift" else target[2:]
         parsed = cli.build_parser().parse_args(argv)
         if service == "nightshift":

@@ -1,7 +1,8 @@
 # run-context Specification
 
 ## Purpose
-TBD - created by archiving change factory-context. Update Purpose after archive.
+Expose run context in CLI status and Factory details so operators can understand
+progress, diagnose pauses and open the relevant change or workspace.
 
 ## Requirements
 

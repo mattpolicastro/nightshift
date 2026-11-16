@@ -23,7 +23,10 @@ Invalid values SHALL be rejected with an error naming the setting.
 
 ### Requirement: Baseline before bounded work
 
-The evidence gate SHALL finish a full unmutated baseline for every distinct resolved ordered step sequence used by its selected mutants before starting any mutant verification. It SHALL baseline each such sequence once per gate, in first-use order, with `{mutant_path}` empty, ordinary preparation and manifest timeouts. Unused routes SHALL NOT run baselines. It SHALL execute at most the configured number of mutants at once and allow independent mutants to overlap when capacity exists. A single selected sequence SHALL retain the existing one-baseline behavior.
+The evidence gate SHALL finish a full unmutated baseline for every distinct resolved
+ordered step sequence used by its selected mutants before starting any mutant
+verification. It SHALL execute at most the configured number of mutants at once and
+allow independent mutants to overlap when capacity exists.
 
 #### Scenario: Baseline precedes overlap
 - **WHEN** a successful single-sequence baseline is followed by at least three executable mutants with a limit of `2`
@@ -45,6 +48,11 @@ The evidence gate SHALL finish a full unmutated baseline for every distinct reso
 - **WHEN** multiple mutants use overlapping routes, two routes resolve to the same ordered step sequence, a mutant uses fallback, and an unused route exists
 - **THEN** each distinct used sequence including fallback gets one full baseline, identical sequences share it, differently ordered sequences remain distinct, and unused routes get none
 - **THEN** every required baseline passes before any worker starts and all selected mutants retain their original identities and order
+
+It SHALL baseline each such sequence once per gate, in first-use order, with
+`{mutant_path}` empty, ordinary preparation and manifest timeouts. Unused routes SHALL
+NOT run baselines. A single selected sequence SHALL retain the existing one-baseline
+behavior.
 
 ### Requirement: Independent mutant workspaces
 
@@ -146,13 +154,10 @@ not configured as invalid and baseline timeouts SHALL retain their classificatio
 
 ### Requirement: Timeout scoring
 
-Only killed and survived mutants SHALL enter the score and summary's caught
-fraction; timeouts SHALL enter neither numerator nor denominator. Evidence with
-generated mutants SHALL be unmeasured unless at least one mutant was killed or
-survived. Equivalent, timeout, invalid and pending results SHALL provide no
-measurement. Unmeasured evidence SHALL have a null score, fail at every
-threshold, and reach the existing `gate_evidence` pause without strengthening
-tasks. Coverage, baseline-failure and no-mutant skip rules SHALL remain unchanged.
+Only killed and survived mutants SHALL enter the score and summary's caught fraction;
+timeouts SHALL enter neither numerator nor denominator. Evidence with generated mutants
+SHALL be unmeasured unless at least one mutant was killed or survived. Coverage,
+baseline-failure and no-mutant skip rules SHALL remain unchanged.
 
 #### Scenario: Mixed results exclude timeouts
 - **WHEN** evidence contains one killed mutant, one survivor, two timeouts, one invalid and one equivalent
@@ -162,9 +167,14 @@ tasks. Coverage, baseline-failure and no-mutant skip rules SHALL remain unchange
 - **WHEN** a passing baseline is followed by generated mutants that all time out in selected tests
 - **THEN** the score is null, evidence is unmeasured, the pass check fails even at threshold zero, and the existing gate pauses with the summary and adds no strengthening tasks
 
+Unmeasured evidence SHALL have a null score, fail at every threshold, and reach the
+existing `gate_evidence` pause without strengthening tasks.
+
 #### Scenario: Timeouts mixed with invalid are unmeasured
 - **WHEN** generated mutants include timeouts and invalids but no killed, survived or equivalent results
 - **THEN** the score is null, evidence is unmeasured, and the pass check fails at every threshold
+
+Equivalent, timeout, invalid and pending results SHALL provide no measurement.
 
 #### Scenario: Equivalent and skipped behavior retained
 - **WHEN** otherwise covered evidence with a passing baseline contains equivalent and timeout mutants, or mutation was skipped with no mutants
@@ -225,12 +235,19 @@ null score representation, and existing timeout reporting SHALL be preserved.
 
 ### Requirement: Deterministic time box regression
 
-`test_parallel_mutants_respect_time_box` SHALL use test-local subprocess blocking for intended hangs, with no natural completion near the enforced time limit. It SHALL preserve both preparation modes, exact budget-formula assertions, queue-wait independence, ordered classifications and real process cleanup. The restriction to editing only this test and its decorators applied to the #49 regression repair; subsequent execution features SHALL preserve the test and its assertions and add their coverage in new test files.
+`test_parallel_mutants_respect_time_box` SHALL use test-local subprocess blocking for
+intended hangs, with no natural completion near the enforced time limit. It SHALL
+preserve both preparation modes, exact budget-formula assertions, queue-wait
+independence, ordered classifications and real process cleanup.
 
 #### Scenario: Hanging work has fixed outcomes
 - **WHEN** the test runs with `prepared=False` or `prepared=True` and two mutant worker slots
 - **THEN** the baseline and ordinary preparation/verification steps succeed, the first three mutants block in their selected test step until the real verifier times out, the fourth exits 3, and the fifth exits 0
 - **THEN** results are exactly `timeout, timeout, timeout, killed, survived` in selection order, with the existing receipt, diagnostic, artifact, process-death, source-isolation, and cleanup-order assertions retained
+
+The restriction to editing only this test and its decorators applied to the #49
+regression repair; subsequent execution features SHALL preserve the test and its
+assertions and add their coverage in new test files.
 
 #### Scenario: Exact budgets survive queue wait
 - **WHEN** controlled baseline durations exercise the floor, fractional scaling, missing/zero fallback, and both manifest-cap cases while a third hanging mutant queues behind the first two

@@ -155,7 +155,7 @@ def build_parser(*, json_errors=False):
         def parse_args(self, args=None, namespace=None):
             argv = list(sys.argv[1:] if args is None else args)
             parsed = super().parse_args(argv or ["status"], namespace)
-            # The frozen service wrapper uses bare run; other build operands
+            # Bare run stays a one-release daemon form (#115); other build operands
             # remain required, and a named run cannot take daemon options.
             if parsed.cmd == "run" and parsed.change is None:
                 parsed.handler, parsed.command = _daemon_command, "run"

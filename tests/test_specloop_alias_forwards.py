@@ -92,8 +92,9 @@ def test_frozen_alias_serve_reaches_supervisor(alias, monkeypatch, capsys):
     monkeypatch.setattr(serve, "serve", lambda poll, notify, *, once: calls.append((poll, notify, once)) or 7)
     wrapper = (PROJECT / "bin" / "specloop-serve").read_text().splitlines()
     command, = [shlex.split(line) for line in wrapper if line.startswith("exec ")]
-    assert command == ["exec", "/opt/homebrew/bin/uv", "run", "--no-sync", "specloop", "serve"]
-    assert result(alias, command[5:]) == 7
+    # The wrapper moved to the canonical name (#115); the alias still forwards serve.
+    assert command == ["exec", "/opt/homebrew/bin/uv", "run", "--no-sync", "nightshift", "serve"]
+    assert result(alias, ["serve"]) == 7
     assert calls == [(60, None, False)]
     output = capsys.readouterr()
     assert output.out == "" and output.err == NOTICE

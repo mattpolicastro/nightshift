@@ -158,11 +158,18 @@ Each CI round SHALL record the current `main` SHA. Landing SHALL ensure the firs
 
 ### Requirement: Bounded CI wait
 
-Landing SHALL wait for checks on the expected PR head with a shared timeout of 1800 seconds by default, configurable by `--timeout`. Except when the Bounded docs only exemption is established and attested, it SHALL require at least one passing check and all checks to finish as pass or skipping, and SHALL refuse failure, cancellation, invalid results or timeout. The response defined by `CI registration delay` SHALL be pending rather than invalid; no other malformed-response exception is introduced.
+Landing SHALL wait for checks on the expected PR head with a shared timeout of 1800
+seconds by default, configurable by `--timeout`. Except when the Bounded docs only
+exemption is established and attested, it SHALL require at least one passing check and
+all checks to finish as pass or skipping, and SHALL refuse failure, cancellation,
+invalid results or timeout.
 
 #### Scenario: Pending then green
 - **WHEN** checks for the expected head progress from pending to a complete set with at least one pass and otherwise pass or skipping
 - **THEN** landing proceeds to final revalidation and the base comparison, using head reads before and after check queries
+
+The response defined by `CI registration delay` SHALL be pending rather than invalid; no
+other malformed-response exception is introduced.
 
 #### Scenario: Failing CI refused
 - **WHEN** any check fails or is cancelled, or check output is malformed or has an unknown classification, excluding the recognized pending registration response
@@ -284,7 +291,10 @@ Landing SHALL invoke eligible specloop finish as `[sys.executable, "-m", "nights
 
 ### Requirement: Landing interpreter prerequisites
 
-The prerequisites passage of `docs/landing.md` SHALL require the interpreter running landing to import `nightshift.cli` without requiring its console script on PATH. It SHALL describe omitted or explicit specloop enrollment and explain that explicit worker enrollment fails configuration loading because the engine is retired. Gitea support SHALL preserve current-interpreter execution, operator authentication, canonical PR run discovery and landing gates while documenting forge-specific credentials.
+The prerequisites passage of `docs/landing.md` SHALL require the interpreter running
+landing to import `nightshift.cli` without requiring its console script on PATH. It
+SHALL describe omitted or explicit specloop enrollment and explain that explicit worker
+enrollment fails configuration loading because the engine is retired.
 
 #### Scenario: Operator prepares the environment
 - **WHEN** an operator follows the landing prerequisites
@@ -293,6 +303,10 @@ The prerequisites passage of `docs/landing.md` SHALL require the interpreter run
 - **THEN** Gitea instead uses its configured URL and human land_token_env, with separate #129 finish credentials where applicable
 - **THEN** omitted and explicit specloop engines are supported, explicit worker enrollment is refused with migration guidance, and the current interpreter's `-m nightshift.cli status --json` must still read the applicable runs
 - **THEN** front-door discovery still uses canonical PR URL identity independently of labels or branch names, with canonical nightshift.cli status/finish argv and unchanged validation and landing gates
+
+Gitea support SHALL preserve current-interpreter execution, operator authentication,
+canonical PR run discovery and landing gates while documenting forge-specific
+credentials.
 
 ### Requirement: Narrow uncertain update responses
 
@@ -360,15 +374,24 @@ An uncertain PUT result SHALL use the existing exact ordered two-parent check an
 
 ### Requirement: Forge specific operations preserve gates
 
-Landing SHALL keep authorization, lifecycle, source selection, provenance and CI policy in `nightshift/land.py`, using named forge-specific operations. New Gitea operations SHALL not change existing GitHub argv, validation, error handling or relative gate ordering. The docs-only extension MAY add named changed-path/workflow reads after a validated empty-check response and the distinct exemption attestation before final revalidation/base comparison; nonempty-check paths SHALL retain their exact transcripts.
+Landing SHALL keep authorization, lifecycle, source selection, provenance and CI policy
+in `nightshift/land.py`, using named forge-specific operations. New Gitea operations
+SHALL not change existing GitHub argv, validation, error handling or relative gate
+ordering.
 
 #### Scenario: Operation boundary retains behavior
 - **WHEN** GitHub operations are routed through the landing boundary and Gitea operations use an injected opener
 - **THEN** existing runner tests observe the same existing GitHub operations in order, with only the specified empty-check evidence and exemption-attestation additions, Gitea has no gh fallback, and both use the same landing gates wherever the forge-specific deltas do not prescribe a different transport
 
+The docs-only extension MAY add named changed-path/workflow reads after a validated
+empty-check response and the distinct exemption attestation before final
+revalidation/base comparison; nonempty-check paths SHALL retain their exact transcripts.
+
 ### Requirement: Base workflow exclusion proof
 
-Landing SHALL establish exclusion only from a complete nonempty PR changed-path set and supported CI `paths-ignore` patterns read at the recorded base SHA. It SHALL include deletions and both names of renames and SHALL require every changed path to be ignored for every declared `push` and `pull_request` event. It SHALL require `pull_request` and a supported nonempty ignore list for each declared path event. It SHALL additionally accept at most one block-form `schedule` containing one or more single- or double-quoted cron items, blank lines and comment lines, and at most one bare `workflow_dispatch` containing no nested lines. These two non-path events SHALL contribute no ignore list and SHALL NOT be checked against changed paths. Landing SHALL reject empty or malformed schedules, non-bare dispatches, duplicate events and all other event names. It SHALL use the single-workflow selection and deterministic physical-line/glob rules in the design, and SHALL retain ordinary CI waiting whenever proof is unavailable or ambiguous.
+Landing SHALL establish exclusion only from a complete nonempty PR changed-path set and
+supported CI `paths-ignore` patterns read at the recorded base SHA. It SHALL require
+`pull_request` and a supported nonempty ignore list for each declared path event.
 
 #### Scenario: Base content controls exclusion
 - **WHEN** the PR changes root and nested Markdown files and the sole base workflow is `ci.yml` with `paths-ignore: ['**.md']` for its pull_request and optional push events
@@ -380,15 +403,28 @@ Landing SHALL establish exclusion only from a complete nonempty PR changed-path 
 - **THEN** landing cannot establish exclusion and retains ordinary CI rules
 - **THEN** matching is case-sensitive against full paths, so `*.md` does not ignore nested Markdown while `**.md` does
 
+It SHALL include deletions and both names of renames and SHALL require every changed
+path to be ignored for every declared `push` and `pull_request` event.
+
 #### Scenario: Incomplete or ambiguous evidence needs CI
 - **WHEN** paths are empty, missing, malformed, duplicated or incomplete, pagination/counts cannot establish completeness, a provider cap is reached, or workflow selection/content/syntax/globs are unsupported or ambiguous
 - **THEN** landing cannot use the exemption, including for multiple workflows, missing ignore lists on path events, negation, duplicate trigger fields or unreadable base content
 - **THEN** a deadline or head/draft failure still refuses through the existing gate rather than becoming permission to skip CI
 
+Landing SHALL reject empty or malformed schedules, non-bare dispatches, duplicate events
+and all other event names. It SHALL use the single-workflow selection and deterministic
+physical-line/glob rules in the design, and SHALL retain ordinary CI waiting whenever
+proof is unavailable or ambiguous.
+
 #### Scenario: Schedule and dispatch events do not block exclusion
 - **WHEN** an otherwise supported trigger block contains a valid `schedule`, a bare `workflow_dispatch`, or both, in any event order
 - **THEN** `ignored_paths` returns exactly the declared push/pull_request ignore lists in their existing order; schedule and workflow_dispatch contribute no ignore list and are never matched against changed paths
 - **THEN** root and nested Markdown paths ignored by all declared path events remain eligible, while a missing pull_request or a nonmatching path-event ignore list still prevents exclusion
+
+It SHALL additionally accept at most one block-form `schedule` containing one or more
+single- or double-quoted cron items, blank lines and comment lines, and at most one bare
+`workflow_dispatch` containing no nested lines. These two non-path events SHALL
+contribute no ignore list and SHALL NOT be checked against changed paths.
 
 #### Scenario: Schedule accepts only cron items
 - **WHEN** a schedule header has only optional spaces after its colon and its block contains one or more exact four-space `- cron: ` lines with single- or double-quoted scalars under the existing scalar grammar, optional trailing spaces, blank lines and whole-line comments

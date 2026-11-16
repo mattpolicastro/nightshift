@@ -59,16 +59,11 @@ policy and SHALL NOT expose a generic command escape hatch.
 
 ### Requirement: Late bound runners
 
-Migrated functions SHALL retain existing runner injection and resolve an
-omitted runner through `GitHubForge(runner or queue._gh)` inside the function.
-The backend SHALL bind its callable at construction, and every delegated queue
-helper SHALL receive that callable explicitly. No module-level forge instance
-or function default SHALL freeze the transport for migrated entry points or
-their helpers. Internal helpers MAY accept a Forge directly while retaining
-existing runner-based calls. The four stage entry points propose_pending,
-admit_pending, revise_pending and publish_pending SHALL accept an optional
-keyword-only forge=None and use a supplied adapter unchanged; when None, their
-existing construction and timing SHALL remain GitHubForge(runner or queue._gh).
+Migrated functions SHALL retain existing runner injection and resolve an omitted runner
+through `GitHubForge(runner or queue._gh)` inside the function. The backend SHALL bind
+its callable at construction, and every delegated queue helper SHALL receive that
+callable explicitly. No module-level forge instance or function default SHALL freeze the
+transport for migrated entry points or their helpers.
 
 #### Scenario: Default runner remains patchable
 - **WHEN** modules are imported before queue._gh is patched, and successive intake, readiness or daemon recovery invocations use different patches without explicit runners
@@ -78,6 +73,12 @@ existing construction and timing SHALL remain GitHubForge(runner or queue._gh).
 - **WHEN** a caller supplies a recording runner while queue._gh is patched to fail if called
 - **THEN** all operations and delegated helpers use that supplied runner with no leading gh and no fallback to queue._gh
 - **THEN** a protocol fake supplied to an internal helper is used without constructing another backend or making unrelated calls
+
+Internal helpers MAY accept a Forge directly while retaining existing runner-based
+calls. The four stage entry points propose_pending, admit_pending, revise_pending and
+publish_pending SHALL accept an optional keyword-only forge=None and use a supplied
+adapter unchanged; when None, their existing construction and timing SHALL remain
+GitHubForge(runner or queue._gh).
 
 ### Requirement: Core policy preservation
 
@@ -101,13 +102,10 @@ receipt writes and operation ordering without introducing rich-text parsing.
 ### Requirement: Readiness request budget
 
 Readiness SHALL retain its existing eligibility, one-core-PR-read polling contract,
-conditional single CI snapshot, saved-assessment reuse and CI-blocked
-reassessment through named Forge operations. Core SHALL retain CI parsing and
-classification, local evidence/human-check/revision decisions, head binding and
-advisory wording. The backend SHALL perform no base-provenance or extra check
-query and SHALL add no cache. GitHub SHALL retain exactly one PR read; Gitea
-MAY perform a second PR read inside pr_checks when CI is queried, followed by
-one logical exact-SHA combined-status snapshot with existing pagination.
+conditional single CI snapshot, saved-assessment reuse and CI-blocked reassessment
+through named Forge operations. Core SHALL retain CI parsing and classification, local
+evidence/human-check/revision decisions, head binding and advisory wording. The backend
+SHALL perform no base-provenance or extra check query and SHALL add no cache.
 
 #### Scenario: Cached and CI blocked polls
 - **WHEN** eligible polls observe a matching delivered assessment with consistent labels, or that same assessment is blocked on CI
@@ -124,51 +122,74 @@ one logical exact-SHA combined-status snapshot with existing pagination.
 - **THEN** cached no-CI polls read the PR once with no status/comment query, while CI assessments read it twice and obtain one logical combined-status snapshot for the SHA captured by pr_checks
 - **THEN** status pagination and non-green/absent/malformed blocking remain intact, with no base-provenance query, cache or change to GitHub read-count assertions
 
+GitHub SHALL retain exactly one PR read; Gitea MAY perform a second PR read inside
+pr_checks when CI is queried, followed by one logical exact-SHA combined-status snapshot
+with existing pagination.
+
 ### Requirement: Guarded daemon calls
 
-Daemon guarded runners SHALL continue to check pause before and after logical
-operations and install queue.gh_guard for transport attempts and reconciliation.
-GitHubForge SHALL receive those wrapped runners. queue._gh SHALL remain the
-transport with unchanged retry/backoff and kill-switch behavior. Engine-switch
-recovery SHALL retain its captured-error and label-validation protections.
-Gitea daemon adapters SHALL receive check_running before transport attempts,
-GET retries and reconciliation, plus an optional after_request completion guard
-so an accepted final write cannot acknowledge delivery while paused. Default
-adapter guards and all GitHub guard behavior SHALL remain unchanged.
+Daemon guarded runners SHALL continue to check pause before and after logical operations
+and install queue.gh_guard for transport attempts and reconciliation. GitHubForge SHALL
+receive those wrapped runners. queue._gh SHALL remain the transport with unchanged
+retry/backoff and kill-switch behavior. Default adapter guards and all GitHub guard
+behavior SHALL remain unchanged.
 
 #### Scenario: Pause during dispatch and retry
 - **WHEN** pause appears before dispatch, after an accepted write or before a transport retry or reconciliation read
 - **THEN** existing guards prevent later operations and preserve pending delivery exactly as before extraction
 - **THEN** GitHubForge neither bypasses the guard nor adds an attempt, and an already-dispatched write may complete without falsely completing its receipt
 
+Gitea daemon adapters SHALL receive check_running before transport attempts, GET retries
+and reconciliation, plus an optional after_request completion guard so an accepted final
+write cannot acknowledge delivery while paused.
+
 #### Scenario: Engine switch recovery unchanged
 - **WHEN** daemon recovery observes orphaned work, surviving work, malformed labels or a failed label lookup
 - **THEN** its forge-backed reads and writes preserve the same journals, comments, relabeling and claim/outcome ordering
 - **THEN** labels_of error suppression cannot convert an unreadable recovery item into empty labels or authorize cleanup, and no worker resumes
 
+Engine-switch recovery SHALL retain its captured-error and label-validation protections.
+
 ### Requirement: AST source boundary
 
-`test_no_gh_argv_outside_backends` SHALL parse all Python sources under `nightshift/` and `specloop/` with ast and reject every literal list whose first element is the string gh, issue, pr or api outside `nightshift/forge/github.py` and the exact remaining temporary allowlist: `nightshift/queue.py`, `nightshift/land.py`, `nightshift/arm.py`, `nightshift/outcomes.py`, `nightshift/preflight.py`, `specloop/cli.py`, `specloop/critic.py`. Parsing or reading failures SHALL fail validation. The allowlist SHALL NOT include nightshift/factory_land.py after #130 migration.
+`test_no_gh_argv_outside_backends` SHALL parse all Python sources under `nightshift/`
+and `specloop/` with ast and reject every literal list whose first element is the string
+gh, issue, pr or api outside `nightshift/forge/github.py` and the exact remaining
+temporary allowlist: `nightshift/queue.py`, `nightshift/land.py`, `nightshift/arm.py`,
+`nightshift/outcomes.py`, `nightshift/preflight.py`, `specloop/cli.py`,
+`specloop/critic.py`.
 
 #### Scenario: Scan rejects new argv sites
 - **WHEN** an unallowlisted source contains a prefixed list, including an assigned list, multiline list or starred-tail list, or cannot be parsed
 - **THEN** validation fails with the source path and available line information
 - **THEN** comments and string contents alone do not count as argv, and tests exercise each forbidden literal prefix without invoking live services
 
+Parsing or reading failures SHALL fail validation.
+
 #### Scenario: Deferred modules remain allowed
 - **WHEN** the scan encounters existing argv in queue.py, land.py, arm.py, outcomes.py, preflight.py, specloop/cli.py or specloop/critic.py at the exact paths above
 - **THEN** it permits those deferred sites and the GitHub backend, while rejecting near-miss paths and direct builders in intake, daemon or factory_land
 - **THEN** no directory-wide exception, new allowlisted module or command-construction disguise is introduced
 
+The allowlist SHALL NOT include nightshift/factory_land.py after #130 migration.
+
 ### Requirement: Module layout guidance
 
-The root README's module layout SHALL retain the Forge contract, factual records, GitHub backend, Gitea backend and retained queue transport. Its staged migration description SHALL be updated for eligible Gitea daemon dispatch; `docs/landing.md` SHALL describe the current #130 terminal Gitea landing boundary. Gitea configuration, adapter construction and read-only preflight SHALL remain distinct from per-item execution authorization and GitHub-only worker recovery. README.md and the affected shared guides SHALL correct obsolete disabled-dispatch claims while preserving unrelated content.
+The root README's module layout SHALL retain the Forge contract, factual records, GitHub
+backend, Gitea backend and retained queue transport. Its staged migration description
+SHALL be updated for eligible Gitea daemon dispatch; `docs/landing.md` SHALL describe
+the current #130 terminal Gitea landing boundary.
 
 #### Scenario: Layout describes staged boundary
 - **WHEN** a contributor reads the root module-layout table and the current landing guide
 - **THEN** the named modules resolve to implemented files and distinguish backend operations from queue transport and core policy
 - **THEN** the table names forge/gitea.py over forge/http.py, configuration and preflight alone do not authorize individual Gitea workflows, and worker recovery remains GitHub-only
 - **THEN** docs/landing.md explains terminal Gitea landing, unchanged Factory UI eligibility and gated Gitea daemon dispatch, superseding historical future-work and blanket disabled-dispatch wording
+
+Gitea configuration, adapter construction and read-only preflight SHALL remain distinct
+from per-item execution authorization and GitHub-only worker recovery. README.md and the
+affected shared guides SHALL correct obsolete disabled-dispatch claims while preserving
+unrelated content.
 
 ### Requirement: Selected forge construction
 

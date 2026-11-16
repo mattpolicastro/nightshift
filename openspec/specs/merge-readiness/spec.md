@@ -83,12 +83,19 @@ Readiness SHALL use Forge.pr_checks once per assessment: GitHub SHALL retain `gh
 
 ### Requirement: Head bound polling
 
-Readiness SHALL require PR head equality with the run head, read the PR once in core per eligible poll (Gitea pr_checks may read it once more when CI is queried), and query checks only when unlabelled or the stored assessment no longer matches the observed head or publication identity. A complete matching assessment with consistent labels SHALL be cached for both outcomes, except that an assessment blocked on CI SHALL be reassessed each poll until CI no longer blocks. Label removal SHALL permit explicit reassessment.
+Readiness SHALL require PR head equality with the run head, read the PR once in core per
+eligible poll (Gitea pr_checks may read it once more when CI is queried), and query
+checks only when unlabelled or the stored assessment no longer matches the observed head
+or publication identity. Label removal SHALL permit explicit reassessment.
 
 #### Scenario: Matching assessment is cached
 - **WHEN** a ready or blocked assessment is delivered and repeated eligible polls, including after restart, observe the same head, identity, and labels
 - **THEN** each poll performs one PR read and no checks query, evidence read, comment lookup, or readiness mutation
 - **THEN** same-head CI or checklist changes alone do not refresh a cached assessment that CI does not block
+
+A complete matching assessment with consistent labels SHALL be cached for both outcomes,
+except that an assessment blocked on CI SHALL be reassessed each poll until CI no longer
+blocks.
 
 #### Scenario: New head removes ready
 - **WHEN** the next eligible poll observes a different head from a previously ready assessment
@@ -102,7 +109,11 @@ Readiness SHALL require PR head equality with the run head, read the PR once in 
 
 ### Requirement: Recoverable readiness delivery
 
-Readiness SHALL reconcile mutually exclusive `merge:ready` and `merge:blocked` labels and one distinct readiness comment per PR/change. It SHALL persist delivery intent separately from publication, explain every determinable failed condition with the full assessed head, reconcile ambiguous writes, preserve unrelated labels, and obey daemon pause guards. It SHALL use the existing recognized approval-marker namespace without changing queue retry timing or attempts; candidate selection SHALL follow Canonical daemon markers. Gitea no-duplicate recovery SHALL assume read-after-write-consistent complete listings and no concurrent creator of the same marker. The deployed single-node assumption SHALL be documented: accepted creates are visible to subsequent listings. If a successfully accepted ambiguous create is invisible on later polls, duplicate comments or PRs remain possible across polls and restart; replicated deployments require revisiting the assumption. This accepted limitation SHALL NOT introduce persistent create reservations or other new recovery state.
+Readiness SHALL reconcile mutually exclusive `merge:ready` and `merge:blocked` labels
+and one distinct readiness comment per PR/change. It SHALL persist delivery intent
+separately from publication, explain every determinable failed condition with the full
+assessed head, reconcile ambiguous writes, preserve unrelated labels, and obey daemon
+pause guards.
 
 #### Scenario: Ready PR is labelled once
 - **WHEN** every readiness condition passes and delivery succeeds across repeated polls and restart
@@ -118,6 +129,16 @@ Readiness SHALL reconcile mutually exclusive `merge:ready` and `merge:blocked` l
 - **WHEN** a readiness label or comment succeeds remotely but its response or local acknowledgement is lost
 - **THEN** a subsequent eligible attempt reconciles observed labels and the stable comment marker before retrying, without a duplicate comment or another publication under the stated Gitea consistency and single-creator assumptions
 - **THEN** failed comment reconciliation prevents a blind POST and a newly observed head prevents stale ready delivery
+
+It SHALL use the existing recognized approval-marker namespace without changing queue
+retry timing or attempts; candidate selection SHALL follow Canonical daemon markers.
+Gitea no-duplicate recovery SHALL assume read-after-write-consistent complete listings
+and no concurrent creator of the same marker. The deployed single-node assumption SHALL
+be documented: accepted creates are visible to subsequent listings. If a successfully
+accepted ambiguous create is invisible on later polls, duplicate comments or PRs remain
+possible across polls and restart; replicated deployments require revisiting the
+assumption. This accepted limitation SHALL NOT introduce persistent create reservations
+or other new recovery state.
 
 #### Scenario: Pause or write failure retains pending delivery
 - **WHEN** pause interrupts readiness operations or a label/comment write fails

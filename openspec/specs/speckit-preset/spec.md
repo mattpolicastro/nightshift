@@ -37,19 +37,10 @@ supersession in Assumptions, without adding a plan template.
 ### Requirement: Scenario-citing task scaffold
 
 `templates/tasks-template.md` SHALL keep spec-kit's checkbox/T-ID/optional-P/
-story-tag/file-path grammar. Its Format section SHALL require every story task
-to cite its covered scenario IDs in backticks and every scenario to have at
-least one task. All example story tasks SHALL follow that rule. It SHALL
-document stable IDs, harness-only uppercase ticks and three distinct harness
-addition forms: review feedback appends `## Phase N: Review round K`, section
-evidence/reviewer fixes extend their existing phase, and final coverage or
-acceptance fixes append `## Phase N: Coverage` or `## Phase N: Acceptance fixes`.
-New phases SHALL use the largest existing phase number plus one; review rounds
-SHALL use the largest existing review-round number plus one; every new base
-task ID SHALL follow the largest existing numeric T root as `T{M+1:03d}` without
-truncation. The scaffold SHALL keep human-only checks outside implementation
-tasks. This replaces the prior wording that conflated review and coverage
-rounds; this template change adds no harness code.
+story-tag/file-path grammar. Its Format section SHALL require every story task to cite
+its covered scenario IDs in backticks and every scenario to have at least one task. All
+example story tasks SHALL follow that rule. The scaffold SHALL keep human-only checks
+outside implementation tasks.
 
 #### Scenario: Task examples preserve scenario traceability
 - **WHEN** an author uses the preset task scaffold
@@ -61,6 +52,16 @@ rounds; this template change adds no harness code.
 - **THEN** review feedback alone creates a Review round K phase, section evidence/reviewer fixes extend the current phase, and final coverage/acceptance fixes create phases with their supplied Coverage or Acceptance fixes titles
 - **THEN** existing task IDs and scenario citations remain stable, new phases and T roots advance from their respective maxima, and only the harness changes completion ticks or frozen authoring files
 - **THEN** documentation checks select the unique exact column-zero heading through the next same-or-higher heading and refuse missing or duplicate boundaries without interpreting fences, HTML or indentation
+
+It SHALL document stable IDs, harness-only uppercase ticks and three distinct harness
+addition forms: review feedback appends `## Phase N: Review round K`, section
+evidence/reviewer fixes extend their existing phase, and final coverage or acceptance
+fixes append `## Phase N: Coverage` or `## Phase N: Acceptance fixes`. New phases SHALL
+use the largest existing phase number plus one; review rounds SHALL use the largest
+existing review-round number plus one; every new base task ID SHALL follow the largest
+existing numeric T root as `T{M+1:03d}` without truncation. This replaces the prior
+wording that conflated review and coverage rounds; this template change adds no harness
+code.
 
 ### Requirement: Issue-first command wrapper
 
@@ -97,15 +98,17 @@ and command execution.
 
 ### Requirement: Native build support guidance
 
-The preset README SHALL describe explicit native drafting and builds using a
-trusted `format = "speckit"` manifest and links to the engine guide and manifest
-example. It SHALL distinguish asset installation from build configuration,
-retain prerequisites and installation guidance, describe native front-door support under trusted-manifest enrollment, and leave unperformed live checks pending. It SHALL describe
-skip-feasibility only as an optional existing bypass. This replaces the obsolete pending-front-door claim; preset assets and command behavior do not
-change.
+The preset README SHALL describe explicit native drafting and builds using a trusted
+`format = "speckit"` manifest and links to the engine guide and manifest example. It
+SHALL describe skip-feasibility only as an optional existing bypass.
 
 #### Scenario: Preset reader finds the native build path
 - **WHEN** an operator reads the shipped preset README after installing its authoring assets
 - **THEN** guidance points to explicit native drafting/admission/build/publication with a trusted native manifest, manifest-frozen specs/** and .specify/**, and Finish setting Status Complete without archival
 - **THEN** installation alone does not enroll or configure a build; the v1.3.2 baseline, PyYAML/interpreter advice, checkout/release installation commands, issue-first example, house-rules/upstream links and pending scratch-install/live-reference checks on issue 184 remain intact
 - **THEN** new checks use deterministic physical-line boundaries and resolving relative links, and all existing preset and plugin test assertions remain unchanged
+
+It SHALL distinguish asset installation from build configuration, retain prerequisites
+and installation guidance, describe native front-door support under trusted-manifest
+enrollment, and leave unperformed live checks pending. This replaces the obsolete
+pending-front-door claim; preset assets and command behavior do not change.

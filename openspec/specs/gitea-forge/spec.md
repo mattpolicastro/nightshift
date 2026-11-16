@@ -53,27 +53,28 @@ write reconciliation. Diagnostics SHALL exclude credentials and remote bodies.
 
 The backend SHALL use independent page/limit loops for paginated list endpoints,
 including repository labels, issues, pulls, timeline, reviews and combined-status
-arrays. For these endpoints it SHALL continue after every nonempty page until
-explicit empty-page termination, never infer completion from a short page, and
-never follow response URLs. It SHALL refuse malformed or conflicting evidence,
-repeated nonempty pages, contradictory termination metadata and exhaustion of
-the 1,000-page bound without returning partial success. Timeline payloads and
-counts SHALL follow Timeline wire pages; combined-status envelopes SHALL follow
-Combined status wire pages. Other paginated endpoints SHALL retain existing null
-refusal and total checks, including status HTTP-header total checks.
-
-Issue-label reads SHALL use a single GET without page/limit parameters and
-validate the complete response as a list of unique, valid labels. Issue comments
-and nested review comments SHALL follow Unpaginated comment listings because
-Gitea 28.2.0 returns complete arrays for those endpoints.
+arrays. For these endpoints it SHALL continue after every nonempty page until explicit
+empty-page termination, never infer completion from a short page, and never follow
+response URLs.
 
 #### Scenario: Short intermediate page
 - **WHEN** a paginated list endpoint returns a short nonempty page followed by more records and then its valid empty terminal page
 - **THEN** the adapter reads all records using page numbers starting at one and limit 50, without mutating another endpoint's query or following Link URLs
 
+Timeline payloads and counts SHALL follow Timeline wire pages; combined-status envelopes
+SHALL follow Combined status wire pages. Issue-label reads SHALL use a single GET
+without page/limit parameters and validate the complete response as a list of unique,
+valid labels. Issue comments and nested review comments SHALL follow Unpaginated comment
+listings because Gitea 28.2.0 returns complete arrays for those endpoints.
+
 #### Scenario: Incomplete listing refused
 - **WHEN** a later page of a paginated endpoint fails, is malformed under its endpoint rules, conflicts on an existing ID, repeats a nonempty page, contradicts completion metadata or fails to terminate within the bound
 - **THEN** the operation raises and returns no partial list, absence conclusion or mutation authorization
+
+It SHALL refuse malformed or conflicting evidence, repeated nonempty pages,
+contradictory termination metadata and exhaustion of the 1,000-page bound without
+returning partial success. Other paginated endpoints SHALL retain existing null refusal
+and total checks, including status HTTP-header total checks.
 
 ### Requirement: Fresh label resolution
 
@@ -97,16 +98,10 @@ without any label filter query parameter or automatic label creation.
 
 ### Requirement: Verified label mutations
 
-Issue and PR label changes SHALL use resolved IDs, preserve unrelated labels,
-reject overlapping add/remove requests and read labels back after every
-successful write. All requested additions SHALL be verified present before any
-requested removal, retaining sorted unique ordering within each group.
-For a transition whose source was present, interrupted writes SHALL leave at
-least source or destination present, absent concurrent external removal.
-An accepted needs-human addition with a lost response SHALL remain a human hold,
-even with its source trigger retained; existing early skips and pending-receipt
-logic SHALL NOT be bypassed for automatic recovery. A silently ignored mutation or failed read-back SHALL raise
-and prevent later writes. The adapter SHALL NOT replay a failed write.
+Issue and PR label changes SHALL use resolved IDs, preserve unrelated labels, reject
+overlapping add/remove requests and read labels back after every successful write. All
+requested additions SHALL be verified present before any requested removal, retaining
+sorted unique ordering within each group. The adapter SHALL NOT replay a failed write.
 
 #### Scenario: Write is read back
 - **WHEN** additions or removals are requested for an issue or PR
@@ -117,30 +112,31 @@ and prevent later writes. The adapter SHALL NOT replay a failed write.
 - **WHEN** Gitea acknowledges but ignores a label change, or verification cannot complete
 - **THEN** the operation raises rather than reporting success and dispatches no remaining label writes
 
+A silently ignored mutation or failed read-back SHALL raise and prevent later writes.
+
 #### Scenario: Interrupted transition retains a label
 - **WHEN** an issue or PR transition from a present source to a destination loses a write response or fails read-back before or after any addition or removal
 - **THEN** no removal occurs before every addition is confirmed, no failed write is replayed in that call, and labels contain the source, destination or both, never neither absent concurrent external edits
 - **THEN** later eligible retries read actual state, skip satisfied changes and preserve unrelated labels
+
+For a transition whose source was present, interrupted writes SHALL leave at least
+source or destination present, absent concurrent external removal.
 
 #### Scenario: Needs human remains a safe hold
 - **WHEN** adding needs-human is accepted but its response or verification is lost while the source trigger remains
 - **THEN** later polls and restart retain the existing needs-human hold without automatic refusal delivery, receipt bypass or rerunning completed work
 - **THEN** after human inspection and resolution, removing needs-human permits the retained authorized trigger to re-enter ordinary eligibility and receipt handling; a fresh round still follows existing input or trusted remove-and-reapply rules
 
+An accepted needs-human addition with a lost response SHALL remain a human hold, even
+with its source trigger retained; existing early skips and pending-receipt logic SHALL
+NOT be bypassed for automatic recovery.
+
 ### Requirement: Label timeline evidence
 
-Label events SHALL come from `/repos/{o}/{r}/issues/{n}/timeline` rows of type
-`label`. Action SHALL derive solely from the string body: `"1"` means labeled
-and `""` means unlabeled. Missing, non-string or any other body SHALL refuse;
-removed SHALL neither be required nor influence the action. This replaces the
-fake boolean-removed assumption with the Gitea 28.2.0 wire encoding.
-
-The adapter SHALL preserve positive event ID, apply/remove action, label name,
-actor identity and timestamp in the existing event shape, with association
-derived solely from the allowlist. It SHALL present chronological ID order and
-refuse unknown or incomplete label-action evidence. FakeGitea's normal timeline
-responses SHALL emit body-based label rows without removed, including when
-serializing legacy boolean-removed fixture input as described in the design.
+Label events SHALL come from `/repos/{o}/{r}/issues/{n}/timeline` rows of type `label`.
+Action SHALL derive solely from the string body: `"1"` means labeled and `""` means
+unlabeled. Missing, non-string or any other body SHALL refuse; removed SHALL neither be
+required nor influence the action.
 
 #### Scenario: Label actions and actors
 - **WHEN** paginated timeline rows contain non-label activity and label apply/remove/reapply events with user and body fields but no removed field
@@ -148,9 +144,19 @@ serializing legacy boolean-removed fixture input as described in the design.
 - **THEN** an extraneous contradictory removed field cannot override body, and no issue-events endpoint, free-text comment inference or membership lookup is used
 - **THEN** the fake serializes valid legacy label fixture actions into that wire shape without altering an explicitly supplied body
 
+This replaces the fake boolean-removed assumption with the Gitea 28.2.0 wire encoding.
+The adapter SHALL preserve positive event ID, apply/remove action, label name, actor
+identity and timestamp in the existing event shape, with association derived solely from
+the allowlist. FakeGitea's normal timeline responses SHALL emit body-based label rows
+without removed, including when serializing legacy boolean-removed fixture input as
+described in the design.
+
 #### Scenario: Unknown label evidence
 - **WHEN** a label timeline row lacks a valid ID, actor, name, timestamp or exact body action, or conflicts with another row of the same ID
 - **THEN** the read is refused rather than manufacturing an actor or successful application, even if a removed field would otherwise suggest an action
+
+It SHALL present chronological ID order and refuse unknown or incomplete label-action
+evidence.
 
 ### Requirement: Allowlist identity projection
 
@@ -167,15 +173,11 @@ be idea text, even if the bot appears in the allowlist.
 
 ### Requirement: Issue and feedback records
 
-Issue reads SHALL preserve the existing title/body/state/label/comment shapes
-and omit bot comments from drafting input. Feedback SHALL read all conversation,
-review and nested inline sources, preserve stable source-qualified IDs,
-timestamps and rendered context, and exclude untrusted/bot text. Reviews SHALL
-paginate; conversation and inline comment lists SHALL follow Unpaginated comment
-listings. Identical duplicates across review lists MAY be deduplicated during
-feedback aggregation; duplicate IDs within a complete comment response SHALL
-refuse. Conflicting or malformed eligible records and partial reads SHALL fail.
-Consumption and lifecycle decisions SHALL stay in core.
+Issue reads SHALL preserve the existing title/body/state/label/comment shapes and omit
+bot comments from drafting input. Feedback SHALL read all conversation, review and
+nested inline sources, preserve stable source-qualified IDs, timestamps and rendered
+context, and exclude untrusted/bot text. Consumption and lifecycle decisions SHALL stay
+in core.
 
 #### Scenario: Draft facts and blockers
 - **WHEN** issue detail, issue author, repository facts, drafting comments or blockers are requested
@@ -187,6 +189,11 @@ Consumption and lifecycle decisions SHALL stay in core.
 - **THEN** trusted non-bot records retain source-qualified identities, timestamps, review states and file/line context, including blank records needed for legacy baselines
 - **THEN** actionable items preserve the existing instruction filter and formatting; conflicting duplicate identities, missing eligible IDs, failed comment reads and later review-page failures raise without partial results
 - **THEN** identical inline records repeated across distinct reviews retain existing aggregation behavior while conflicts still refuse
+
+Reviews SHALL paginate; conversation and inline comment lists SHALL follow Unpaginated
+comment listings. Identical duplicates across review lists MAY be deduplicated during
+feedback aggregation; duplicate IDs within a complete comment response SHALL refuse.
+Conflicting or malformed eligible records and partial reads SHALL fail.
 
 ### Requirement: PR identity and drafts
 
@@ -213,24 +220,26 @@ and repository and SHALL never be dispatched as request destinations.
 
 ### Requirement: Exact SHA combined status
 
-`checks_for_sha` SHALL query combined status for a full exact SHA and validate
-complete, consistent status evidence under Combined status wire pages.
-`pr_checks` SHALL obtain the current PR head once and use that SHA. A proven
-empty status set SHALL mean not registered and return an empty check array.
-Registered combined states SHALL map success to pass, pending to pending,
-failure/error/warning to fail and skipped to skipping. All other states or
-malformed/mismatching evidence SHALL be refused. Success SHALL require at least
-one successful row and no row result outside success/skipped, using `status`.
+`checks_for_sha` SHALL query combined status for a full exact SHA and validate complete,
+consistent status evidence under Combined status wire pages. `pr_checks` SHALL obtain
+the current PR head once and use that SHA.
 
 #### Scenario: Status mapping
 - **WHEN** an exact SHA has no statuses or has each supported combined state
 - **THEN** the result is respectively an empty JSON array or one named combined check with the specified bucket and original state in ResponseText
 - **THEN** no-status and skipped-only results cannot imply a passing check, and a valid null terminal envelope does not replace the nonempty snapshot
 
+A proven empty status set SHALL mean not registered and return an empty check array.
+Registered combined states SHALL map success to pass, pending to pending,
+failure/error/warning to fail and skipped to skipping. Success SHALL require at least
+one successful row and no row result outside success/skipped, using `status`.
+
 #### Scenario: SHA and status refusal
 - **WHEN** the caller supplies a branch or abbreviated SHA, the response names another SHA, nonempty status pages disagree, or the combined state/count/shape is unknown or malformed under Combined status wire pages
 - **THEN** the adapter raises rather than returning absence or green; the valid null terminal envelope is the sole exception to cross-page envelope comparison
 - **THEN** a PR head changing after lookup does not redirect the request away from the captured exact SHA, and no merge ref or Actions endpoint is queried
+
+All other states or malformed/mismatching evidence SHALL be refused.
 
 ### Requirement: Commit parent facts
 
@@ -246,36 +255,41 @@ not interpreted as a root commit. The adapter SHALL NOT decide provenance.
 
 ### Requirement: Bot owned marked comments
 
-Comment creation SHALL recognize markers with the deterministic final-line
-rule in the design, refuse ambiguous marker structure and search complete
-comment listings for bot-owned matches using exact canonical final-marker selection. Marker upserts SHALL edit only bot-authored
-comments. Direct updates SHALL verify bot ownership before PATCH. Human copies
-SHALL neither authorize edits nor count as successful create reconciliation.
-Bot ownership SHALL be tested before marker syntax: malformed human marker
-strings SHALL be ignored, while malformed bot marker evidence SHALL refuse.
-A separate bot_comment_pages view SHALL supply daemon marker consumers without
-filtering factual comment_pages, drafting input or human feedback. Duplicate
-canonical bot markers SHALL refuse. Canonical selection SHALL use the shared
-final-line predicate without relaxing existing outgoing marker validation.
+Comment creation SHALL recognize markers with the deterministic final-line rule in the
+design, refuse ambiguous marker structure and search complete comment listings for
+bot-owned matches using exact canonical final-marker selection. Marker upserts SHALL
+edit only bot-authored comments. Direct updates SHALL verify bot ownership before PATCH.
 
 #### Scenario: Deterministic marker matching
 - **WHEN** comment bodies contain valid final-line markers, misplaced or multiple marker tokens, indentation, CRLF, fences or HTML-like content
 - **THEN** recognition follows only the design's exact line/token rules without semantic Markdown or HTML parsing
 - **THEN** malformed marker-bearing input is refused before writes and original body bytes are retained
 
+Canonical selection SHALL use the shared final-line predicate without relaxing existing
+outgoing marker validation.
+
 #### Scenario: Bot ownership gates upserts
 - **WHEN** a marker lookup sees human copies, one bot match or multiple bot matches, or a direct update names a human comment
 - **THEN** human comments remain unchanged, one bot match may be updated, multiple bot matches refuse and a direct human update dispatches no PATCH
 - **THEN** comment_pages retains human records for factual reads and every edit verifies current bot authorship
+
+Bot ownership SHALL be tested before marker syntax: malformed human marker strings SHALL
+be ignored, while malformed bot marker evidence SHALL refuse.
 
 #### Scenario: Human copies cannot satisfy daemon lookup
 - **WHEN** rejection or delivery lookup encounters human copies, including malformed marker strings, and zero or one valid bot-owned canonical match
 - **THEN** it ignores the human marker strings, creates when no bot match exists, and only considers the bot match for suppression or upsert
 - **THEN** human comments remain byte-for-byte unchanged and factual comment_pages and drafting retain their existing human-record behavior
 
+Human copies SHALL neither authorize edits nor count as successful create
+reconciliation. A separate bot_comment_pages view SHALL supply daemon marker consumers
+without filtering factual comment_pages, drafting input or human feedback.
+
 #### Scenario: Ambiguous bot evidence refuses
 - **WHEN** daemon marker lookup or adapter upsert encounters malformed bot marker structure or duplicate canonical bot markers
 - **THEN** it refuses without POST or PATCH; a fresh direct-update ownership check also refuses if authorship no longer matches bot_login
+
+Duplicate canonical bot markers SHALL refuse.
 
 ### Requirement: Ambiguous comment reconciliation
 
@@ -298,49 +312,62 @@ handler unchanged. Definite rejection and unmarked failures SHALL not reconcile.
 
 ### Requirement: Offline fake and optional live contracts
 
-FakeGitea SHALL run in process through the real transport opener interface with
-no sockets and exercise silent writes, ignored filters, paginated and explicitly
-unpaginated endpoints, and lost responses. It SHALL emit timeline per-page
-counts and null empty pages, and status rows with `status` and pending/zero/null
-terminal envelopes. State-backed legacy status fixture conversion SHALL occur
-only on copied rows at serialization, never overwrite explicit status values,
-and never affect raw route replies or production decoding. Existing body-action
-and complete-comment wire behavior SHALL remain intact.
-
-Reusable normal-operation contracts SHALL run offline by default and provide
-live cases gated by GITEA_CONTRACT_URL. Missing URL SHALL skip before networking
-or credential validation; configured but incomplete live setup SHALL fail.
-Existing tests and assertions SHALL remain intact except the exact obsolete
-shape fixtures inventoried in this change's design, which SHALL be replaced
-under Timeline wire pages and Combined status wire pages. Previously established
-#165 body-action and complete-comment corrections SHALL remain intact. All
-GitHub assertions and `tests/contract/` SHALL remain unchanged except the single
-GitHub inline-marker fixture migration below. These narrowly
-enumerated fixture corrections SHALL NOT weaken refusal or landing assertions.
-
-The following additional assertion migrations SHALL be permitted, and no others:
-- `test_gitea_label_write_is_read_back` SHALL expect verified POST additions before DELETE removals; `test_label_failure_stops_remaining_writes` SHALL inject removal faults after verified additions and retain its no-later-write and error-classification checks (Verified label mutations).
-- Human (`Alice`) cases of `test_malformed_existing_marker_is_not_absence` SHALL expect malformed human marker strings to be ignored rather than blocking a bot create; bot cases SHALL still refuse (Bot owned marked comments).
-- `test_gitea_daemon_stages_are_disabled` and its blanket `held`/`check_hold` expectations SHALL be replaced by eligible dispatch coverage; only nested-only and post-removal blanket-hold expectations in `test_gitea_repo_with_engine_switch_journal_is_held` SHALL change. Direct-journal and unreadable-location holds and every mixed GitHub assertion SHALL remain (Eligible Gitea dispatch; Foreign recovery journal hold).
-- The sole GitHub exception SHALL be `test_comment_fake_preserves_literal_marker_and_raw_body`: its inline-only `"prefix " + marker + " suffix"` case SHALL expect create_comment, and an added canonical-final-line case SHALL expect update_comment while preserving raw body bytes (Core policy preservation; Canonical daemon markers).
-
-All other GitHub and unrelated assertions SHALL remain intact. Existing #165
-and #170 exceptions above SHALL remain in force; tests/contract/ SHALL remain
-unchanged.
+FakeGitea SHALL run in process through the real transport opener interface with no
+sockets and exercise silent writes, ignored filters, paginated and explicitly
+unpaginated endpoints, and lost responses. Reusable normal-operation contracts SHALL run
+offline by default and provide live cases gated by GITEA_CONTRACT_URL.
 
 #### Scenario: Fake exercises transport behavior
 - **WHEN** adapter tests and shared contracts run with FakeGitea
 - **THEN** real request encoding, guarded dispatch, response parsing and adapter behavior execute without sockets or service processes, including the timeline/status wire shapes, unchanged label/comment shapes, ignored filters and injected write failures
 - **THEN** the full pytest suite passes and type checking introduces no new baseline errors
 
+It SHALL emit timeline per-page counts and null empty pages, and status rows with
+`status` and pending/zero/null terminal envelopes.
+
 #### Scenario: Fake serialization preserves test evidence
 - **WHEN** state-backed legacy status input, explicitly supplied status fields, raw route replies and timeline slices are serialized
 - **THEN** normal wire bodies/headers match the endpoint shapes, stored inputs remain unchanged, explicit invalid status values survive, and raw malformed replies remain malformed
 - **THEN** the unchanged contract oracle continues to exercise the real adapter through this wire boundary
 
+State-backed legacy status fixture conversion SHALL occur only on copied rows at
+serialization, never overwrite explicit status values, and never affect raw route
+replies or production decoding. Existing body-action and complete-comment wire behavior
+SHALL remain intact. Existing tests and assertions SHALL remain intact except the exact
+obsolete shape fixtures inventoried in this change's design, which SHALL be replaced
+under Timeline wire pages and Combined status wire pages. Previously established #165
+body-action and complete-comment corrections SHALL remain intact. All GitHub assertions
+and `tests/contract/` SHALL remain unchanged except the single GitHub inline-marker
+fixture migration below. These narrowly enumerated fixture corrections SHALL NOT weaken
+refusal or landing assertions. The following additional assertion migrations SHALL be
+permitted, and no others:
+- `test_gitea_label_write_is_read_back` SHALL expect verified POST additions before
+  DELETE removals; `test_label_failure_stops_remaining_writes` SHALL inject removal
+  faults after verified additions and retain its no-later-write and error-classification
+  checks (Verified label mutations).
+- Human (`Alice`) cases of `test_malformed_existing_marker_is_not_absence` SHALL expect
+  malformed human marker strings to be ignored rather than blocking a bot create; bot
+  cases SHALL still refuse (Bot owned marked comments).
+- `test_gitea_daemon_stages_are_disabled` and its blanket `held`/`check_hold`
+  expectations SHALL be replaced by eligible dispatch coverage; only nested-only and
+  post-removal blanket-hold expectations in
+  `test_gitea_repo_with_engine_switch_journal_is_held` SHALL change. Direct-journal and
+  unreadable-location holds and every mixed GitHub assertion SHALL remain (Eligible
+  Gitea dispatch; Foreign recovery journal hold).
+- The sole GitHub exception SHALL be
+  `test_comment_fake_preserves_literal_marker_and_raw_body`: its inline-only `"prefix "
+  + marker + " suffix"` case SHALL expect create_comment, and an added
+  canonical-final-line case SHALL expect update_comment while preserving raw body bytes
+  (Core policy preservation; Canonical daemon markers). All other GitHub and unrelated
+  assertions SHALL remain intact. Existing #165 and #170 exceptions above SHALL remain
+  in force; tests/contract/ SHALL remain unchanged.
+
 #### Scenario: Live suite skips without URL
 - **WHEN** GITEA_CONTRACT_URL is absent during live contract selection
 - **THEN** collected live cases explicitly skip before any opener dispatch, even without credentials, and offline contracts still execute
+
+Missing URL SHALL skip before networking or credential validation; configured but
+incomplete live setup SHALL fail.
 
 #### Scenario: Configured live setup is strict
 - **WHEN** live contract selection has a URL but missing credentials, identity, repository or required fixture evidence

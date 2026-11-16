@@ -170,7 +170,11 @@ errors exist and 0 otherwise; warnings alone SHALL not fail the command.
 
 ### Requirement: Producer naming compatibility
 
-When proposal records are missing, the report SHALL infer issue identity from exact native, owner-qualified or legacy producer names in admission/revision receipts and retained jobs, matching the validated receipt repository and existing legacy issue/slug grammar. Native names SHALL use the design's safe basename with a positive numeric prefix of at least three digits (including supported exact repository qualification), infer the issue by integer conversion and retain bounded slug validation. Native padding is accepted; legacy leading-zero issue spellings remain invalid. It SHALL preserve Front door attribution guarantees, offline read-only operation, accounting, schema, diagnostics and date filtering. Only the fallback matcher and its tests SHALL change.
+When proposal records are missing, the report SHALL infer issue identity from exact
+native, owner-qualified or legacy producer names in admission/revision receipts and
+retained jobs, matching the validated receipt repository and existing legacy issue/slug
+grammar. It SHALL preserve Front door attribution guarantees, offline read-only
+operation, accounting, schema, diagnostics and date filtering.
 
 #### Scenario: Qualified fallback recovers without a proposal
 - **WHEN** proposal records are absent and admission or revision evidence for owner/sample names owner__sample-issue-7-add-a-gate, including evidence retained only in a job request
@@ -187,10 +191,17 @@ When proposal records are missing, the report SHALL infer issue identity from ex
 - **THEN** the valid row is recovered with its exact repository spelling, invalid evidence retains diagnostics without speculative attribution or unsafe event reads, and healthy rows remain available
 - **THEN** matching proposal/job identities continue to take precedence over name inference under the existing attribution rules
 
+Only the fallback matcher and its tests SHALL change.
+
 #### Scenario: Native admission recovers without proposal
 - **WHEN** collect_history reads an admission for 007-add-a-gate and no proposal history exists
 - **THEN** it returns one issue-attributed row for issue 7 in the receipt's repository, with the exact change, unknown draft date and existing warning
 - **THEN** the same fallback works for revision receipts and retained admission/revision requests, preserving accounting and date-filter diagnostics without network or state writes
+
+Native names SHALL use the design's safe basename with a positive numeric prefix of at
+least three digits (including supported exact repository qualification), infer the issue
+by integer conversion and retain bounded slug validation. Native padding is accepted;
+legacy leading-zero issue spellings remain invalid.
 
 #### Scenario: Native repositories remain separate
 - **WHEN** two repositories have proposal-free receipts for 007-add-a-gate, or native evidence has a conflicting explicit issue or foreign repository qualification
