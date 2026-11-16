@@ -204,12 +204,16 @@ status, instead return a version-1 error document and exit 1
 ([issue #10](https://github.com/mattpolicastro/nightshift/issues/10),
 [PR #32](https://github.com/mattpolicastro/nightshift/pull/32)).
 
-`nightshift attention` lists human pauses with reason, change and PR link.
+`nightshift attention` lists human pauses with reason, change and PR link, each
+pointing to the same change in the Factory, beside open issues and PRs carrying
+the configured `needs-human` label.
 Per-run `status_error` rows refresh alongside healthy entries; a failed
 top-level status read instead retains the previous snapshot marked `STALE`
 and exits 1 ([PR #32](https://github.com/mattpolicastro/nightshift/pull/32)).
-JSON carries `specloop` beside historical worker
-`tasks`. The Paseo plugin source now includes the Factory section described
+Version-1 JSON carries `specloop` and an additive `repositories` array; its
+legacy `tasks` and `stale` arrays are always empty, and historical worker
+outcomes are read only through the historical outcome APIs. See
+[What needs you](../../README.md#what-needs-you). The Paseo plugin source now includes the Factory section described
 below. Daemon quota pacing for these runs remains separate work.
 
 Optional manifest `[[prepare]]` steps fetch dependencies before offline
@@ -275,7 +279,9 @@ env = { CACHE_DIR = "{build}/cache", MODE = "{env_mode}" }
 ### Retirement rollout
 
 Worker retirement ([issue #16](https://github.com/mattpolicastro/nightshift/issues/16))
-preserves attention, outcomes, transcripts and safe leftover-work recovery.
+preserves outcome history, transcripts and safe leftover-work recovery. History
+stays readable through the historical outcome APIs; current attention shows
+front-door escalations and Factory pause pointers instead of worker rows.
 The canonical `nightshift` CLI and build state root `~/.nightshift` implement
 [issue #40](https://github.com/mattpolicastro/nightshift/issues/40). Daemon and
 supervisor remain independent jobs. The `specloop` CLI/module alias lasts one
@@ -321,7 +327,9 @@ tools, credential isolation and preflight guards. See
 - [ ] Inspect external scripts, aliases, cron/launchd and Paseo calls for retired
   `task.run`, probes, worker status/model output and configuration assumptions.
 - [ ] Verify the front door and independent supervisor with intended config/provider
-  profiles, historical attention and leftover recovery. Pause/unload does not stop
+  profiles and leftover recovery. Check current attention (labelled escalations and
+  Factory pointers) separately from retained history read through the historical
+  outcome APIs; attention no longer shows worker rows. Pause/unload does not stop
   admitted builds; inspect supervisor and run processes separately.
 - [ ] Review operational prose and live issue/PR references; record pending or failed
   checks on the PR. Merge only after live config/plist/caller inspection completes.
@@ -708,7 +716,7 @@ the verbs listed in `nightshift status --json`, plus a separate confirmed Land
 control for verifiable human-check pauses. Resume has an optional note
 field (up to 2,000 characters); Accept is available for `stuck` and
 `needs_human`, Publish for `ready_to_publish`, Finish for `human_checks`, and
-Abort at every pause. Worker task rows remain read-only.
+Abort at every pause. Escalation rows remain read-only.
 
 **Publish and Finish push to the forge selected by the run manifest, so Paseo
 asks for confirmation before either action**, even before a PR exists. Cancel

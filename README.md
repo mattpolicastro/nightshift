@@ -550,8 +550,8 @@ for [issue #40](https://github.com/mattpolicastro/nightshift/issues/40).
 
 ```sh
 uv sync
-uv run nightshift attention   # PRs awaiting merge and decisions needing you
-uv run nightshift attention --offline  # cached outcomes, no GitHub calls
+uv run nightshift attention   # escalated issues/PRs and paused runs needing you
+uv run nightshift attention --offline  # cached listings and pauses, no GitHub or status reads
 uv run nightshift attention --json     # versioned output for a display adapter
 uv run nightshift daemon status      # what's running now, queue depth, blocked, alerting
 uv run nightshift preflight   # is it safe to leave alone tonight?
@@ -834,42 +834,62 @@ and stopping during a push to a disposable remote.
 
 ### What needs you
 
-`nightshift attention` shows one entry per recorded task, keyed by repository
-and issue. Merged PRs disappear. A PR closed without merging needs a decision
-until its issue is also closed. For escalations, closing the issue or removing
-`needs-human` explicitly resolves the item (including re-arming it). A harness
-crash released automatically to the queue stays visible until another attempt
-starts or the issue is closed.
+`nightshift attention` lists open issues and PRs in each enrolled GitHub
+repository that carry the configured `[labels].needs_human` label (default
+`needs-human`). Each entry shows its title, Issue/PR kind, link and, when
+available, a one-line summary. The summary is the first line of the latest
+recognised Nightshift escalation comment (drafting, admission, revision,
+publication or a specloop stage failure), capped at 400 characters and shown
+as plain text. An item without one is still listed; the label alone makes it
+visible. This change leaves label meaning, daemon escalation and Slack alerts
+as they were: closing the item or removing the label drops it on the next
+successful listing.
 
-It also lists specloop runs paused for a human decision, with the change,
-pause reason and PR link. Running and finished runs are omitted. JSON output
-has a `specloop` list beside historical worker `tasks`; retirement preserves it.
+It also lists specloop runs paused for a human decision, each as one line
+naming the change, pause reason and PR link, with a pointer to the same change
+in the Factory. Use the Factory to act; attention offers no actions. Running and
+finished runs are omitted.
 
-The command reads GitHub and `specloop status --json` through the one-release
-alias. Failed checks retain the last known outcome, print `STALE` with the last successful check time,
-and return exit code 1.
-`--offline` skips those checks and explicitly displays cached data. A successful
-check returns 0, even when tasks need attention.
+**Freshness.** A complete listing is saved per repository, forge and label
+before summaries are read. A failed summary read keeps the item visible with
+its last summary, or `Summary unavailable` if none was ever read, and a stale
+summary diagnostic with its own last-checked time. A failed or incomplete
+listing keeps the last complete listing marked `STALE` with its listing time.
+A repository never listed successfully shows a not-checked diagnostic, never
+an empty list. Only a fully checked, error-free run with no entries is a confirmed
+all-clear. Gitea or other non-GitHub enrollments get an `unsupported forge`
+diagnostic and are never looked up as a same-named GitHub repository.
 
-The worker-task refresh checks at most 32 tasks with four concurrent checks
-and a 40-second network budget. Outstanding tasks have priority; resolved history gets reserved
-capacity and normally waits an hour between checks. Large backlogs rotate across
-refreshes, and deferred checks are marked stale. Reopened historical tasks appear
-when their next historical check runs. See the [refresh policy](plugins/nightshift/README.md#nightshift-task-refresh-behavior).
+**Bounded reads.** Listings and comment reads share one 40-second GitHub
+budget, each request is limited to eight seconds, and at most four repository
+reads run at once. Listings run before summaries. Work left when the budget
+runs out keeps its last good data marked stale. The specloop status read keeps
+its own eight-second limit. Any listing, summary or status failure exits 1;
+otherwise the command exits 0 even when items need you. `--offline` reads only
+the cache and advances no timestamps.
 
-Historical events remain in `~/.nightshift/outcomes.sqlite3`, with the same
-resolution, stale/offline and exit behavior. Retirement does not backfill,
-move or delete history, branches, worktrees or transcripts. Transcript readers
-and the mirror utility remain available; automatic phase mirroring is disabled
-and `mirror_to_paseo` is inert. Reading attention does not resolve a task.
+**JSON compatibility.** `--json` stays version 1 with the same `version`,
+`offline`, `tasks`, `stale`, `specloop` and `specloop_error` keys and types.
+`tasks` and `stale` are now always empty arrays. A new `repositories` array
+holds `{repo, label, entries, checked_at, stale, error, error_code}` per
+enrollment. A consumer reading only the legacy arrays sees no items; update it
+alongside the CLI.
+
+Historical worker events remain in `~/.nightshift/outcomes.sqlite3` and stay
+readable through the historical outcome APIs (`outcomes.tasks()`,
+`outcomes.refresh()` and the mirror and transcript utilities), but attention no
+longer reads or reconciles them. Retirement does not backfill, move or delete
+history, branches, worktrees or transcripts. Automatic phase mirroring is
+disabled and `mirror_to_paseo` is inert.
 
 ### Paseo attention page
 
 The optional [Nightshift Paseo plugin](plugins/nightshift/README.md) adds a
-**Nightshift** sidebar page on the selected host. It shows the same
-outstanding tasks as the CLI, refreshes while open, and links to GitHub. Install
-and enable it on the host that owns the Nightshift ledger; it does not create
-agent sessions or change task execution.
+**Nightshift** sidebar page on the selected host. It shows the same escalated
+issues/PRs and Factory pause pointers as the CLI, refreshes while open, and links
+to GitHub. Install and enable it on the host that owns the Nightshift ledger; it
+does not create agent sessions or change task execution. See its
+[refresh and stale behaviour](plugins/nightshift/README.md#attention-refresh-behavior).
 
 The page's **Factory** section lists specloop runs, those waiting on you first, with
 one button per action that fits each pause (resume with a note, accept, publish,

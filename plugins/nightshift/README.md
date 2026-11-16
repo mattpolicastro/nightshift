@@ -1,6 +1,6 @@
 # Nightshift for Paseo
 
-One host-level sidebar page for outstanding Nightshift tasks and specloop runs.
+One host-level sidebar page for front-door escalations and specloop runs.
 Requires Paseo 0.10.1 or later, daemon and app alike (`paseo-plugin.json`
 declares `>=0.10.1` with no upper bound; built against SDK 0.14.0), and the Nightshift
 checkout on the Paseo host (`NIGHTSHIFT_CHECKOUT`, default `~/Projects/nightshift`;
@@ -8,9 +8,11 @@ see [platform settings and limits](../../KNOWN-LIMITATIONS.md#platform-assumptio
 The existing outcome database must be present. The page creates no agents.
 
 Select the host and open **Nightshift** in the sidebar, or search
-**Nightshift attention** in the Command Center. Nightshift task rows link to
-GitHub. Reading a task row does not resolve it; Nightshift reconciles resolution
-from GitHub. The **Factory** section lets you act on paused specloop runs.
+**Nightshift attention** in the Command Center. **What needs you** lists open
+issues and PRs labelled with the configured `needs-human` label, each linking to
+GitHub, plus one compact pointer per human-paused run naming its change in the
+Factory below. Reading a row does not resolve it; close the item or remove the
+label on GitHub. The **Factory** section lets you act on paused specloop runs.
 
 ## Factory
 
@@ -53,7 +55,7 @@ engine HTTP loopback or URL-prefix installations may require direct CLI use.
 Land remains GitHub-only, and confirmation enables no Gitea daemon stage.
 Finish does not merge the PR. After an action, the page shows the result and refreshes the list.
 Resume and Accept leave further execution to the `nightshift serve` supervisor.
-These controls apply to specloop runs; Nightshift worker tasks remain read-only.
+These controls apply to specloop runs; escalation rows remain read-only.
 
 **Search and sort.** The search field filters runs by change, PR, action
 headline, summary, repository or branch; every word must match. While a search
@@ -281,22 +283,39 @@ equivalent credential and preflight guards. Second-install and actual Paseo
 host integration validation for alternate paths remain pending; see the
 [manual checks](../../KNOWN-LIMITATIONS.md#platform-assumptions).
 
-## Nightshift task refresh behavior
+## Attention refresh behavior
 
-The task list first reads cached outcomes, then refreshes against GitHub. It
-refreshes every minute while mounted and the app is active, and when the app
+The page first reads the cache (`attention --offline`), then refreshes online.
+It refreshes every minute while mounted and the app is active, and when the app
 returns to the foreground. Refreshes share a server-side promise and are throttled to one
 per 30 seconds across clients. Manual Refresh obeys the same throttle.
 
-Each CLI refresh checks at most 32 tasks with up to four concurrent GitHub
-requests and a 40-second network budget (eight seconds per request). Outstanding
-tasks take priority; up to eight slots are reserved for resolved history, and
-either group can borrow unused slots. Attempts rotate oldest first, including
-failed attempts, so a broken record cannot monopolize the next refresh.
-Resolved records normally cool down for an hour; failed historical checks retry
-after a minute. Reopened historical items therefore appear on a later historical
-check, not necessarily the next minute. Large backlogs need multiple refreshes.
-Checks deferred by the work/time limit retain their prior state and show stale.
+Each online CLI read lists the labelled issues and PRs of every enrolled GitHub
+repository, then reads their comments for summaries, within these limits:
+
+| Attention limit | Value |
+| --- | --- |
+| Shared GitHub budget seconds | 40 |
+| Request seconds | 8 |
+| Concurrent reads | 4 |
+| Summary characters | 400 |
+
+A complete listing appears even when summary reads fail. Such a row keeps its
+last summary, or shows **Summary unavailable**, with a stale summary notice.
+Listing and summary diagnostics are separate and each shows its own last-success
+time. A repository whose listing failed keeps its last complete listing with a
+stale notice; one never listed shows a not-checked notice, and a non-GitHub
+enrollment shows an unsupported-forge notice. These notices appear even when the
+repository has no rows. **Nothing needs your attention** appears only after a
+fully checked, error-free read; cached, partial or unavailable data never
+claims an all-clear. Pause pointers read
+`<change> — <reason> · See Factory below: <change>`; search the Factory for the
+change to act on it.
+
+A host CLI that predates front-door attention returns only legacy worker
+arrays. The page ignores those rows and asks you to update Nightshift on the
+host. Historical worker outcomes stay in the outcome database and its
+historical APIs; the page no longer shows them.
 
 The server invokes `uv run --no-sync nightshift attention --json` through the
 configured uv executable in the configured checkout, using literal argv without
@@ -307,8 +326,8 @@ a cache read, 60 seconds for GitHub refresh, 2 MiB for command output. A missing
 installation produces an error, never a healthy empty list.
 
 Only display fields cross the RPC boundary. Transcripts, run internals, local
-paths and raw command errors are excluded. GitHub links are checked against the
-task's repository. Merging requires Factory's explicit bound Land confirmation;
+paths and raw command errors are excluded. Comment summaries are plain text.
+GitHub links are checked against the entry's repository, kind and number. Merging requires Factory's explicit bound Land confirmation;
 attention reads cannot merge. The plugin exposes no arbitrary-command operation.
 Its backend runs with Paseo's ordinary trusted-plugin host access.
 
@@ -321,3 +340,8 @@ Desktop and native phone review of Land remains a human checklist: confirmation
 and Cancel, stale dialogs, wrapping and touch targets, foreground refresh,
 progress/refusal retention and folded/absent-row placement. Also inspect real-host
 Stop and evidence; automated fixtures do not complete these checks.
+
+Escalation rows are not yet checked live. Pending human checks: with Slack off,
+see a real drafter escalation appear within one eligible online refresh, with
+the right link and headline; on a connected phone, check wrapping, stale notices,
+link opening and the pause pointer, then find the named Factory row.
