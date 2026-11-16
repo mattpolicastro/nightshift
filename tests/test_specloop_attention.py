@@ -29,6 +29,13 @@ def run_record(change="add-gate", status="paused", reason="stuck", pr=PR,
     }
 
 
+def pointer(change, reason, pr=PR, stale=False):
+    """The one logical text line for a human pause: a reference to its Factory row."""
+    prefix = "STALE " if stale else ""
+    suffix = f" · {pr}" if pr else ""
+    return f"  {prefix}{change} — {reason} · See Factory: {change}{suffix}"
+
+
 def status_result(runs):
     return subprocess.CompletedProcess(
         [], 0, json.dumps({"version": 1, "supervisor": {"state": "running"}, "runs": runs}), ALIAS_NOTICE
@@ -93,6 +100,67 @@ def test_running_finished_and_automatic_pauses_not_listed(status, capsys):
     assert "0 specloop run(s) need you" in text
     for change in ("running", "finished", "old-pause", "infra", "usage-limit"):
         assert change not in text
+
+
+@pytest.mark.scenario("attention/factory-pause-pointers/paused-runs-point-to-factory")
+def test_attention_points_paused_runs_to_factory(status, monkeypatch, capsys):
+    checked_at = "2026-10-21T12:00:00+00:00"
+    monkeypatch.setattr(outcomes, "now", lambda: checked_at)
+    status["result"] = status_result([
+        run_record("needs-decision", reason="stuck"),
+        run_record("requested-pause", reason="requested", pr=None),
+        run_record("legacy-infra", reason="infra", auto_resumes_remaining=MISSING_ALLOWANCE),
+        run_record("recovering", reason="infra", auto_resumes_remaining=2),
+        run_record("unlimited", reason="stuck", auto_resumes_remaining=None),
+        run_record("running", "running", None),
+        run_record("finished", "done", None),
+    ])
+    assert cli.main(["attention"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "3 specloop run(s) need you" in lines
+    assert pointer("needs-decision", "stuck") in lines
+    assert pointer("requested-pause", "requested", pr=None) in lines
+    assert pointer("legacy-infra", "infra") in lines
+    # One logical line per pause: no detail, progress or action lines follow it.
+    assert [line for line in lines if PR in line] == [
+        pointer("needs-decision", "stuck"), pointer("legacy-infra", "infra"),
+    ]
+    text = "\n".join(lines)
+    for change in ("recovering", "unlimited", "running", "finished"):
+        assert change not in text
+    for detail in ("Needs a decision", "1.1", "abc123", "resume", "abort"):
+        assert detail not in text
+
+    # The JSON specloop entries keep their shape; the pointer is text only.
+    assert cli.main(["attention", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["specloop"] == [
+        {"change": change, "reason": reason, "pr": pr,
+         "checked_at": checked_at, "error": None, "stale": False}
+        for change, reason, pr in [
+            ("needs-decision", "stuck", PR), ("requested-pause", "requested", None),
+            ("legacy-infra", "infra", PR),
+        ]
+    ]
+
+    # Stale metadata survives on the pointer line, beside the unchanged error line.
+    status["result"] = FileNotFoundError("specloop unavailable")
+    assert cli.main(["attention"]) == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert pointer("needs-decision", "stuck", stale=True) in lines
+    assert pointer("requested-pause", "requested", pr=None, stale=True) in lines
+    assert ("  STALE specloop — last checked "
+            f"{checked_at}: could not run specloop: specloop unavailable") in lines
+
+    # Direct rendering through the module API, independent of the CLI.
+    assert specloop_attention.render(specloop_attention.snapshot(offline=True)).splitlines() == [
+        "3 specloop run(s) need you",
+        pointer("needs-decision", "stuck", stale=True),
+        pointer("requested-pause", "requested", pr=None, stale=True),
+        pointer("legacy-infra", "infra", stale=True),
+        f"  STALE specloop — last checked {checked_at}: "
+        "could not run specloop: specloop unavailable",
+    ]
 
 
 @pytest.mark.scenario("attention/pause-driven-attention/other-human-pauses-listed")
@@ -178,8 +246,7 @@ def test_legacy_pause_without_allowance(status, capsys, reason):
     text = capsys.readouterr().out
     assert "unlimited-pause" not in text
     if expected:
-        assert f"legacy-pause — {reason}" in text
-        assert PR in text
+        assert pointer("legacy-pause", reason) in text.splitlines()
     else:
         assert "legacy-pause" not in text
 
@@ -223,8 +290,7 @@ def test_invalid_allowance_preserves_snapshot(status, monkeypatch, capsys, allow
     }
     assert cli.main(["attention"]) == 1
     text = capsys.readouterr().out
-    assert f"STALE cached-pause — {reason}" in text
-    assert PR in text
+    assert pointer("cached-pause", reason, stale=True) in text.splitlines()
     assert f"last checked {checked_at}: {error}" in text
     assert "replacement-pause" not in text
     assert "malformed-pause" not in text
@@ -295,9 +361,7 @@ def test_cached_entries_and_recovery(status, monkeypatch, capsys, recovered_runs
         assert worker_text not in text
         assert "2 specloop run(s) need you" in text
         for entry in before["specloop"]:
-            prefix = "STALE " if stale else ""
-            assert f"{prefix}{entry['change']} — {entry['reason']}" in text
-        assert PR in text
+            assert pointer(entry["change"], entry["reason"], entry["pr"], stale) in text.splitlines()
         assert ("STALE" in text) is stale
         if stale:
             assert f"last checked {checked_at}: {error}" in text
