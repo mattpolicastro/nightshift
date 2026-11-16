@@ -14,6 +14,21 @@ from pathlib import Path, PureWindowsPath
 ADAPTERS = ("codex", "claude")
 DEFAULT_MUTATION_INVALID_STEPS = ("configure", "build")
 
+DEFAULT_ENV = Path.home() / ".config" / "specloop" / "env"
+
+
+def load_env(path: Path | None) -> dict[str, str]:
+    """`K=V` lines from the manifest's env_file, or DEFAULT_ENV when it names none."""
+    values = {}
+    p = path or DEFAULT_ENV
+    if p.exists():
+        for line in p.read_text().splitlines():
+            line = line.strip().removeprefix("export ").strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                values[k.strip()] = v.strip().strip('"').strip("'")
+    return values
+
 
 @dataclass(frozen=True)
 class Profile:

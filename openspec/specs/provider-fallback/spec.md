@@ -148,6 +148,22 @@ A codex profile without `base_url` MAY name its own login file with `auth` (for 
 - **WHEN** `~/.codex/auth.json` and `~/.codex-api/auth.json` both exist
 - **THEN** the seal's credential values include the token values from both
 
+### Requirement: Manifest credentials for every session
+
+Every agent session the harness starts for a manifest SHALL receive the values in that manifest's `env_file` (or `~/.config/specloop/env` when it names none) as its session secrets: build and review sessions, and also the drafting, feasibility and spec-critic sessions. The secrets SHALL reach only the adapter's child environment, never a prompt, so a `claude` subscription profile authenticates with the env file's `CLAUDE_CODE_OAUTH_TOKEN` in every role.
+
+#### Scenario: Drafting session carries the manifest credentials
+- **WHEN** a manifest's `env_file` sets `CLAUDE_CODE_OAUTH_TOKEN` and its drafting role selects a `claude` profile
+- **THEN** each drafting session's call carries that token and its prompt does not
+
+#### Scenario: Feasibility session carries the manifest credentials
+- **WHEN** a manifest's `env_file` sets `CLAUDE_CODE_OAUTH_TOKEN` and its feasibility role selects a `claude` profile
+- **THEN** the feasibility session's call carries that token and its prompt does not
+
+#### Scenario: Critic session carries the manifest credentials
+- **WHEN** a manifest's `env_file` sets `CLAUDE_CODE_OAUTH_TOKEN` and its critic selects a `claude` profile
+- **THEN** the critic session's call carries that token and its prompt does not
+
 ### Requirement: Shared rate limit telemetry
 
 Claude and the historical trace parser SHALL share one decoder for

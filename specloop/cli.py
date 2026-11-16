@@ -24,23 +24,10 @@ from nightshift import config
 from nightshift.forge import ForgeError
 from nightshift.forge.gitea import GiteaForge
 from specloop import feasibility, loop, manifest, messages, openspec, speckit, spec_format, tasks, verify
+from specloop.manifest import DEFAULT_ENV, load_env  # noqa: F401 -- re-exported; tests patch cli.load_env
 from specloop.seal import git
 from specloop.state import SAFE_CHANGE, Busy, Run, TaskState, iter_run_dirs, proposals_dir, run_dir
 from specloop.state_locks import MigrationBusy, writer
-
-DEFAULT_ENV = Path.home() / ".config" / "specloop" / "env"
-
-
-def load_env(path: Path | None) -> dict[str, str]:
-    values = {}
-    p = path or DEFAULT_ENV
-    if p.exists():
-        for line in p.read_text().splitlines():
-            line = line.strip().removeprefix("export ").strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                values[k.strip()] = v.strip().strip('"').strip("'")
-    return values
 
 
 def notifier(secrets: dict):
