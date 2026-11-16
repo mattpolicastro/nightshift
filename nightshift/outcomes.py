@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import subprocess
 import time
@@ -15,6 +16,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 DB_PATH = Path.home() / ".nightshift" / "outcomes.sqlite3"
 log = logging.getLogger("nightshift")
@@ -132,21 +134,185 @@ def _observe(item, labels, runner):
     return state, resolution
 
 
+class _BudgetExhausted(RuntimeError):
+    pass
+
+
+class _TimedOut(RuntimeError):
+    pass
+
+
 def _read_github(args, deadline):
     """Attention has its own deadline; queue retries must not hold the UI open."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise RuntimeError("Refresh time budget exhausted")
+        raise _BudgetExhausted("Refresh time budget exhausted")
     try:
         result = subprocess.run(
             ["gh", *args], capture_output=True, text=True, check=False,
             timeout=min(REQUEST_SECONDS, remaining),
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("GitHub check timed out") from exc
+        raise _TimedOut("GitHub check timed out") from exc
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "GitHub check failed")
     return result.stdout
+
+
+# Fixed display text: raw stderr can carry credentials and is never shown.
+SAFE_ERRORS = {
+    "read_failed": "GitHub read failed",
+    "timeout": "GitHub read timed out",
+    "invalid_response": "GitHub returned an invalid response",
+    "budget_exhausted": "Refresh time budget exhausted",
+    "unsupported_forge": "Attention does not support this repository's forge",
+    "not_checked": "Not checked yet",
+}
+SUMMARY_LIMIT = 400
+_HEADLINE_PREFIX = "**nightshift** — "
+_HEADLINES = {
+    "The spec draft needs human input.": "draft",
+    "Admission refused. Human input is needed.": "admit",
+    "Revision needs human input.": "revise",
+    "Publication refused. Human input is needed.": "publish",
+}
+_STAGE_HEADLINE = re.compile(r"Specloop ([A-Za-z0-9_-]+) failed\. Human input is needed\.")
+
+
+class _FrontDoorError(Exception):
+    def __init__(self, code: str):
+        super().__init__(SAFE_ERRORS[code])
+        self.code = code
+
+
+def _gh_pages(runner, path: str) -> list[dict]:
+    """Every row of every page of a GitHub list endpoint; partial is failure."""
+    try:
+        raw = runner(["api", path, "--paginate", "--slurp"])
+    except _BudgetExhausted as exc:
+        raise _FrontDoorError("budget_exhausted") from exc
+    except _TimedOut as exc:
+        raise _FrontDoorError("timeout") from exc
+    except (RuntimeError, OSError) as exc:
+        raise _FrontDoorError("read_failed") from exc
+    try:
+        pages = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise _FrontDoorError("invalid_response") from exc
+    if not isinstance(pages, list) or not all(
+            isinstance(page, list) and all(isinstance(row, dict) for row in page)
+            for page in pages):
+        raise _FrontDoorError("invalid_response")
+    return [row for page in pages for row in page]
+
+
+def _positive(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _listing_entry(repo: str, row: dict) -> dict:
+    number, title, url = row.get("number"), row.get("title"), row.get("html_url")
+    kind = "pr" if row.get("pull_request") is not None else "issue"
+    if not _positive(number) or not isinstance(title, str) or row.get("state") != "open":
+        raise _FrontDoorError("invalid_response")
+    expected = f"/{repo}/{'pull' if kind == 'pr' else 'issues'}/{number}"
+    if not isinstance(url, str):
+        raise _FrontDoorError("invalid_response")
+    parts = urlsplit(url)
+    if (parts.scheme != "https" or parts.netloc != "github.com"
+            or "?" in url or "#" in url or parts.path.lower() != expected.lower()):
+        raise _FrontDoorError("invalid_response")
+    return {"repo": repo, "number": number, "kind": kind, "title": title, "url": url}
+
+
+def _list_repository(cfg, repo, runner) -> dict:
+    """One enrollment's complete open labelled listing, or its safe failure."""
+    label = cfg.labels.needs_human
+    status: dict = {"repo": repo.name, "label": label, "entries": None,
+                    "error": None, "error_code": None}
+    try:
+        try:
+            forge = cfg.forge_for(repo)
+        except ValueError as exc:
+            raise _FrontDoorError("unsupported_forge") from exc
+        # Never fall back to a same-named repository on github.com.
+        if forge.kind != "github" or forge.url.rstrip("/") != "https://github.com":
+            raise _FrontDoorError("unsupported_forge")
+        rows = _gh_pages(runner, f"repos/{repo.name}/issues?state=open"
+                                 f"&labels={quote(label, safe='')}&per_page=100")
+        entries = [_listing_entry(repo.name, row) for row in rows]
+        if len({e["number"] for e in entries}) != len(entries):
+            raise _FrontDoorError("invalid_response")
+    except _FrontDoorError as exc:
+        status.update(error=str(exc), error_code=exc.code)
+    else:
+        status["entries"] = sorted(entries, key=lambda e: (e["number"], e["kind"]))
+    return status
+
+
+def _collect_listings(cfg, runner) -> list[dict]:
+    """Listings only: summaries are enriched separately, once membership is known."""
+    return [_list_repository(cfg, repo, runner)
+            for repo in sorted(cfg.repos, key=lambda r: r.name)]
+
+
+def _escalation_headline(body) -> str | None:
+    """The first physical line of an exact delivery comment, else None.
+
+    Physical lines only: no trimming, and no reading of fences, HTML or
+    indentation. Anything not exactly headline ... marker refuses evidence.
+    """
+    if not isinstance(body, str):
+        return None
+    lines = [line[:-1] if line.endswith("\r") else line for line in body.split("\n")]
+    while lines and lines[-1] == "":
+        lines.pop()
+    if len(lines) < 2 or not lines[0].startswith(_HEADLINE_PREFIX):
+        return None
+    headline = lines[0][len(_HEADLINE_PREFIX):]
+    stage = _STAGE_HEADLINE.fullmatch(headline)
+    action = _HEADLINES.get(headline) or (f"{stage[1]}-error" if stage else None)
+    if action is None or not re.fullmatch(
+            rf"<!-- nightshift:{re.escape(action)}:[^\s<>]+ -->", lines[-1]):
+        return None
+    return lines[0]
+
+
+def _comment_recency(comment: dict) -> tuple[datetime, int]:
+    stamp = comment.get("updated_at")
+    if stamp is None:
+        stamp = comment.get("created_at")
+    if not isinstance(stamp, str):
+        raise _FrontDoorError("invalid_response")
+    try:
+        parsed = datetime.fromisoformat(stamp)
+    except ValueError as exc:
+        raise _FrontDoorError("invalid_response") from exc
+    if parsed.tzinfo is None or not _positive(comment.get("id")):
+        raise _FrontDoorError("invalid_response")
+    return parsed, comment["id"]
+
+
+def _read_summary(repo: str, number: int, runner) -> str | None:
+    """The latest qualifying escalation's headline across every comment page."""
+    comments = _gh_pages(runner, f"repos/{repo}/issues/{number}/comments?per_page=100")
+    qualifying = [(_comment_recency(c), line) for c in comments
+                  if (line := _escalation_headline(c.get("body"))) is not None]
+    if not qualifying:
+        return None
+    line = max(qualifying)[1]
+    return line if len(line) <= SUMMARY_LIMIT else line[:SUMMARY_LIMIT - 1] + "…"
+
+
+def _enrich_summary(entry: dict, runner, clock=None) -> dict:
+    """Summary fields for one listed item; a failure affects only that item."""
+    try:
+        summary = _read_summary(entry["repo"], entry["number"], runner)
+    except _FrontDoorError as exc:
+        return {"summary": None, "summary_checked_at": None, "summary_stale": True,
+                "summary_error": str(exc), "summary_error_code": exc.code}
+    return {"summary": summary, "summary_checked_at": (clock or now)(),
+            "summary_stale": False, "summary_error": None, "summary_error_code": None}
 
 
 def refresh(labels, *, runner=None) -> list[dict]:
