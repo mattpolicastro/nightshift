@@ -475,6 +475,28 @@ def front_door_snapshot(cfg, *, offline=False, runner=None, clock=None) -> list[
     return result
 
 
+def render_front_door(repositories: list[dict]) -> str:
+    """Text projection of front_door_snapshot; diagnostics show even without entries."""
+    entries = [e for r in repositories for e in r["entries"]]
+    lines = [f"{len(entries)} issue(s)/PR(s) need you"]
+    for repo in repositories:
+        for e in repo["entries"]:
+            kind = "PR" if e["kind"] == "pr" else "Issue"
+            lines.append(f"  {kind} {e['repo']}#{e['number']} — {' '.join(e['title'].split())}")
+            if e.get("summary"):
+                lines.append("    " + " ".join(e["summary"].split()))
+            elif e.get("summary_error"):
+                lines.append(f"    {SUMMARY_UNAVAILABLE}")
+            if e.get("summary_error"):
+                lines.append(f"    STALE summary — last checked {e.get('summary_checked_at') or 'never'}: "
+                             f"{e['summary_error']}")
+            lines.append(f"    {e['url']}")
+        if repo["stale"]:
+            lines.append(f"  STALE {repo['repo']} — last listed {repo['checked_at'] or 'never'}: "
+                         f"{repo['error']}")
+    return "\n".join(lines)
+
+
 def refresh(labels, *, runner=None) -> list[dict]:
     """Bound work per invocation, rotating attempts so failures cannot starve peers.
 

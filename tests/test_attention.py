@@ -424,3 +424,191 @@ def test_listings_precede_enrichment_without_a_repository_cap(stamps):
     assert [r["repo"] for r in result] == names and all(r["checked_at"] for r in result)
     assert result[0]["entries"][0]["summary_error_code"] == "timeout" and result[0]["stale"]
     assert all(r["entries"][0]["summary"] == HEAD and not r["stale"] for r in result[1:])
+
+
+REPO_KEYS = {"repo", "label", "entries", "checked_at", "stale", "error", "error_code"}
+ENTRY_KEYS = {"repo", "number", "kind", "title", "url", "summary", "summary_checked_at",
+              "summary_stale", "summary_error", "summary_error_code"}
+PAYLOAD_KEYS = {"version", "offline", "tasks", "repositories", "specloop", "specloop_error", "stale"}
+
+
+@pytest.fixture
+def cli_attention(monkeypatch, capsys):
+    """Run `nightshift attention` against a config and recorded GitHub answers."""
+    from nightshift import cli
+
+    monkeypatch.setattr(cli.config, "load_env_file", lambda: None)
+    monkeypatch.setattr(cli.specloop_attention.specloop_client, "call",
+                        lambda *a, **k: {"version": 1, "runs": []})
+    state = {"recorder": Recorder({})}
+    monkeypatch.setattr(outcomes, "_read_github", lambda args, deadline: state["recorder"](args))
+
+    def run(cfg, responses=None, *, json_output=True, offline=False, code=0):
+        monkeypatch.setattr(cli.config, "load", lambda path: cfg)
+        state["recorder"] = Recorder(responses or {})
+        argv = ["attention", *(["--json"] if json_output else []), *(["--offline"] if offline else [])]
+        assert cli.main(argv) == code
+        out = capsys.readouterr().out
+        if not json_output:
+            return out
+        payload = json.loads(out)
+        assert set(payload) == PAYLOAD_KEYS and payload["version"] == 1
+        assert payload["offline"] is offline and payload["tasks"] == [] == payload["stale"]
+        for repo in payload["repositories"]:
+            assert set(repo) == REPO_KEYS
+            assert all(set(e) == ENTRY_KEYS for e in repo["entries"])
+        return payload
+
+    run.recorder = lambda: state["recorder"]
+    return run
+
+
+@pytest.mark.scenario("attention/front-door-escalations/labelled-issues-and-prs-listed")
+def test_attention_lists_needs_human_issues_and_prs(cli_attention, stamps):
+    """attention/front-door-escalations/labelled-issues-and-prs-listed"""
+    cfg = Config(repos=[Repo("o/zeta"), Repo("o/alpha")], labels=Labels(needs_human="wait on me"))
+    responses = {
+        listing("o/alpha", "wait%20on%20me"): [[row("o/alpha", 9, "PR nine", pr=True)],
+                                               [row("o/alpha", 3, "Issue three")]],
+        listing("o/zeta", "wait%20on%20me"): [[row("o/zeta", 4, "Zeta four")]],
+        comments("o/alpha", 3): [[ESC]], comments("o/alpha", 9): [[]], comments("o/zeta", 4): [[]],
+    }
+    payload = cli_attention(cfg, responses)  # waits alone exit 0
+    paths = [c[1] for c in cli_attention.recorder().calls]
+    # Only enrolled repositories are read, and GitHub filters to open labelled items.
+    assert sorted(paths) == sorted(responses)
+    assert all("state=open&labels=wait%20on%20me" in p for p in paths if "comments" not in p)
+    listed = [(e["repo"], e["number"], e["kind"], e["title"], e["url"])
+              for r in payload["repositories"] for e in r["entries"]]
+    assert listed == [
+        ("o/alpha", 3, "issue", "Issue three", "https://github.com/o/alpha/issues/3"),
+        ("o/alpha", 9, "pr", "PR nine", "https://github.com/o/alpha/pull/9"),
+        ("o/zeta", 4, "issue", "Zeta four", "https://github.com/o/zeta/issues/4")]
+    assert [r["label"] for r in payload["repositories"]] == ["wait on me"] * 2
+    assert payload["repositories"][0]["entries"][0]["summary"] == HEAD
+    assert not any(r["stale"] for r in payload["repositories"])
+    text = cli_attention(cfg, responses, json_output=False)
+    assert "3 issue(s)/PR(s) need you" in text and "STALE" not in text
+    for kind, repo, number, title, url in [
+            ("Issue", "o/alpha", 3, "Issue three", "https://github.com/o/alpha/issues/3"),
+            ("PR", "o/alpha", 9, "PR nine", "https://github.com/o/alpha/pull/9"),
+            ("Issue", "o/zeta", 4, "Zeta four", "https://github.com/o/zeta/issues/4")]:
+        assert text.count(f"{kind} {repo}#{number} — {title}") == 1 and text.count(url) == 1
+    assert HEAD in text
+    # A closed or relabelled item drops out on the next complete listing.
+    gone = cli_attention(cfg, {**responses, listing("o/zeta", "wait%20on%20me"): [[]]})
+    assert gone["repositories"][1]["entries"] == []
+
+
+@pytest.mark.scenario("attention/independent-repository-snapshots/unreadable-repository-is-stale-not-empty")
+def test_attention_unreadable_repository_is_stale_not_empty(cli_attention, stamps):
+    """attention/independent-repository-snapshots/unreadable-repository-is-stale-not-empty"""
+    cfg = Config(repos=[Repo("o/a"), Repo("o/b")])
+    cold = cli_attention(cfg, {listing("o/a"): RuntimeError("ghp_SECRET down"),
+                               listing("o/b"): [[]]}, code=1)
+    a, b = cold["repositories"]
+    assert a["entries"] == [] and a["checked_at"] is None and a["stale"]
+    assert a["error_code"] == "read_failed" and "SECRET" not in json.dumps(cold)
+    assert b["checked_at"] and not b["stale"]
+    warm = cli_attention(cfg, {listing("o/a"): [[row("o/a", 1, "kept")]], comments("o/a", 1): [[ESC]],
+                               listing("o/b"): [[]]})
+    failing = {listing("o/a"): outcomes._TimedOut("slow"),
+               listing("o/b"): [[row("o/b", 2, "fresh")]], comments("o/b", 2): [[]]}
+    failed = cli_attention(cfg, failing, code=1)
+    a, b = failed["repositories"]
+    assert a["entries"] == warm["repositories"][0]["entries"]
+    assert a["checked_at"] == warm["repositories"][0]["checked_at"]
+    assert a["stale"] and a["error_code"] == "timeout"
+    assert [e["number"] for e in b["entries"]] == [2] and not b["stale"]
+    assert b["checked_at"] > warm["repositories"][1]["checked_at"]
+    text = cli_attention(cfg, failing, json_output=False, code=1)
+    assert "STALE o/a — last listed " in text and "Issue o/a#1 — kept" in text
+    assert "Issue o/b#2 — fresh" in text
+    assert cli_attention(cfg, offline=True, code=1)["repositories"][0] == a
+    # A summary failure on a healthy listing is also a current-source failure.
+    flaky = {**failing, listing("o/a"): [[]], comments("o/b", 2): RuntimeError("x")}
+    result = cli_attention(cfg, flaky, code=1)["repositories"]
+    assert not result[0]["stale"]
+    assert result[1]["stale"] and result[1]["error_code"] == "read_failed"
+    assert outcomes.SUMMARY_UNAVAILABLE in cli_attention(cfg, flaky, json_output=False, code=1)
+
+
+@pytest.mark.scenario("attention/independent-repository-snapshots/empty-enrollment-leaves-state-untouched")
+@pytest.mark.parametrize("offline", [False, True])
+def test_attention_empty_enrollment_creates_no_cache(cli_attention, monkeypatch, offline):
+    """attention/independent-repository-snapshots/empty-enrollment-leaves-state-untouched"""
+    from nightshift import cli
+    # Isolate the specloop provider as test_reads_never_migrate does; it has its own store.
+    monkeypatch.setattr(cli.specloop_attention, "snapshot", lambda **_: {"entries": [], "error": None})
+    monkeypatch.setattr(outcomes, "database", lambda: pytest.fail("cache opened"))
+    monkeypatch.setattr(outcomes.subprocess, "run", lambda *a, **k: pytest.fail("subprocess"))
+    payload = cli_attention(Config(repos=[]), offline=offline)
+    assert payload["repositories"] == [] and cli_attention.recorder().calls == []
+    assert not outcomes.DB_PATH.exists()
+
+
+def history_rows():
+    with outcomes.database() as db:
+        return ([tuple(r) for r in db.execute("SELECT * FROM events ORDER BY id")],
+                [tuple(r) for r in db.execute("SELECT * FROM observations ORDER BY event_id")])
+
+
+@pytest.mark.scenario("attention/additive-attention-json/worker-history-no-longer-renders")
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/historical-attention-remains-readable")
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/historical-reconciliation-stays-explicit")
+@pytest.mark.scenario("worker-retirement/historical-evidence-remains-available/historical-mirroring-remains-usable")
+def test_attention_no_longer_renders_worker_outcomes(cli_attention, monkeypatch):
+    """attention/additive-attention-json/worker-history-no-longer-renders
+
+    worker-retirement/historical-evidence-remains-available/historical-attention-remains-readable
+    worker-retirement/historical-evidence-remains-available/historical-reconciliation-stays-explicit
+    worker-retirement/historical-evidence-remains-available/historical-mirroring-remains-usable
+    """
+    import importlib.util
+    import sys
+    from nightshift import mirror
+
+    outcomes.record("w/old", 1, state="awaiting_merge", reason="merge me",
+                    pr_url="https://github.com/w/old/pull/2")
+    outcomes.record("w/old", 3, state="needs_decision", reason="decide me")
+    outcomes.record("w/old", 5, state="needs_decision", reason="stale me")
+    with outcomes.database() as db:
+        db.execute("INSERT INTO observations(event_id,error) SELECT id,'historical outage' "
+                   "FROM events WHERE issue=5")
+    history = history_rows()
+    before = outcomes.tasks()
+    cfg = Config(repos=[Repo("o/r")])
+    healthy = {listing("o/r"): [[row("o/r", 7, "current")]], comments("o/r", 7): [[]]}
+    for offline in (False, True):
+        payload = cli_attention(cfg, healthy, offline=offline)
+        assert [e["number"] for e in payload["repositories"][0]["entries"]] == [7]
+        text = cli_attention(cfg, healthy, offline=offline, json_output=False)
+        assert "w/old" not in text and "task(s) need you" not in text
+        assert "historical outage" not in text and "Issue o/r#7 — current" in text
+        assert ("Cached outcomes (GitHub and specloop not checked)" in text) is offline
+    # Discovery that no longer lists anything, or fails, never reconciles history.
+    cli_attention(cfg, {listing("o/r"): [[]]})
+    cli_attention(cfg, {listing("o/r"): RuntimeError("down")}, code=1)
+    assert history_rows() == history
+    assert outcomes.tasks() == before
+    assert [(t["issue"], t["state"], t["reason"]) for t in before] == [
+        (1, "awaiting_merge", "merge me"), (3, "needs_decision", "decide me"),
+        (5, "needs_decision", "stale me")]
+    assert [t["issue"] for t in outcomes.attention(before)] == [1, 3, 5]
+    assert "STALE w/old#5" in outcomes.render(before)
+    # Explicit historical refresh still resolves and preserves under its own rules.
+    monkeypatch.setattr(outcomes, "HISTORY_INTERVAL", 0)
+
+    def historical(args):
+        if args[0] == "pr":
+            return json.dumps({"state": "MERGED"})
+        if args[2] == "5":
+            raise RuntimeError("still down")
+        return json.dumps({"state": "CLOSED", "labels": []})
+    refreshed = {t["issue"]: t for t in outcomes.refresh(Labels(), runner=historical)}
+    assert refreshed[1]["state"] == refreshed[3]["state"] == "resolved"
+    assert refreshed[5]["state"] == "needs_decision" and "still down" in refreshed[5]["error"]
+    assert refreshed[5]["checked_at"] is None
+    # Attention imports no worker engine and leaves the retained mirror utility in place.
+    assert importlib.util.find_spec("nightshift.worker") is None
+    assert "nightshift.worker" not in sys.modules and callable(mirror.mirror)

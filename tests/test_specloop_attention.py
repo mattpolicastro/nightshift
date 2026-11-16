@@ -62,13 +62,13 @@ def test_stuck_run_in_text_and_json_beside_worker_tasks(status, monkeypatch, cap
     text = capsys.readouterr().out
     assert "add-gate — stuck" in text
     assert PR in text
-    assert "example/repo#8" in text
+    assert "example/repo#8" not in text  # worker history stays behind outcomes.tasks()
     assert "STALE" not in text
 
     assert cli.main(["attention", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["version"] == 1
-    assert payload["tasks"][0]["issue"] == 8
+    assert payload["tasks"] == [] and outcomes.tasks()[0]["issue"] == 8
     assert len(payload["specloop"]) == 1
     entry = payload["specloop"][0]
     assert (entry["change"], entry["reason"], entry["pr"]) == ("add-gate", "stuck", PR)
@@ -263,7 +263,8 @@ def test_cached_entries_and_recovery(status, monkeypatch, capsys, recovered_runs
             ("exhausted-infra", "infra", PR), ("requested-pause", "requested", None),
         ]
     ]
-    worker, = before["tasks"]
+    assert before["tasks"] == []
+    worker, = outcomes.tasks()
     assert (worker["repo"], worker["issue"], worker["state"], worker["reason"]) == (
         "example/repo", 8, "needs_decision", "Review this",
     )
@@ -291,7 +292,7 @@ def test_cached_entries_and_recovery(status, monkeypatch, capsys, recovered_runs
         assert cli.main(["attention", "--offline"]) == int(stale)
         text = capsys.readouterr().out
         assert "Cached outcomes (GitHub and specloop not checked)" in text
-        assert worker_text in text
+        assert worker_text not in text
         assert "2 specloop run(s) need you" in text
         for entry in before["specloop"]:
             prefix = "STALE " if stale else ""
@@ -308,11 +309,11 @@ def test_cached_entries_and_recovery(status, monkeypatch, capsys, recovered_runs
     recovered = json.loads(capsys.readouterr().out)
     assert recovered == {
         **before, "specloop": [], "specloop_error": None,
-        "tasks": [{**worker, "checked_at": checked_at}],
     }
+    assert outcomes.tasks() == [worker]  # attention does not reconcile history
     assert cli.main(["attention"]) == 0
     text = capsys.readouterr().out
-    assert worker_text in text
+    assert worker_text not in text
     assert "0 specloop run(s) need you" in text
     assert "exhausted-infra" not in text
     assert "requested-pause" not in text
