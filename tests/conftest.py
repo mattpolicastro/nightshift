@@ -15,6 +15,7 @@ LIVE_STATE_ROOTS = getattr(os, "_nightshift_test_guard_roots", tuple(
 install(LIVE_STATE_ROOTS)
 
 from nightshift import config, daemon, mirror, outcomes, queue, specloop_intake
+from specloop import manifest as specloop_manifest
 
 
 @pytest.fixture
@@ -101,6 +102,8 @@ def isolate_outcome_store(isolated_home_factory, monkeypatch):
     monkeypatch.setenv("NIGHTSHIFT_STATE_ROOT", str(state))
     monkeypatch.setenv("NIGHTSHIFT_LEGACY_STATE_ROOT", str(home / ".specloop"))
     monkeypatch.setattr(config, "ENV_FILE", home / ".config/nightshift/env")
+    # Draft and review sessions load the manifest env file; never the live one.
+    monkeypatch.setattr(specloop_manifest, "DEFAULT_ENV", home / ".config/specloop/env")
     monkeypatch.setattr(config, "DEFAULT_PATH", home / "config.toml")
     monkeypatch.delenv("NIGHTSHIFT_FORGE_CONFIG", raising=False)
     monkeypatch.setattr(mirror, "DEFAULT_CONFIG_ROOT", home / ".config/nightshift/claude")
