@@ -3,7 +3,7 @@
 #
 # launchd reads NO shell config — not .zprofile, not .zshenv — so the daemon's
 # credentials have to be sourced here explicitly. This wrapper exists for that
-# one reason; everything else is `uv run nightshift run`.
+# one reason; everything else is `uv run nightshift daemon run`.
 
 set -euo pipefail
 
@@ -54,4 +54,4 @@ for bin in gh claude pnpm node git swift; do
 done
 
 cd "$HOME/Projects/nightshift"
-exec /opt/homebrew/bin/uv run nightshift run
+exec /opt/homebrew/bin/uv run nightshift daemon run

@@ -266,8 +266,8 @@ SHALL NOT claim live-provider error wording has been validated by fixtures.
 
 #### Scenario: Frozen service wrappers remain explicit
 - **WHEN** an operator reads setup examples and platform limitations for the new host settings
-- **THEN** guidance names `bin/nightshift-daemon` and `bin/specloop-serve` as unchanged wrappers with fixed bootstrap checkout, uv and PATH locations, explicitly noting the supervisor's retained ~/n/bin prefix and stale OpenSpec comment, and says environment settings do not relocate those wrapper commands
-- **THEN** guidance describes wrapper portability as deferred because `bin/**` remains frozen without exceptions, distinguishes direct CLI configuration from bundled service startup, and does not claim a new helper or relocated wrapper pathname solves the limitation
+- **THEN** guidance names `bin/nightshift-daemon` and `bin/specloop-serve` as wrappers with fixed bootstrap checkout, uv and PATH locations, noting that the supervisor's PATH no longer includes ~/n/bin while the daemon's keeps it for its startup tool guard, and says environment settings do not relocate those wrapper commands
+- **THEN** guidance describes wrapper portability as deferred because `bin/**` remains frozen to agents without exceptions, so wrapper edits are hand-made direct PRs, distinguishes direct CLI configuration from bundled service startup, and does not claim a new helper or relocated wrapper pathname solves the limitation
 - **THEN** full daemon rollout remains pending separate wrapper work or an independently provisioned operator service preserving credential and preflight guards
 - **THEN** the same freeze covers launchd plists and all wrapper comments; current guidance explains the retained worker startup prerequisites and real pause/supervisor boundaries without promising those files were corrected
 
@@ -414,8 +414,8 @@ Setup and deployment guidance SHALL prescribe stopped-supervisor migration and i
 - **THEN** guidance uses migrate while supervisor is stopped, inspection before restart, requested holds before supervisor startup and explicit resume afterwards; daemon pause survives reload via daemon-group commands
 
 #### Scenario: Frozen inventories match the parser
-- **WHEN** documentation command checks inspect the unchanged daemon and supervisor wrapper inventory
-- **THEN** actual bare nightshift run and specloop serve argv match the inventory and parse, with bootstrap and credential assertions preserved and no required wrapper edit
+- **WHEN** documentation command checks inspect the daemon and supervisor wrapper inventory
+- **THEN** actual nightshift daemon run and nightshift serve argv match the inventory and parse to the daemon run handler and the build supervisor, with bootstrap and credential assertions preserved
 
 #### Scenario: Documentation checks are structural
 - **WHEN** touched documentation is checked under the design's physical-line extraction rule
@@ -877,7 +877,7 @@ The prerequisite, engine, deployment, platform and plugin guides SHALL consisten
 - **WHEN** an operator reads the validator and deployment guidance
 - **THEN** it explains missing WHEN/GIVEN or THEN and unknown requirements-header failures, accepted closing hashes and the retained harness scenario lint
 - **THEN** exactly three human checks remain pending and recorded on #191/#184: pre-merge validation of throwaway main and Scheming Vizier including disposable strict examples, pre-deploy validation of both enrolled deployment checkouts, and the Mac Studio admission/finish cut-over
-- **THEN** the bundled supervisor PATH/comment remain unchanged; absolute executable selection plus the cut-over establish dependency removal, with no separate supervisor-without-`~/n/bin` experiment, while exact bundled-wrapper cleanup remains deferred on #184's ledger
+- **THEN** absolute executable selection plus the cut-over establish dependency removal, with no separate supervisor-without-`~/n/bin` experiment; the bundled supervisor's `~/n/bin` prefix and stale OpenSpec comment were removed afterwards by a hand-made wrapper PR (#115 step 1)
 - **THEN** archived failures are informational and offline tests do not claim live deployment success
 
 ### Requirement: Native build operator guidance
