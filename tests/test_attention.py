@@ -1,4 +1,5 @@
 import json
+import threading
 
 import pytest
 
@@ -199,3 +200,227 @@ def test_physical_line_rule_and_safe_summary_failures():
     failed = outcomes._enrich_summary({"repo": "o/r", "number": 1}, Recorder(
         {comments("o/r", 1): RuntimeError("stderr with ghp_SECRET")}))
     assert failed["summary_error_code"] == "read_failed" and "SECRET" not in failed["summary_error"]
+
+
+class Clock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+class Tracked(Recorder):
+    """A recorder that measures reads in flight and can run a hook per path."""
+
+    def __init__(self, responses, hooks=None):
+        super().__init__(responses)
+        self.hooks, self.lock, self.active, self.peak = hooks or {}, threading.Lock(), 0, 0
+
+    def __call__(self, args):
+        with self.lock:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        try:
+            if args[1] in self.hooks:
+                self.hooks[args[1]]()
+            return super().__call__(args)
+        finally:
+            with self.lock:
+                self.active -= 1
+
+
+@pytest.fixture
+def stamps(monkeypatch):
+    counter = iter(f"2026-11-15T00:{n // 60:02d}:{n % 60:02d}+00:00" for n in range(3600))
+    monkeypatch.setattr(outcomes, "now", lambda: next(counter))
+    monkeypatch.setattr(outcomes.subprocess, "run",
+                        lambda *a, **k: pytest.fail("injected runner bypassed"))
+
+
+def snap(cfg, responses, **kwargs):
+    return {r["repo"]: r for r in outcomes.front_door_snapshot(cfg, runner=Recorder(responses), **kwargs)}
+
+
+def entry_map(status):
+    return {e["number"]: e for e in status["entries"]}
+
+
+ESC = escalation("Revision needs human input.", "revise")
+HEAD = f"{PREFIX}Revision needs human input."
+
+
+@pytest.mark.scenario("attention/escalation-comment-summary/failed-summary-does-not-hide-listing-changes")
+def test_sibling_comment_failures_do_not_hide_listing_changes(stamps):
+    """attention/escalation-comment-summary/failed-summary-does-not-hide-listing-changes"""
+    cfg = Config(repos=[Repo("o/r")])
+    first = snap(cfg, {listing("o/r"): [[row("o/r", 1, "one"), row("o/r", 2, "two")]],
+                       comments("o/r", 1): [[ESC]], comments("o/r", 2): [[]]})["o/r"]
+    kept_at = entry_map(first)[1]["summary_checked_at"]
+    assert entry_map(first)[1]["summary"] == HEAD and not first["stale"]
+    malformed = {**ESC, "updated_at": "later"}
+    second = snap(cfg, {
+        listing("o/r"): [[row("o/r", 1, "one"), row("o/r", 3, "new", pr=True),
+                          row("o/r", 4, "four"), row("o/r", 5, "five")]],
+        comments("o/r", 1): RuntimeError("ghp_SECRET stderr"),
+        comments("o/r", 3): [[{**ESC, "body": ESC["body"] + "x" * outcomes.COMMENT_BYTES_LIMIT}]],
+        comments("o/r", 4): [[malformed]],
+        comments("o/r", 5): [[ESC]]})["o/r"]
+    items = entry_map(second)
+    assert sorted(items) == [1, 3, 4, 5]  # #2 closed and is gone; #3 is new
+    assert second["checked_at"] > first["checked_at"] and second["stale"]
+    assert second["error_code"] == "read_failed" and "SECRET" not in json.dumps(second)
+    assert items[1]["summary"] == HEAD and items[1]["summary_checked_at"] == kept_at
+    assert items[1]["summary_stale"] and items[1]["summary_error_code"] == "read_failed"
+    for cold in (3, 4):  # cold failures display as unavailable, never hidden
+        assert items[cold]["summary"] is None and items[cold]["summary_checked_at"] is None
+        assert items[cold]["summary_error_code"] == "invalid_response"
+    assert items[5]["summary"] == HEAD and not items[5]["summary_stale"]
+    # A later successful read clears the error with the same listing.
+    third = snap(cfg, {listing("o/r"): [[row("o/r", n, "t", pr=n == 3) for n in (1, 3, 4, 5)]],
+                       **{comments("o/r", n): [[]] for n in (1, 3, 4)},
+                       comments("o/r", 5): [[ESC]]})["o/r"]
+    assert not third["stale"] and third["error"] is None
+    assert all(e["summary_error"] is None and not e["summary_stale"] for e in third["entries"])
+    assert entry_map(third)[1]["summary"] is None  # successful read, no qualifying comment
+
+
+@pytest.mark.scenario("attention/independent-repository-snapshots/unreadable-repository-is-stale-not-empty")
+def test_unreadable_repository_is_stale_while_healthy_one_updates(stamps):
+    """attention/independent-repository-snapshots/unreadable-repository-is-stale-not-empty"""
+    cfg = Config(repos=[Repo("o/a"), Repo("o/b")])
+    cold = snap(cfg, {listing("o/a"): RuntimeError("down"), listing("o/b"): [[]]})
+    assert cold["o/a"]["entries"] == [] and cold["o/a"]["checked_at"] is None
+    assert cold["o/a"]["stale"] and cold["o/a"]["error_code"] == "read_failed"
+    assert not cold["o/b"]["stale"] and cold["o/b"]["checked_at"]
+    warm = snap(cfg, {listing("o/a"): [[row("o/a", 1, "x")]], comments("o/a", 1): [[]],
+                      listing("o/b"): [[]]})
+    failed = snap(cfg, {listing("o/a"): outcomes._TimedOut("t"),
+                        listing("o/b"): [[row("o/b", 2, "y")]], comments("o/b", 2): [[]]})
+    assert [e["number"] for e in failed["o/a"]["entries"]] == [1]
+    assert failed["o/a"]["checked_at"] == warm["o/a"]["checked_at"]
+    assert failed["o/a"]["stale"] and failed["o/a"]["error_code"] == "timeout"
+    assert [e["number"] for e in failed["o/b"]["entries"]] == [2] and not failed["o/b"]["stale"]
+
+
+TRUNCATED = '[[{"number": 1, "title": "a", "state": "open"}], [{"num'
+
+
+@pytest.mark.scenario("attention/independent-repository-snapshots/incomplete-read-preserves-complete-snapshot")
+@pytest.mark.parametrize("later_page, code", [
+    (RuntimeError("page 2 failed"), "read_failed"),
+    (TRUNCATED, "invalid_response"),
+    ([[row("o/r", 1, "a")], [{"number": 5}]], "invalid_response"),
+])
+def test_incomplete_listing_never_partially_replaces(stamps, later_page, code):
+    """attention/independent-repository-snapshots/incomplete-read-preserves-complete-snapshot"""
+    cfg = Config(repos=[Repo("o/r")])
+    good = snap(cfg, {listing("o/r"): [[row("o/r", 1, "a")], [row("o/r", 2, "b")]],
+                      comments("o/r", 1): [[]], comments("o/r", 2): [[ESC]]})["o/r"]
+    after = snap(cfg, {listing("o/r"): later_page})["o/r"]
+    assert after["entries"] == good["entries"] and after["checked_at"] == good["checked_at"]
+    assert after["stale"] and after["error_code"] == code
+
+
+@pytest.mark.scenario("attention/independent-repository-snapshots/offline-recovery-and-selection-isolation")
+def test_offline_recovery_and_selection_isolation(stamps):
+    """attention/independent-repository-snapshots/offline-recovery-and-selection-isolation"""
+    cfg = Config(repos=[Repo("o/r"), Repo("o/gone")])
+    snap(cfg, {listing("o/r"): [[row("o/r", 1, "a")]], comments("o/r", 1): [[ESC]],
+               listing("o/gone"): [[]]})
+    failed = snap(cfg, {listing("o/r"): RuntimeError("x"), listing("o/gone"): [[]]})["o/r"]
+    offline = snap(cfg, {}, offline=True)["o/r"]  # Recorder({}) would fail any read
+    assert offline == failed and offline["error_code"] == "read_failed"
+    assert offline["entries"][0]["summary"] == HEAD and offline["entries"][0]["summary_checked_at"]
+    recovered = snap(cfg, {listing("o/r"): [[]], listing("o/gone"): [[]]})["o/r"]
+    assert recovered["entries"] == [] and not recovered["stale"] and recovered["error"] is None
+    # Removed, relabelled, re-forged and never-checked selections share nothing.
+    ghcom = ForgeConfig(name="hub", kind="github")
+    for changed in [Config(repos=[Repo("o/r")], labels=Labels(needs_human="other")),
+                    Config(repos=[Repo("o/r", forge="hub")], forges=[ghcom]),
+                    Config(repos=[Repo("o/r"), Repo("o/new")])]:
+        result = snap(changed, {}, offline=True)
+        assert "o/gone" not in result
+        fresh = result.get("o/new") or result["o/r"]
+        assert fresh["entries"] == [] and fresh["checked_at"] is None
+        assert fresh["stale"] and fresh["error_code"] == "not_checked"
+
+
+@pytest.mark.scenario("attention/independent-repository-snapshots/empty-enrollment-leaves-state-untouched")
+def test_empty_enrollment_returns_before_opening_the_cache(monkeypatch):
+    """attention/independent-repository-snapshots/empty-enrollment-leaves-state-untouched"""
+    monkeypatch.setattr(outcomes, "database", lambda: pytest.fail("cache opened"))
+    monkeypatch.setattr(outcomes.subprocess, "run", lambda *a, **k: pytest.fail("subprocess"))
+    for offline in (False, True):
+        assert outcomes.front_door_snapshot(Config(repos=[]), offline=offline,
+                                            runner=lambda a: pytest.fail("read")) == []
+    assert not outcomes.DB_PATH.exists()
+
+
+@pytest.mark.scenario("attention/bounded-attention-reads/deadline-includes-pagination-and-comments")
+def test_shared_deadline_defers_unstarted_reads(stamps):
+    """attention/bounded-attention-reads/deadline-includes-pagination-and-comments"""
+    names = [f"o/r{n}" for n in range(5)]
+    cfg = Config(repos=[Repo(n) for n in names])
+    seeded = snap(cfg, {**{listing(n): [[row(n, 1, "old")]] for n in names},
+                        **{comments(n, 1): [[ESC]] for n in names}})
+    clock, barrier = Clock(), threading.Barrier(4, timeout=5)
+
+    def stall():  # the first four listings start together, then exhaust the budget
+        barrier.wait()
+        clock.t = outcomes.REFRESH_SECONDS + 1
+
+    run = Tracked({listing(n): [[row(n, 2, "new")]] for n in names},
+                  {listing(n): stall for n in names[:4]})
+    result = {r["repo"]: r for r in outcomes.front_door_snapshot(cfg, runner=run, clock=clock)}
+    assert run.peak == 4 and [c[1] for c in run.calls if "comments" in c[1]] == []
+    assert sorted(c[1] for c in run.calls) == sorted(listing(n) for n in names[:4])
+    for name in names[:4]:  # completed listings commit; their summaries are deferred
+        [item] = result[name]["entries"]
+        assert item["number"] == 2 and item["summary_error_code"] == "budget_exhausted"
+        assert result[name]["checked_at"] != seeded[name]["checked_at"]
+    late = result["o/r4"]
+    assert late["entries"] == seeded["o/r4"]["entries"] and late["error_code"] == "budget_exhausted"
+    assert late["checked_at"] == seeded["o/r4"]["checked_at"] and late["stale"]
+
+
+@pytest.mark.scenario("attention/bounded-attention-reads/deadline-includes-pagination-and-comments")
+def test_default_runner_bounds_each_subprocess_by_remaining_time(monkeypatch):
+    """attention/bounded-attention-reads/deadline-includes-pagination-and-comments"""
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        seen.append((argv, kwargs["timeout"]))
+        return outcomes.subprocess.CompletedProcess(argv, 0, "[[]]", "")
+    monkeypatch.setattr(outcomes.subprocess, "run", fake_run)
+    [status] = outcomes.front_door_snapshot(Config(repos=[Repo("o/r")]))
+    assert status["entries"] == [] and not status["stale"]
+    assert seen[0][0] == ["gh", "api", listing("o/r"), "--paginate", "--slurp"]
+    assert 0 < seen[0][1] <= outcomes.REQUEST_SECONDS
+    outcomes._read_github(["api", "x"], outcomes.time.monotonic() + 2)
+    assert seen[-1][1] <= 2
+    with pytest.raises(outcomes._BudgetExhausted):
+        outcomes._read_github(["api", "x"], outcomes.time.monotonic() - 1)
+    assert len(seen) == 2
+
+
+@pytest.mark.scenario("attention/bounded-attention-reads/listings-precede-summary-enrichment")
+def test_listings_precede_enrichment_without_a_repository_cap(stamps):
+    """attention/bounded-attention-reads/listings-precede-summary-enrichment"""
+    names = [f"o/r{n:02d}" for n in range(40)]
+    cfg = Config(repos=[Repo(n) for n in names])
+    clock = Clock()
+
+    def slow():
+        clock.t += 7
+    run = Tracked({**{listing(n): [[row(n, 1, "x")]] for n in names},
+                   **{comments(n, 1): [[ESC]] for n in names},
+                   comments(names[0], 1): outcomes._TimedOut("slow thread")},
+                  {comments(names[0], 1): slow})
+    result = outcomes.front_door_snapshot(cfg, runner=run, clock=clock)
+    paths = [c[1] for c in run.calls]
+    assert len(paths) == 80 and all("comments" not in p for p in paths[:40])
+    assert all("comments" in p for p in paths[40:]) and run.peak <= 4
+    assert [r["repo"] for r in result] == names and all(r["checked_at"] for r in result)
+    assert result[0]["entries"][0]["summary_error_code"] == "timeout" and result[0]["stale"]
+    assert all(r["entries"][0]["summary"] == HEAD and not r["stale"] for r in result[1:])

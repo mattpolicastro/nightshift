@@ -58,6 +58,11 @@ def database():
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 data TEXT NOT NULL, checked_at TEXT, error TEXT
             );
+            CREATE TABLE IF NOT EXISTS front_door_snapshot (
+                repo TEXT NOT NULL, forge TEXT NOT NULL, label TEXT NOT NULL,
+                entries TEXT NOT NULL, checked_at TEXT, error TEXT, error_code TEXT,
+                PRIMARY KEY (repo, forge, label)
+            );
         """)
         with db:
             yield db
@@ -169,6 +174,9 @@ SAFE_ERRORS = {
     "not_checked": "Not checked yet",
 }
 SUMMARY_LIMIT = 400
+# A larger comment thread is refused as oversized rather than parsed.
+COMMENT_BYTES_LIMIT = 4 * 1024 * 1024
+SUMMARY_UNAVAILABLE = "Summary unavailable"
 _HEADLINE_PREFIX = "**nightshift** — "
 _HEADLINES = {
     "The spec draft needs human input.": "draft",
@@ -185,7 +193,7 @@ class _FrontDoorError(Exception):
         self.code = code
 
 
-def _gh_pages(runner, path: str) -> list[dict]:
+def _gh_pages(runner, path: str, limit: int | None = None) -> list[dict]:
     """Every row of every page of a GitHub list endpoint; partial is failure."""
     try:
         raw = runner(["api", path, "--paginate", "--slurp"])
@@ -195,6 +203,8 @@ def _gh_pages(runner, path: str) -> list[dict]:
         raise _FrontDoorError("timeout") from exc
     except (RuntimeError, OSError) as exc:
         raise _FrontDoorError("read_failed") from exc
+    if limit is not None and isinstance(raw, str) and len(raw.encode()) > limit:
+        raise _FrontDoorError("invalid_response")
     try:
         pages = json.loads(raw)
     except (TypeError, ValueError) as exc:
@@ -295,7 +305,8 @@ def _comment_recency(comment: dict) -> tuple[datetime, int]:
 
 def _read_summary(repo: str, number: int, runner) -> str | None:
     """The latest qualifying escalation's headline across every comment page."""
-    comments = _gh_pages(runner, f"repos/{repo}/issues/{number}/comments?per_page=100")
+    comments = _gh_pages(runner, f"repos/{repo}/issues/{number}/comments?per_page=100",
+                         COMMENT_BYTES_LIMIT)
     qualifying = [(_comment_recency(c), line) for c in comments
                   if (line := _escalation_headline(c.get("body"))) is not None]
     if not qualifying:
@@ -313,6 +324,155 @@ def _enrich_summary(entry: dict, runner, clock=None) -> dict:
                 "summary_error": str(exc), "summary_error_code": exc.code}
     return {"summary": summary, "summary_checked_at": (clock or now)(),
             "summary_stale": False, "summary_error": None, "summary_error_code": None}
+
+
+def _summary_failure(code: str) -> dict:
+    return {"summary_stale": True, "summary_error": SAFE_ERRORS[code], "summary_error_code": code}
+
+
+def _selection(cfg, repo) -> tuple[tuple[str, str, str], bool]:
+    """Cache key (repository, forge identity, label) and whether GitHub can answer."""
+    try:
+        forge = cfg.forge_for(repo)
+    except ValueError:
+        return (repo.name, json.dumps(["missing", repo.forge]), cfg.labels.needs_human), False
+    identity = "github" if repo.forge is None else json.dumps([forge.kind, forge.name, forge.url])
+    supported = forge.kind == "github" and forge.url.rstrip("/") == "https://github.com"
+    return (repo.name, identity, cfg.labels.needs_human), supported
+
+
+def _cached(db, key):
+    return db.execute("SELECT * FROM front_door_snapshot WHERE repo=? AND forge=? AND label=?",
+                      key).fetchone()
+
+
+def _commit_listing(key, status) -> None:
+    """Replace membership only with a complete listing; failure keeps the last good one."""
+    with database() as db:
+        db.execute("BEGIN IMMEDIATE")
+        prior = _cached(db, key)
+        if status["entries"] is None:
+            if prior:
+                db.execute("UPDATE front_door_snapshot SET error=?, error_code=? WHERE repo=? "
+                           "AND forge=? AND label=?", (status["error"], status["error_code"], *key))
+            else:
+                db.execute("INSERT INTO front_door_snapshot VALUES(?,?,?,'[]',NULL,?,?)",
+                           (*key, status["error"], status["error_code"]))
+            return
+        old = {(e["number"], e["kind"]): e for e in json.loads(prior["entries"])} if prior else {}
+        entries = []
+        for entry in status["entries"]:
+            previous = old.get((entry["number"], entry["kind"]))
+            summary = ({k: previous.get(k) for k in ("summary", "summary_checked_at", "summary_stale",
+                                                     "summary_error", "summary_error_code")}
+                       if previous else {"summary": None, "summary_checked_at": None,
+                                         **_summary_failure("not_checked")})
+            entries.append({**entry, **summary})
+        db.execute("INSERT OR REPLACE INTO front_door_snapshot VALUES(?,?,?,?,?,NULL,NULL)",
+                   (*key, json.dumps(entries), now()))
+
+
+def _commit_summary(key, entry, fields) -> None:
+    """One item's summary result, applied only while the item is still listed."""
+    if fields.get("summary_error_code"):
+        fields = _summary_failure(fields["summary_error_code"])  # keep the last good summary
+    with database() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = _cached(db, key)
+        if row is None:
+            return
+        entries = json.loads(row["entries"])
+        for item in entries:
+            if (item["number"], item["kind"]) == (entry["number"], entry["kind"]):
+                item.update(fields)
+        db.execute("UPDATE front_door_snapshot SET entries=? WHERE repo=? AND forge=? AND label=?",
+                   (json.dumps(entries), *key))
+
+
+def _bounded(jobs, work, done, clock, deadline) -> list:
+    """Stable order, at most REFRESH_WORKERS in flight, nothing started after the deadline.
+
+    `done` runs on the calling thread, so database writes stay off the workers.
+    Returns the jobs never started.
+    """
+    queue = list(jobs)
+    with ThreadPoolExecutor(max_workers=REFRESH_WORKERS) as pool:
+        pending: dict = {}
+        while queue or pending:
+            while queue and len(pending) < REFRESH_WORKERS and clock() < deadline:
+                job = queue.pop(0)
+                pending[pool.submit(work, job)] = job
+            if not pending:
+                break
+            finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in finished:
+                done(pending.pop(future), future.result())
+    return queue
+
+
+def _repository_view(repo: str, label: str, row) -> dict:
+    if row is None:
+        return {"repo": repo, "label": label, "entries": [], "checked_at": None, "stale": True,
+                "error": SAFE_ERRORS["not_checked"], "error_code": "not_checked"}
+    entries = sorted(json.loads(row["entries"]), key=lambda e: (e["number"], e["kind"]))
+    failed = [e for e in entries if e.get("summary_error_code")]
+    error, code = row["error"], row["error_code"]
+    if code is None and failed:
+        code = failed[0]["summary_error_code"]
+        error = f"{SUMMARY_UNAVAILABLE} for {len(failed)} item(s): {failed[0]['summary_error']}"
+    return {"repo": repo, "label": label, "entries": entries, "checked_at": row["checked_at"],
+            "stale": code is not None, "error": error, "error_code": code}
+
+
+def front_door_snapshot(cfg, *, offline=False, runner=None, clock=None) -> list[dict]:
+    """Current needs-human issues and PRs per enrolled repository, with last-good caching.
+
+    Listings are attempted before any comment read; each complete listing is
+    committed before its summaries, and each summary result commits alone. No
+    transaction spans network work. `clock` is the monotonic clock for the
+    shared deadline; injected runners are additionally gated by it.
+    """
+    if not cfg.repos:
+        return []  # empty enrollment must not create the cache
+    clock = clock or time.monotonic
+    selections = [(repo, *_selection(cfg, repo)) for repo in sorted(cfg.repos, key=lambda r: r.name)]
+    if not offline:
+        deadline = clock() + REFRESH_SECONDS
+        gh_deadline = time.monotonic() + REFRESH_SECONDS
+        base = runner or (lambda args: _read_github(args, gh_deadline))
+
+        def gated(args):
+            if clock() >= deadline:
+                raise _BudgetExhausted("Refresh time budget exhausted")
+            return base(args)
+
+        supported = [(repo, key) for repo, key, ok in selections if ok]
+        listed = []
+
+        def listing_done(job, status):
+            _commit_listing(job[1], status)
+            if status["entries"] is not None:
+                listed.extend((job[1], entry) for entry in status["entries"])
+
+        for repo, key in _bounded(supported, lambda job: _list_repository(cfg, job[0], gated),
+                                  listing_done, clock, deadline):
+            _commit_listing(key, {"entries": None, "error": SAFE_ERRORS["budget_exhausted"],
+                                  "error_code": "budget_exhausted"})
+        for key, entry in _bounded(listed, lambda job: _enrich_summary(job[1], gated),
+                                   lambda job, fields: _commit_summary(job[0], job[1], fields),
+                                   clock, deadline):
+            _commit_summary(key, entry, _summary_failure("budget_exhausted"))
+    result = []
+    with database() as db:
+        for repo, key, ok in selections:
+            if not ok:
+                result.append({"repo": repo.name, "label": key[2], "entries": [],
+                               "checked_at": None, "stale": True,
+                               "error": SAFE_ERRORS["unsupported_forge"],
+                               "error_code": "unsupported_forge"})
+            else:
+                result.append(_repository_view(repo.name, key[2], _cached(db, key)))
+    return result
 
 
 def refresh(labels, *, runner=None) -> list[dict]:
