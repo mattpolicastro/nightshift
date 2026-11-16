@@ -81,7 +81,7 @@ function page(replies: Reply[], options: { open?: (url: string) => Promise<void>
     }
     return [{ type: value.type, props: value.props, children: render(value.props.children, path) }];
   }
-  const surface = { theme: { colors: { statusWarning: 'warn' } }, host: { id: 'host-1', label: 'Studio' }, layout: { compact: true }, navigation: { openWorkspace() {} } };
+  const surface = { theme: { colors: { statusWarning: 'warn', foreground: 'fg', foregroundMuted: 'muted', border: 'line', surface0: 'bg', surface1: 'card', accent: 'link' } }, host: { id: 'host-1', label: 'Studio' }, layout: { compact: true }, navigation: { openWorkspace() {} } };
   let tree: (Node | string)[] = [];
   function draw() {
     tree = render(React.createElement(exports.MainSurface, surface), 'root');
@@ -95,7 +95,7 @@ function page(replies: Reply[], options: { open?: (url: string) => Promise<void>
   async function settle() { for (let i = 0; i < 4; i++) { await new Promise(r => setImmediate(r)); draw(); } }
   draw();
   return {
-    calls, text, lines, find, settle, surface, draw,
+    calls, text, lines, find, settle, surface, draw, nodes,
     async press(label: string) { const button = find(label); assert.ok(button, `Missing ${label}`); button.props.onPress(); await settle(); },
     dispose() { components.forEach(hooks => hooks.forEach(hook => hook.cleanup?.())); },
   };
@@ -277,4 +277,31 @@ test('attention/safe-plugin-attention-projection/external-escalation-link-opens-
   // A successful refresh does not hide the open failure.
   await view.press('Refresh Nightshift');
   assert.ok(view.lines().includes('Could not open GitHub.'));
+});
+
+test('attention page styles: rows, titles, footer and repository warnings use their theme tokens', async t => {
+  const view = page([snap({ complete: false, repositories: [
+    repo({ repo: 'owner/stale-only', stale: true, error: null }),
+    repo({ repo: 'owner/error-only', stale: false, error: 'Listing failed.' }),
+    repo({ entries: [item(3, { title: 'Styled row' })] }),
+  ] })]);
+  t.after(view.dispose);
+  await view.settle();
+  const textOf = (node: Node): string => node.children.map(c => typeof c === 'string' ? c : textOf(c)).join('');
+  const nodes = view.nodes();
+  const texts = nodes.filter(node => node.type === 'Text');
+  const title = texts.find(node => textOf(node) === 'Styled row')!;
+  assert.deepEqual({ ...title.props.style }, { color: 'fg', fontSize: 17, fontWeight: '600' });
+  const card = nodes.find(node => node.type === 'View' && node.children.includes(title))!;
+  assert.ok(card, 'row container');
+  assert.deepEqual({ ...card.props.style }, { padding: 16, gap: 8, borderWidth: 1, borderColor: 'line', borderRadius: 12, backgroundColor: 'card' });
+  const footer = texts.find(node => textOf(node).startsWith('List loaded: '))!;
+  assert.equal(textOf(footer), `List loaded: ${when(at)} · Opening an item does not resolve it.`);
+  assert.deepEqual({ ...footer.props.style }, { color: 'muted', fontSize: 12 });
+  // Either stale or an error alone produces the repository warning.
+  const staleOnly = texts.find(node => textOf(node) === `Stale · Could not be fully checked. · Listing checked: ${when(at)}`);
+  const errorOnly = texts.find(node => textOf(node) === `Stale · Listing failed. · Listing checked: ${when(at)}`);
+  assert.ok(staleOnly && errorOnly);
+  assert.deepEqual({ ...staleOnly.props.style }, { color: 'warn', fontSize: 12 });
+  assert.deepEqual({ ...errorOnly.props.style }, { color: 'warn', fontSize: 12 });
 });
