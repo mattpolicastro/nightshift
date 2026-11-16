@@ -511,10 +511,41 @@ def test_native_admission_uses_feasibility_normally(native_admission, monkeypatc
     assert all((root / name).read_text() == "dirty\n" for name in snapshot)
 
 
+FEASIBILITY_SIZE_CLAUSE = """\
+An estimated line count alone, however large, never makes a task impossible
+as written; report a size concern in `risks`, not in contradictions.
+"""
+CRITIC_SIZE_CLAUSE = """\
+   Estimated size is advisory. About 600 changed lines per task, counting
+   production code, tests and documentation together, is a soft planning
+   guideline, never a target or an automatic rejection threshold. Weigh
+   cohesion, safe split boundaries (independent behavior, migration or
+   recovery boundaries, distinct verification strategies, substantial
+   uncertainty) and any task boundary and verification rationale in
+   design.md. A coherent task of 301 to 600 lines needs no risk; an
+   above-guideline task with that rationale is reviewable without a numeric
+   blocker. A size concern belongs in risks. Estimated size alone never belongs
+   in contradictions, requires correction or rejects a proposal. Estimated
+   lines or task count alone never require another issue or pull request.
+   Soft sizing waives no frozen path, trusted verify command, protected
+   guarantee, required context or split warranted by substantial uncertainty.
+"""
+
+
+def without_addition(prompt, addition):
+    # Remove only the authorized advisory-size addition; every other byte stays hashed.
+    assert prompt.count(addition) == 1
+    return prompt.replace(addition, "", 1)
+
+
 @pytest.mark.scenario("spec-critic/native-feasibility-and-critic-context/native-admission-uses-feasibility-normally")
+@pytest.mark.scenario("spec-format/scoped-prompt-compatibility-migration/review-additions-preserve-unrelated-bytes")
 def test_original_review_prompts_and_native_checklist_are_preserved():
-    assert hashlib.sha256(feasibility.PROMPT.encode()).hexdigest() == "58c2d98ae31ff9af8239ebbaeee9018ce37aa324494d261bd4bb9682dc0a74d3"
-    assert hashlib.sha256(critic.PROMPT.encode()).hexdigest() == "b221906f7a9e0d3fc5669ae58d3c22f093ebeb56aeada6abdb6187f074e52781"
+    legacy_feasibility = without_addition(feasibility.PROMPT, FEASIBILITY_SIZE_CLAUSE)
+    legacy_critic = without_addition(critic.PROMPT, CRITIC_SIZE_CLAUSE)
+    assert hashlib.sha256(legacy_feasibility.encode()).hexdigest() == "58c2d98ae31ff9af8239ebbaeee9018ce37aa324494d261bd4bb9682dc0a74d3"
+    assert hashlib.sha256(legacy_critic.encode()).hexdigest() == "b221906f7a9e0d3fc5669ae58d3c22f093ebeb56aeada6abdb6187f074e52781"
+    assert feasibility.SPECKIT_PROMPT.count(FEASIBILITY_SIZE_CLAUSE) == 1
     # Native sizing intentionally replaces only the count guidance in item 1.
     opening = critic.PROMPT.split("Work through all eight checklist items:\n", 1)[1].split("   Count task entries", 1)[0]
     assert opening in critic.SPECKIT_PROMPT
