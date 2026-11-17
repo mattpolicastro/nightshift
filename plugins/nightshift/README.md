@@ -197,12 +197,19 @@ through `server/reader.ts`) and the Factory RPCs (`server/factory.ts` and
 `index.client.tsx` registers the surface, sidebar item and Command Center entry
 (`client/main.tsx`), with Factory rendered by `client/factory.tsx`.
 This directory is the plugin's source of truth; an installation runs a copy
-exported from one of its commits. To ship a change without restarting the daemon (a changed plugin path needs a
-`paseo daemon restart`), keep the configured path and swap its contents: move the
-live copy aside as `nightshift-<old sha>`, export the committed tree in its place
+exported from one of its commits, never the checkout itself, so branch work
+cannot redeploy Factory. On the Mac Studio the configured path is
+`~/.local/share/paseo-plugins/nightshift/` (since 2026-11-17; before that it sat
+inside the custom Paseo build's release folder), with the exported commit
+recorded in `~/.local/share/paseo-plugins/manifest.sha256`. To ship a change, keep
+the configured path and swap its contents: `python -m nightshift.deploy` does this
+(see [deploy](../../docs/deploy.md)), or by hand move the live copy aside as
+`nightshift-<old sha>`, export the committed tree in its place
 (`git archive <sha> plugins/nightshift | tar -x -C <dir> --strip-components=2`),
 then `paseo plugin reload nightshift`. Roll back by swapping the directories
-back and reloading again.
+back and reloading again. Changing the path itself is `paseo plugin remove
+nightshift` then `paseo plugin install <dir>`; on Paseo 0.16.1 that needed no
+daemon restart.
 
 ## Development
 

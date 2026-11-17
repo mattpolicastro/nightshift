@@ -1,6 +1,6 @@
 # Deploying Nightshift
 
-Run from the intended live checkout on the macOS host, with its launchd services already installed. Arrange a quiet window **before pull/sync as well as restarts**: idle checks can race new work, and pausing the daemon does not stop the independent supervisor. Choose the correct plugin directory and service labels; concurrent applies and checkout edits during deployment are unsupported.
+Run from the intended live checkout on the macOS host, with its launchd services already installed. Arrange a quiet window **before pull/sync as well as restarts**: idle checks can race new work, and pausing the daemon does not stop the independent supervisor. Choose the correct plugin directory and service labels (on the Mac Studio the plugin directory is `~/.local/share/paseo-plugins/nightshift`); concurrent applies and checkout edits during deployment are unsupported.
 
 ```sh
 export NIGHTSHIFT_PLUGIN_DIR='/absolute/path/to/deployed/nightshift'
