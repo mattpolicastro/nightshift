@@ -214,6 +214,22 @@ None of this contradicts the issue's plan, so the change goes ahead.
     - Another in-flight change (issue 117) also edits this README, so other
       sections stay as they are.
     - `manifest.sha256` is described as retired.
+    - **The docs land before the flags are removed.**
+      `tests/test_unified_command_docs.py::test_rollout_commands_and_links`
+      passes every `nightshift.deploy` command line in `docs/deploy.md` and
+      `plugins/nightshift/README.md` (fenced, bare or backticked) through
+      `deploy.parse_options`. `docs/deploy.md:194-195` still runs
+      `--reload-cmd`, so removing the option first would turn the suite red.
+      The doc task therefore runs after `--plugin-id` exists and before the
+      retirement task. When it is done, neither file contains the literal text
+      `--plugin-dir` or `--reload-cmd` on any line; prose says "the old
+      directory and reload options" instead. That grep is the line rule, so no
+      task has to work out which lines the doc test treats as commands.
+    - Doc commands that reach `parse_options` use only options that exist
+      when the doc task lands (`--apply`, `--force`, `--plugin-id`, …).
+      `paseo …` lines and `NIGHTSHIFT_PLUGIN_ID=… uv run …` lines are not
+      parsed by that test, because they do not start with `nightshift`,
+      `specloop`, `uv run` or `python -m`.
 
 ## Risks / Trade-offs
 
